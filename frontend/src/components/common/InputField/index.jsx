@@ -1,55 +1,79 @@
 import { useState } from "react";
-import { Eye, EyeOff } from "lucide-react";
+import { Eye, EyeOff, Mail, Lock } from "lucide-react";
 
 const InputField = ({
   label,
   type = "text",
+  name,
   placeholder,
   value,
   onChange,
   error,
 }) => {
   const [showPassword, setShowPassword] = useState(false);
+  const [focused, setFocused] = useState(false);
   const isPassword = type === "password";
+  const isEmail = type === "email";
 
   return (
-    <div className="flex flex-col gap-1 w-full">
+    <div className="flex flex-col gap-1.5 w-full">
       {/* Label */}
       {label && (
-        <label className="text-sm text-slate-300 font-medium">{label}</label>
+        <label
+          className="text-xs uppercase tracking-widest font-semibold"
+          style={{ color: "#64748b" }}
+        >
+          {label}
+        </label>
       )}
 
       {/* Input Wrapper */}
-      <div className="relative">
+      <div
+        className="flex items-center gap-3 px-4 rounded-xl transition-all"
+        style={{
+          background: "#f1f5f9",
+          border: focused ? "1.5px solid #0ea5e9" : "1.5px solid #cbd5e1",
+          height: "48px",
+          boxShadow: focused ? "0 0 0 3px rgba(14,165,233,0.15)" : "none",
+        }}
+      >
+        <span
+          style={{ color: focused ? "#0ea5e9" : "#94a3b8" }}
+          className="transition-colors"
+        >
+          {isEmail && <Mail size={16} />}
+          {isPassword && <Lock size={16} />}
+        </span>
+
         <input
           type={isPassword && showPassword ? "text" : type}
+          name={name}
           placeholder={placeholder}
           value={value}
           onChange={onChange}
-          className="
-            w-full px-4 py-3 rounded-xl
-            bg-white/5 border border-white/20
-            text-white placeholder:text-slate-400
-            focus:outline-none focus:border-brand-accent
-            focus:ring-1 focus:ring-brand-accent
-            transition duration-200
-          "
+          onFocus={() => setFocused(true)}
+          onBlur={() => setFocused(false)}
+          className="flex-1 bg-transparent text-sm outline-none"
+          style={{ color: "#0f172a" }}
         />
 
-        {/* Password Toggle */}
         {isPassword && (
           <button
             type="button"
             onClick={() => setShowPassword(!showPassword)}
-            className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-400 hover:text-white transition"
+            style={{ color: "#94a3b8" }}
+            className="hover:text-slate-700 transition"
           >
-            {showPassword ? <EyeOff size={18} /> : <Eye size={18} />}
+            {showPassword ? <EyeOff size={16} /> : <Eye size={16} />}
           </button>
         )}
       </div>
 
-      {/* Error Message */}
-      {error && <p className="text-red-400 text-xs mt-1">{error}</p>}
+      {error && (
+        <p className="text-xs mt-1" style={{ color: "#ef4444" }}>
+          {error}
+        </p>
+      )}
     </div>
   );
 };

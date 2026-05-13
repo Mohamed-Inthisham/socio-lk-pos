@@ -1,12 +1,12 @@
-function App() {
+import { Routes, Route } from "react-router-dom";
+import LoginPage from "./pages/LoginPage";
 
+function App() {
   return (
-    <>
-      <h1 className="text-3xl font-bold underline bg-amber-300">
-        Hello world!
-      </h1>
-    </>
-  )
+    <Routes>
+      <Route path="/" element={<LoginPage />} />
+    </Routes>
+  );
 }
 
-export default App
+export default App;
