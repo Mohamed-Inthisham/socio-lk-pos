@@ -1,4 +1,5 @@
 import { configureStore } from "@reduxjs/toolkit";
+import authReducer from "./slices/authSlice";
 
 /**
  * Redux Store Configuration
@@ -14,8 +15,10 @@ import { configureStore } from "@reduxjs/toolkit";
  */
 export const store = configureStore({
   reducer: {
-    // Slices will be added here as we build features
-    // Example: auth: authReducer,
+    auth: authReducer,
+    // Future slices will be added here:
+    // products: productsReducer,
+    // cart: cartReducer,
   },
 
   // Development tools (auto-enabled in dev, disabled in production)
