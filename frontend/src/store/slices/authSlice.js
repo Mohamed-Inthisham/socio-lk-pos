@@ -1,5 +1,6 @@
 import { createSlice, createAsyncThunk } from "@reduxjs/toolkit";
-import { loginAPI, logoutAPI } from "../../services/authService";
+import { loginAPI, logoutAPI, isTokenValid } from "../../services/authService";
+import { storage } from "../../utils/storage";
 
 /**
  * Authentication Slice
@@ -10,7 +11,10 @@ import { loginAPI, logoutAPI } from "../../services/authService";
  * - Authentication status
  * - Loading and error states
  *
- * Used by: LoginForm, ProtectedRoute, Navbar, Dashboard
+ * Features:
+ * - localStorage persistence for session restoration
+ * - Async login/logout with API simulation
+ * - Token validation
  */
 
 // ============================================
@@ -19,22 +23,19 @@ import { loginAPI, logoutAPI } from "../../services/authService";
 
 /**
  * Login Async Thunk
- *
- * Handles the asynchronous login process:
- * 1. Calls the authentication API
- * 2. Auto-dispatches: pending → fulfilled (success) | rejected (failure)
- * 3. Returns user and token data on success
- *
- * @param {Object} credentials - { email, password }
+ * Authenticates user and persists session to localStorage
  */
 export const loginUser = createAsyncThunk(
   "auth/loginUser",
   async (credentials, { rejectWithValue }) => {
     try {
       const response = await loginAPI(credentials);
+
+      // Persist to localStorage on success
+      storage.setAuth(response);
+
       return response; // { user, token }
     } catch (error) {
-      // Pass error message to rejected case
       return rejectWithValue(error.message);
     }
   },
@@ -42,20 +43,52 @@ export const loginUser = createAsyncThunk(
 
 /**
  * Logout Async Thunk
- *
- * Handles the asynchronous logout process:
- * 1. Calls the logout API (invalidates token on backend)
- * 2. Clears localStorage
- * 3. Resets Redux state
+ * Clears Redux state and localStorage
  */
 export const logoutUser = createAsyncThunk(
   "auth/logoutUser",
   async (_, { rejectWithValue }) => {
     try {
       await logoutAPI();
+
+      // Clear localStorage
+      storage.clearAuth();
+
       return true;
     } catch (error) {
+      // Even if API fails, clear local data
+      storage.clearAuth();
       return rejectWithValue(error.message);
+    }
+  },
+);
+
+/**
+ * Restore Session Thunk
+ * Checks localStorage on app load and restores auth state if valid token exists
+ */
+export const restoreSession = createAsyncThunk(
+  "auth/restoreSession",
+  async (_, { rejectWithValue }) => {
+    try {
+      const authData = storage.getAuth();
+
+      // No saved session
+      if (!authData) {
+        return rejectWithValue("No saved session");
+      }
+
+      // Validate token (check expiration)
+      if (!isTokenValid(authData.token)) {
+        storage.clearAuth(); // Clear expired token
+        return rejectWithValue("Session expired");
+      }
+
+      return authData; // { user, token }
+    } catch (error) {
+      console.error("Session restoration failed:", error);
+      storage.clearAuth();
+      return rejectWithValue("Failed to restore session");
     }
   },
 );
@@ -65,11 +98,12 @@ export const logoutUser = createAsyncThunk(
 // ============================================
 
 const initialState = {
-  user: null, // User object: { id, name, email, role }
-  token: null, // JWT token string
-  isAuthenticated: false, // Login status flag
-  loading: false, // True during login/logout API calls
-  error: null, // Error message if login fails
+  user: null,
+  token: null,
+  isAuthenticated: false,
+  loading: false,
+  error: null,
+  initialized: false, // Has app checked localStorage yet?
 };
 
 // ============================================
@@ -80,37 +114,18 @@ const authSlice = createSlice({
   name: "auth",
   initialState,
   reducers: {
-    /**
-     * Clears error messages
-     * Useful when user dismisses an error or starts a new action
-     */
     clearError: (state) => {
       state.error = null;
     },
-
-    /**
-     * Manually set credentials (used for localStorage restoration)
-     */
-    setCredentials: (state, action) => {
-      const { user, token } = action.payload;
-      state.user = user;
-      state.token = token;
-      state.isAuthenticated = true;
-    },
   },
 
-  // ============================================
-  // EXTRA REDUCERS (handle async thunk states)
-  // ============================================
   extraReducers: (builder) => {
     builder
-      // LOGIN: Pending
+      // LOGIN
       .addCase(loginUser.pending, (state) => {
         state.loading = true;
         state.error = null;
       })
-
-      // LOGIN: Success
       .addCase(loginUser.fulfilled, (state, action) => {
         const { user, token } = action.payload;
         state.user = user;
@@ -119,8 +134,6 @@ const authSlice = createSlice({
         state.loading = false;
         state.error = null;
       })
-
-      // LOGIN: Failure
       .addCase(loginUser.rejected, (state, action) => {
         state.user = null;
         state.token = null;
@@ -129,12 +142,10 @@ const authSlice = createSlice({
         state.error = action.payload || "Login failed";
       })
 
-      // LOGOUT: Pending
+      // LOGOUT
       .addCase(logoutUser.pending, (state) => {
         state.loading = true;
       })
-
-      // LOGOUT: Success
       .addCase(logoutUser.fulfilled, (state) => {
         state.user = null;
         state.token = null;
@@ -142,23 +153,34 @@ const authSlice = createSlice({
         state.loading = false;
         state.error = null;
       })
-
-      // LOGOUT: Failure (still log out locally even if API fails)
       .addCase(logoutUser.rejected, (state) => {
         state.user = null;
         state.token = null;
         state.isAuthenticated = false;
         state.loading = false;
+      })
+
+      // RESTORE SESSION
+      .addCase(restoreSession.pending, (state) => {
+        state.loading = true;
+      })
+      .addCase(restoreSession.fulfilled, (state, action) => {
+        const { user, token } = action.payload;
+        state.user = user;
+        state.token = token;
+        state.isAuthenticated = true;
+        state.loading = false;
+        state.initialized = true;
+      })
+      .addCase(restoreSession.rejected, (state) => {
+        state.user = null;
+        state.token = null;
+        state.isAuthenticated = false;
+        state.loading = false;
+        state.initialized = true; // Initialized, just no session
       });
   },
 });
 
-// ============================================
-// EXPORTS
-// ============================================
-
-// Export sync action creators
-export const { clearError, setCredentials } = authSlice.actions;
-
-// Export the reducer
+export const { clearError } = authSlice.actions;
 export default authSlice.reducer;
