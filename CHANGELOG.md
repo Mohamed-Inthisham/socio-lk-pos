@@ -10,19 +10,63 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
-- Initial project documentation
+
+#### Authentication System (Redux Toolkit)
+- Configured Redux store with `@reduxjs/toolkit`
+- Created auth slice with user, token, and authentication state
+- Implemented async login/logout thunks
+- Mock authentication service with three test users (admin/manager/cashier)
+- Mock JWT-like token generation with 24-hour expiration
+
+#### Session Persistence
+- localStorage utility for safe storage operations
+- Auto-restore session on app load
+- Token validation with expiration check
+- Persistent login across browser sessions
+
+#### Route Protection
+- `ProtectedRoute` component for authenticated routes
+- Smart redirect: remembers intended URL after login
+- Loading states during session restoration
+- `RoleProtectedRoute` for role-specific pages
+
+#### Role-Based Access Control (RBAC)
+- Centralized permission definitions (`rolePermissions.js`)
+- Three user roles: Admin 👑, Manager 👔, Cashier 🛒
+- `usePermissions` custom hook for easy permission checks
+- "Visible but Disabled" UI pattern for unauthorized actions
+- Helper utilities: `can()`, `isAdmin`, `isManager`, `isCashier`
+
+#### Demo Dashboard
+- Temporary dashboard demonstrating RBAC in action
+- Role-based button states (enabled/disabled)
+- Tooltips explaining unauthorized actions
+- User info card showing session details
+- Logout functionality with state cleanup
+
+#### Documentation
+- Initial project documentation foundation
   - Comprehensive README with project overview, tech stack, and roadmap
   - Architecture documentation explaining tech decisions
   - Git workflow and branching strategy guide
   - Getting started setup guide
   - Changelog for version tracking
 
+### Changed
+- Migrated `LoginForm` from local state to Redux state management
+- Updated `App.jsx` with React Router setup and protected routes
+- Updated `main.jsx` to wrap app with Redux Provider and BrowserRouter
+
 ### Planned
-- Redux Toolkit integration for authentication state
-- Role-based access control (RBAC) with admin/manager/cashier roles
-- Protected routes implementation
-- localStorage persistence for auth state
-- Mock JWT authentication
+- Real backend with NestJS + PostgreSQL
+- Audit log system for tracking user actions (who did what, when)
+- Real dashboard layout with sidebar navigation
+- Product management module
+- POS checkout flow
+- Inventory tracking
+- Customer management
+- Reports & analytics
+- AWS deployment
 
 ---
 
@@ -107,6 +151,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 └────────── Major (breaking change)
 
 ---
+
+
 
 ## Update Guidelines
 
