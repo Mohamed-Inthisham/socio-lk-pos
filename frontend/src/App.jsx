@@ -2,6 +2,7 @@ import { useEffect } from "react";
 import { useDispatch, useSelector } from "react-redux";
 import { Routes, Route, Navigate } from "react-router-dom";
 import LoginPage from "./pages/LoginPage";
+import DashboardDemo from "./pages/DashboardDemo";
 import ProtectedRoute from "./components/auth/ProtectedRoute";
 import { restoreSession } from "./store/slices/authSlice";
 
@@ -39,9 +40,7 @@ function App() {
         path="/dashboard"
         element={
           <ProtectedRoute>
-            <div className="p-8 text-center text-2xl">
-              Dashboard (coming soon)
-            </div>
+            <DashboardDemo />
           </ProtectedRoute>
         }
       />
