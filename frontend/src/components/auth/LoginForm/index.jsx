@@ -1,6 +1,6 @@
 import { useState, useEffect } from "react";
 import { useDispatch, useSelector } from "react-redux";
-import { useNavigate } from "react-router-dom";
+import { useNavigate, useLocation } from "react-router-dom";
 import InputField from "../../common/InputField";
 import Button from "../../common/Button";
 import { loginUser, clearError } from "../../../store/slices/authSlice";
@@ -8,6 +8,7 @@ import { loginUser, clearError } from "../../../store/slices/authSlice";
 const LoginForm = () => {
   const dispatch = useDispatch();
   const navigate = useNavigate();
+  const location = useLocation();
   const { loading, error, isAuthenticated } = useSelector(
     (state) => state.auth,
   );
@@ -15,12 +16,15 @@ const LoginForm = () => {
   const [formData, setFormData] = useState({ email: "", password: "" });
   const [errors, setErrors] = useState({});
 
-  // Redirect to dashboard after successful login
+  // Get the page user was trying to access before login
+  const from = location.state?.from?.pathname || "/dashboard";
+
+  // Redirect to intended page after successful login
   useEffect(() => {
     if (isAuthenticated) {
-      navigate("/dashboard");
+      navigate(from, { replace: true });
     }
-  }, [isAuthenticated, navigate]);
+  }, [isAuthenticated, navigate, from]);
 
   // Clear Redux error when component unmounts
   useEffect(() => {
@@ -50,7 +54,6 @@ const LoginForm = () => {
       return;
     }
 
-    // Dispatch Redux login action
     dispatch(
       loginUser({
         email: formData.email.trim().toLowerCase(),
@@ -84,7 +87,6 @@ const LoginForm = () => {
         error={errors.password}
       />
 
-      {/* Redux error - only shown if not field-specific */}
       {error && !error.toLowerCase().includes("email") && (
         <p className="text-sm text-red-500 text-center">{error}</p>
       )}

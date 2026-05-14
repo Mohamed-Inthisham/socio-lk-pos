@@ -2,6 +2,7 @@ import { useEffect } from "react";
 import { useDispatch, useSelector } from "react-redux";
 import { Routes, Route, Navigate } from "react-router-dom";
 import LoginPage from "./pages/LoginPage";
+import ProtectedRoute from "./components/auth/ProtectedRoute";
 import { restoreSession } from "./store/slices/authSlice";
 
 function App() {
@@ -27,16 +28,25 @@ function App() {
 
   return (
     <Routes>
-      <Route path="/" element={<Navigate to="/login" replace />} />
+      {/* Default route - redirects to dashboard (or login if not authenticated) */}
+      <Route path="/" element={<Navigate to="/dashboard" replace />} />
+
+      {/* Public routes */}
       <Route path="/login" element={<LoginPage />} />
+
+      {/* Protected routes */}
       <Route
         path="/dashboard"
         element={
-          <div className="p-8 text-center text-2xl">
-            Dashboard (coming soon)
-          </div>
+          <ProtectedRoute>
+            <div className="p-8 text-center text-2xl">
+              Dashboard (coming soon)
+            </div>
+          </ProtectedRoute>
         }
       />
+
+      {/* 404 fallback */}
       <Route path="*" element={<Navigate to="/" replace />} />
     </Routes>
   );
