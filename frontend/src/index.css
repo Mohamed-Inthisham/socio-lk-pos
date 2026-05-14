@@ -1,1 +1,12 @@
 @import "tailwindcss";
+
+@layer theme {
+  :root {
+    --color-brand-from: #0f2027;
+    --color-brand-mid: #203a43;
+    --color-brand-to: #2c5364;
+    --color-brand-primary: #0ea5e9;
+    --color-brand-secondary: #06b6d4;
+    --color-brand-accent: #38bdf8;
+  }
+}
