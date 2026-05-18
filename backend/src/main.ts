@@ -26,7 +26,10 @@ async function bootstrap() {
   const port = config.get('PORT');
   await app.listen(port);
 
-  // eslint-disable-next-line no-console
   console.log(`🚀 Backend running on http://localhost:${port}/api/v1`);
 }
-bootstrap();
+
+bootstrap().catch((error) => {
+  console.error('❌ Failed to start backend:', error);
+  process.exit(1);
+});
