@@ -9,6 +9,7 @@ import { validateEnv } from './config/validate-env';
 import { TypedConfigModule } from './config/config.module';
 import { TypedConfigService } from './config/typed-config.service';
 import { buildTypeOrmConfig } from './config/typeorm.config';
+import { UsersModule } from './users/users.module';
 
 @Module({
   imports: [
@@ -34,6 +35,7 @@ import { buildTypeOrmConfig } from './config/typeorm.config';
         limit: 100, // max 100 requests per minute
       },
     ]),
+    UsersModule,
   ],
   controllers: [AppController],
   providers: [
