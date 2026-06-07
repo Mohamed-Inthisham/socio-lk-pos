@@ -52,13 +52,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Getting started setup guide
   - Changelog for version tracking
 
+#### Backend Foundation (NestJS)
+- 🏗️ NestJS scaffolded in `backend/` folder
+- 🔐 Hybrid `.gitignore` strategy (root + frontend + backend)
+- ✅ Zod schema for environment validation (fail-fast on startup)
+- 🔧 `TypedConfigService` — typed wrapper around `@nestjs/config`
+- 🗄️ TypeORM connected to PostgreSQL (`socio_lk_pos_dev`)
+- 🚫 `synchronize: false` — schema changes only via migrations
+- 🛡️ Helmet (security headers), CORS, two-tier rate limiting (10/sec, 100/min)
+- 🌐 API versioning prefix (`/api/v1`)
+
+#### Database Migrations
+- 📜 TypeORM DataSource configured for migration CLI
+- 🔄 npm scripts for full migration workflow (`generate`, `create`, `run`, `revert`, `show`)
+- ✅ Pipeline verified end-to-end (forward + reverse + re-forward)
+
+#### Users Module
+- 👤 `User` entity with UUID primary key, soft-delete, and CHECK-constrained role
+- 🗃️ First real migration: `CreateUsersTable` with `uuid-ossp` extension
+- 🔧 `UsersService` — create, find, update, deactivate, soft-delete operations
+- 🔒 bcrypt password hashing (work factor 12)
+- ✔️ DTOs with `class-validator` (`CreateUserDto`, `UpdateUserDto`)
+- 🛡️ Global `ValidationPipe` with whitelist + forbidNonWhitelisted (mass-assignment protection)
+
+#### Backend Documentation
+- 📘 `docs/backend/configuration.md` — env vars and config layer
+- 🔐 `docs/backend/security.md` — Helmet, CORS, rate limiting
+- 🗄️ `docs/backend/migrations.md` — migration workflow
+- 🗃️ `docs/backend/database.md` — schema conventions, soft-delete strategy, table reference
+
 ### Changed
 - Migrated `LoginForm` from local state to Redux state management
 - Updated `App.jsx` with React Router setup and protected routes
 - Updated `main.jsx` to wrap app with Redux Provider and BrowserRouter
+- 🧹 `tsconfig.json`: removed deprecated `baseUrl` and obsolete `ignoreDeprecations`
+- 🎯 `eslint.config.mjs`: allow underscore-prefixed unused vars (standard convention)
 
 ### Planned
-- Real backend with NestJS + PostgreSQL
 - Audit log system for tracking user actions (who did what, when)
 - Real dashboard layout with sidebar navigation
 - Product management module
@@ -158,7 +188,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 When making changes, add entries under `[Unreleased]`:
 
-```markdown
+​```markdown
 ## [Unreleased]
 
 ### Added
@@ -166,7 +196,7 @@ When making changes, add entries under `[Unreleased]`:
 
 ### Fixed
 - Bug fix description
-```
+​```
 
 When ready to release, move `[Unreleased]` items to a new version section with the date.
 
