@@ -6,10 +6,12 @@ import {
   UpdateDateColumn,
   DeleteDateColumn,
   Index,
+  Check,
 } from 'typeorm';
 import { UserRole } from '../enums/user-role.enum';
 
 @Entity('users')
+@Check('CHK_users_role', `role IN ('admin', 'manager', 'cashier')`)
 export class User {
   @PrimaryGeneratedColumn('uuid')
   id!: string;
