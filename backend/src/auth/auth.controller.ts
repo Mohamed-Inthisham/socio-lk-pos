@@ -8,15 +8,15 @@ import {
   Req,
   Res,
   UnauthorizedException,
-  UseGuards,
+
 } from '@nestjs/common';
 import type { Request, Response, CookieOptions } from 'express';
 import { AuthService } from './auth.service';
 import { LoginDto } from './dto/login.dto';
-import { JwtAuthGuard } from './guards/jwt-auth.guard';
 import { CurrentUser } from './decorators/current-user.decorator';
 import { AuthenticatedUser } from './strategies/jwt.strategy';
 import { TypedConfigService } from '../config/typed-config.service';
+import { Public } from './decorators/public.decorator';
 
 const ACCESS_TOKEN_COOKIE = 'access_token';
 const REFRESH_TOKEN_COOKIE = 'refresh_token';
@@ -33,7 +33,7 @@ export class AuthController {
     private readonly authService: AuthService,
     private readonly config: TypedConfigService,
   ) {}
-
+  @Public()
   @Post('login')
   @HttpCode(HttpStatus.OK)
   async login(
@@ -103,9 +103,7 @@ export class AuthController {
   }
 
   @Get('me')
-  @UseGuards(JwtAuthGuard)
   getMe(@CurrentUser() user: AuthenticatedUser | undefined) {
-    // JwtAuthGuard guarantees user is present, but the type reflects the
     // decorator's honest signature. Assert here for the response.
     if (!user) throw new UnauthorizedException();
     return { user };
