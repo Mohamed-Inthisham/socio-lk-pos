@@ -75,11 +75,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - ✔️ DTOs with `class-validator` (`CreateUserDto`, `UpdateUserDto`)
 - 🛡️ Global `ValidationPipe` with whitelist + forbidNonWhitelisted (mass-assignment protection)
 
+#### Auth Module
+- 🔐 `RefreshToken` entity + migration (`CreateRefreshTokensTable`)
+- 🎫 JWT access + refresh token strategy with rotation
+- 🍪 httpOnly cookies with `SameSite=Strict` (config-driven `Secure` + `Domain`)
+- 🛡️ Timing-safe login (dummy bcrypt compare when user doesn't exist)
+- 🔄 Refresh token rotation with reuse detection (revokes all sessions on suspicious reuse)
+- 🗝️ SHA-256 hashed refresh tokens in DB (never plaintext)
+- 📍 Session metadata captured (IP address, user agent) for audit
+- 🛂 `JwtAuthGuard` + `@CurrentUser()` decorator for clean route protection
+- 🚪 4 endpoints: `POST /auth/login`, `POST /auth/refresh`, `POST /auth/logout`, `GET /auth/me`
+
 #### Backend Documentation
 - 📘 `docs/backend/configuration.md` — env vars and config layer
 - 🔐 `docs/backend/security.md` — Helmet, CORS, rate limiting
 - 🗄️ `docs/backend/migrations.md` — migration workflow
 - 🗃️ `docs/backend/database.md` — schema conventions, soft-delete strategy, table reference
+- 🔑 `docs/backend/auth.md` — auth design, token strategy, and endpoint reference
 
 ### Changed
 - Migrated `LoginForm` from local state to Redux state management
@@ -87,6 +99,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Updated `main.jsx` to wrap app with Redux Provider and BrowserRouter
 - 🧹 `tsconfig.json`: removed deprecated `baseUrl` and obsolete `ignoreDeprecations`
 - 🎯 `eslint.config.mjs`: allow underscore-prefixed unused vars (standard convention)
+- 🧰 `eslint.config.mjs`: downgrade `no-unsafe-*` rules to `warn` (library-typed `any` values)
+- 🧬 `eslint.config.mjs`: allow single-extends empty interfaces (for declaration merging)
 
 ### Planned
 - Audit log system for tracking user actions (who did what, when)
