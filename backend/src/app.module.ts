@@ -10,6 +10,7 @@ import { TypedConfigModule } from './config/config.module';
 import { TypedConfigService } from './config/typed-config.service';
 import { buildTypeOrmConfig } from './config/typeorm.config';
 import { UsersModule } from './users/users.module';
+import { AuthModule } from './auth/auth.module';
 
 @Module({
   imports: [
@@ -36,6 +37,7 @@ import { UsersModule } from './users/users.module';
       },
     ]),
     UsersModule,
+    AuthModule,
   ],
   controllers: [AppController],
   providers: [
