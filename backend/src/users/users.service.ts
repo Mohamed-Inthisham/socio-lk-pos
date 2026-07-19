@@ -30,6 +30,15 @@ export class UsersService {
   }
 
   /**
+   * Find a user by id — INCLUDES password_hash.
+   * Used internally by AuthService for token generation flows.
+   * Do not expose externally.
+   */
+  async findByIdWithHash(id: string): Promise<User | null> {
+    return this.usersRepository.findOne({ where: { id } });
+  }
+
+  /**
    * Find a user by id — EXCLUDES password_hash.
    * Safe to return to clients.
    */
