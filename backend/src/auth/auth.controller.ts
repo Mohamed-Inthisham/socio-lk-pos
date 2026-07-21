@@ -10,33 +10,44 @@ import {
   UnauthorizedException,
 } from '@nestjs/common';
 import type { Request, Response, CookieOptions } from 'express';
+import {
+  ApiTags,
+  ApiOperation,
+  ApiResponse,
+  ApiCookieAuth,
+} from '@nestjs/swagger';
 import { AuthService } from './auth.service';
 import { LoginDto } from './dto/login.dto';
 import { CurrentUser } from './decorators/current-user.decorator';
 import { AuthenticatedUser } from './strategies/jwt.strategy';
 import { TypedConfigService } from '../config/typed-config.service';
 import { Public } from './decorators/public.decorator';
-// import { Roles } from './decorators/roles.decorator';
-// import { UserRole } from '../users/enums/user-role.enum';
 
 const ACCESS_TOKEN_COOKIE = 'access_token';
 const REFRESH_TOKEN_COOKIE = 'refresh_token';
 const REFRESH_TOKEN_PATH = '/api/v1/auth/refresh';
 
-// Rough milliseconds — used for cookie maxAge only. Actual token expiry is
-// enforced by JWT signature, so cookie maxAge is a hint to the browser.
-const ACCESS_COOKIE_MAX_AGE_MS = 15 * 60 * 1000; // 15 minutes
-const REFRESH_COOKIE_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000; // 7 days
+const ACCESS_COOKIE_MAX_AGE_MS = 15 * 60 * 1000;
+const REFRESH_COOKIE_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
 
+@ApiTags('Auth')
 @Controller('auth')
 export class AuthController {
   constructor(
     private readonly authService: AuthService,
     private readonly config: TypedConfigService,
   ) {}
+
   @Public()
   @Post('login')
   @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary: 'Log in with email and password',
+    description:
+      'Validates credentials, sets httpOnly access and refresh cookies, and returns the user profile.',
+  })
+  @ApiResponse({ status: 200, description: 'Login successful — cookies set' })
+  @ApiResponse({ status: 401, description: 'Invalid email or password' })
   async login(
     @Body() dto: LoginDto,
     @Req() req: Request,
@@ -66,8 +77,19 @@ export class AuthController {
     };
   }
 
+  @Public()
   @Post('refresh')
   @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary: 'Rotate access and refresh tokens',
+    description:
+      'Reads the refresh_token cookie, rotates it, and issues a new access_token. Detects reuse of revoked tokens.',
+  })
+  @ApiResponse({ status: 200, description: 'Tokens rotated successfully' })
+  @ApiResponse({
+    status: 401,
+    description: 'Missing, invalid, or revoked refresh token',
+  })
   async refresh(
     @Req() req: Request,
     @Res({ passthrough: true }) res: Response,
@@ -89,8 +111,15 @@ export class AuthController {
     return { success: true };
   }
 
+  @Public()
   @Post('logout')
   @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary: 'Log out and clear session cookies',
+    description:
+      'Revokes the current refresh token (if present) and clears both access and refresh cookies.',
+  })
+  @ApiResponse({ status: 200, description: 'Logged out' })
   async logout(@Req() req: Request, @Res({ passthrough: true }) res: Response) {
     const token = req.cookies?.[REFRESH_TOKEN_COOKIE];
     if (token) {
@@ -104,21 +133,20 @@ export class AuthController {
   }
 
   @Get('me')
+  @ApiCookieAuth('access_token')
+  @ApiOperation({
+    summary: 'Get current authenticated user',
+    description:
+      'Returns the user derived from the access_token cookie. Fresh-fetched from the DB each call.',
+  })
+  @ApiResponse({ status: 200, description: 'Current user profile' })
+  @ApiResponse({ status: 401, description: 'Not authenticated' })
   getMe(@CurrentUser() user: AuthenticatedUser | undefined) {
-    // decorator's honest signature. Assert here for the response.
     if (!user) throw new UnauthorizedException();
     return { user };
   }
 
-  // @Get('admin-only')
-  // @Roles(UserRole.ADMIN)
-  // adminOnly(@CurrentUser() user: AuthenticatedUser | undefined) {
-  //   return {
-  //     message: `Hello ${user?.full_name}, you have admin access.`,
-  //   };
-  // }
-
-  // ---------- private helpers ----------
+  // ---------- private helpers (unchanged) ----------
 
   private setAccessCookie(res: Response, token: string): void {
     res.cookie(ACCESS_TOKEN_COOKIE, token, {

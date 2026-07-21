@@ -4,6 +4,7 @@ import helmet from 'helmet';
 import { AppModule } from './app.module';
 import { TypedConfigService } from './config/typed-config.service';
 import cookieParser from 'cookie-parser';
+import { DocumentBuilder, SwaggerModule } from '@nestjs/swagger';
 
 async function bootstrap() {
   const app = await NestFactory.create(AppModule);
@@ -39,6 +40,23 @@ async function bootstrap() {
 
   // API versioning prefix
   app.setGlobalPrefix('api/v1');
+
+  // Swagger — dev-only, mounted OUTSIDE the /api/v1 prefix
+  if (config.get('NODE_ENV') !== 'production') {
+    const swaggerConfig = new DocumentBuilder()
+      .setTitle('SOCIO.LK POS API')
+      .setDescription('Point of Sale system for mobile shops in Sri Lanka')
+      .setVersion('1.0')
+      .addCookieAuth('access_token', {
+        type: 'apiKey',
+        in: 'cookie',
+        name: 'access_token',
+      })
+      .build();
+
+    const document = SwaggerModule.createDocument(app, swaggerConfig);
+    SwaggerModule.setup('api/docs', app, document);
+  }
 
   const port = config.get('PORT');
   await app.listen(port);
