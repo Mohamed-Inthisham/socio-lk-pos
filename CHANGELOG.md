@@ -86,12 +86,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - 🛂 `JwtAuthGuard` + `@CurrentUser()` decorator for clean route protection
 - 🚪 4 endpoints: `POST /auth/login`, `POST /auth/refresh`, `POST /auth/logout`, `GET /auth/me`
 
+#### RBAC (Role-Based Access Control)
+- 🛡️ `JwtAuthGuard` registered globally (secure by default)
+- 🚪 `@Public()` decorator for explicit opt-out on unauthenticated routes
+- 🏷️ `@Roles(...roles)` decorator using `UserRole` enum for type safety
+- 👮 `RolesGuard` enforces role requirements per route (401 for auth failure, 403 for role failure)
+- 📗 `docs/backend/rbac.md` documenting design and usage patterns
+
 #### Backend Documentation
 - 📘 `docs/backend/configuration.md` — env vars and config layer
 - 🔐 `docs/backend/security.md` — Helmet, CORS, rate limiting
 - 🗄️ `docs/backend/migrations.md` — migration workflow
 - 🗃️ `docs/backend/database.md` — schema conventions, soft-delete strategy, table reference
 - 🔑 `docs/backend/auth.md` — auth design, token strategy, and endpoint reference
+- 🛂 `docs/backend/rbac.md` — role hierarchy, guard pipeline, and decorator usage
 
 ### Changed
 - Migrated `LoginForm` from local state to Redux state management
