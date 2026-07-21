@@ -10,6 +10,7 @@ import { JwtAuthGuard } from './guards/jwt-auth.guard';
 import { RefreshToken } from './entities/refresh-token.entity';
 import { UsersModule } from '../users/users.module';
 import { TypedConfigModule } from '../config/config.module';
+import { RolesGuard } from './guards/roles.guard';
 
 @Module({
   imports: [
@@ -26,6 +27,10 @@ import { TypedConfigModule } from '../config/config.module';
     {
       provide: APP_GUARD,
       useClass: JwtAuthGuard,
+    },
+    {
+      provide: APP_GUARD,
+      useClass: RolesGuard,
     },
   ],
   exports: [AuthService],

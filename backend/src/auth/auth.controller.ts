@@ -8,7 +8,6 @@ import {
   Req,
   Res,
   UnauthorizedException,
-
 } from '@nestjs/common';
 import type { Request, Response, CookieOptions } from 'express';
 import { AuthService } from './auth.service';
@@ -17,6 +16,8 @@ import { CurrentUser } from './decorators/current-user.decorator';
 import { AuthenticatedUser } from './strategies/jwt.strategy';
 import { TypedConfigService } from '../config/typed-config.service';
 import { Public } from './decorators/public.decorator';
+// import { Roles } from './decorators/roles.decorator';
+// import { UserRole } from '../users/enums/user-role.enum';
 
 const ACCESS_TOKEN_COOKIE = 'access_token';
 const REFRESH_TOKEN_COOKIE = 'refresh_token';
@@ -108,6 +109,14 @@ export class AuthController {
     if (!user) throw new UnauthorizedException();
     return { user };
   }
+
+  // @Get('admin-only')
+  // @Roles(UserRole.ADMIN)
+  // adminOnly(@CurrentUser() user: AuthenticatedUser | undefined) {
+  //   return {
+  //     message: `Hello ${user?.full_name}, you have admin access.`,
+  //   };
+  // }
 
   // ---------- private helpers ----------
 
