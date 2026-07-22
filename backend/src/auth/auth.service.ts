@@ -113,12 +113,14 @@ export class AuthService {
   // ---------- private helpers ----------
 
   private async generateTokens(user: User): Promise<TokensDto> {
-    const payload = { sub: user.id, role: user.role };
+    const payload = {
+      sub: user.id,
+      role: user.role,
+      jti: crypto.randomUUID(), // unique per token — prevents collision on rapid rotation
+    };
 
     const access_token = await this.jwtService.signAsync(payload, {
       secret: this.config.get('JWT_ACCESS_SECRET'),
-      // Cast: Zod validates format at startup; @nestjs/jwt's StringValue
-      // template literal type doesn't accept env-sourced strings.
       expiresIn: this.config.get('JWT_ACCESS_EXPIRES_IN') as any,
     });
 
