@@ -3,8 +3,16 @@ import { createRoot } from "react-dom/client";
 import { BrowserRouter } from "react-router-dom";
 import { Provider } from "react-redux";
 import { store } from "./store";
+import { setAuthFailureHandler } from "./services/api";
+import { logoutUser } from "./store/slices/authSlice";
 import "./index.css";
 import App from "./App.jsx";
+
+// Wire the auth failure handler into Redux.
+// Called by the axios interceptor when refresh fails (session unrecoverable).
+setAuthFailureHandler(() => {
+  store.dispatch(logoutUser());
+});
 
 createRoot(document.getElementById("root")).render(
   <StrictMode>
