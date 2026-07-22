@@ -1,85 +1,38 @@
+import api from "./api";
+
 /**
  * Authentication Service
  *
- * Handles all authentication-related API calls.
- * Currently uses MOCK data for development.
- * Will be replaced with real API calls when NestJS backend is built.
- *
- * Mock Users (any password works):
- * - admin@socio.lk    → admin role
- * - manager@socio.lk  → manager role
- * - cashier@socio.lk  → cashier role
+ * Real API calls to the SOCIO.LK POS NestJS backend.
+ * Uses httpOnly cookies for auth — no token stored in JS.
  */
 
 // ============================================
-// MOCK DATABASE
-// ============================================
-
-const MOCK_USERS = {
-  "admin@socio.lk": {
-    id: 1,
-    name: "Admin User",
-    email: "admin@socio.lk",
-    role: "admin",
-    avatar: null,
-  },
-  "manager@socio.lk": {
-    id: 2,
-    name: "Manager User",
-    email: "manager@socio.lk",
-    role: "manager",
-    avatar: null,
-  },
-  "cashier@socio.lk": {
-    id: 3,
-    name: "Cashier User",
-    email: "cashier@socio.lk",
-    role: "cashier",
-    avatar: null,
-  },
-};
-
-// ============================================
-// HELPER FUNCTIONS
+// SHAPE MAPPING
 // ============================================
 
 /**
- * Generates a mock JWT-like token
- *
- * Real JWT structure: header.payload.signature
- * Our mock structure: mockHeader.payload.mockSignature
- *
- * The payload is base64-encoded JSON (just like real JWT)
- * so we can decode it with jwt-decode library
- *
- * @param {Object} user - User data to embed in token
- * @returns {string} Mock JWT token
+ * Backend returns user with `full_name`.
+ * Frontend components use `name`.
+ * We map at the boundary so the rest of the app is untouched.
  */
-const generateMockToken = (user) => {
-  const header = btoa(JSON.stringify({ alg: "mock", typ: "JWT" }));
-
-  const payload = btoa(
-    JSON.stringify({
-      userId: user.id,
-      email: user.email,
-      role: user.role,
-      name: user.name,
-      iat: Math.floor(Date.now() / 1000), // Issued at
-      exp: Math.floor(Date.now() / 1000) + 24 * 60 * 60, // Expires in 24 hours
-    }),
-  );
-
-  const signature = "mock-signature-not-real";
-
-  return `${header}.${payload}.${signature}`;
-};
+const mapBackendUser = (backendUser) => ({
+  id: backendUser.id,
+  email: backendUser.email,
+  name: backendUser.full_name,
+  role: backendUser.role,
+  avatar: null,
+});
 
 /**
- * Simulates network delay (1 second)
- * Makes the mock feel realistic
+ * Turns axios errors into simple message strings.
+ * Prefers backend-provided messages over generic ones.
  */
-const simulateNetworkDelay = (ms = 1000) => {
-  return new Promise((resolve) => setTimeout(resolve, ms));
+const extractErrorMessage = (error, fallback) => {
+  const backendMessage = error?.response?.data?.message;
+  if (Array.isArray(backendMessage)) return backendMessage[0];
+  if (typeof backendMessage === "string") return backendMessage;
+  return fallback;
 };
 
 // ============================================
@@ -87,77 +40,45 @@ const simulateNetworkDelay = (ms = 1000) => {
 // ============================================
 
 /**
- * Mock login function
- * Simulates an API call to authenticate user
- *
- * @param {Object} credentials - { email, password }
- * @returns {Promise<{ user, token }>} User data and auth token
- * @throws {Error} If credentials are invalid
+ * Login with email and password.
+ * Backend sets access_token + refresh_token httpOnly cookies.
+ * Returns { user } — no token in response body.
  */
 export const loginAPI = async ({ email, password }) => {
-  // Simulate network delay
-  await simulateNetworkDelay(1000);
-
-  // Validate input
-  if (!email || !password) {
-    throw new Error("Email and password are required");
+  try {
+    const response = await api.post("/auth/login", { email, password });
+    return {
+      user: mapBackendUser(response.data.user),
+    };
+  } catch (error) {
+    throw new Error(extractErrorMessage(error, "Invalid email or password"), {
+      cause: error,
+    });
   }
-
-  // Find user in mock database
-  const user = MOCK_USERS[email.toLowerCase()];
-
-  // Simulate invalid credentials
-  if (!user) {
-    throw new Error("Invalid email or password");
-  }
-
-  // Mock password check (in real app, backend does this)
-  // For now: any password with at least 3 characters works
-  if (password.length < 3) {
-    throw new Error("Password must be at least 3 characters");
-  }
-
-  // Generate mock token
-  const token = generateMockToken(user);
-
-  // Return user and token (mimics real API response)
-  return {
-    user,
-    token,
-  };
 };
 
 /**
- * Mock logout function
- * In a real app, this would call the backend to invalidate the token
+ * Logout — revokes the refresh token server-side and clears cookies.
  */
 export const logoutAPI = async () => {
-  await simulateNetworkDelay(300);
-  return { success: true };
+  try {
+    await api.post("/auth/logout");
+    return { success: true };
+  } catch (error) {
+    // Even if server call fails, treat logout as successful locally
+    console.error("Logout API error:", error);
+    return { success: true };
+  }
 };
 
 /**
- * Mock function to verify if a token is still valid
- * Used when restoring session from localStorage
- *
- * @param {string} token - JWT token
- * @returns {boolean} Whether token is valid
+ * Get the currently authenticated user.
+ * Used on app load to restore session — replaces the old localStorage check.
+ * 401 here means no valid session; caller should treat as logged out.
  */
-export const isTokenValid = (token) => {
-  if (!token) return false;
-
-  try {
-    // Extract and decode payload
-    const payload = token.split(".")[1];
-    if (!payload) return false;
-
-    const decoded = JSON.parse(atob(payload));
-
-    // Check expiration
-    const now = Math.floor(Date.now() / 1000);
-    return decoded.exp > now;
-  } catch (error) {
-    console.error("Invalid token:", error);
-    return false;
-  }
+export const getCurrentUser = async () => {
+  const response = await api.get("/auth/me");
+  return {
+    user: mapBackendUser(response.data.user),
+  };
 };
