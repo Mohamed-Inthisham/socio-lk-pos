@@ -9,15 +9,19 @@ import * as bcrypt from 'bcrypt';
 import { User } from './entities/user.entity';
 import { CreateUserDto } from './dto/create-user.dto';
 import { UpdateUserDto } from './dto/update-user.dto';
+import { TypedConfigService } from '../config/typed-config.service';
 
 @Injectable()
 export class UsersService {
-  private readonly BCRYPT_ROUNDS = 12;
+  private readonly bcryptRounds: number;
 
   constructor(
     @InjectRepository(User)
     private readonly usersRepository: Repository<User>,
-  ) {}
+    config: TypedConfigService,
+  ) {
+    this.bcryptRounds = config.get('BCRYPT_ROUNDS');
+  }
 
   /**
    * Find a user by email — INCLUDES password_hash.
@@ -62,7 +66,7 @@ export class UsersService {
       throw new ConflictException('Email is already registered');
     }
 
-    const password_hash = await bcrypt.hash(dto.password, this.BCRYPT_ROUNDS);
+    const password_hash = await bcrypt.hash(dto.password, this.bcryptRounds);
 
     const user = this.usersRepository.create({
       email: normalizedEmail,
