@@ -100,6 +100,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - 🗃️ `docs/backend/database.md` — schema conventions, soft-delete strategy, table reference
 - 🔑 `docs/backend/auth.md` — auth design, token strategy, and endpoint reference
 - 🛂 `docs/backend/rbac.md` — role hierarchy, guard pipeline, and decorator usage
+- 📇 `docs/backend/README.md` — index page linking all backend topic docs
+
+#### Audit Log System
+- 🗂️ `AuditLog` entity with nullable user FK (`ON DELETE SET NULL`) preserving `user_name` / `user_role` snapshots
+- 🏷️ `@Auditable(entityType, action)` decorator for declarative audit marking
+- 🎯 `AuditLogInterceptor` (global) — reads metadata, computes generic before/after diff (excludes `created_at`/`updated_at`/`deleted_at`), writes fire-and-forget
+- 🔍 `GET /api/v1/audit-logs` (admin-only) with 6 filters + pagination (max limit 100)
+- 📅 6-month retention policy documented; purge job deferred
+- 📗 `docs/backend/audit-logs.md`
+
+#### API Documentation (Swagger)
+- 📖 `@nestjs/swagger` mounted at `/api/docs`, dev-only (gated on `NODE_ENV !== 'production'`)
+- 🍪 Cookie auth scheme registered via `addCookieAuth`
+- 🏷️ All DTOs annotated with `@ApiProperty` / `@ApiPropertyOptional`
+- 🏷️ All controllers annotated with `@ApiTags`, `@ApiOperation`, `@ApiResponse`, `@ApiCookieAuth`
+- 📗 `docs/backend/api-documentation.md`
+
+#### Frontend ↔ Backend Integration
+- 🔌 Preconfigured axios client (`services/api.js`) with `withCredentials: true` and `VITE_API_BASE_URL`
+- 🔁 401 refresh interceptor with `refreshPromise` coalescing (prevents parallel refreshes tripping backend reuse-detection)
+- 🔗 Decoupled auth-failure handler via `setAuthFailureHandler` callback (avoids circular dep between `api.js` and Redux store)
+- 🗺️ Backend shape mapping at service boundary (`mapBackendUser`: `full_name` → `name`)
+- ✅ RBAC verified end-to-end against real backend (cashier vs admin)
+
+#### Testing Infrastructure
+- 🧪 Separate test DB (`socio_lk_pos_test`) with `.env.test` and `BCRYPT_ROUNDS=4` for speed
+- ⚙️ `data-source.ts` env-loading keyed on `NODE_ENV`; `cross-env` for cross-platform env vars
+- 🔒 Jest `maxWorkers: 1` for e2e to serialize DB access
+- 🧰 `createTestApp` helper mirroring `main.ts` essentials (Helmet, cookie-parser, ValidationPipe, `/api/v1` prefix)
+- ✅ 47 tests total — unit: `diffObjects` (10), `AuthService` (18); e2e: auth flow (13), RBAC + audit interceptor (6)
+- 📗 `docs/backend/testing.md`
 
 ### Changed
 - Migrated `LoginForm` from local state to Redux state management
@@ -109,9 +140,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - 🎯 `eslint.config.mjs`: allow underscore-prefixed unused vars (standard convention)
 - 🧰 `eslint.config.mjs`: downgrade `no-unsafe-*` rules to `warn` (library-typed `any` values)
 - 🧬 `eslint.config.mjs`: allow single-extends empty interfaces (for declaration merging)
+- 🔄 Replaced frontend mock auth (mock JWT + localStorage + `jwt-decode`) with real backend integration
+- 🗑️ Deleted `storage.js` and `jwt-decode` dependency — tokens now live only in httpOnly cookies
+- 🧾 `authSlice` simplified: no token in Redux state; `restoreSession` now calls `/auth/me`
+
+### Fixed
+- 🐛 **JWT hash collision on rapid rotation** — identical payloads issued within the same second produced byte-identical JWTs, tripping the `refresh_tokens.token_hash` unique constraint. Fixed by adding `jti` (`crypto.randomUUID()`) to every JWT payload. Caught by e2e tests.
+- 🐛 **e2e test races against shared test DB** — Jest ran spec files in parallel, causing mid-flight `TRUNCATE` from other suites. Fixed by setting `maxWorkers: 1` in `jest-e2e.json`. Caught by intermittent test failures.
 
 ### Planned
-- Audit log system for tracking user actions (who did what, when)
 - Real dashboard layout with sidebar navigation
 - Product management module
 - POS checkout flow

@@ -53,6 +53,12 @@ Rotation reduces the useful lifetime of a compromised refresh token to a single 
 
 Refresh tokens have high entropy (~200 bits), so brute-forcing them is impossible regardless of hash speed. We use fast **SHA-256** for the DB hash — different threat model from passwords (which use slow bcrypt). If the database is ever leaked, hashed refresh tokens are useless to an attacker.
 
+### Why every JWT includes a `jti` claim
+
+Every access and refresh JWT includes a `jti` (JWT ID) claim populated with a fresh `crypto.randomUUID()`. Without it, two tokens issued in the same second with identical other claims (same `sub`, same `iat`, same `exp`) would be byte-identical, producing identical SHA-256 hashes. Since `refresh_tokens.token_hash` is unique, the second insert would fail with a constraint violation.
+
+This is not hypothetical — it surfaced during rapid-rotation e2e tests in Phase 5.11 and was fixed by adding `jti` to the payload before signing. The claim is not used for verification; its only job is to guarantee uniqueness.
+
 ## Session Metadata
 
 Every session row in `refresh_tokens` records:

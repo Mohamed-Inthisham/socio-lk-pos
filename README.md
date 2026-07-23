@@ -35,11 +35,13 @@
 - **React Router** (navigation)
 - **Lucide React** (icons)
 
-### Backend (Coming Soon)
+### Backend
 - **NestJS** (Node.js framework)
 - **PostgreSQL** (database)
 - **TypeORM** (ORM)
-- **JWT** (authentication)
+- **JWT** (authentication with rotating refresh tokens)
+- **Zod** (env validation) + **class-validator** (DTOs)
+- **Jest** + **Supertest** (unit and e2e testing)
 
 ### DevOps
 - **GitHub** (version control)
@@ -90,15 +92,15 @@ npm run dev
 
 - [x] Project setup & folder structure
 - [x] Login UI (responsive design)
-- [ ] Authentication with Redux Toolkit
-- [ ] Role-based access control (RBAC)
+- [x] Authentication with Redux Toolkit
+- [x] Role-based access control (RBAC)
 - [ ] Dashboard layout
 - [ ] Product management module
 - [ ] POS checkout flow
 - [ ] Inventory tracking
 - [ ] Reports & analytics
-- [ ] Backend API (NestJS)
-- [ ] PostgreSQL integration
+- [x] Backend API (NestJS)
+- [x] PostgreSQL integration
 - [ ] AWS deployment
 
 ---
