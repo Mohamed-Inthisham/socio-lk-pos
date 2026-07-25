@@ -14,6 +14,7 @@ import { AuthModule } from './auth/auth.module';
 import { AuditLogModule } from './audit-log/audit-log.module';
 import { BranchesModule } from './branches/branches.module';
 import { BrandsModule } from './brands/brands.module';
+import { CategoriesModule } from './categories/categories.module';
 
 @Module({
   imports: [
@@ -44,6 +45,7 @@ import { BrandsModule } from './brands/brands.module';
     AuditLogModule,
     BranchesModule,
     BrandsModule,
+    CategoriesModule,
   ],
   controllers: [AppController],
   providers: [
