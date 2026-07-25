@@ -12,6 +12,7 @@ import { buildTypeOrmConfig } from './config/typeorm.config';
 import { UsersModule } from './users/users.module';
 import { AuthModule } from './auth/auth.module';
 import { AuditLogModule } from './audit-log/audit-log.module';
+import { BranchesModule } from './branches/branches.module';
 
 @Module({
   imports: [
@@ -40,6 +41,7 @@ import { AuditLogModule } from './audit-log/audit-log.module';
     UsersModule,
     AuthModule,
     AuditLogModule,
+    BranchesModule,
   ],
   controllers: [AppController],
   providers: [
