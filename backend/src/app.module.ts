@@ -15,6 +15,7 @@ import { AuditLogModule } from './audit-log/audit-log.module';
 import { BranchesModule } from './branches/branches.module';
 import { BrandsModule } from './brands/brands.module';
 import { CategoriesModule } from './categories/categories.module';
+import { SkuBarcodeCountersModule } from './sku-barcode-counters/sku-barcode-counters.module';
 
 @Module({
   imports: [
@@ -46,6 +47,7 @@ import { CategoriesModule } from './categories/categories.module';
     BranchesModule,
     BrandsModule,
     CategoriesModule,
+    SkuBarcodeCountersModule,
   ],
   controllers: [AppController],
   providers: [
