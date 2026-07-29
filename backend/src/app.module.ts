@@ -16,6 +16,7 @@ import { BranchesModule } from './branches/branches.module';
 import { BrandsModule } from './brands/brands.module';
 import { CategoriesModule } from './categories/categories.module';
 import { SkuBarcodeCountersModule } from './sku-barcode-counters/sku-barcode-counters.module';
+import { ProductsModule } from './products/products.module';
 
 @Module({
   imports: [
@@ -48,6 +49,7 @@ import { SkuBarcodeCountersModule } from './sku-barcode-counters/sku-barcode-cou
     BrandsModule,
     CategoriesModule,
     SkuBarcodeCountersModule,
+    ProductsModule,
   ],
   controllers: [AppController],
   providers: [
