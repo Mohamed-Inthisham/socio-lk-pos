@@ -2,4 +2,6 @@ export enum AuditAction {
   CREATE = 'CREATE',
   UPDATE = 'UPDATE',
   DELETE = 'DELETE',
+  DEACTIVATE = 'DEACTIVATE',
+  REACTIVATE = 'REACTIVATE',
 }

@@ -31,13 +31,28 @@ export async function createTestApp(): Promise<INestApplication> {
 }
 
 /**
- * Truncates all data tables between tests. Fast: uses TRUNCATE ... RESTART
- * IDENTITY CASCADE, which is a single Postgres command.
- * Keeps schema, drops rows.
+ * Truncates all data tables between tests. Dynamically discovers tables from
+ * TypeORM metadata so new entities are handled automatically — no need to
+ * update this file every time we add a table.
+ *
+ * The `migrations` table is deliberately excluded so migration state is
+ * preserved between tests. Fast: single Postgres command with CASCADE.
  */
 export async function truncateAllTables(app: INestApplication): Promise<void> {
   const dataSource = app.get(DataSource);
+
+  // Allow any fire-and-forget writes (audit log interceptor) to flush
+  // before truncating. Prevents lock races between the async audit INSERT
+  // (RowShareLock on audit_logs) and TRUNCATE (AccessExclusiveLock).
+  await new Promise((r) => setTimeout(r, 50));
+
+  const tableNames = dataSource.entityMetadatas
+    .map((entity) => `"${entity.tableName}"`)
+    .join(', ');
+
+  if (!tableNames) return;
+
   await dataSource.query(
-    'TRUNCATE TABLE "audit_logs", "refresh_tokens", "users" RESTART IDENTITY CASCADE',
+    `TRUNCATE TABLE ${tableNames} RESTART IDENTITY CASCADE`,
   );
 }

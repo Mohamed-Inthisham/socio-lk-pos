@@ -95,14 +95,13 @@ npm run dev
 - [x] Authentication with Redux Toolkit
 - [x] Role-based access control (RBAC)
 - [ ] Dashboard layout
-- [ ] Product management module
+- [ ] Product management module *(backend ✅ Phase 6.1 — frontend pending)*
 - [ ] POS checkout flow
-- [ ] Inventory tracking
+- [ ] Inventory tracking *(backend ✅ Phase 6.1 — frontend pending)*
 - [ ] Reports & analytics
 - [x] Backend API (NestJS)
 - [x] PostgreSQL integration
 - [ ] AWS deployment
-
 ---
 
 ## 👨‍💻 Author

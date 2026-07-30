@@ -12,4 +12,5 @@ Reference docs for the SOCIO.LK POS backend (NestJS + PostgreSQL + TypeORM).
 - [Audit Logs](./audit-logs.md) — Interceptor, entity design, retention policy
 - [Security](./security.md) — Helmet, CORS, rate limiting, cookie hardening
 - [API Documentation](./api-documentation.md) — Swagger setup and conventions
+- [Products Backend](./products.md) — Branches, brands, categories, products, stock, SKU/barcode counter
 - [Testing](./testing.md) — Test DB, unit and e2e patterns

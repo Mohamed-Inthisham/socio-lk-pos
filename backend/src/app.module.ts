@@ -12,6 +12,12 @@ import { buildTypeOrmConfig } from './config/typeorm.config';
 import { UsersModule } from './users/users.module';
 import { AuthModule } from './auth/auth.module';
 import { AuditLogModule } from './audit-log/audit-log.module';
+import { BranchesModule } from './branches/branches.module';
+import { BrandsModule } from './brands/brands.module';
+import { CategoriesModule } from './categories/categories.module';
+import { SkuBarcodeCountersModule } from './sku-barcode-counters/sku-barcode-counters.module';
+import { ProductsModule } from './products/products.module';
+import { StockModule } from './stock/stock.module';
 
 @Module({
   imports: [
@@ -40,6 +46,12 @@ import { AuditLogModule } from './audit-log/audit-log.module';
     UsersModule,
     AuthModule,
     AuditLogModule,
+    BranchesModule,
+    BrandsModule,
+    CategoriesModule,
+    SkuBarcodeCountersModule,
+    ProductsModule,
+    StockModule,
   ],
   controllers: [AppController],
   providers: [

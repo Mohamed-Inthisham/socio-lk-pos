@@ -132,6 +132,66 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - ✅ 47 tests total — unit: `diffObjects` (10), `AuthService` (18); e2e: auth flow (13), RBAC + audit interceptor (6)
 - 📗 `docs/backend/testing.md`
 
+#### Branches Module (Phase 6.1)
+- 🏬 `Branch` entity with UUID PK, name, address, phone, `is_active` toggle
+- 📱 Sri Lankan phone validation on DTO (`^0\d{9}$` — exactly 10 digits starting with 0)
+- 🛡️ "Cannot deactivate the last active branch" service guard prevents lock-out
+- 🌱 Seed migration inserts "Main Shop" as the initial branch
+- 🚫 No `deleted_at` — hard-preserving branch history is a data-integrity requirement
+- 🚪 6 endpoints: list, get, create, update, deactivate, reactivate
+
+#### Brands Module (Phase 6.1)
+- 🏷️ `Brand` entity with UUID PK, name, `is_active`, soft-delete
+- 🔒 Case-insensitive uniqueness via functional partial index: `LOWER(name) WHERE deleted_at IS NULL`
+- 🚫 Non-cascading deactivation — brand deactivation does not touch products
+- 🚪 6 endpoints: list, get, create, update, deactivate, reactivate
+
+#### Categories Module (Phase 6.1)
+- 🗂️ `Category` entity with self-referencing nullable `parent_id` for hierarchy
+- 📏 Two-level hierarchy cap enforced app-side (create + update guards reject depth 3)
+- 🔒 Sibling-scoped case-insensitive uniqueness via functional partial index using `COALESCE(parent_id, sentinel_uuid)` to collapse NULLs into a comparable value
+- 🌲 `GET /categories/top-level` for sidebar / navigation-tree consumers
+- 🚫 Non-cascading deactivation — parent deactivation does not touch children or products
+- 🚪 7 endpoints: list, top-level, get, create, update, deactivate, reactivate
+
+#### SKU/Barcode Counter (Phase 6.1, internal)
+- 🔢 `SkuBarcodeCounter` singleton table with two seed rows: `SKU` and `BARCODE`
+- 🔐 Row-locked increment via `SELECT ... FOR UPDATE` inside a transaction — collision-safe under concurrent product creation
+- 🧾 Formatted output: `SKU-000001`, `SLP-000001` with zero-padding
+- 🚫 No HTTP surface — service is consumed only by `ProductsService`
+
+#### Products Module (Phase 6.1)
+- 📦 `Product` entity with FKs to brand, category, branch; UUID PK; soft-delete
+- 🎫 SKU auto-generated on create (never client-supplied); barcode auto-generated if omitted, accepted if provided (supports manufacturer barcodes at receive time)
+- ✏️ Admin can override SKU on update — for correcting bad initial entries
+- 💰 Prices stored as `numeric(10,2)` in DB, `string` in code — avoids IEEE-754 rounding bugs
+- 🏭 `product_type` enum, `phone_condition` enum (NEW/USED, nullable — only meaningful when `product_type = PHONE`)
+- ⏱️ Two warranty fields: `warranty_months` (full manufacturer warranty) and `checking_warranty_days` (defect-check window for used phones)
+- 🔖 `is_serialized` flag → cashier prompted for IMEI at sale time (per-unit tracking deferred to R2)
+- ✅ Cross-entity validation at service layer — active-status checks on brand/category/branch produce clean 400s instead of raw FK failures
+- 🧬 Nested read responses `{ brand, category, branch }` — kills N+1 on product lists
+- 🔍 `GET /products/by-barcode/:barcode` for POS scan-to-cart
+- 🚪 7 endpoints: list, by-barcode, get, create, update, deactivate, reactivate
+
+#### Stock Module (Phase 6.1)
+- 📊 `Stock` entity: per-product, per-branch quantity + configurable low-stock threshold
+- 🔁 Auto-created at quantity 0 on product create (via `forwardRef` between `ProductsModule` and `StockModule`)
+- 🚨 `low_stock_alert` boolean computed on read (`quantity <= low_stock_threshold`) — never stored, avoids stale-flag bugs
+- 🧬 Nested read responses `{ product, branch }`
+- 🚫 No DELETE endpoint — quantity 0 is the correct "not carrying here" state; preserves history
+- 🚪 5 endpoints: list, by-product, get, create, update
+
+#### Products Backend Testing (Phase 6.1)
+- 🧪 200 new tests (116 unit + 84 e2e) bringing the backend suite to 247 total — all green
+- 🔄 `test/setup.ts` truncation now enumerates entity tables dynamically from TypeORM metadata (new entities auto-truncate)
+- 💤 50ms sleep before truncate lets fire-and-forget audit writes flush, prevents Postgres lock races during teardown
+- 🌱 Cross-module e2e tests re-seed `SkuBarcodeCounter` rows (`SKU`, `BARCODE`) after truncation before creating products
+- 💤 110ms sleep in every `loginAndGetCookies` helper works around the hardcoded 10/sec throttler tripping under test load (tracked as tech debt)
+
+#### Backend Documentation (Phase 6.1)
+- 📗 `docs/backend/products.md` — Products Backend design, endpoints, RBAC matrix, cross-entity flows, migration notes, and test coverage
+- 📇 `docs/backend/README.md` updated to index the new topic doc
+
 ### Changed
 - Migrated `LoginForm` from local state to Redux state management
 - Updated `App.jsx` with React Router setup and protected routes
