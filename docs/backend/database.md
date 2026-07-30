@@ -123,3 +123,194 @@ The application's user accounts (admin, manager, cashier).
 - `idx_users_email` — UNIQUE on `email`
 
 **Migration:** `CreateUsersTable` (first real migration, follows the `PipelineCheck` test from Phase 5.4 — now cleaned up).
+
+### `branches`
+
+Physical shop locations. Every product and stock row belongs to exactly one branch.
+
+| Column | Type | Notes |
+|--------|------|-------|
+| `id` | `uuid` | PK |
+| `name` | `varchar(100)` | Branch display name (e.g., "Main Shop") |
+| `address` | `text` | Full street address |
+| `phone` | `varchar(10)` | Sri Lankan format: exactly 10 digits starting with `0` (validated in DTO and at DB with CHECK) |
+| `is_active` | `boolean` | Default `true`. Service guard prevents deactivating the last active branch. |
+| `created_at` | `timestamptz` | |
+| `updated_at` | `timestamptz` | |
+
+**Constraints:**
+- `PK_branches_id` — primary key on `id`
+- `CHK_branches_phone` — `phone ~ '^0[0-9]{9}$'` <!-- 🔍 verify constraint name and regex in migration -->
+
+**No `deleted_at`.** Branches hold historical references from every product, stock, and future sale. Hard-preserving them is required.
+
+**Seed:** the migration inserts a single "Main Shop" branch so the app has a valid default.
+
+**Migration:** `CreateBranchesTable`
+
+---
+
+### `brands`
+
+Manufacturer brands (Apple, Samsung, Nokia, etc.).
+
+| Column | Type | Notes |
+|--------|------|-------|
+| `id` | `uuid` | PK |
+| `name` | `varchar(100)` | Brand name; case-insensitive unique among active rows |
+| `is_active` | `boolean` | Default `true` |
+| `created_at` | `timestamptz` | |
+| `updated_at` | `timestamptz` | |
+| `deleted_at` | `timestamptz` nullable | Soft delete |
+
+**Constraints:**
+- `PK_brands_id` — primary key on `id`
+
+**Indexes:**
+- `idx_brands_name_lower_active` — UNIQUE on `LOWER(name)` WHERE `deleted_at IS NULL` (functional partial index) <!-- 🔍 verify index name -->
+
+**Why the functional partial index:** application-layer "already exists?" checks race under concurrent create. Enforcing at the DB with a functional index on `LOWER(name)` (ignoring soft-deleted rows) makes duplicates impossible regardless of casing or timing.
+
+**Migration:** `CreateBrandsTable`
+
+---
+
+### `categories`
+
+Product taxonomy with a two-level hierarchy (root → child).
+
+| Column | Type | Notes |
+|--------|------|-------|
+| `id` | `uuid` | PK |
+| `name` | `varchar(100)` | Sibling-scoped case-insensitive unique |
+| `parent_id` | `uuid` nullable | Self-reference to another category; `NULL` for top-level |
+| `is_active` | `boolean` | Default `true` |
+| `created_at` | `timestamptz` | |
+| `updated_at` | `timestamptz` | |
+| `deleted_at` | `timestamptz` nullable | Soft delete |
+
+**Constraints:**
+- `PK_categories_id` — primary key on `id`
+- `FK_categories_parent_id` — `parent_id` references `categories.id`, `ON DELETE RESTRICT`
+
+**Indexes:**
+- `idx_categories_name_parent_lower_active` — UNIQUE on `(LOWER(name), COALESCE(parent_id, '00000000-0000-0000-0000-000000000000'::uuid))` WHERE `deleted_at IS NULL` <!-- 🔍 verify index name and sentinel UUID -->
+
+**Why the `COALESCE` on `parent_id`:** Postgres treats `NULL` values in unique indexes as always distinct, which would allow duplicate top-level categories. Coalescing `NULL` to a fixed sentinel UUID collapses those into a single comparable value so uniqueness holds for both top-level and child categories.
+
+**Two-level cap enforced app-side.** The schema allows arbitrary depth via self-reference; the service layer rejects create/update operations that would produce depth 3 or greater. See [products.md](./products.md).
+
+**Non-cascading deactivation.** Deactivating a parent leaves children (and any products) untouched.
+
+**Migration:** `CreateCategoriesTable`
+
+---
+
+### `sku_barcode_counters`
+
+Atomic sequence generator for product SKUs and internal barcodes. Two-row singleton table.
+
+| Column | Type | Notes |
+|--------|------|-------|
+| `id` | `uuid` | PK |
+| `code_type` | `varchar(20)` | Either `'SKU'` or `'BARCODE'` (CHECK constraint) |
+| `next_value` | `bigint` | Next integer to hand out; incremented on use |
+| `created_at` | `timestamptz` | |
+| `updated_at` | `timestamptz` | |
+
+**Constraints:**
+- `PK_sku_barcode_counters_id` — primary key on `id`
+- `CHK_sku_barcode_counters_code_type` — `code_type IN ('SKU', 'BARCODE')`
+
+**Indexes:**
+- `idx_sku_barcode_counters_code_type` — UNIQUE on `code_type` (ensures exactly one row per type) <!-- 🔍 verify index name -->
+
+**Seed:** migration inserts the two initial rows, both with `next_value = 1`.
+
+**Access pattern:** consumers must `SELECT ... FOR UPDATE` on the row inside a transaction, read `next_value`, format it (`SKU-000042`, `SLP-000042`), increment, and commit. The row lock serialises concurrent product creation, preventing SKU/barcode collisions.
+
+**Why not a Postgres sequence:** sequences gap on rollback (leaving holes in the SKU space) and don't natively produce zero-padded formatted output. A counter table with row locks gives gap-free, formatted, testable generation.
+
+**Migration:** `CreateSkuBarcodeCountersTable` <!-- 🔍 verify migration name (may be singular in your naming) -->
+
+---
+
+### `products`
+
+The catalog. Every product belongs to one brand, one category, and one branch.
+
+| Column | Type | Notes |
+|--------|------|-------|
+| `id` | `uuid` | PK |
+| `sku` | `varchar(20)` | Format `SKU-000001`; always auto-generated on create; admin may override on update |
+| `barcode` | `varchar(50)` | Format `SLP-000001` (auto) or manufacturer-supplied (accepted as-is on create) |
+| `name` | `varchar(200)` | Product name <!-- 🔍 verify length -->|
+| `description` | `text` nullable | Optional long description <!-- 🔍 verify field exists / nullability -->|
+| `product_type` | `varchar(20)` | Enum (CHECK): `PHONE`, `ACCESSORY`, etc. <!-- 🔍 verify enum values -->|
+| `phone_condition` | `varchar(10)` nullable | Enum (CHECK): `NEW`, `USED`; only meaningful when `product_type = 'PHONE'` |
+| `cost_price` | `numeric(10,2)` | Purchase cost <!-- 🔍 verify column name -->|
+| `selling_price` | `numeric(10,2)` | Retail price <!-- 🔍 verify column name -->|
+| `warranty_months` | `integer` | Default `0`. Full manufacturer warranty duration. |
+| `checking_warranty_days` | `integer` | Default `0`. Short defect-check window (mostly used phones). |
+| `is_serialized` | `boolean` | Default `false`. When `true`, POS prompts cashier for IMEI at sale. |
+| `brand_id` | `uuid` | FK → `brands.id` |
+| `category_id` | `uuid` | FK → `categories.id` |
+| `branch_id` | `uuid` | FK → `branches.id` |
+| `is_active` | `boolean` | Default `true` |
+| `created_at` | `timestamptz` | |
+| `updated_at` | `timestamptz` | |
+| `deleted_at` | `timestamptz` nullable | Soft delete |
+
+**Constraints:**
+- `PK_products_id` — primary key on `id`
+- `FK_products_brand_id`, `FK_products_category_id`, `FK_products_branch_id`
+- `CHK_products_product_type` — enum validation
+- `CHK_products_phone_condition` — enum validation (with `NULL` allowed)
+
+**Indexes:**
+- `idx_products_sku` — UNIQUE on `sku`
+- `idx_products_barcode` — UNIQUE on `barcode` <!-- 🔍 verify whether barcode uniqueness is partial (nullable barcode?) -->
+- `idx_products_brand_id`, `idx_products_category_id`, `idx_products_branch_id` — FK-supporting indexes
+
+**Why prices are `numeric`, not `float`/`double`:** IEEE-754 rounding errors accumulate across sale lines and tax calculations. `numeric(10,2)` gives exact decimal arithmetic. TypeScript treats these as `string` end-to-end to prevent accidental float coercion.
+
+**Cross-entity validation lives at the service layer.** `ProductsService.create()` checks brand/category/branch are all active before insert, producing clean 400 errors instead of raw Postgres FK failures.
+
+**Stock auto-creation.** Every product create atomically inserts a matching `stock` row at quantity 0 for the product's home branch (via `forwardRef` between `ProductsModule` and `StockModule`).
+
+**Migration:** `CreateProductsTable`
+
+---
+
+### `stock`
+
+Per-product, per-branch inventory quantities.
+
+| Column | Type | Notes |
+|--------|------|-------|
+| `id` | `uuid` | PK |
+| `product_id` | `uuid` | FK → `products.id` |
+| `branch_id` | `uuid` | FK → `branches.id` |
+| `quantity` | `integer` | Current on-hand quantity; default `0` |
+| `low_stock_threshold` | `integer` | Admin-configurable per row; default `0` |
+| `created_at` | `timestamptz` | |
+| `updated_at` | `timestamptz` | |
+
+**Constraints:**
+- `PK_stock_id` — primary key on `id`
+- `FK_stock_product_id`, `FK_stock_branch_id`
+- `CHK_stock_quantity_non_negative` — `quantity >= 0` <!-- 🔍 verify constraint exists -->
+
+**Indexes:**
+- `idx_stock_product_branch` — UNIQUE on `(product_id, branch_id)` (one stock row per product per branch) <!-- 🔍 verify index name -->
+- `idx_stock_product_id`, `idx_stock_branch_id` — FK-supporting indexes
+
+**No `deleted_at`.** Stock history is operational data; quantity 0 represents "not carrying here" without erasing the record.
+
+**No DELETE endpoint** — quantity 0 is the correct state for a discontinued line at a branch.
+
+**`low_stock_alert` is computed on read** (`quantity <= low_stock_threshold`) and included in API responses. Never stored — avoids stale-flag bugs.
+
+**Auto-created on product create** at quantity 0 for the product's home branch.
+
+**Migration:** `CreateStockTable`
