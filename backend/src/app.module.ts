@@ -17,6 +17,7 @@ import { BrandsModule } from './brands/brands.module';
 import { CategoriesModule } from './categories/categories.module';
 import { SkuBarcodeCountersModule } from './sku-barcode-counters/sku-barcode-counters.module';
 import { ProductsModule } from './products/products.module';
+import { StockModule } from './stock/stock.module';
 
 @Module({
   imports: [
@@ -50,6 +51,7 @@ import { ProductsModule } from './products/products.module';
     CategoriesModule,
     SkuBarcodeCountersModule,
     ProductsModule,
+    StockModule,
   ],
   controllers: [AppController],
   providers: [

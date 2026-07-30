@@ -14,6 +14,8 @@ import { CategoriesService } from '../categories/categories.service';
 import { BranchesService } from '../branches/branches.service';
 import { SkuBarcodeCountersService } from '../sku-barcode-counters/sku-barcode-counters.service';
 import { CounterType } from '../sku-barcode-counters/enums/counter-type.enum';
+import { Inject, forwardRef } from '@nestjs/common';
+import { StockService } from '../stock/stock.service';
 
 /**
  * Standard list of relations to always eagerly load for the nested
@@ -31,6 +33,8 @@ export class ProductsService {
     private readonly categoriesService: CategoriesService,
     private readonly branchesService: BranchesService,
     private readonly countersService: SkuBarcodeCountersService,
+    @Inject(forwardRef(() => StockService))
+    private readonly stockService: StockService,
   ) {}
 
   /**
@@ -79,6 +83,9 @@ export class ProductsService {
     });
 
     const saved = await this.productsRepository.save(product);
+    // Auto-create a Stock row for the new product at its branch.
+    // See Stock.createForNewProduct — idempotent, quantity starts at 0.
+    await this.stockService.createForNewProduct(saved.id, saved.branch_id);
     // Re-fetch with relations for a consistent nested response shape
     return this.findOne(saved.id);
   }

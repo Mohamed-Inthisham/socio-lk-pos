@@ -13,6 +13,7 @@ import { BranchesService } from '../branches/branches.service';
 import { SkuBarcodeCountersService } from '../sku-barcode-counters/sku-barcode-counters.service';
 import { CounterType } from '../sku-barcode-counters/enums/counter-type.enum';
 import { ProductType } from './enums/product-type.enum';
+import { StockService } from '../stock/stock.service';
 
 describe('ProductsService', () => {
   let service: ProductsService;
@@ -28,6 +29,7 @@ describe('ProductsService', () => {
   const mockCategoriesService = { findOne: jest.fn() };
   const mockBranchesService = { findOne: jest.fn() };
   const mockCountersService = { next: jest.fn() };
+  const mockStockService = { createForNewProduct: jest.fn() };
 
   const validDto = {
     product_type: ProductType.PHONE,
@@ -54,6 +56,7 @@ describe('ProductsService', () => {
         { provide: CategoriesService, useValue: mockCategoriesService },
         { provide: BranchesService, useValue: mockBranchesService },
         { provide: SkuBarcodeCountersService, useValue: mockCountersService },
+        { provide: StockService, useValue: mockStockService },
       ],
     }).compile();
 
@@ -73,6 +76,7 @@ describe('ProductsService', () => {
         .mockResolvedValueOnce('SKU-000001')
         .mockResolvedValueOnce('SLP-000001');
       mockRepo.create.mockImplementation((e) => e);
+      mockStockService.createForNewProduct.mockResolvedValue({ id: 'stock-1' });
       mockRepo.save.mockImplementation((e) =>
         Promise.resolve({ id: 'new-product-id', ...e }),
       );
