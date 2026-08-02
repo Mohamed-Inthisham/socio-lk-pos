@@ -42,9 +42,22 @@ describe('Stock (e2e)', () => {
     await app.close();
   });
 
-  async function seedUser(role: UserRole, email: string) {
+  async function getOrCreateMainShop(): Promise<Branch> {
+    const repo = dataSource.getRepository(Branch);
+    const existing = await repo.findOne({ where: { name: 'Main Shop' } });
+    if (existing) return existing;
+    return repo.save(repo.create({ name: 'Main Shop', is_active: true }));
+  }
+
+  async function seedUser(role: UserRole, email: string, branchId?: string) {
     const password = 'testpass123';
     const password_hash = await bcrypt.hash(password, 4);
+
+    let resolvedBranchId: string | null = null;
+    if (role !== UserRole.ADMIN) {
+      resolvedBranchId = branchId ?? (await getOrCreateMainShop()).id;
+    }
+
     const userRepo = dataSource.getRepository(User);
     const user = await userRepo.save(
       userRepo.create({
@@ -53,6 +66,7 @@ describe('Stock (e2e)', () => {
         full_name: `Test ${role}`,
         role,
         is_active: true,
+        branch_id: resolvedBranchId,
       }),
     );
     return { user, password };

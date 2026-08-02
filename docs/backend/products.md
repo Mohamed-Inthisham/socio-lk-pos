@@ -294,9 +294,9 @@ No `DELETE` on stock — quantity 0 is the correct way to represent "not carryin
 | Create/update/deactivate branches | ✅ | ❌ | ❌ |
 | Create/adjust stock | ✅ | ❌ | ❌ |
 
-Two follow-ups are already tracked:
+Two follow-ups are tracked:
 
-- Manager/cashier reads will be **scoped to their own branch** once the User → Branch link commit lands at the start of Phase 6.2.
+- ✅ **Done for `GET /branches/:id`** (Phase 6.2 Path A) — manager/cashier reads of a single branch are now scoped to their own branch, 403 otherwise; see [rbac.md](./rbac.md#branch-scoping). List endpoints (`GET /branches`, `GET /products`, `GET /stock`, etc.) remain unscoped — deferred to multi-branch launch (R9).
 - Stock adjustments may be **delegated to managers** in a later phase; for R1, keeping mutation admin-only is the safer default.
 
 ## Migration Notes
@@ -338,7 +338,7 @@ Key testing decisions from Phase 6.1 (see [testing.md](./testing.md) for the gen
 
 ## Future Work
 
-- **User → Branch link (imminent, Phase 6.2 opening commit)** — add `branch_id` FK to `User`, backfill existing users to Main Shop, include branch in `@CurrentUser()`, open scoped `/branches/:id` reads to managers and cashiers.
+- ✅ ~~User → Branch link~~ — **Done (Phase 6.2 Path A).** `branch_id` FK added to `User` (nullable, admin-exempt via `CHK_users_branch_role`), backfilled to Main Shop, exposed on `AuthenticatedUser` / `/auth/me` / `/auth/login`, and `GET /branches/:id` scoped to managers'/cashiers' own branch. See [auth.md](./auth.md), [rbac.md](./rbac.md#branch-scoping), and [database.md](./database.md). Multi-branch read scoping for **list** endpoints (Products, Stock, and the rest) stays deferred to R9.
 - **Per-unit inventory (R2)** — introduce a `ProductUnit` entity for products where `is_serialized = true`, carrying individual IMEI, cost, purchase date, condition per unit. Especially important for used phones where per-unit cost varies.
 - **Concurrent-sale hardening** — R1 assumes single-cashier operation. When multiple terminals go live: row-level locking on stock deduction, tuned transaction isolation, collision-safe invoice numbering.
 - **Bulk barcode labels** — R1 will print one label at a time via `jsbarcode` + `window.print()`. Bulk label sheets (Avery-style templates) are deferred.

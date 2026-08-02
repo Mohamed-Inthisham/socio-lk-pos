@@ -5,6 +5,7 @@ import {
   MaxLength,
   MinLength,
   IsOptional,
+  IsUUID,
 } from 'class-validator';
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 import { UserRole } from '../enums/user-role.enum';
@@ -51,4 +52,15 @@ export class CreateUserDto {
     message: `Role must be one of: ${Object.values(UserRole).join(', ')}`,
   })
   role?: UserRole;
+
+  @ApiPropertyOptional({
+    example: 'c5f4e0f2-3456-789a-bcde-f23456789012',
+    description:
+      'Branch UUID. REQUIRED for manager and cashier roles, ' +
+      'FORBIDDEN for admin role. Admins are un-branched and see all branches.',
+    format: 'uuid',
+  })
+  @IsOptional()
+  @IsUUID(undefined, { message: 'branch_id must be a valid UUID' })
+  branch_id?: string;
 }

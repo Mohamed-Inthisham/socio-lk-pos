@@ -72,6 +72,31 @@ getProfitReport() { ... }
 getSalesReport() { ... }
 ​```
 
+## Branch Scoping
+
+Role gates *which endpoints* a user can call; branch scoping (new in Phase 6.2) gates *which rows* they see once inside. `GET /branches/:id` is the first endpoint to apply the pattern:
+
+- **Admin** — unrestricted. Admins are unbranched (`branch_id` is always `null`), so there's nothing to scope against.
+- **Manager / cashier** — locked to their own assigned branch. Requesting any other branch id returns `403 Forbidden`.
+
+​```typescript
+async findOne(
+  @Param('id', ParseUUIDPipe) id: string,
+  @CurrentUser() user: AuthenticatedUser,
+) {
+  if (user.role !== UserRole.ADMIN && user.branch_id !== id) {
+    throw new ForbiddenException('You can only view your own branch');
+  }
+  return this.branchesService.findOne(id);
+}
+​```
+
+This relies on the DB-level `CHK_users_branch_role` invariant (every non-admin user has a non-null `branch_id` — see [database.md](./database.md)), so the comparison never needs a null-check on `user.branch_id`.
+
+### Where this is headed
+
+`GET /branches/:id` is the first application of this pattern, not the only one. Multi-branch launch (R9) will extend the same admin-unrestricted / staff-scoped-to-own-branch check across other branch-owned entities and their **list** endpoints (`GET /branches`, `GET /products`, `GET /stock`, etc., which remain unscoped for now). See [products.md](./products.md) Future Work.
+
 ## Design Choices
 
 ### Why global guards (opt-out) instead of per-route guards (opt-in)?

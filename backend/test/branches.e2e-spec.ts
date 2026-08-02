@@ -24,10 +24,26 @@ describe('Branches (e2e)', () => {
     await app.close();
   });
 
-  // Helper: seed a user with a specific role
-  async function seedUser(role: UserRole, email: string) {
+  // Helper: get-or-create the default Main Shop branch.
+  // Non-admins need a branch per CHK_users_branch_role.
+  async function getOrCreateMainShop(): Promise<Branch> {
+    const repo = dataSource.getRepository(Branch);
+    const existing = await repo.findOne({ where: { name: 'Main Shop' } });
+    if (existing) return existing;
+    return repo.save(repo.create({ name: 'Main Shop', is_active: true }));
+  }
+
+  // Helper: seed a user. Non-admins get Main Shop by default, or a specific
+  // branch via branchId (used for cross-branch scoping tests).
+  async function seedUser(role: UserRole, email: string, branchId?: string) {
     const password = 'testpass123';
     const password_hash = await bcrypt.hash(password, 4);
+
+    let resolvedBranchId: string | null = null;
+    if (role !== UserRole.ADMIN) {
+      resolvedBranchId = branchId ?? (await getOrCreateMainShop()).id;
+    }
+
     const userRepo = dataSource.getRepository(User);
     const user = await userRepo.save(
       userRepo.create({
@@ -36,6 +52,7 @@ describe('Branches (e2e)', () => {
         full_name: `Test ${role}`,
         role,
         is_active: true,
+        branch_id: resolvedBranchId,
       }),
     );
     return { user, password };
@@ -91,7 +108,6 @@ describe('Branches (e2e)', () => {
         UserRole.MANAGER,
         'manager@t.com',
       );
-      await seedBranch();
       const cookies = await loginAndGetCookies(user.email, password);
 
       await request(app.getHttpServer())
@@ -105,7 +121,6 @@ describe('Branches (e2e)', () => {
         UserRole.CASHIER,
         'cashier@t.com',
       );
-      await seedBranch();
       const cookies = await loginAndGetCookies(user.email, password);
 
       await request(app.getHttpServer())
@@ -145,6 +160,106 @@ describe('Branches (e2e)', () => {
 
     it('returns 401 when unauthenticated', async () => {
       await request(app.getHttpServer()).get('/api/v1/branches').expect(401);
+    });
+  });
+
+  describe('GET /api/v1/branches/:id — branch scoping (Path A)', () => {
+    it('admin can fetch any branch', async () => {
+      const { user, password } = await seedUser(UserRole.ADMIN, 'admin@t.com');
+      const branch = await seedBranch({ name: 'Kandy Shop' });
+      const cookies = await loginAndGetCookies(user.email, password);
+
+      const response = await request(app.getHttpServer())
+        .get(`/api/v1/branches/${branch.id}`)
+        .set('Cookie', cookies)
+        .expect(200);
+
+      expect(response.body.name).toBe('Kandy Shop');
+    });
+
+    it('cashier can fetch their own branch (200)', async () => {
+      const mainShop = await getOrCreateMainShop();
+      const { user, password } = await seedUser(
+        UserRole.CASHIER,
+        'cashier@t.com',
+        mainShop.id,
+      );
+      const cookies = await loginAndGetCookies(user.email, password);
+
+      const response = await request(app.getHttpServer())
+        .get(`/api/v1/branches/${mainShop.id}`)
+        .set('Cookie', cookies)
+        .expect(200);
+
+      expect(response.body.id).toBe(mainShop.id);
+    });
+
+    it('cashier is forbidden from fetching a different branch (403)', async () => {
+      const mainShop = await getOrCreateMainShop();
+      const otherBranch = await seedBranch({ name: 'Kandy Shop' });
+      const { user, password } = await seedUser(
+        UserRole.CASHIER,
+        'cashier@t.com',
+        mainShop.id,
+      );
+      const cookies = await loginAndGetCookies(user.email, password);
+
+      const response = await request(app.getHttpServer())
+        .get(`/api/v1/branches/${otherBranch.id}`)
+        .set('Cookie', cookies)
+        .expect(403);
+
+      expect(response.body.message).toContain('own branch');
+    });
+
+    it('manager can fetch their own branch (200)', async () => {
+      const mainShop = await getOrCreateMainShop();
+      const { user, password } = await seedUser(
+        UserRole.MANAGER,
+        'manager@t.com',
+        mainShop.id,
+      );
+      const cookies = await loginAndGetCookies(user.email, password);
+
+      await request(app.getHttpServer())
+        .get(`/api/v1/branches/${mainShop.id}`)
+        .set('Cookie', cookies)
+        .expect(200);
+    });
+
+    it('manager is forbidden from fetching a different branch (403)', async () => {
+      const mainShop = await getOrCreateMainShop();
+      const otherBranch = await seedBranch({ name: 'Kandy Shop' });
+      const { user, password } = await seedUser(
+        UserRole.MANAGER,
+        'manager@t.com',
+        mainShop.id,
+      );
+      const cookies = await loginAndGetCookies(user.email, password);
+
+      await request(app.getHttpServer())
+        .get(`/api/v1/branches/${otherBranch.id}`)
+        .set('Cookie', cookies)
+        .expect(403);
+    });
+
+    it('scoping check runs before existence check (403 on nonexistent for staff)', async () => {
+      // Staff attempting to fetch a UUID that isn't theirs — regardless of
+      // whether it exists — should get 403, not 404. This protects branch
+      // existence from being probed by staff.
+      const mainShop = await getOrCreateMainShop();
+      const { user, password } = await seedUser(
+        UserRole.CASHIER,
+        'cashier@t.com',
+        mainShop.id,
+      );
+      const cookies = await loginAndGetCookies(user.email, password);
+      const nonexistentId = '00000000-0000-0000-0000-000000000000';
+
+      await request(app.getHttpServer())
+        .get(`/api/v1/branches/${nonexistentId}`)
+        .set('Cookie', cookies)
+        .expect(403);
     });
   });
 

@@ -22,6 +22,7 @@ import { CurrentUser } from './decorators/current-user.decorator';
 import { AuthenticatedUser } from './strategies/jwt.strategy';
 import { TypedConfigService } from '../config/typed-config.service';
 import { Public } from './decorators/public.decorator';
+import { UsersService } from '../users/users.service';
 
 const ACCESS_TOKEN_COOKIE = 'access_token';
 const REFRESH_TOKEN_COOKIE = 'refresh_token';
@@ -35,6 +36,7 @@ const REFRESH_COOKIE_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
 export class AuthController {
   constructor(
     private readonly authService: AuthService,
+    private readonly usersService: UsersService,
     private readonly config: TypedConfigService,
   ) {}
 
@@ -67,12 +69,21 @@ export class AuthController {
     this.setAccessCookie(res, access_token);
     this.setRefreshCookie(res, refresh_token);
 
+    // Re-fetch with branch relation loaded, so login response mirrors /auth/me.
+    const enriched = await this.usersService.findById(user.id);
+    if (!enriched) {
+      // Should never happen — user just authenticated seconds ago.
+      throw new UnauthorizedException();
+    }
+
     return {
       user: {
-        id: user.id,
-        email: user.email,
-        full_name: user.full_name,
-        role: user.role,
+        id: enriched.id,
+        email: enriched.email,
+        full_name: enriched.full_name,
+        role: enriched.role,
+        branch_id: enriched.branch_id,
+        branch: enriched.branch ?? null,
       },
     };
   }

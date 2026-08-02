@@ -192,6 +192,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - 📗 `docs/backend/products.md` — Products Backend design, endpoints, RBAC matrix, cross-entity flows, migration notes, and test coverage
 - 📇 `docs/backend/README.md` updated to index the new topic doc
 
+#### User → Branch Link (Phase 6.2, Path A)
+- 🔗 `users.branch_id` — nullable UUID FK to `branches.id`, `ON DELETE RESTRICT` (migration `AddBranchIdToUsers1785413437552`)
+- 🛡️ `CHK_users_branch_role` — DB-level invariant: `role = 'admin' OR branch_id IS NOT NULL` (admins stay unbranched, staff always scoped)
+- 🌱 Migration backfills existing non-admin users to "Main Shop" before adding the CHECK constraint
+- 🔧 `UsersService` re-enforces the same branch/role invariant at the service layer — clean 400s instead of raw constraint violations, plus active-branch validation on both create and update
+- 🔑 `branch_id` embedded in the JWT payload; `AuthenticatedUser`, `/auth/me`, and `/auth/login` responses now include `branch_id` + nested `branch`
+- 🚪 `GET /branches/:id` scoped: admin unrestricted, manager/cashier limited to their own branch (403 otherwise) — first appearance of the branch-scoping pattern, to be extended to other entities' list endpoints at multi-branch launch (R9)
+- 🧪 31 new unit tests + 8 new e2e tests — backend suite now 175 unit + 111 e2e = **286 tests total**, all green
+- 📗 `docs/backend/auth.md`, `docs/backend/rbac.md`, `docs/backend/database.md`, `docs/backend/products.md` updated for the branch link
+
 ### Changed
 - Migrated `LoginForm` from local state to Redux state management
 - Updated `App.jsx` with React Router setup and protected routes

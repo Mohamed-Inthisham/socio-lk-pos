@@ -59,6 +59,16 @@ Every access and refresh JWT includes a `jti` (JWT ID) claim populated with a fr
 
 This is not hypothetical — it surfaced during rapid-rotation e2e tests in Phase 5.11 and was fixed by adding `jti` to the payload before signing. The claim is not used for verification; its only job is to guarantee uniqueness.
 
+### JWT payload contents
+
+Every access token payload carries:
+
+​```typescript
+{ sub: string; role: UserRole; branch_id: string | null; jti: string; iat?: number; exp?: number }
+​```
+
+`branch_id` mirrors the user's row at issue time — `null` for admins, a UUID for managers/cashiers (Phase 6.2). It lets downstream checks (e.g. the branch-scoping pattern in [rbac.md](./rbac.md)) read the caller's branch without a DB round trip. As with `role`, this is convenience only: `JwtStrategy.validate()` still re-fetches the user from the DB on every request, so a branch transfer takes effect on the next request, not 15 minutes later.
+
 ## Session Metadata
 
 Every session row in `refresh_tokens` records:
@@ -88,6 +98,8 @@ This metadata supports future features (session management UI, "log out other de
 | POST | `/api/v1/auth/logout` | none | none | 200 + cleared cookies | 200 (idempotent) |
 | GET | `/api/v1/auth/me` | JwtAuthGuard | none | 200 + user | 401 |
 
+**Login and `/auth/me` return the same user shape.** Both respond with `{ id, email, full_name, role, branch_id, branch }`, where `branch_id` is `null` for admins and a UUID for managers/cashiers, and `branch` is the nested `Branch` object (or `null`). `login()` re-fetches the user with the branch relation loaded right after issuing tokens, specifically so its response matches `/auth/me` exactly rather than returning the pre-fetch, branch-less row.
+
 ## Programmatic Use
 
 Inside NestJS controllers, use the `@CurrentUser()` decorator to extract the authenticated user:
@@ -100,7 +112,7 @@ handler(@CurrentUser() user: AuthenticatedUser) {
 }
 ​```
 
-The `AuthenticatedUser` shape is `{ id, email, full_name, role }` — never includes `password_hash`.
+The `AuthenticatedUser` shape is `{ id, email, full_name, role, branch_id, branch }` — never includes `password_hash`. `branch_id` is `null` for admins; `branch` is the nested `Branch` object (or `null`) resolved via the entity relation on every request.
 
 ## Environment Variables
 
