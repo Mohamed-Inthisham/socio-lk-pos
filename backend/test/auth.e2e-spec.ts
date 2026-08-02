@@ -5,6 +5,7 @@ import { DataSource } from 'typeorm';
 import { createTestApp, truncateAllTables } from './setup';
 import { User } from '../src/users/entities/user.entity';
 import { UserRole } from '../src/users/enums/user-role.enum';
+import { Branch } from '../src/branches/entities/branch.entity';
 
 describe('Auth (e2e)', () => {
   let app: INestApplication;
@@ -23,11 +24,27 @@ describe('Auth (e2e)', () => {
     await app.close();
   });
 
+  // Helper: get-or-create the default Main Shop branch.
+  // Any non-admin user needs a branch per the CHK_users_branch_role constraint.
+  async function getOrCreateMainShop(): Promise<Branch> {
+    const repo = dataSource.getRepository(Branch);
+    const existing = await repo.findOne({ where: { name: 'Main Shop' } });
+    if (existing) return existing;
+    return repo.save(repo.create({ name: 'Main Shop', is_active: true }));
+  }
+
   // Helper: seed a user directly via the repository (bypasses UsersService
   // to keep tests independent of that service's behavior)
   async function seedUser(overrides: Partial<User> = {}) {
     const password = 'testpass123';
     const password_hash = await bcrypt.hash(password, 4);
+
+    const role = overrides.role ?? UserRole.ADMIN;
+    let branch_id: string | null = overrides.branch_id ?? null;
+    if (role !== UserRole.ADMIN && branch_id === null) {
+      branch_id = (await getOrCreateMainShop()).id;
+    }
+
     const userRepo = dataSource.getRepository(User);
     const user = userRepo.create({
       email: 'admin@test.com',
@@ -36,6 +53,7 @@ describe('Auth (e2e)', () => {
       role: UserRole.ADMIN,
       is_active: true,
       ...overrides,
+      branch_id, // last so overrides can't leave it undefined
     });
     const saved = await userRepo.save(user);
     return { user: saved, password };
@@ -56,6 +74,8 @@ describe('Auth (e2e)', () => {
           email: user.email,
           full_name: user.full_name,
           role: user.role,
+          branch_id: null,
+          branch: null,
         },
       });
 
@@ -117,7 +137,7 @@ describe('Auth (e2e)', () => {
   }
 
   describe('GET /api/v1/auth/me', () => {
-    it('returns the current user when authenticated', async () => {
+    it('returns the current admin user with branch: null', async () => {
       const { user, password } = await seedUser();
       const cookies = await loginAndGetCookies(user.email, password);
 
@@ -132,8 +152,52 @@ describe('Auth (e2e)', () => {
           email: user.email,
           full_name: user.full_name,
           role: user.role,
+          branch_id: null,
+          branch: null,
         },
       });
+    });
+
+    it('returns nested branch object for a cashier', async () => {
+      const branch = await getOrCreateMainShop();
+      const { user, password } = await seedUser({
+        email: 'cashier@test.com',
+        role: UserRole.CASHIER,
+        branch_id: branch.id,
+      });
+      const cookies = await loginAndGetCookies(user.email, password);
+
+      const response = await request(app.getHttpServer())
+        .get('/api/v1/auth/me')
+        .set('Cookie', cookies)
+        .expect(200);
+
+      expect(response.body.user.role).toBe(UserRole.CASHIER);
+      expect(response.body.user.branch_id).toBe(branch.id);
+      expect(response.body.user.branch).toMatchObject({
+        id: branch.id,
+        name: 'Main Shop',
+        is_active: true,
+      });
+    });
+
+    it('returns nested branch object for a manager', async () => {
+      const branch = await getOrCreateMainShop();
+      const { user, password } = await seedUser({
+        email: 'manager@test.com',
+        role: UserRole.MANAGER,
+        branch_id: branch.id,
+      });
+      const cookies = await loginAndGetCookies(user.email, password);
+
+      const response = await request(app.getHttpServer())
+        .get('/api/v1/auth/me')
+        .set('Cookie', cookies)
+        .expect(200);
+
+      expect(response.body.user.role).toBe(UserRole.MANAGER);
+      expect(response.body.user.branch_id).toBe(branch.id);
+      expect(response.body.user.branch.name).toBe('Main Shop');
     });
 
     it('returns 401 when no cookies are sent', async () => {

@@ -5,6 +5,7 @@ import { DataSource } from 'typeorm';
 import { createTestApp, truncateAllTables } from './setup';
 import { User } from '../src/users/entities/user.entity';
 import { UserRole } from '../src/users/enums/user-role.enum';
+import { Branch } from '../src/branches/entities/branch.entity';
 import { AuditLog } from '../src/audit-log/entities/audit-log.entity';
 
 describe('RBAC (e2e)', () => {
@@ -24,9 +25,25 @@ describe('RBAC (e2e)', () => {
     await app.close();
   });
 
+  // Helper: get-or-create the default Main Shop branch.
+  // Non-admin users need a branch per CHK_users_branch_role.
+  async function getOrCreateMainShop(): Promise<Branch> {
+    const repo = dataSource.getRepository(Branch);
+    const existing = await repo.findOne({ where: { name: 'Main Shop' } });
+    if (existing) return existing;
+    return repo.save(repo.create({ name: 'Main Shop', is_active: true }));
+  }
+
   async function seedUser(overrides: Partial<User> = {}) {
     const password = 'testpass123';
     const password_hash = await bcrypt.hash(password, 4);
+
+    const role = overrides.role ?? UserRole.ADMIN;
+    let branch_id: string | null = overrides.branch_id ?? null;
+    if (role !== UserRole.ADMIN && branch_id === null) {
+      branch_id = (await getOrCreateMainShop()).id;
+    }
+
     const userRepo = dataSource.getRepository(User);
     const user = userRepo.create({
       email: 'user@test.com',
@@ -35,6 +52,7 @@ describe('RBAC (e2e)', () => {
       role: UserRole.ADMIN,
       is_active: true,
       ...overrides,
+      branch_id, // last so overrides can't leave it undefined
     });
     const saved = await userRepo.save(user);
     return { user: saved, password };
