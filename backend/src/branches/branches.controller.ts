@@ -11,6 +11,7 @@ import {
   ParseBoolPipe,
   HttpCode,
   HttpStatus,
+  ForbiddenException,
 } from '@nestjs/common';
 import {
   ApiTags,
@@ -27,6 +28,8 @@ import { Roles } from '../auth/decorators/roles.decorator';
 import { UserRole } from '../users/enums/user-role.enum';
 import { Auditable } from '../audit-log/decorators/auditable.decorator';
 import { AuditAction } from '../audit-log/enums/audit-action.enum';
+import { CurrentUser } from '../auth/decorators/current-user.decorator';
+import type { AuthenticatedUser } from '../auth/strategies/jwt.strategy';
 
 @ApiTags('Branches')
 @ApiCookieAuth('access_token')
@@ -42,7 +45,8 @@ export class BranchesController {
       'All authenticated roles can list active branches (needed for receipt header, ' +
       'admin dropdown, etc.). Pass includeInactive=true (admin UI) to include ' +
       'deactivated branches. ' +
-      'TODO (deferred to multi-branch release): scope manager/cashier to their own branch only.',
+      "Note: scoping to caller's branch is deferred to R9 (multi-branch launch); " +
+      'for now all roles see all branches. See GET /branches/:id for the scoped pattern.',
   })
   @ApiQuery({
     name: 'includeInactive',
@@ -65,15 +69,30 @@ export class BranchesController {
   @ApiOperation({
     summary: 'Get a branch by ID',
     description:
-      'All authenticated roles can fetch a branch by ID (used by cashier UI to load ' +
-      'receipt header info). ' +
-      'TODO (deferred to multi-branch release): scope manager/cashier to their own branch only.',
+      'Admin can fetch any branch. Manager and cashier can only fetch their own ' +
+      'assigned branch (returns 403 otherwise). Used by cashier UI to load ' +
+      'receipt header info for their own shop.',
   })
   @ApiParam({ name: 'id', description: 'Branch UUID', format: 'uuid' })
   @ApiResponse({ status: 200, description: 'Branch found' })
   @ApiResponse({ status: 401, description: 'Not authenticated' })
+  @ApiResponse({
+    status: 403,
+    description: 'Staff attempted to read a branch other than their own',
+  })
   @ApiResponse({ status: 404, description: 'Branch not found' })
-  async findOne(@Param('id', ParseUUIDPipe) id: string) {
+  async findOne(
+    @Param('id', ParseUUIDPipe) id: string,
+    @CurrentUser() user: AuthenticatedUser,
+  ) {
+    // Branch scoping (first appearance of the pattern):
+    //   - Admin: unrestricted (branch_id is null anyway)
+    //   - Manager/cashier: locked to their own branch
+    // DB invariant guarantees non-admins always have a non-null branch_id,
+    // so we can compare directly without a null-check on user.branch_id.
+    if (user.role !== UserRole.ADMIN && user.branch_id !== id) {
+      throw new ForbiddenException('You can only view your own branch');
+    }
     return this.branchesService.findOne(id);
   }
 
