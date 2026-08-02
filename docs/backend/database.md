@@ -111,6 +111,7 @@ The application's user accounts (admin, manager, cashier).
 | `full_name` | `varchar(100)` | Display name |
 | `role` | `varchar(20)` | `'admin' \| 'manager' \| 'cashier'` (CHECK constraint) |
 | `is_active` | `boolean` | Default `true`. Inactive users cannot log in. |
+| `branch_id` | `uuid` nullable | FK → `branches.id`, `ON DELETE RESTRICT`. `NULL` only for admins (Phase 6.2). |
 | `created_at` | `timestamptz` | |
 | `updated_at` | `timestamptz` | |
 | `deleted_at` | `timestamptz` nullable | Soft delete |
@@ -118,11 +119,16 @@ The application's user accounts (admin, manager, cashier).
 **Constraints:**
 - `PK_users_id` — primary key on `id`
 - `CHK_users_role` — `role IN ('admin', 'manager', 'cashier')`
+- `CHK_users_branch_role` — `role = 'admin' OR branch_id IS NOT NULL`
+- `FK_users_branch_id` — `branch_id` references `branches.id`, `ON DELETE RESTRICT ON UPDATE CASCADE`
 
 **Indexes:**
 - `idx_users_email` — UNIQUE on `email`
+- `idx_users_branch_id` — supports FK lookups and "list users in my branch" queries
 
-**Migration:** `CreateUsersTable` (first real migration, follows the `PipelineCheck` test from Phase 5.4 — now cleaned up).
+**Why `branch_id` is nullable, not `NOT NULL`:** admins are unbranched — they operate across all branches, so forcing a real (or sentinel) branch onto every admin row would be meaningless. `CHK_users_branch_role` gets the safety without that: `NULL` is only legal when `role = 'admin'`; managers and cashiers are always required to have one. The same invariant is re-enforced at the service layer (`UsersService`) so violations surface as a clean `400` instead of a raw constraint error.
+
+**Migrations:** `CreateUsersTable` (first real migration, follows the `PipelineCheck` test from Phase 5.4 — now cleaned up) + `AddBranchIdToUsers1785413437552` (Phase 6.2 — adds `branch_id`, backfills existing non-admin users to "Main Shop" before adding `CHK_users_branch_role`, since the constraint would otherwise reject the backfill target rows).
 
 ### `branches`
 
