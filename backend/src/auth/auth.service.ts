@@ -116,6 +116,7 @@ export class AuthService {
     const payload = {
       sub: user.id,
       role: user.role,
+      branch_id: user.branch_id ?? null, // null for admins, UUID for staff
       jti: crypto.randomUUID(), // unique per token — prevents collision on rapid rotation
     };
 
