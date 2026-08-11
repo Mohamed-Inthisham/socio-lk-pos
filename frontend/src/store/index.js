@@ -1,5 +1,6 @@
 import { configureStore } from "@reduxjs/toolkit";
 import authReducer from "./slices/authSlice";
+import branchesReducer from "./slices/branchesSlice";
 
 /**
  * Redux Store Configuration
@@ -16,6 +17,7 @@ import authReducer from "./slices/authSlice";
 export const store = configureStore({
   reducer: {
     auth: authReducer,
+    branches: branchesReducer,
     // Future slices will be added here:
     // products: productsReducer,
     // cart: cartReducer,
