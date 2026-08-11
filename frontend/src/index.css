@@ -12,3 +12,12 @@
     --color-brand-accent: #38bdf8;
   }
 }
+
+@layer base {
+  html {
+    color-scheme: light;
+  }
+  html.dark {
+    color-scheme: dark;
+  }
+}

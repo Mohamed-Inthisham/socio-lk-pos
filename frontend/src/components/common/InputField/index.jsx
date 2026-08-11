@@ -120,16 +120,24 @@ const InputField = ({
             onFocus={handleFocus}
             onBlur={handleBlur}
             disabled={disabled}
-            className={`${inputBase} appearance-none pr-6 cursor-pointer`}
+            className={`${inputBase} appearance-none pr-6 cursor-pointer [color-scheme:light] dark:[color-scheme:dark]`}
             {...rest}
           >
             {placeholder && (
-              <option value="" disabled>
+              <option
+                value=""
+                disabled
+                className="bg-white dark:bg-slate-800 text-slate-900 dark:text-slate-100"
+              >
                 {placeholder}
               </option>
             )}
             {options.map((opt) => (
-              <option key={opt.value} value={opt.value}>
+              <option
+                key={opt.value}
+                value={opt.value}
+                className="bg-white dark:bg-slate-800 text-slate-900 dark:text-slate-100"
+              >
                 {opt.label}
               </option>
             ))}

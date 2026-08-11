@@ -3,6 +3,7 @@ import { useDispatch, useSelector } from "react-redux";
 import { Routes, Route, Navigate } from "react-router-dom";
 import LoginPage from "./pages/LoginPage";
 import DashboardDemo from "./pages/DashboardDemo";
+import ProductsList from "./pages/ProductsList";
 import ProtectedRoute from "./components/auth/ProtectedRoute";
 import { restoreSession } from "./store/slices/authSlice";
 
@@ -41,6 +42,15 @@ function App() {
         element={
           <ProtectedRoute>
             <DashboardDemo />
+          </ProtectedRoute>
+        }
+      />
+
+      <Route
+        path="/products"
+        element={
+          <ProtectedRoute>
+            <ProductsList />
           </ProtectedRoute>
         }
       />

@@ -1,6 +1,8 @@
 import { configureStore } from "@reduxjs/toolkit";
 import authReducer from "./slices/authSlice";
 import branchesReducer from "./slices/branchesSlice";
+import brandsReducer from "./slices/brandsSlice";
+import categoriesReducer from "./slices/categoriesSlice";
 
 /**
  * Redux Store Configuration
@@ -21,6 +23,8 @@ export const store = configureStore({
     // Future slices will be added here:
     // products: productsReducer,
     // cart: cartReducer,
+    brands: brandsReducer,
+    categories: categoriesReducer,
   },
 
   // Development tools (auto-enabled in dev, disabled in production)
