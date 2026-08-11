@@ -121,14 +121,11 @@ export const ROLE_PERMISSIONS = {
     PERMISSIONS.VIEW_DASHBOARD,
     PERMISSIONS.VIEW_REPORTS,
 
-    // Products - View and edit only (no delete)
+    // Products - View only in R1 (backend enforces admin-only mutations)
     PERMISSIONS.VIEW_PRODUCTS,
-    PERMISSIONS.CREATE_PRODUCT,
-    PERMISSIONS.EDIT_PRODUCT,
 
-    // Inventory - Can adjust
+    // Inventory - View only in R1 (backend enforces admin-only mutations)
     PERMISSIONS.VIEW_INVENTORY,
-    PERMISSIONS.ADJUST_STOCK,
 
     // Sales - Most actions
     PERMISSIONS.VIEW_SALES,
