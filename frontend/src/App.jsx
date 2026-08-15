@@ -4,6 +4,7 @@ import { Routes, Route, Navigate } from "react-router-dom";
 import LoginPage from "./pages/LoginPage";
 import DashboardDemo from "./pages/DashboardDemo";
 import ProductsList from "./pages/ProductsList";
+import ProductDetail from "./pages/ProductDetail";
 import ProtectedRoute from "./components/auth/ProtectedRoute";
 import { restoreSession } from "./store/slices/authSlice";
 
@@ -51,6 +52,14 @@ function App() {
         element={
           <ProtectedRoute>
             <ProductsList />
+          </ProtectedRoute>
+        }
+      />
+      <Route
+        path="/products/:id"
+        element={
+          <ProtectedRoute>
+            <ProductDetail />
           </ProtectedRoute>
         }
       />
