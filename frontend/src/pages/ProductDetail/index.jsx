@@ -15,6 +15,8 @@ import usePermissions from "../../hooks/usePermissions";
 import { PERMISSIONS } from "../../constants/rolePermissions";
 import { getProduct } from "../../services/productsService";
 import { getStockByProduct } from "../../services/stockService";
+import DeactivateProductDialog from "../../components/products/DeactivateProductDialog";
+import AdjustStockDialog from "../../components/products/AdjustStockDialog";
 
 /**
  * ProductDetail Page
@@ -214,6 +216,10 @@ const ProductDetail = () => {
   const [stock, setStock] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
+  // Dialog state — deactivate is boolean, adjust-stock uses the row itself
+  // as the "open" signal (null = closed, row object = open on that row).
+  const [showDeactivateDialog, setShowDeactivateDialog] = useState(false);
+  const [adjustStockRow, setAdjustStockRow] = useState(null);
 
   const load = () => {
     setLoading(true);
@@ -243,14 +249,22 @@ const ProductDetail = () => {
 
   const handleBack = () => navigate("/products");
   const handleEdit = () => navigate(`/products/${id}/edit`);
-  const handleDeactivate = () => {
-    console.log("Deactivate clicked");
+  // Deactivate and reactivate share the same dialog — the action prop
+  // decides which flow. Same trigger, same modal, different confirmation.
+  const handleDeactivate = () => setShowDeactivateDialog(true);
+  const handleReactivate = () => setShowDeactivateDialog(true);
+  const handleAdjustStock = (stockRow) => setAdjustStockRow(stockRow);
+
+  // Called by the deactivate/reactivate dialog after a successful API call
+  const handleDeactivateSuccess = () => {
+    setShowDeactivateDialog(false);
+    load(); // Refetch product + stock so is_active flips
   };
-  const handleReactivate = () => {
-    console.log("Reactivate clicked");
-  };
-  const handleAdjustStock = (stockRow) => {
-    console.log("Adjust stock clicked for", stockRow.id);
+
+  // Called by the adjust-stock dialog after a successful update
+  const handleAdjustStockSuccess = () => {
+    setAdjustStockRow(null);
+    load(); // Refetch stock rows so the quantity/badge update
   };
 
   const canEdit = can(PERMISSIONS.EDIT_PRODUCT);
@@ -466,8 +480,24 @@ const ProductDetail = () => {
           </div>
         </div>
       )}
+
+      {/* Dialogs — rendered outside the layout, mounted only when open */}
+      <DeactivateProductDialog
+        open={showDeactivateDialog}
+        onClose={() => setShowDeactivateDialog(false)}
+        onSuccess={handleDeactivateSuccess}
+        product={product}
+        action={product.is_active ? "deactivate" : "reactivate"}
+      />
+
+      <AdjustStockDialog
+        open={adjustStockRow !== null}
+        onClose={() => setAdjustStockRow(null)}
+        onSuccess={handleAdjustStockSuccess}
+        stockRow={adjustStockRow}
+      />
     </div>,
   );
-};
+};;;
 
 export default ProductDetail;
