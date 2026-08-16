@@ -24,10 +24,32 @@ import { z } from "zod";
 // ENUMS
 // ============================================
 
-export const PRODUCT_TYPES = ["PHONE", "ACCESSORY", "WATCH", "SPEAKER"];
+export const PRODUCT_TYPES = ["PHONE", "ACCESSORY", "WATCH", "SPEAKER", "CABLE", "BACKCOVER", "CHARGER", "HEADSET", "BATTERY", "OTHER"];
 export const PHONE_CONDITIONS = ["NEW", "USED"];
 export const BARCODE_TYPES = ["CODE_128", "EAN_13", "UPC_A", "CODE_39"];
+// Phone specs — common values only. Schema still accepts any string on these
+// fields (phone_storage, phone_ram) since manufacturers occasionally use
+// non-standard values. The dropdown just gives fast entry for the 95% case.
+export const PHONE_STORAGE_OPTIONS = [
+  "16GB",
+  "32GB",
+  "64GB",
+  "128GB",
+  "256GB",
+  "512GB",
+  "1TB",
+];
 
+export const PHONE_RAM_OPTIONS = [
+  "1GB",
+  "2GB",
+  "3GB",
+  "4GB",
+  "6GB",
+  "8GB",
+  "12GB",
+  "16GB",
+];
 // ============================================
 // FIELD SCHEMAS
 // ============================================

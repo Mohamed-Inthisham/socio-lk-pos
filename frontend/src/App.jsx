@@ -5,6 +5,8 @@ import LoginPage from "./pages/LoginPage";
 import DashboardDemo from "./pages/DashboardDemo";
 import ProductsList from "./pages/ProductsList";
 import ProductDetail from "./pages/ProductDetail";
+import ProductCreate from "./pages/ProductCreate";
+import RoleProtectedRoute from "./components/auth/RoleProtectedRoute";
 import ProtectedRoute from "./components/auth/ProtectedRoute";
 import { restoreSession } from "./store/slices/authSlice";
 
@@ -60,6 +62,16 @@ function App() {
         element={
           <ProtectedRoute>
             <ProductDetail />
+          </ProtectedRoute>
+        }
+      />
+      <Route
+        path="/products/new"
+        element={
+          <ProtectedRoute>
+            <RoleProtectedRoute allowedRoles={["admin"]}>
+              <ProductCreate />
+            </RoleProtectedRoute>
           </ProtectedRoute>
         }
       />
