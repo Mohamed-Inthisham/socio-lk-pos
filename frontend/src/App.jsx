@@ -15,10 +15,31 @@ function App() {
   const dispatch = useDispatch();
   const { initialized, loading } = useSelector((state) => state.auth);
 
-  // Try to restore session on app load — hits /auth/me via cookies
+  // Try to restore session on app load — hits /auth/me via cookies.
+  // If valid, populates auth state; if 401, silently marks as logged out.
   useEffect(() => {
     dispatch(restoreSession());
   }, [dispatch]);
+
+  // Guard against browser back-forward cache (bfcache) restoring an
+  // authenticated page after logout.
+  //
+  // Browsers cache the FROZEN DOM of pages when the user navigates away.
+  // On Back, they restore the cached page without re-running React. That
+  // means a logged-out user pressing Back could briefly see the previous
+  // logged-in page — a real data leak on shared devices.
+  //
+  // On pageshow with event.persisted=true, the page came from bfcache.
+  // We force a full reload so ProtectedRoute runs and redirects to login.
+  useEffect(() => {
+    const handlePageShow = (event) => {
+      if (event.persisted) {
+        window.location.reload();
+      }
+    };
+    window.addEventListener("pageshow", handlePageShow);
+    return () => window.removeEventListener("pageshow", handlePageShow);
+  }, []);
 
   // Show loading screen while restoring session
   if (!initialized && loading) {
