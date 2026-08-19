@@ -1,4 +1,8 @@
-import { createSlice, createAsyncThunk } from "@reduxjs/toolkit";
+import {
+  createSlice,
+  createAsyncThunk,
+  createSelector,
+} from "@reduxjs/toolkit";
 import api from "../../services/api";
 
 /**
@@ -67,7 +71,8 @@ export const { clearBrands } = brandsSlice.actions;
 export const selectAllBrands = (state) => state.brands.brands;
 export const selectBrandsLoading = (state) => state.brands.loading;
 export const selectBrandsInitialized = (state) => state.brands.initialized;
-export const selectActiveBrands = (state) =>
-  state.brands.brands.filter((b) => b.is_active);
+export const selectActiveBrands = createSelector([selectAllBrands], (brands) =>
+  brands.filter((b) => b.is_active),
+);
 
 export default brandsSlice.reducer;

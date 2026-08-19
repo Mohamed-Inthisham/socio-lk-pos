@@ -1,4 +1,8 @@
-import { createSlice, createAsyncThunk } from "@reduxjs/toolkit";
+import {
+  createSlice,
+  createAsyncThunk,
+  createSelector,
+} from "@reduxjs/toolkit";
 import { listBranches } from "../../services/branchesService";
 
 /**
@@ -104,9 +108,15 @@ export const selectBranchesInitialized = (state) => state.branches.initialized;
 
 /**
  * Only active branches — the common case for dropdown filters and selectors.
+ *
+ * Memoized with createSelector: .filter() returns a new array on every call,
+ * which would trip RTK's dev warning and force consuming components to
+ * re-render on every unrelated Redux state change.
  */
-export const selectActiveBranches = (state) =>
-  state.branches.branches.filter((b) => b.is_active);
+export const selectActiveBranches = createSelector(
+  [selectAllBranches],
+  (branches) => branches.filter((b) => b.is_active),
+);
 
 /**
  * Look up one branch by ID.

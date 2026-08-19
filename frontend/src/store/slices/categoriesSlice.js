@@ -1,4 +1,8 @@
-import { createSlice, createAsyncThunk } from "@reduxjs/toolkit";
+import {
+  createSlice,
+  createAsyncThunk,
+  createSelector,
+} from "@reduxjs/toolkit";
 import api from "../../services/api";
 
 /**
@@ -68,9 +72,13 @@ export const selectAllCategories = (state) => state.categories.categories;
 export const selectCategoriesLoading = (state) => state.categories.loading;
 export const selectCategoriesInitialized = (state) =>
   state.categories.initialized;
-export const selectActiveCategories = (state) =>
-  state.categories.categories.filter((c) => c.is_active);
-export const selectTopLevelCategories = (state) =>
-  state.categories.categories.filter((c) => c.is_active && !c.parent_id);
+export const selectActiveCategories = createSelector(
+  [selectAllCategories],
+  (categories) => categories.filter((c) => c.is_active),
+);
+export const selectTopLevelCategories = createSelector(
+  [selectAllCategories],
+  (categories) => categories.filter((c) => c.is_active && !c.parent_id),
+);
 
 export default categoriesSlice.reducer;
