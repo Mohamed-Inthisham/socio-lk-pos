@@ -92,8 +92,7 @@ const DashboardDemo = () => {
   };
 
   return (
-    <div className="min-h-screen bg-slate-50 dark:bg-slate-950 p-6 transition-colors">
-      <div className="max-w-6xl mx-auto">
+    <div className="max-w-6xl mx-auto p-6">
         {/* Header */}
         <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-xl shadow-sm p-6 mb-6 flex items-center justify-between">
           <div>
@@ -201,7 +200,6 @@ const DashboardDemo = () => {
           </div>
         </div>
       </div>
-    </div>
   );
 };
 

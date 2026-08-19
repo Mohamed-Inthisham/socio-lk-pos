@@ -287,9 +287,8 @@ const ProductsList = () => {
     ...categories.map((c) => ({ value: c.id, label: c.name })),
   ];
 
-  return (
-    <div className="min-h-screen bg-slate-50 dark:bg-slate-950 transition-colors">
-      <div className="max-w-7xl mx-auto p-4 md:p-6">
+    return (
+    <div className="max-w-7xl mx-auto p-4 md:p-6">
         {/* Page header */}
         <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 mb-6">
           <div className="flex items-center gap-3">
@@ -405,7 +404,6 @@ const ProductsList = () => {
           }
         />
       </div>
-    </div>
   );
 };
 
