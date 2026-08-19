@@ -8,18 +8,19 @@ import ProductDetail from "./pages/ProductDetail";
 import ProductCreate from "./pages/ProductCreate";
 import RoleProtectedRoute from "./components/auth/RoleProtectedRoute";
 import ProtectedRoute from "./components/auth/ProtectedRoute";
+import AppLayout from "./components/layout/AppLayout";
 import { restoreSession } from "./store/slices/authSlice";
 
 function App() {
   const dispatch = useDispatch();
   const { initialized, loading } = useSelector((state) => state.auth);
 
-  // Try to restore session from localStorage on app load
+  // Try to restore session on app load — hits /auth/me via cookies
   useEffect(() => {
     dispatch(restoreSession());
   }, [dispatch]);
 
-  // Show loading screen while checking localStorage
+  // Show loading screen while restoring session
   if (!initialized && loading) {
     return (
       <div className="min-h-screen flex items-center justify-center bg-slate-900">
@@ -33,48 +34,44 @@ function App() {
 
   return (
     <Routes>
-      {/* Default route - redirects to dashboard (or login if not authenticated) */}
-      <Route path="/" element={<Navigate to="/dashboard" replace />} />
-
-      {/* Public routes */}
+      {/* Public routes — no layout, standalone pages */}
       <Route path="/login" element={<LoginPage />} />
 
-      {/* Protected routes */}
-      <Route
-        path="/dashboard"
-        element={
-          <ProtectedRoute>
-            <DashboardDemo />
-          </ProtectedRoute>
-        }
-      />
+      {/* Default redirect */}
+      <Route path="/" element={<Navigate to="/dashboard" replace />} />
 
+      {/*
+        Protected routes wrapped in AppLayout.
+        The parent route's element is <ProtectedRoute><AppLayout /></ProtectedRoute>,
+        and AppLayout contains an <Outlet /> where each child route's element
+        renders. Child routes inherit the AppLayout shell (header + sidebar)
+        automatically — no need to wrap each one.
+      */}
       <Route
-        path="/products"
         element={
           <ProtectedRoute>
-            <ProductsList />
+            <AppLayout />
           </ProtectedRoute>
         }
-      />
-      <Route
-        path="/products/:id"
-        element={
-          <ProtectedRoute>
-            <ProductDetail />
-          </ProtectedRoute>
-        }
-      />
-      <Route
-        path="/products/new"
-        element={
-          <ProtectedRoute>
+      >
+        <Route path="/dashboard" element={<DashboardDemo />} />
+        <Route path="/products" element={<ProductsList />} />
+
+        {/*
+          IMPORTANT: /products/new MUST be defined before /products/:id.
+          Otherwise React Router matches "new" as a UUID param and renders
+          ProductDetail with id="new".
+        */}
+        <Route
+          path="/products/new"
+          element={
             <RoleProtectedRoute allowedRoles={["admin"]}>
               <ProductCreate />
             </RoleProtectedRoute>
-          </ProtectedRoute>
-        }
-      />
+          }
+        />
+        <Route path="/products/:id" element={<ProductDetail />} />
+      </Route>
 
       {/* 404 fallback */}
       <Route path="*" element={<Navigate to="/" replace />} />
