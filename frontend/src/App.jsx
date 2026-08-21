@@ -6,6 +6,7 @@ import DashboardDemo from "./pages/DashboardDemo";
 import ProductsList from "./pages/ProductsList";
 import ProductDetail from "./pages/ProductDetail";
 import ProductCreate from "./pages/ProductCreate";
+import ProductEdit from "./pages/ProductEdit";
 import RoleProtectedRoute from "./components/auth/RoleProtectedRoute";
 import ProtectedRoute from "./components/auth/ProtectedRoute";
 import AppLayout from "./components/layout/AppLayout";
@@ -92,7 +93,12 @@ function App() {
           }
         />
         <Route path="/products/:id" element={<ProductDetail />} />
-      </Route>
+        <Route path="/products/:id/edit" element={
+          <RoleProtectedRoute allowedRoles={["admin"]}>
+            <ProductEdit />
+          </RoleProtectedRoute>
+        } />
+        </Route>
 
       {/* 404 fallback */}
       <Route path="*" element={<Navigate to="/" replace />} />
