@@ -68,6 +68,7 @@ const NAV_ITEMS = [
       {
         to: "/products",
         label: "All products",
+        icon: Package,
       },
       {
         to: "/brands",
