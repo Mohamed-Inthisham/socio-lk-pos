@@ -2,16 +2,16 @@ import { useEffect, useState } from "react";
 import { useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { AlertCircle } from "lucide-react";
-import Dialog from "../common/Dialog";
-import Button from "../common/Button";
-import InputField from "../common/InputField";
+import Dialog from "../../common/Dialog";
+import Button from "../../common/Button";
+import InputField from "../../common/InputField";
 import {
   brandSchema,
   brandFormDefaults,
   mapBrandToFormValues,
   buildBrandPayload,
-} from "../../schemas/brandSchema";
-import { createBrand, updateBrand } from "../../services/brandsService";
+} from "../../../schemas/brandSchema";
+import { createBrand, updateBrand } from "../../../services/brandsService";
 
 /**
  * BrandFormDialog
