@@ -44,6 +44,7 @@ export const PERMISSIONS = {
 
   // ===== CATALOG (brands, categories) =====
   MANAGE_BRANDS: "manage_brands",
+  MANAGE_CATEGORIES: "manage_categories",
 
   // ===== INVENTORY =====
   VIEW_INVENTORY: "view_inventory",
@@ -92,7 +93,7 @@ export const ROLE_PERMISSIONS = {
 
     // Catalog - Brands and categories
     PERMISSIONS.MANAGE_BRANDS,
-
+    PERMISSIONS.MANAGE_CATEGORIES,
     // Inventory - Full control
     PERMISSIONS.VIEW_INVENTORY,
     PERMISSIONS.ADJUST_STOCK,

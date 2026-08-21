@@ -4,6 +4,7 @@ import {
   LayoutDashboard,
   Package,
   Tag,
+  FolderTree,
   ChevronsLeft,
   ChevronsRight,
   ChevronDown,
@@ -75,7 +76,11 @@ const NAV_ITEMS = [
         label: "Brands",
         icon: Tag,
       },
-      // Categories added when Manage Categories page ships
+      {
+        to: "/categories",
+        label: "Categories",
+        icon: FolderTree,
+      },
     ],
   },
 ];

@@ -8,6 +8,7 @@ import ProductDetail from "./pages/ProductDetail";
 import ProductCreate from "./pages/ProductCreate";
 import ProductEdit from "./pages/ProductEdit";
 import ManageBrands from "./pages/ManageBrands";
+import ManageCategories from "./pages/ManageCategories";
 import RoleProtectedRoute from "./components/auth/RoleProtectedRoute";
 import ProtectedRoute from "./components/auth/ProtectedRoute";
 import AppLayout from "./components/layout/AppLayout";
@@ -104,6 +105,7 @@ function App() {
         />
 
         <Route path="/brands" element={<ManageBrands />} />
+        <Route path="/categories" element={<ManageCategories />} />
       </Route>
 
       {/* 404 fallback */}
