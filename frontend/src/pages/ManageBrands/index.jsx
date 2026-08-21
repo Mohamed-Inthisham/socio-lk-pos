@@ -307,7 +307,9 @@ const ManageBrands = () => {
         emptyMessage={
           searchTerm
             ? `No brands match "${searchTerm}"`
-            : "No brands yet. Click New brand to add the first one."
+            : canManage
+              ? "No brands yet. Click New brand to add the first one."
+              : "No brands yet."
         }
       />
 

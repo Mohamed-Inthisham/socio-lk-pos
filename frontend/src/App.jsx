@@ -103,14 +103,7 @@ function App() {
           }
         />
 
-        <Route
-          path="/brands"
-          element={
-            <RoleProtectedRoute allowedRoles={["admin"]}>
-              <ManageBrands />
-            </RoleProtectedRoute>
-          }
-        />
+        <Route path="/brands" element={<ManageBrands />} />
       </Route>
 
       {/* 404 fallback */}
