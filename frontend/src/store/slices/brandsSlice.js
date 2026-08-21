@@ -3,7 +3,7 @@ import {
   createAsyncThunk,
   createSelector,
 } from "@reduxjs/toolkit";
-import api from "../../services/api";
+import { listBrands } from "../../services/brandsService";
 
 /**
  * Brands Slice
@@ -19,10 +19,8 @@ export const fetchBrands = createAsyncThunk(
   "brands/fetchBrands",
   async ({ includeInactive = false } = {}, { rejectWithValue }) => {
     try {
-      const response = await api.get("/brands", {
-        params: includeInactive ? { includeInactive: true } : undefined,
-      });
-      return response.data;
+      const brands = await listBrands({ includeInactive });
+      return brands;
     } catch (error) {
       return rejectWithValue(
         error.response?.data?.message ||
