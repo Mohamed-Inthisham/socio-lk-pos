@@ -3,7 +3,7 @@ import {
   createAsyncThunk,
   createSelector,
 } from "@reduxjs/toolkit";
-import api from "../../services/api";
+import { listCategories } from "../../services/categoriesService";
 
 /**
  * Categories Slice
@@ -19,10 +19,8 @@ export const fetchCategories = createAsyncThunk(
   "categories/fetchCategories",
   async ({ includeInactive = false } = {}, { rejectWithValue }) => {
     try {
-      const response = await api.get("/categories", {
-        params: includeInactive ? { includeInactive: true } : undefined,
-      });
-      return response.data;
+      const categories = await listCategories({ includeInactive });
+      return categories;
     } catch (error) {
       return rejectWithValue(
         error.response?.data?.message ||
@@ -31,7 +29,7 @@ export const fetchCategories = createAsyncThunk(
       );
     }
   },
-);
+);;
 
 const initialState = {
   categories: [],
