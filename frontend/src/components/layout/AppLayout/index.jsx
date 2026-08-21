@@ -13,10 +13,14 @@ import SidebarDrawer from "../SidebarDrawer";
  * - <Outlet /> for the routed page content
  *
  * LAYOUT MATH:
- * - Header spans full width at top (h-14 sticky)
+ * - Root is h-screen (exact viewport height, not min-height) so the
+ *   whole shell doesn't scroll — only the main content area does
+ * - Header spans full width at top (h-14)
  * - Below header: flex row with Sidebar (left, fixed width) and main
- *   content (right, fills remaining space)
- * - min-h-screen on the root so short pages still fill the viewport
+ *   content (right, fills remaining space, scrolls vertically)
+ * - Sidebar stays put during scroll because it's inside a fixed-height
+ *   flex container, not because it's `sticky`. This matches dashboard
+ *   shells like Linear and Notion.
  *
  * MOBILE VS DESKTOP:
  * - Desktop (lg+): Sidebar always visible via `hidden lg:block`
@@ -34,7 +38,7 @@ import SidebarDrawer from "../SidebarDrawer";
 
 const AppLayout = () => {
   return (
-    <div className="min-h-screen flex flex-col bg-slate-50 dark:bg-slate-950">
+    <div className="h-screen flex flex-col bg-slate-50 dark:bg-slate-950">
       {/* Header spans full width at top */}
       <AppHeader />
 
@@ -49,7 +53,7 @@ const AppLayout = () => {
         <SidebarDrawer />
 
         {/* Main content area — page renders here via Outlet */}
-        <main className="flex-1 min-w-0 overflow-x-hidden">
+        <main className="flex-1 min-w-0 overflow-y-auto overflow-x-hidden">
           <Outlet />
         </main>
       </div>
