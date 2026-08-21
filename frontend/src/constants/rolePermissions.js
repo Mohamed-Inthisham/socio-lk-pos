@@ -42,6 +42,9 @@ export const PERMISSIONS = {
   EDIT_PRODUCT: "edit_product",
   DELETE_PRODUCT: "delete_product",
 
+  // ===== CATALOG (brands, categories) =====
+  MANAGE_BRANDS: "manage_brands",
+
   // ===== INVENTORY =====
   VIEW_INVENTORY: "view_inventory",
   ADJUST_STOCK: "adjust_stock",
@@ -86,6 +89,9 @@ export const ROLE_PERMISSIONS = {
     PERMISSIONS.CREATE_PRODUCT,
     PERMISSIONS.EDIT_PRODUCT,
     PERMISSIONS.DELETE_PRODUCT,
+
+    // Catalog - Brands and categories
+    PERMISSIONS.MANAGE_BRANDS,
 
     // Inventory - Full control
     PERMISSIONS.VIEW_INVENTORY,

@@ -2,6 +2,7 @@ import { NavLink } from "react-router-dom";
 import {
   LayoutDashboard,
   Package,
+  Tag,
   ChevronsLeft,
   ChevronsRight,
 } from "lucide-react";
@@ -50,8 +51,13 @@ const NAV_ITEMS = [
     icon: Package,
     permission: PERMISSIONS.VIEW_PRODUCTS,
   },
+  {
+    to: "/brands",
+    label: "Brands",
+    icon: Tag,
+    permission: PERMISSIONS.MANAGE_BRANDS,
+  },
 ];
-
 const Sidebar = ({ onNavigate }) => {
   const collapsed = useLayoutStore((s) => s.sidebarCollapsed);
   const toggleSidebar = useLayoutStore((s) => s.toggleSidebar);
