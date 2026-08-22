@@ -1,5 +1,6 @@
 import HeaderLogo from "../HeaderLogo";
 import MobileMenuButton from "../MobileMenuButton";
+import BranchSelector from "../BranchSelector";
 import ThemeToggle from "../../common/ThemeToggle";
 import UserMenu from "../UserMenu";
 
@@ -10,6 +11,7 @@ import UserMenu from "../UserMenu";
  * - MobileMenuButton (mobile only): hamburger that opens the sidebar drawer
  * - HeaderLogo: brand mark, always visible
  * - Spacer: pushes right-side actions to the right
+ * - BranchSelector: active branch context (admin dropdown / staff chip)
  * - ThemeToggle: light/dark switcher
  * - UserMenu: avatar + dropdown with logout
  *
@@ -19,6 +21,12 @@ import UserMenu from "../UserMenu";
  * The header sits ABOVE both the sidebar and content on the visual stack,
  * spanning full width. On desktop, this means the sidebar starts BELOW
  * the header, not next to it. AppLayout handles that composition.
+ *
+ * RIGHT CLUSTER ORDER (reading left-to-right):
+ *   [BranchSelector] [ThemeToggle] [UserMenu]
+ * Read right-to-left, it's "me → my preferences → my current branch
+ * context" — user identity closest to the avatar, viewing context next.
+ * BranchSelector is hidden below sm; on mobile the header stays compact.
  */
 
 const AppHeader = () => {
@@ -40,8 +48,9 @@ const AppHeader = () => {
       {/* Spacer pushes right-side actions to the right */}
       <div className="flex-1" />
 
-      {/* Right side: theme toggle + user menu */}
+      {/* Right side: branch context + theme toggle + user menu */}
       <div className="flex items-center gap-2">
+        <BranchSelector />
         <ThemeToggle />
         <UserMenu />
       </div>
