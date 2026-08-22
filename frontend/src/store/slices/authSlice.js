@@ -4,7 +4,10 @@ import {
   logoutAPI,
   getCurrentUser,
 } from "../../services/authService";
-
+import { clearBranches } from "./branchesSlice";
+import { clearBrands } from "./brandsSlice";
+import { clearCategories } from "./categoriesSlice";
+import useActiveBranchStore from "../zustand/activeBranchStore";
 /**
  * Authentication Slice
  *
@@ -31,11 +34,25 @@ export const loginUser = createAsyncThunk(
 
 export const logoutUser = createAsyncThunk(
   "auth/logoutUser",
-  async (_, { rejectWithValue }) => {
+  async (_, { dispatch, rejectWithValue }) => {
+    // Clear all per-session data — reference caches (Redux) and the
+    // picked-branch UI preference (Zustand). Prevents leaking one user's
+    // state into the next login session on shared POS terminals.
+    const clearSessionData = () => {
+      dispatch(clearBranches());
+      dispatch(clearBrands());
+      dispatch(clearCategories());
+      useActiveBranchStore.getState().clear();
+    };
+
     try {
       await logoutAPI();
+      clearSessionData();
       return true;
     } catch (error) {
+      // Clear locally even if the API call fails — the user's intent was
+      // "log out," and the backend will 401 the cookie on next request.
+      clearSessionData();
       return rejectWithValue(error.message);
     }
   },
