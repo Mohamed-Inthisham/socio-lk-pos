@@ -2,12 +2,17 @@ import { useDispatch, useSelector } from "react-redux";
 import usePermissions from "../../hooks/usePermissions";
 import { PERMISSIONS, ROLE_INFO } from "../../constants/rolePermissions";
 import { logoutUser } from "../../store/slices/authSlice";
+import ThemeToggle from "../../components/common/ThemeToggle";
 
 /**
  * Dashboard Demo Page
  *
  * Temporary page to demonstrate role-based permissions.
  * Shows how different actions are enabled/disabled per role.
+ *
+ * NOTE: Path B added dark mode support (dark: variants throughout) and a
+ * ThemeToggle in the header for end-to-end testing of the theme store.
+ * This whole page will be replaced by the real dashboard in Phase 6.8.
  */
 const DashboardDemo = () => {
   const dispatch = useDispatch();
@@ -20,7 +25,6 @@ const DashboardDemo = () => {
     dispatch(logoutUser());
   };
 
-  // Sample action buttons demonstrating permissions
   const productActions = [
     {
       label: "View Products",
@@ -76,7 +80,7 @@ const DashboardDemo = () => {
           ${
             allowed
               ? "bg-cyan-600 text-white hover:bg-cyan-700 cursor-pointer"
-              : "bg-slate-200 text-slate-400 cursor-not-allowed"
+              : "bg-slate-200 dark:bg-slate-700 text-slate-400 dark:text-slate-500 cursor-not-allowed"
           }
         `}
       >
@@ -88,20 +92,25 @@ const DashboardDemo = () => {
   };
 
   return (
-    <div className="min-h-screen bg-slate-50 p-6">
-      <div className="max-w-6xl mx-auto">
+    <div className="max-w-6xl mx-auto p-6">
         {/* Header */}
-        <div className="bg-white rounded-xl shadow-sm p-6 mb-6 flex items-center justify-between">
+        <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-xl shadow-sm p-6 mb-6 flex items-center justify-between">
           <div>
-            <h1 className="text-2xl font-bold text-slate-800">
+            <h1 className="text-2xl font-bold text-slate-800 dark:text-slate-100">
               Dashboard Demo
             </h1>
-            <p className="text-sm text-slate-500 mt-1">
-              Welcome, <span className="font-semibold">{user?.name}</span>
+            <p className="text-sm text-slate-500 dark:text-slate-400 mt-1">
+              Welcome,{" "}
+              <span className="font-semibold text-slate-700 dark:text-slate-200">
+                {user?.name}
+              </span>
             </p>
           </div>
 
-          <div className="flex items-center gap-4">
+          <div className="flex items-center gap-3">
+            {/* Theme Toggle */}
+            <ThemeToggle />
+
             {/* Role Badge */}
             <span
               className={`px-4 py-2 rounded-full text-sm font-semibold ${roleInfo.color}`}
@@ -120,8 +129,8 @@ const DashboardDemo = () => {
         </div>
 
         {/* Info Banner */}
-        <div className="bg-blue-50 border border-blue-200 rounded-xl p-4 mb-6">
-          <p className="text-sm text-blue-800">
+        <div className="bg-blue-50 dark:bg-blue-950/40 border border-blue-200 dark:border-blue-900 rounded-xl p-4 mb-6">
+          <p className="text-sm text-blue-800 dark:text-blue-200">
             💡 <strong>Demo Mode:</strong> This page demonstrates role-based
             permissions. Buttons you don't have access to are disabled. Try
             logging in as different roles!
@@ -129,8 +138,8 @@ const DashboardDemo = () => {
         </div>
 
         {/* Products Section */}
-        <div className="bg-white rounded-xl shadow-sm p-6 mb-6">
-          <h2 className="text-lg font-semibold text-slate-800 mb-4">
+        <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-xl shadow-sm p-6 mb-6">
+          <h2 className="text-lg font-semibold text-slate-800 dark:text-slate-100 mb-4">
             📦 Product Management
           </h2>
           <div className="flex flex-wrap gap-3">
@@ -139,8 +148,8 @@ const DashboardDemo = () => {
         </div>
 
         {/* Sales Section */}
-        <div className="bg-white rounded-xl shadow-sm p-6 mb-6">
-          <h2 className="text-lg font-semibold text-slate-800 mb-4">
+        <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-xl shadow-sm p-6 mb-6">
+          <h2 className="text-lg font-semibold text-slate-800 dark:text-slate-100 mb-4">
             💰 Sales & POS
           </h2>
           <div className="flex flex-wrap gap-3">
@@ -149,8 +158,8 @@ const DashboardDemo = () => {
         </div>
 
         {/* Users Section */}
-        <div className="bg-white rounded-xl shadow-sm p-6 mb-6">
-          <h2 className="text-lg font-semibold text-slate-800 mb-4">
+        <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-xl shadow-sm p-6 mb-6">
+          <h2 className="text-lg font-semibold text-slate-800 dark:text-slate-100 mb-4">
             👥 User Management (Admin Only)
           </h2>
           <div className="flex flex-wrap gap-3">
@@ -159,33 +168,38 @@ const DashboardDemo = () => {
         </div>
 
         {/* User Info Card */}
-        <div className="bg-white rounded-xl shadow-sm p-6">
-          <h2 className="text-lg font-semibold text-slate-800 mb-4">
+        <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-xl shadow-sm p-6">
+          <h2 className="text-lg font-semibold text-slate-800 dark:text-slate-100 mb-4">
             🔐 Current Session Info
           </h2>
           <div className="grid grid-cols-2 gap-4 text-sm">
             <div>
-              <p className="text-slate-500">User ID</p>
-              <p className="font-mono text-slate-800">{user?.id}</p>
+              <p className="text-slate-500 dark:text-slate-400">User ID</p>
+              <p className="font-mono text-slate-800 dark:text-slate-200 truncate">
+                {user?.id}
+              </p>
             </div>
             <div>
-              <p className="text-slate-500">Email</p>
-              <p className="font-mono text-slate-800">{user?.email}</p>
+              <p className="text-slate-500 dark:text-slate-400">Email</p>
+              <p className="font-mono text-slate-800 dark:text-slate-200 truncate">
+                {user?.email}
+              </p>
             </div>
             <div>
-              <p className="text-slate-500">Role</p>
-              <p className="font-mono text-slate-800">{role}</p>
+              <p className="text-slate-500 dark:text-slate-400">Role</p>
+              <p className="font-mono text-slate-800 dark:text-slate-200">
+                {role}
+              </p>
             </div>
             <div>
-              <p className="text-slate-500">Token (first 30 chars)</p>
-              <p className="font-mono text-slate-800 truncate">
-                {useSelector((state) => state.auth.token)?.substring(0, 30)}...
+              <p className="text-slate-500 dark:text-slate-400">Branch</p>
+              <p className="font-mono text-slate-800 dark:text-slate-200 truncate">
+                {user?.branch?.name || "—"}
               </p>
             </div>
           </div>
         </div>
       </div>
-    </div>
   );
 };
 

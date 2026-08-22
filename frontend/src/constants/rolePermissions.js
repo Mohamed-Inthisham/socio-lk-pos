@@ -42,6 +42,10 @@ export const PERMISSIONS = {
   EDIT_PRODUCT: "edit_product",
   DELETE_PRODUCT: "delete_product",
 
+  // ===== CATALOG (brands, categories) =====
+  MANAGE_BRANDS: "manage_brands",
+  MANAGE_CATEGORIES: "manage_categories",
+
   // ===== INVENTORY =====
   VIEW_INVENTORY: "view_inventory",
   ADJUST_STOCK: "adjust_stock",
@@ -87,6 +91,9 @@ export const ROLE_PERMISSIONS = {
     PERMISSIONS.EDIT_PRODUCT,
     PERMISSIONS.DELETE_PRODUCT,
 
+    // Catalog - Brands and categories
+    PERMISSIONS.MANAGE_BRANDS,
+    PERMISSIONS.MANAGE_CATEGORIES,
     // Inventory - Full control
     PERMISSIONS.VIEW_INVENTORY,
     PERMISSIONS.ADJUST_STOCK,
@@ -121,14 +128,11 @@ export const ROLE_PERMISSIONS = {
     PERMISSIONS.VIEW_DASHBOARD,
     PERMISSIONS.VIEW_REPORTS,
 
-    // Products - View and edit only (no delete)
+    // Products - View only in R1 (backend enforces admin-only mutations)
     PERMISSIONS.VIEW_PRODUCTS,
-    PERMISSIONS.CREATE_PRODUCT,
-    PERMISSIONS.EDIT_PRODUCT,
 
-    // Inventory - Can adjust
+    // Inventory - View only in R1 (backend enforces admin-only mutations)
     PERMISSIONS.VIEW_INVENTORY,
-    PERMISSIONS.ADJUST_STOCK,
 
     // Sales - Most actions
     PERMISSIONS.VIEW_SALES,

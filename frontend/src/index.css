@@ -1,5 +1,7 @@
 @import "tailwindcss";
 
+@custom-variant dark (&:where(.dark, .dark *));
+
 @layer theme {
   :root {
     --color-brand-from: #0f2027;
@@ -8,5 +10,14 @@
     --color-brand-primary: #0ea5e9;
     --color-brand-secondary: #06b6d4;
     --color-brand-accent: #38bdf8;
+  }
+}
+
+@layer base {
+  html {
+    color-scheme: light;
+  }
+  html.dark {
+    color-scheme: dark;
   }
 }
