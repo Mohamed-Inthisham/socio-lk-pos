@@ -13,16 +13,37 @@ import RoleProtectedRoute from "./components/auth/RoleProtectedRoute";
 import ProtectedRoute from "./components/auth/ProtectedRoute";
 import AppLayout from "./components/layout/AppLayout";
 import { restoreSession } from "./store/slices/authSlice";
+import { fetchBranches } from "./store/slices/branchesSlice";
 
 function App() {
   const dispatch = useDispatch();
-  const { initialized, loading } = useSelector((state) => state.auth);
+  const { initialized, loading, isAuthenticated } = useSelector(
+    (state) => state.auth,
+  );
+  const branchesInitialized = useSelector(
+    (state) => state.branches.initialized,
+  );
 
   // Try to restore session on app load — hits /auth/me via cookies.
   // If valid, populates auth state; if 401, silently marks as logged out.
   useEffect(() => {
     dispatch(restoreSession());
   }, [dispatch]);
+
+  // Load branches once, after auth is established. Branches are app-wide
+  // reference data now (header selector, product forms, stock UI), so it
+  // makes sense to fetch them at the shell level rather than page-by-page.
+  //
+  // Gated on isAuthenticated to avoid a guaranteed 401 during the brief
+  // window between mount and restoreSession resolving. Page-level dispatches
+  // in ProductsList/ProductCreate/ProductEdit remain as defensive no-ops —
+  // by the time those pages mount, branches are almost always already
+  // initialized here.
+  useEffect(() => {
+    if (isAuthenticated && !branchesInitialized) {
+      dispatch(fetchBranches());
+    }
+  }, [dispatch, isAuthenticated, branchesInitialized]);
 
   // Guard against browser back-forward cache (bfcache) restoring an
   // authenticated page after logout.
