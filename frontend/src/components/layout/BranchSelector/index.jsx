@@ -26,6 +26,12 @@ import useActiveBranchStore from "../../../store/zustand/activeBranchStore";
  *   have a non-null branch_id, so `user.branch` is always populated.
  *   Rendering a dropdown for them would be misleading — they can't switch.
  *
+ * RESPONSIVE LAYOUT:
+ * Visible on ALL breakpoints. On mobile the pill is tighter (smaller icon,
+ * narrower max-width for the name, no gap between the icon and name) but
+ * the branch name stays visible — hiding it entirely would mean staff can't
+ * see their assigned branch and admins can't switch on mobile.
+ *
  * WHY THIS IS SCAFFOLD-ONLY IN PATH B:
  * The store update wires up. ProductsList's existing filter does NOT yet
  * subscribe to activeBranchId — that's a deliberate deferral. R1 is single-
@@ -86,8 +92,8 @@ const BranchSelector = () => {
     return (
       <div
         className="
-          hidden sm:flex items-center gap-2
-          h-10 px-3 rounded-full
+          flex items-center gap-1 sm:gap-2
+          h-10 px-2 sm:px-3 rounded-full
           bg-slate-100 dark:bg-slate-800
           text-sm font-medium text-slate-700 dark:text-slate-200
         "
@@ -95,10 +101,12 @@ const BranchSelector = () => {
       >
         <Store
           size={14}
-          className="text-slate-500 dark:text-slate-400"
+          className="text-slate-500 dark:text-slate-400 flex-shrink-0"
           aria-hidden="true"
         />
-        <span className="max-w-[8rem] truncate">{staffBranchName}</span>
+        <span className="max-w-[5rem] sm:max-w-[8rem] truncate">
+          {staffBranchName}
+        </span>
       </div>
     );
   }
@@ -119,8 +127,8 @@ const BranchSelector = () => {
         //   - Every branch has been deactivated (unlikely but possible)
         disabled={!hasBranches}
         className="
-          hidden sm:flex items-center gap-2
-          h-10 pl-3 pr-2 rounded-full
+          flex items-center gap-1 sm:gap-2
+          h-10 pl-2 sm:pl-3 pr-1 sm:pr-2 rounded-full
           bg-slate-100 dark:bg-slate-800
           hover:bg-slate-200 dark:hover:bg-slate-700
           disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:bg-slate-100 dark:disabled:hover:bg-slate-800
@@ -130,15 +138,15 @@ const BranchSelector = () => {
       >
         <Store
           size={14}
-          className="text-slate-500 dark:text-slate-400"
+          className="text-slate-500 dark:text-slate-400 flex-shrink-0"
           aria-hidden="true"
         />
-        <span className="text-sm font-medium text-slate-700 dark:text-slate-200 max-w-[8rem] truncate">
+        <span className="text-sm font-medium text-slate-700 dark:text-slate-200 max-w-[5rem] sm:max-w-[8rem] truncate">
           {buttonLabel}
         </span>
         <ChevronDown
           size={14}
-          className="text-slate-400 dark:text-slate-500"
+          className="text-slate-400 dark:text-slate-500 flex-shrink-0"
           aria-hidden="true"
         />
       </MenuButton>
