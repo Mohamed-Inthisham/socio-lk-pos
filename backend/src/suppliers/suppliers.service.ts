@@ -22,21 +22,20 @@ export class SuppliersService {
    * via a partial unique index on LOWER(name) WHERE deleted_at IS NULL).
    */
   async create(dto: CreateSupplierDto): Promise<Supplier> {
-    const name = dto.name.trim();
-    await this.assertNameNotTaken(name);
+    // DTO layer has already trimmed strings and converted empties to null.
+    await this.assertNameNotTaken(dto.name);
 
     const supplier = this.suppliersRepository.create({
-      name,
-      contact_person: dto.contact_person?.trim() || null,
-      phone: dto.phone?.trim() || null,
-      email: dto.email?.trim() || null,
-      address: dto.address?.trim() || null,
-      notes: dto.notes?.trim() || null,
+      name: dto.name,
+      contact_person: dto.contact_person ?? null,
+      phone: dto.phone ?? null,
+      email: dto.email ?? null,
+      address: dto.address ?? null,
+      notes: dto.notes ?? null,
       is_active: dto.is_active,
     });
     return this.suppliersRepository.save(supplier);
   }
-
   /**
    * List suppliers. By default returns only active suppliers.
    * Soft-deleted suppliers are always excluded (TypeORM handles this via
@@ -68,28 +67,25 @@ export class SuppliersService {
   async update(id: string, dto: UpdateSupplierDto): Promise<Supplier> {
     const supplier = await this.findOne(id);
 
+    // REST PATCH semantics: undefined = don't touch, null = clear, string = set.
+    // DTO layer has already trimmed strings and converted empties to null.
     if (dto.name !== undefined) {
-      const newName = dto.name.trim();
-      if (newName.toLowerCase() !== supplier.name.toLowerCase()) {
-        await this.assertNameNotTaken(newName);
+      if (dto.name === null) {
+        // name is required — the DTO's @IsString + @MinLength(1) rejects
+        // null/empty before we get here, so this branch is defensive only.
+        throw new ConflictException('Supplier name cannot be empty');
       }
-      supplier.name = newName;
+      if (dto.name.toLowerCase() !== supplier.name.toLowerCase()) {
+        await this.assertNameNotTaken(dto.name);
+      }
+      supplier.name = dto.name;
     }
-    if (dto.contact_person !== undefined) {
-      supplier.contact_person = dto.contact_person?.trim() || null;
-    }
-    if (dto.phone !== undefined) {
-      supplier.phone = dto.phone?.trim() || null;
-    }
-    if (dto.email !== undefined) {
-      supplier.email = dto.email?.trim() || null;
-    }
-    if (dto.address !== undefined) {
-      supplier.address = dto.address?.trim() || null;
-    }
-    if (dto.notes !== undefined) {
-      supplier.notes = dto.notes?.trim() || null;
-    }
+    if (dto.contact_person !== undefined)
+      supplier.contact_person = dto.contact_person;
+    if (dto.phone !== undefined) supplier.phone = dto.phone;
+    if (dto.email !== undefined) supplier.email = dto.email;
+    if (dto.address !== undefined) supplier.address = dto.address;
+    if (dto.notes !== undefined) supplier.notes = dto.notes;
     if (dto.is_active !== undefined) supplier.is_active = dto.is_active;
 
     return this.suppliersRepository.save(supplier);

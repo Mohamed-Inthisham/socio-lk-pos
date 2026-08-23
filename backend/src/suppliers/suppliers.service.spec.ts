@@ -41,14 +41,15 @@ describe('SuppliersService', () => {
   });
 
   describe('create', () => {
-    it('creates a supplier and trims whitespace from name', async () => {
+    it('creates a supplier with the provided name (post-DTO normalization)', async () => {
       mockQueryBuilder.getOne.mockResolvedValue(null);
       mockRepo.create.mockImplementation((e) => e);
       mockRepo.save.mockImplementation((e) =>
         Promise.resolve({ id: 's1', ...e }),
       );
 
-      const result = await service.create({ name: '  Ranjith Mobile  ' });
+      // The DTO's @Transform trims the name before the service is called.
+      const result = await service.create({ name: 'Ranjith Mobile' });
 
       expect(mockRepo.create).toHaveBeenCalledWith(
         expect.objectContaining({ name: 'Ranjith Mobile' }),
@@ -74,18 +75,20 @@ describe('SuppliersService', () => {
       );
     });
 
-    it('trims and stores all provided optional fields', async () => {
+    it('stores all provided optional fields (post-DTO normalization)', async () => {
       mockQueryBuilder.getOne.mockResolvedValue(null);
       mockRepo.create.mockImplementation((e) => e);
       mockRepo.save.mockImplementation((e) => Promise.resolve(e));
 
+      // The DTO's @Transform trims strings before the service is called.
+      // Test the post-transform contract with already-trimmed values.
       await service.create({
         name: 'Ranjith Mobile',
-        contact_person: '  Ranjith  ',
-        phone: '  0771234567  ',
-        email: '  ranjith@shop.lk  ',
-        address: '  No 45, Galle Road  ',
-        notes: '  30-day terms  ',
+        contact_person: 'Ranjith',
+        phone: '0771234567',
+        email: 'ranjith@shop.lk',
+        address: 'No 45, Galle Road',
+        notes: '30-day terms',
       });
 
       expect(mockRepo.create).toHaveBeenCalledWith(
@@ -99,18 +102,20 @@ describe('SuppliersService', () => {
       );
     });
 
-    it('normalizes empty-string optional fields to null', async () => {
+    it('stores null for optional fields when null is passed (post-DTO normalization)', async () => {
       mockQueryBuilder.getOne.mockResolvedValue(null);
       mockRepo.create.mockImplementation((e) => e);
       mockRepo.save.mockImplementation((e) => Promise.resolve(e));
 
+      // The DTO's @Transform converts empty strings to null before the
+      // service is called. Test the post-transform contract directly.
       await service.create({
         name: 'Ranjith Mobile',
-        contact_person: '',
-        phone: '',
-        email: '',
-        address: '',
-        notes: '',
+        contact_person: null as unknown as string,
+        phone: null as unknown as string,
+        email: null as unknown as string,
+        address: null as unknown as string,
+        notes: null as unknown as string,
       });
 
       expect(mockRepo.create).toHaveBeenCalledWith(
@@ -209,14 +214,15 @@ describe('SuppliersService', () => {
       expect(result.name).toBe('Ranjith Mobile Pvt Ltd');
     });
 
-    it('trims whitespace on renamed name', async () => {
+    it('updates the name with the provided value (post-DTO normalization)', async () => {
       const existing = { id: 's1', name: 'Ranjith Mobile', is_active: true };
       mockRepo.findOne.mockResolvedValue(existing);
       mockQueryBuilder.getOne.mockResolvedValue(null);
       mockRepo.save.mockImplementation((e) => Promise.resolve(e));
 
+      // The DTO's @Transform trims the name before the service is called.
       const result = await service.update('s1', {
-        name: '  Ranjith Mobile Pvt Ltd  ',
+        name: 'Ranjith Mobile Pvt Ltd',
       });
 
       expect(result.name).toBe('Ranjith Mobile Pvt Ltd');
@@ -245,7 +251,7 @@ describe('SuppliersService', () => {
       ).rejects.toThrow(ConflictException);
     });
 
-    it('updates optional fields and trims them', async () => {
+    it('updates optional fields with the provided values (post-DTO normalization)', async () => {
       const existing = {
         id: 's1',
         name: 'Ranjith Mobile',
@@ -259,12 +265,13 @@ describe('SuppliersService', () => {
       mockRepo.findOne.mockResolvedValue(existing);
       mockRepo.save.mockImplementation((e) => Promise.resolve(e));
 
+      // The DTO's @Transform trims strings before the service is called.
       const result = await service.update('s1', {
-        contact_person: '  Ranjith  ',
-        phone: '  0771234567  ',
-        email: '  ranjith@shop.lk  ',
-        address: '  No 45, Galle Road  ',
-        notes: '  30-day terms  ',
+        contact_person: 'Ranjith',
+        phone: '0771234567',
+        email: 'ranjith@shop.lk',
+        address: 'No 45, Galle Road',
+        notes: '30-day terms',
       });
 
       expect(result.contact_person).toBe('Ranjith');
@@ -274,7 +281,7 @@ describe('SuppliersService', () => {
       expect(result.notes).toBe('30-day terms');
     });
 
-    it('normalizes empty-string optional fields to null on update (clearing values)', async () => {
+    it('clears optional fields when null is passed (post-DTO normalization)', async () => {
       const existing = {
         id: 's1',
         name: 'Ranjith Mobile',
@@ -288,12 +295,14 @@ describe('SuppliersService', () => {
       mockRepo.findOne.mockResolvedValue(existing);
       mockRepo.save.mockImplementation((e) => Promise.resolve(e));
 
+      // The DTO's @Transform converts empty strings to null before the
+      // service is called. Test the post-transform contract directly.
       const result = await service.update('s1', {
-        contact_person: '',
-        phone: '',
-        email: '',
-        address: '',
-        notes: '',
+        contact_person: null as unknown as string,
+        phone: null as unknown as string,
+        email: null as unknown as string,
+        address: null as unknown as string,
+        notes: null as unknown as string,
       });
 
       expect(result.contact_person).toBeNull();
