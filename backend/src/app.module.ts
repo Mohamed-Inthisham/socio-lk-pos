@@ -19,6 +19,7 @@ import { SkuBarcodeCountersModule } from './sku-barcode-counters/sku-barcode-cou
 import { ProductsModule } from './products/products.module';
 import { StockModule } from './stock/stock.module';
 import { SuppliersModule } from './suppliers/suppliers.module';
+import { SaleNumberCountersModule } from './sale-number-counters/sale-number-counters.module';
 
 @Module({
   imports: [
@@ -54,6 +55,7 @@ import { SuppliersModule } from './suppliers/suppliers.module';
     ProductsModule,
     StockModule,
     SuppliersModule,
+    SaleNumberCountersModule,
   ],
   controllers: [AppController],
   providers: [
