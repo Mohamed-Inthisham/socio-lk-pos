@@ -20,6 +20,7 @@ import { ProductsModule } from './products/products.module';
 import { StockModule } from './stock/stock.module';
 import { SuppliersModule } from './suppliers/suppliers.module';
 import { SaleNumberCountersModule } from './sale-number-counters/sale-number-counters.module';
+import { SalesModule } from './sales/sales.module';
 
 @Module({
   imports: [
@@ -56,6 +57,7 @@ import { SaleNumberCountersModule } from './sale-number-counters/sale-number-cou
     StockModule,
     SuppliersModule,
     SaleNumberCountersModule,
+    SalesModule,
   ],
   controllers: [AppController],
   providers: [
