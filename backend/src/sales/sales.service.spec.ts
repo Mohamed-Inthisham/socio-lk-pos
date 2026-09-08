@@ -1,5 +1,5 @@
 import { Test, TestingModule } from '@nestjs/testing';
-import { getRepositoryToken } from '@nestjs/typeorm';
+import { getRepositoryToken, getDataSourceToken } from '@nestjs/typeorm';
 import {
   NotFoundException,
   BadRequestException,
@@ -7,21 +7,34 @@ import {
 } from '@nestjs/common';
 import { SalesService } from './sales.service';
 import { Sale } from './entities/sale.entity';
+import { SaleLine } from './entities/sale-line.entity';
 import { SaleStatus } from './enums/sale-status.enum';
 import { SaleType } from './enums/sale-type.enum';
+import { DiscountType } from './enums/discount-type.enum';
 import { Branch } from '../branches/entities/branch.entity';
 import { User } from '../users/entities/user.entity';
+import { ProductsService } from '../products/products.service';
+import { SuppliersService } from '../suppliers/suppliers.service';
 
 describe('SalesService', () => {
   let service: SalesService;
 
+  // Shared query-builder mock. Covers both the existing findAll chain
+  // (leftJoinAndSelect/andWhere/orderBy/skip/take/getManyAndCount) and the
+  // new transactional chain used inside line mutations
+  // (setLock/where/andWhere/getOne, plus select/getRawOne for MAX line_number).
   const mockQueryBuilder = {
     leftJoinAndSelect: jest.fn().mockReturnThis(),
+    where: jest.fn().mockReturnThis(),
     andWhere: jest.fn().mockReturnThis(),
     orderBy: jest.fn().mockReturnThis(),
     skip: jest.fn().mockReturnThis(),
     take: jest.fn().mockReturnThis(),
+    setLock: jest.fn().mockReturnThis(),
+    select: jest.fn().mockReturnThis(),
     getManyAndCount: jest.fn(),
+    getOne: jest.fn(),
+    getRawOne: jest.fn(),
   };
 
   const mockSalesRepo = {
@@ -32,11 +45,39 @@ describe('SalesService', () => {
     remove: jest.fn(),
   };
 
+  const mockSaleLinesRepo = {
+    findOne: jest.fn(),
+  };
+
   const mockBranchesRepo = {
     findOne: jest.fn(),
   };
 
   const mockUsersRepo = {
+    findOne: jest.fn(),
+  };
+
+  // Manager mock used inside dataSource.transaction() callbacks. addLine,
+  // updateLine, removeLine all use it. Reuses mockQueryBuilder for the
+  // sale-lock query and the MAX(line_number) query.
+  const mockManager = {
+    createQueryBuilder: jest.fn(() => mockQueryBuilder),
+    findOne: jest.fn(),
+    create: jest.fn(),
+    save: jest.fn(),
+    remove: jest.fn(),
+    query: jest.fn(),
+  };
+
+  const mockDataSource = {
+    transaction: jest.fn(),
+  };
+
+  const mockProductsService = {
+    findOne: jest.fn(),
+  };
+
+  const mockSuppliersService = {
     findOne: jest.fn(),
   };
 
@@ -72,17 +113,28 @@ describe('SalesService', () => {
     jest.clearAllMocks();
     Object.values(mockQueryBuilder).forEach((fn) => {
       if (typeof fn === 'function' && 'mockReturnThis' in fn) {
-        (fn as jest.Mock).mockReturnThis();
+        fn.mockReturnThis();
       }
     });
     mockSalesRepo.createQueryBuilder.mockReturnValue(mockQueryBuilder);
+    mockManager.createQueryBuilder.mockReturnValue(mockQueryBuilder);
+    // Default transaction behavior: invoke the callback with our mock manager.
+    // Individual tests can override with mockImplementationOnce if they need
+    // to simulate rollback or a different manager shape.
+    mockDataSource.transaction.mockImplementation(
+      (cb: (m: typeof mockManager) => unknown) => cb(mockManager),
+    );
 
     const module: TestingModule = await Test.createTestingModule({
       providers: [
         SalesService,
         { provide: getRepositoryToken(Sale), useValue: mockSalesRepo },
+        { provide: getRepositoryToken(SaleLine), useValue: mockSaleLinesRepo },
         { provide: getRepositoryToken(Branch), useValue: mockBranchesRepo },
         { provide: getRepositoryToken(User), useValue: mockUsersRepo },
+        { provide: getDataSourceToken(), useValue: mockDataSource },
+        { provide: ProductsService, useValue: mockProductsService },
+        { provide: SuppliersService, useValue: mockSuppliersService },
       ],
     }).compile();
 
@@ -483,6 +535,604 @@ describe('SalesService', () => {
       mockSalesRepo.findOne.mockResolvedValue(null);
 
       await expect(service.discardDraft('missing')).rejects.toThrow(
+        NotFoundException,
+      );
+    });
+  });
+
+  // ---- D2 seed helpers ----
+
+  const seedProduct = (
+    overrides: Partial<{
+      id: string;
+      name: string;
+      sku: string;
+      selling_price: string;
+      buying_price: string;
+      branch_id: string;
+      is_active: boolean;
+    }> = {},
+  ) => ({
+    id: 'prod-1',
+    name: 'iPhone 15',
+    sku: 'PH-000001',
+    selling_price: '250000.00',
+    buying_price: '220000.00',
+    branch_id: 'branch-1',
+    is_active: true,
+    ...overrides,
+  });
+
+  const seedSupplier = (
+    overrides: Partial<{
+      id: string;
+      name: string;
+      is_active: boolean;
+    }> = {},
+  ) => ({
+    id: 'supplier-1',
+    name: 'Friendly Shop A',
+    is_active: true,
+    ...overrides,
+  });
+
+  const seedDraftSale = (
+    overrides: Partial<{
+      id: string;
+      status: SaleStatus;
+      branch_id: string;
+    }> = {},
+  ) => ({
+    id: 'sale-1',
+    status: SaleStatus.DRAFT,
+    branch_id: 'branch-1',
+    ...overrides,
+  });
+
+  const seedLine = (
+    overrides: Partial<{
+      id: string;
+      sale_id: string;
+      unit_price: string;
+      quantity: number;
+      discount_type: DiscountType | null;
+      discount_value: string | null;
+      discount_amount: string;
+      line_total: string;
+      external_supplier_id: string | null;
+      imei_snapshot: string | null;
+    }> = {},
+  ) => ({
+    id: 'line-1',
+    sale_id: 'sale-1',
+    unit_price: '100.00',
+    quantity: 2,
+    discount_type: null,
+    discount_value: null,
+    discount_amount: '0.00',
+    line_total: '200.00',
+    external_supplier_id: null,
+    imei_snapshot: null,
+    ...overrides,
+  });
+
+  describe('addLine', () => {
+    it('inserts a line with resolved snapshots and recomputes totals', async () => {
+      mockQueryBuilder.getOne.mockResolvedValue(seedDraftSale());
+      mockQueryBuilder.getRawOne.mockResolvedValue({ max: '0' });
+      mockProductsService.findOne.mockResolvedValue(seedProduct());
+      mockManager.create.mockImplementation((_entity, data) => data);
+      mockManager.save.mockImplementation((e) =>
+        Promise.resolve({ id: 'line-new', ...e }),
+      );
+
+      const result = await service.addLine(
+        'sale-1',
+        { product_id: 'prod-1', quantity: 2 },
+        'cashier-1',
+      );
+
+      expect(mockManager.create).toHaveBeenCalledWith(
+        SaleLine,
+        expect.objectContaining({
+          sale_id: 'sale-1',
+          line_number: 1,
+          product_id: 'prod-1',
+          product_sku_snapshot: 'PH-000001',
+          product_name_snapshot: 'iPhone 15',
+          unit_price: '250000.00',
+          cost_price_snapshot: '220000.00',
+          quantity: 2,
+          discount_type: null,
+          discount_value: null,
+          discount_amount: '0.00',
+          line_total: '500000.00',
+        }),
+      );
+      expect(result.id).toBe('line-new');
+      expect(mockManager.query).toHaveBeenCalled(); // recompute totals
+    });
+
+    it('assigns line_number as max + 1 when other lines exist', async () => {
+      mockQueryBuilder.getOne.mockResolvedValue(seedDraftSale());
+      mockQueryBuilder.getRawOne.mockResolvedValue({ max: '4' });
+      mockProductsService.findOne.mockResolvedValue(seedProduct());
+      mockManager.create.mockImplementation((_e, data) => data);
+      mockManager.save.mockImplementation((e) => Promise.resolve(e));
+
+      await service.addLine(
+        'sale-1',
+        { product_id: 'prod-1', quantity: 1 },
+        'cashier-1',
+      );
+
+      expect(mockManager.create).toHaveBeenCalledWith(
+        SaleLine,
+        expect.objectContaining({ line_number: 5 }),
+      );
+    });
+
+    it('resolves a PERCENT discount to the correct LKR amount', async () => {
+      mockQueryBuilder.getOne.mockResolvedValue(seedDraftSale());
+      mockQueryBuilder.getRawOne.mockResolvedValue({ max: '0' });
+      mockProductsService.findOne.mockResolvedValue(
+        seedProduct({ selling_price: '100.00' }),
+      );
+      mockManager.create.mockImplementation((_e, data) => data);
+      mockManager.save.mockImplementation((e) => Promise.resolve(e));
+
+      await service.addLine(
+        'sale-1',
+        {
+          product_id: 'prod-1',
+          quantity: 3,
+          discount_type: DiscountType.PERCENT,
+          discount_value: 10,
+        },
+        'cashier-1',
+      );
+
+      // 10% of (100 * 3) = 30
+      expect(mockManager.create).toHaveBeenCalledWith(
+        SaleLine,
+        expect.objectContaining({
+          discount_type: DiscountType.PERCENT,
+          discount_value: '10.00',
+          discount_amount: '30.00',
+          line_total: '270.00',
+        }),
+      );
+    });
+
+    it('rounds a PERCENT discount half-up to 2 decimals', async () => {
+      mockQueryBuilder.getOne.mockResolvedValue(seedDraftSale());
+      mockQueryBuilder.getRawOne.mockResolvedValue({ max: '0' });
+      mockProductsService.findOne.mockResolvedValue(
+        seedProduct({ selling_price: '333.33' }),
+      );
+      mockManager.create.mockImplementation((_e, data) => data);
+      mockManager.save.mockImplementation((e) => Promise.resolve(e));
+
+      await service.addLine(
+        'sale-1',
+        {
+          product_id: 'prod-1',
+          quantity: 1,
+          discount_type: DiscountType.PERCENT,
+          discount_value: 10,
+        },
+        'cashier-1',
+      );
+
+      // 10% of 333.33 = 33.333 → 33.33 (half-up on the 3rd decimal is down)
+      // line_total = 333.33 - 33.33 = 300.00
+      expect(mockManager.create).toHaveBeenCalledWith(
+        SaleLine,
+        expect.objectContaining({
+          discount_amount: '33.33',
+          line_total: '300.00',
+        }),
+      );
+    });
+
+    it('accepts an AMOUNT discount up to line subtotal', async () => {
+      mockQueryBuilder.getOne.mockResolvedValue(seedDraftSale());
+      mockQueryBuilder.getRawOne.mockResolvedValue({ max: '0' });
+      mockProductsService.findOne.mockResolvedValue(
+        seedProduct({ selling_price: '100.00' }),
+      );
+      mockManager.create.mockImplementation((_e, data) => data);
+      mockManager.save.mockImplementation((e) => Promise.resolve(e));
+
+      await service.addLine(
+        'sale-1',
+        {
+          product_id: 'prod-1',
+          quantity: 2,
+          discount_type: DiscountType.AMOUNT,
+          discount_value: 50,
+        },
+        'cashier-1',
+      );
+
+      expect(mockManager.create).toHaveBeenCalledWith(
+        SaleLine,
+        expect.objectContaining({
+          discount_amount: '50.00',
+          line_total: '150.00',
+        }),
+      );
+    });
+
+    it('throws BadRequestException when AMOUNT discount exceeds line subtotal', async () => {
+      mockQueryBuilder.getOne.mockResolvedValue(seedDraftSale());
+      mockQueryBuilder.getRawOne.mockResolvedValue({ max: '0' });
+      mockProductsService.findOne.mockResolvedValue(
+        seedProduct({ selling_price: '100.00' }),
+      );
+
+      await expect(
+        service.addLine(
+          'sale-1',
+          {
+            product_id: 'prod-1',
+            quantity: 2,
+            discount_type: DiscountType.AMOUNT,
+            discount_value: 500,
+          },
+          'cashier-1',
+        ),
+      ).rejects.toThrow(BadRequestException);
+    });
+
+    it('throws BadRequestException when only discount_type is provided', async () => {
+      mockQueryBuilder.getOne.mockResolvedValue(seedDraftSale());
+      mockQueryBuilder.getRawOne.mockResolvedValue({ max: '0' });
+      mockProductsService.findOne.mockResolvedValue(seedProduct());
+
+      await expect(
+        service.addLine(
+          'sale-1',
+          {
+            product_id: 'prod-1',
+            quantity: 1,
+            discount_type: DiscountType.AMOUNT,
+          },
+          'cashier-1',
+        ),
+      ).rejects.toThrow(BadRequestException);
+    });
+
+    it('validates external supplier when set', async () => {
+      mockQueryBuilder.getOne.mockResolvedValue(seedDraftSale());
+      mockQueryBuilder.getRawOne.mockResolvedValue({ max: '0' });
+      mockProductsService.findOne.mockResolvedValue(seedProduct());
+      mockSuppliersService.findOne.mockResolvedValue(seedSupplier());
+      mockManager.create.mockImplementation((_e, data) => data);
+      mockManager.save.mockImplementation((e) => Promise.resolve(e));
+
+      await service.addLine(
+        'sale-1',
+        {
+          product_id: 'prod-1',
+          quantity: 1,
+          external_supplier_id: 'supplier-1',
+        },
+        'cashier-1',
+      );
+
+      expect(mockSuppliersService.findOne).toHaveBeenCalledWith('supplier-1');
+      expect(mockManager.create).toHaveBeenCalledWith(
+        SaleLine,
+        expect.objectContaining({ external_supplier_id: 'supplier-1' }),
+      );
+    });
+
+    it('throws BadRequestException when external supplier is inactive', async () => {
+      mockQueryBuilder.getOne.mockResolvedValue(seedDraftSale());
+      mockQueryBuilder.getRawOne.mockResolvedValue({ max: '0' });
+      mockProductsService.findOne.mockResolvedValue(seedProduct());
+      mockSuppliersService.findOne.mockResolvedValue(
+        seedSupplier({ is_active: false }),
+      );
+
+      await expect(
+        service.addLine(
+          'sale-1',
+          {
+            product_id: 'prod-1',
+            quantity: 1,
+            external_supplier_id: 'supplier-1',
+          },
+          'cashier-1',
+        ),
+      ).rejects.toThrow(BadRequestException);
+    });
+
+    it('throws NotFoundException when the sale does not exist', async () => {
+      mockQueryBuilder.getOne.mockResolvedValue(null);
+
+      await expect(
+        service.addLine(
+          'missing',
+          { product_id: 'prod-1', quantity: 1 },
+          'cashier-1',
+        ),
+      ).rejects.toThrow(NotFoundException);
+    });
+
+    it('throws BadRequestException when sale is not DRAFT', async () => {
+      mockQueryBuilder.getOne.mockResolvedValue(
+        seedDraftSale({ status: SaleStatus.COMPLETED }),
+      );
+
+      await expect(
+        service.addLine(
+          'sale-1',
+          { product_id: 'prod-1', quantity: 1 },
+          'cashier-1',
+        ),
+      ).rejects.toThrow(BadRequestException);
+    });
+
+    it('throws BadRequestException when product is inactive', async () => {
+      mockQueryBuilder.getOne.mockResolvedValue(seedDraftSale());
+      mockQueryBuilder.getRawOne.mockResolvedValue({ max: '0' });
+      mockProductsService.findOne.mockResolvedValue(
+        seedProduct({ is_active: false }),
+      );
+
+      await expect(
+        service.addLine(
+          'sale-1',
+          { product_id: 'prod-1', quantity: 1 },
+          'cashier-1',
+        ),
+      ).rejects.toThrow(BadRequestException);
+    });
+
+    it('throws BadRequestException when product belongs to a different branch', async () => {
+      mockQueryBuilder.getOne.mockResolvedValue(
+        seedDraftSale({ branch_id: 'branch-1' }),
+      );
+      mockQueryBuilder.getRawOne.mockResolvedValue({ max: '0' });
+      mockProductsService.findOne.mockResolvedValue(
+        seedProduct({ branch_id: 'branch-2' }),
+      );
+
+      await expect(
+        service.addLine(
+          'sale-1',
+          { product_id: 'prod-1', quantity: 1 },
+          'cashier-1',
+        ),
+      ).rejects.toThrow(BadRequestException);
+    });
+
+    it('locks the sale row for update', async () => {
+      mockQueryBuilder.getOne.mockResolvedValue(seedDraftSale());
+      mockQueryBuilder.getRawOne.mockResolvedValue({ max: '0' });
+      mockProductsService.findOne.mockResolvedValue(seedProduct());
+      mockManager.create.mockImplementation((_e, data) => data);
+      mockManager.save.mockImplementation((e) => Promise.resolve(e));
+
+      await service.addLine(
+        'sale-1',
+        { product_id: 'prod-1', quantity: 1 },
+        'cashier-1',
+      );
+
+      expect(mockQueryBuilder.setLock).toHaveBeenCalledWith(
+        'pessimistic_write',
+      );
+    });
+  });
+
+  describe('updateLine', () => {
+    it('updates quantity and recomputes discount_amount + line_total', async () => {
+      mockQueryBuilder.getOne.mockResolvedValue(seedDraftSale());
+      mockManager.findOne.mockResolvedValue(
+        seedLine({
+          unit_price: '100.00',
+          quantity: 2,
+          discount_type: DiscountType.PERCENT,
+          discount_value: '10',
+          discount_amount: '20.00',
+          line_total: '180.00',
+        }),
+      );
+      mockManager.save.mockImplementation((e) => Promise.resolve(e));
+
+      const result = await service.updateLine('sale-1', 'line-1', {
+        quantity: 5,
+      });
+
+      // 10% of (100 * 5) = 50 → line_total = 450
+      expect(result.quantity).toBe(5);
+      expect(result.discount_amount).toBe('50.00');
+      expect(result.line_total).toBe('450.00');
+    });
+
+    it('clears the discount when both type and value are null', async () => {
+      mockQueryBuilder.getOne.mockResolvedValue(seedDraftSale());
+      mockManager.findOne.mockResolvedValue(
+        seedLine({
+          unit_price: '100.00',
+          quantity: 2,
+          discount_type: DiscountType.PERCENT,
+          discount_value: '10',
+          discount_amount: '20.00',
+          line_total: '180.00',
+        }),
+      );
+      mockManager.save.mockImplementation((e) => Promise.resolve(e));
+
+      const result = await service.updateLine('sale-1', 'line-1', {
+        discount_type: null,
+        discount_value: null,
+      });
+
+      expect(result.discount_type).toBeNull();
+      expect(result.discount_value).toBeNull();
+      expect(result.discount_amount).toBe('0.00');
+      expect(result.line_total).toBe('200.00');
+    });
+
+    it('throws BadRequestException when only discount_type is touched', async () => {
+      mockQueryBuilder.getOne.mockResolvedValue(seedDraftSale());
+      mockManager.findOne.mockResolvedValue(seedLine());
+
+      await expect(
+        service.updateLine('sale-1', 'line-1', {
+          discount_type: DiscountType.PERCENT,
+        }),
+      ).rejects.toThrow(BadRequestException);
+    });
+
+    it('throws BadRequestException when only discount_value is touched', async () => {
+      mockQueryBuilder.getOne.mockResolvedValue(seedDraftSale());
+      mockManager.findOne.mockResolvedValue(seedLine());
+
+      await expect(
+        service.updateLine('sale-1', 'line-1', { discount_value: 10 }),
+      ).rejects.toThrow(BadRequestException);
+    });
+
+    it('does not touch fields not sent in the DTO', async () => {
+      mockQueryBuilder.getOne.mockResolvedValue(seedDraftSale());
+      mockManager.findOne.mockResolvedValue(
+        seedLine({
+          unit_price: '100.00',
+          quantity: 2,
+          imei_snapshot: '354789102345678',
+          external_supplier_id: 'supplier-old',
+        }),
+      );
+      mockManager.save.mockImplementation((e) => Promise.resolve(e));
+
+      const result = await service.updateLine('sale-1', 'line-1', {
+        quantity: 3,
+      });
+
+      expect(result.quantity).toBe(3);
+      expect(result.imei_snapshot).toBe('354789102345678');
+      expect(result.external_supplier_id).toBe('supplier-old');
+    });
+
+    it('validates external supplier when changed to non-null', async () => {
+      mockQueryBuilder.getOne.mockResolvedValue(seedDraftSale());
+      mockManager.findOne.mockResolvedValue(seedLine());
+      mockSuppliersService.findOne.mockResolvedValue(seedSupplier());
+      mockManager.save.mockImplementation((e) => Promise.resolve(e));
+
+      await service.updateLine('sale-1', 'line-1', {
+        external_supplier_id: 'supplier-1',
+      });
+
+      expect(mockSuppliersService.findOne).toHaveBeenCalledWith('supplier-1');
+    });
+
+    it('does not validate supplier when clearing to null', async () => {
+      mockQueryBuilder.getOne.mockResolvedValue(seedDraftSale());
+      mockManager.findOne.mockResolvedValue(
+        seedLine({ external_supplier_id: 'supplier-old' }),
+      );
+      mockManager.save.mockImplementation((e) => Promise.resolve(e));
+
+      await service.updateLine('sale-1', 'line-1', {
+        external_supplier_id: null,
+      });
+
+      expect(mockSuppliersService.findOne).not.toHaveBeenCalled();
+    });
+
+    it('throws NotFoundException when the sale does not exist', async () => {
+      mockQueryBuilder.getOne.mockResolvedValue(null);
+
+      await expect(
+        service.updateLine('missing', 'line-1', { quantity: 3 }),
+      ).rejects.toThrow(NotFoundException);
+    });
+
+    it('throws BadRequestException when sale is not DRAFT', async () => {
+      mockQueryBuilder.getOne.mockResolvedValue(
+        seedDraftSale({ status: SaleStatus.COMPLETED }),
+      );
+
+      await expect(
+        service.updateLine('sale-1', 'line-1', { quantity: 3 }),
+      ).rejects.toThrow(BadRequestException);
+    });
+
+    it('throws NotFoundException when the line does not exist', async () => {
+      mockQueryBuilder.getOne.mockResolvedValue(seedDraftSale());
+      mockManager.findOne.mockResolvedValue(null);
+
+      await expect(
+        service.updateLine('sale-1', 'missing', { quantity: 3 }),
+      ).rejects.toThrow(NotFoundException);
+    });
+
+    it('throws NotFoundException when line belongs to a different sale', async () => {
+      mockQueryBuilder.getOne.mockResolvedValue(
+        seedDraftSale({ id: 'sale-1' }),
+      );
+      mockManager.findOne.mockResolvedValue(seedLine({ sale_id: 'sale-99' }));
+
+      await expect(
+        service.updateLine('sale-1', 'line-1', { quantity: 3 }),
+      ).rejects.toThrow(NotFoundException);
+    });
+  });
+
+  describe('removeLine', () => {
+    it('removes the line and recomputes totals', async () => {
+      const line = seedLine();
+      mockQueryBuilder.getOne.mockResolvedValue(seedDraftSale());
+      mockManager.findOne.mockResolvedValue(line);
+      mockManager.remove.mockResolvedValue(line);
+
+      await service.removeLine('sale-1', 'line-1');
+
+      expect(mockManager.remove).toHaveBeenCalledWith(line);
+      expect(mockManager.query).toHaveBeenCalled();
+    });
+
+    it('throws NotFoundException when the sale does not exist', async () => {
+      mockQueryBuilder.getOne.mockResolvedValue(null);
+
+      await expect(service.removeLine('missing', 'line-1')).rejects.toThrow(
+        NotFoundException,
+      );
+    });
+
+    it('throws BadRequestException when sale is not DRAFT', async () => {
+      mockQueryBuilder.getOne.mockResolvedValue(
+        seedDraftSale({ status: SaleStatus.COMPLETED }),
+      );
+
+      await expect(service.removeLine('sale-1', 'line-1')).rejects.toThrow(
+        BadRequestException,
+      );
+      expect(mockManager.remove).not.toHaveBeenCalled();
+    });
+
+    it('throws NotFoundException when the line does not exist', async () => {
+      mockQueryBuilder.getOne.mockResolvedValue(seedDraftSale());
+      mockManager.findOne.mockResolvedValue(null);
+
+      await expect(service.removeLine('sale-1', 'missing')).rejects.toThrow(
+        NotFoundException,
+      );
+    });
+
+    it('throws NotFoundException when line belongs to a different sale', async () => {
+      mockQueryBuilder.getOne.mockResolvedValue(
+        seedDraftSale({ id: 'sale-1' }),
+      );
+      mockManager.findOne.mockResolvedValue(seedLine({ sale_id: 'sale-99' }));
+
+      await expect(service.removeLine('sale-1', 'line-1')).rejects.toThrow(
         NotFoundException,
       );
     });

@@ -6,9 +6,15 @@ import { Branch } from '../branches/entities/branch.entity';
 import { User } from '../users/entities/user.entity';
 import { SalesService } from './sales.service';
 import { SalesController } from './sales.controller';
+import { ProductsModule } from '../products/products.module';
+import { SuppliersModule } from '../suppliers/suppliers.module';
 
 @Module({
-  imports: [TypeOrmModule.forFeature([Sale, SaleLine, Branch, User])],
+  imports: [
+    TypeOrmModule.forFeature([Sale, SaleLine, Branch, User]),
+    ProductsModule,
+    SuppliersModule,
+  ],
   providers: [SalesService],
   controllers: [SalesController],
   exports: [SalesService],
