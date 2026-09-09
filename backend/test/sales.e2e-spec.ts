@@ -9,6 +9,14 @@ import { Sale } from '../src/sales/entities/sale.entity';
 import { SaleStatus } from '../src/sales/enums/sale-status.enum';
 import { SaleType } from '../src/sales/enums/sale-type.enum';
 import { Branch } from '../src/branches/entities/branch.entity';
+import { Brand } from '../src/brands/entities/brand.entity';
+import { Category } from '../src/categories/entities/category.entity';
+import { Product } from '../src/products/entities/product.entity';
+import { ProductType } from '../src/products/enums/product-type.enum';
+import { SkuBarcodeCounter } from '../src/sku-barcode-counters/entities/sku-barcode-counter.entity';
+import { Supplier } from '../src/suppliers/entities/supplier.entity';
+import { SaleLine } from '../src/sales/entities/sale-line.entity';
+import { DiscountType } from '../src/sales/enums/discount-type.enum';
 
 describe('Sales (e2e)', () => {
   let app: INestApplication;
@@ -21,6 +29,21 @@ describe('Sales (e2e)', () => {
 
   beforeEach(async () => {
     await truncateAllTables(app);
+    // Re-seed counter rows required by Products (schema invariant).
+    // Only matters for tests that create products (line endpoints);
+    // safe/cheap for the rest.
+    await dataSource.getRepository(SkuBarcodeCounter).save([
+      {
+        counter_type: 'SKU',
+        prefix: 'SKU-',
+        current_value: 0,
+      } as SkuBarcodeCounter,
+      {
+        counter_type: 'BARCODE',
+        prefix: 'SLP-',
+        current_value: 0,
+      } as SkuBarcodeCounter,
+    ]);
   });
 
   afterAll(async () => {
@@ -84,6 +107,59 @@ describe('Sales (e2e)', () => {
         amount_paid: '0',
         change_due: '0',
         ...overrides,
+      }),
+    );
+  }
+
+  /**
+   * Seed a product at the given branch. Auto-creates a matching brand and
+   * category (idempotent per test — beforeEach truncates). Used by line
+   * endpoint tests; not needed by the C3 endpoint tests above.
+   */
+  async function seedProduct(
+    branchId: string,
+    overrides: {
+      name?: string;
+      selling_price?: string;
+      buying_price?: string;
+      is_active?: boolean;
+    } = {},
+  ): Promise<Product> {
+    const brandRepo = dataSource.getRepository(Brand);
+    let brand = await brandRepo.findOne({ where: { name: 'TestBrand' } });
+    if (!brand) {
+      brand = await brandRepo.save({
+        name: 'TestBrand',
+        is_active: true,
+      } as Brand);
+    }
+    const categoryRepo = dataSource.getRepository(Category);
+    let category = await categoryRepo.findOne({
+      where: { name: 'TestCategory' },
+    });
+    if (!category) {
+      category = await categoryRepo.save({
+        name: 'TestCategory',
+        is_active: true,
+      } as Category);
+    }
+
+    const repo = dataSource.getRepository(Product);
+    // SKU/barcode use random suffixes so tests can seed multiple products
+    // in one run without collisions.
+    const suffix = Math.random().toString(36).slice(2, 8);
+    return repo.save(
+      repo.create({
+        product_type: ProductType.PHONE,
+        name: overrides.name ?? 'Test Phone',
+        sku: `SKU-TEST-${suffix}`,
+        barcode: `BC-${suffix}`,
+        brand_id: brand.id,
+        category_id: category.id,
+        branch_id: branchId,
+        buying_price: overrides.buying_price ?? '80000.00',
+        selling_price: overrides.selling_price ?? '100000.00',
+        is_active: overrides.is_active ?? true,
       }),
     );
   }
@@ -624,6 +700,442 @@ describe('Sales (e2e)', () => {
         .delete(`/api/v1/sales/${fakeId}`)
         .set('Cookie', cookies)
         .expect(404);
+    });
+  });
+
+  describe('POST /api/v1/sales/:saleId/lines', () => {
+    it('adds a line and returns the sale with recomputed totals', async () => {
+      const branch = await seedBranch();
+      const { user, password } = await seedUser(UserRole.ADMIN, 'a@t.com');
+      const sale = await seedSale({
+        branch_id: branch.id,
+        cashier_id: user.id,
+      });
+      const product = await seedProduct(branch.id, {
+        selling_price: '100.00',
+        buying_price: '80.00',
+      });
+      const cookies = await loginAndGetCookies(user.email, password);
+
+      const response = await request(app.getHttpServer())
+        .post(`/api/v1/sales/${sale.id}/lines`)
+        .set('Cookie', cookies)
+        .send({ product_id: product.id, quantity: 2 })
+        .expect(201);
+
+      // Response is the full sale, not just the line
+      expect(response.body.id).toBe(sale.id);
+      expect(response.body.subtotal).toBe('200.00');
+      expect(response.body.discount_total).toBe('0.00');
+      expect(response.body.total).toBe('200.00');
+      expect(response.body.lines).toHaveLength(1);
+      expect(response.body.lines[0]).toMatchObject({
+        line_number: 1,
+        product_id: product.id,
+        product_sku_snapshot: product.sku,
+        product_name_snapshot: product.name,
+        unit_price: '100.00',
+        cost_price_snapshot: '80.00',
+        quantity: 2,
+        discount_amount: '0.00',
+        line_total: '200.00',
+      });
+    });
+
+    it('adds a second line and assigns line_number 2', async () => {
+      const branch = await seedBranch();
+      const { user, password } = await seedUser(UserRole.ADMIN, 'a@t.com');
+      const sale = await seedSale({
+        branch_id: branch.id,
+        cashier_id: user.id,
+      });
+      const productA = await seedProduct(branch.id, {
+        name: 'Product A',
+        selling_price: '100.00',
+      });
+      const productB = await seedProduct(branch.id, {
+        name: 'Product B',
+        selling_price: '250.00',
+      });
+      const cookies = await loginAndGetCookies(user.email, password);
+
+      await request(app.getHttpServer())
+        .post(`/api/v1/sales/${sale.id}/lines`)
+        .set('Cookie', cookies)
+        .send({ product_id: productA.id, quantity: 1 })
+        .expect(201);
+
+      const response = await request(app.getHttpServer())
+        .post(`/api/v1/sales/${sale.id}/lines`)
+        .set('Cookie', cookies)
+        .send({ product_id: productB.id, quantity: 2 })
+        .expect(201);
+
+      expect(response.body.lines).toHaveLength(2);
+      // Lines ordered by line_number ASC
+      expect(response.body.lines[0].line_number).toBe(1);
+      expect(response.body.lines[1].line_number).toBe(2);
+      expect(response.body.subtotal).toBe('600.00'); // 100 + 500
+    });
+
+    it('applies a PERCENT discount and recomputes totals', async () => {
+      const branch = await seedBranch();
+      const { user, password } = await seedUser(UserRole.ADMIN, 'a@t.com');
+      const sale = await seedSale({
+        branch_id: branch.id,
+        cashier_id: user.id,
+      });
+      const product = await seedProduct(branch.id, {
+        selling_price: '100.00',
+      });
+      const cookies = await loginAndGetCookies(user.email, password);
+
+      const response = await request(app.getHttpServer())
+        .post(`/api/v1/sales/${sale.id}/lines`)
+        .set('Cookie', cookies)
+        .send({
+          product_id: product.id,
+          quantity: 3,
+          discount_type: DiscountType.PERCENT,
+          discount_value: 10,
+        })
+        .expect(201);
+
+      // 10% of (100 * 3) = 30
+      expect(response.body.subtotal).toBe('300.00');
+      expect(response.body.discount_total).toBe('30.00');
+      expect(response.body.total).toBe('270.00');
+      expect(response.body.lines[0].discount_amount).toBe('30.00');
+      expect(response.body.lines[0].line_total).toBe('270.00');
+    });
+
+    it('returns 400 when AMOUNT discount exceeds line subtotal', async () => {
+      const branch = await seedBranch();
+      const { user, password } = await seedUser(UserRole.ADMIN, 'a@t.com');
+      const sale = await seedSale({
+        branch_id: branch.id,
+        cashier_id: user.id,
+      });
+      const product = await seedProduct(branch.id, {
+        selling_price: '100.00',
+      });
+      const cookies = await loginAndGetCookies(user.email, password);
+
+      await request(app.getHttpServer())
+        .post(`/api/v1/sales/${sale.id}/lines`)
+        .set('Cookie', cookies)
+        .send({
+          product_id: product.id,
+          quantity: 1,
+          discount_type: DiscountType.AMOUNT,
+          discount_value: 500,
+        })
+        .expect(400);
+    });
+
+    it('returns 400 when sale is COMPLETED', async () => {
+      const branch = await seedBranch();
+      const { user, password } = await seedUser(UserRole.ADMIN, 'a@t.com');
+      const sale = await seedSale({
+        branch_id: branch.id,
+        cashier_id: user.id,
+        status: SaleStatus.COMPLETED,
+        sale_number: 'INV-20260825-0001',
+        completed_at: new Date(),
+      });
+      const product = await seedProduct(branch.id);
+      const cookies = await loginAndGetCookies(user.email, password);
+
+      await request(app.getHttpServer())
+        .post(`/api/v1/sales/${sale.id}/lines`)
+        .set('Cookie', cookies)
+        .send({ product_id: product.id, quantity: 1 })
+        .expect(400);
+    });
+
+    it('returns 400 when product belongs to a different branch', async () => {
+      const branchA = await seedBranch({ name: 'Branch A' });
+      const branchB = await seedBranch({ name: 'Branch B' });
+      const { user, password } = await seedUser(UserRole.ADMIN, 'a@t.com');
+      const sale = await seedSale({
+        branch_id: branchA.id,
+        cashier_id: user.id,
+      });
+      const productAtB = await seedProduct(branchB.id);
+      const cookies = await loginAndGetCookies(user.email, password);
+
+      await request(app.getHttpServer())
+        .post(`/api/v1/sales/${sale.id}/lines`)
+        .set('Cookie', cookies)
+        .send({ product_id: productAtB.id, quantity: 1 })
+        .expect(400);
+    });
+
+    it('returns 404 when sale does not exist', async () => {
+      const branch = await seedBranch();
+      const { user, password } = await seedUser(UserRole.ADMIN, 'a@t.com');
+      const product = await seedProduct(branch.id);
+      const cookies = await loginAndGetCookies(user.email, password);
+      const fakeId = '00000000-0000-0000-0000-000000000000';
+
+      await request(app.getHttpServer())
+        .post(`/api/v1/sales/${fakeId}/lines`)
+        .set('Cookie', cookies)
+        .send({ product_id: product.id, quantity: 1 })
+        .expect(404);
+    });
+
+    it('returns 401 when unauthenticated', async () => {
+      const branch = await seedBranch();
+      const { user } = await seedUser(UserRole.ADMIN, 'a@t.com');
+      const sale = await seedSale({
+        branch_id: branch.id,
+        cashier_id: user.id,
+      });
+      const product = await seedProduct(branch.id);
+
+      await request(app.getHttpServer())
+        .post(`/api/v1/sales/${sale.id}/lines`)
+        .send({ product_id: product.id, quantity: 1 })
+        .expect(401);
+    });
+  });
+
+  describe('PATCH /api/v1/sales/:saleId/lines/:lineId', () => {
+    it('updates quantity and recomputes totals', async () => {
+      const branch = await seedBranch();
+      const { user, password } = await seedUser(UserRole.ADMIN, 'a@t.com');
+      const sale = await seedSale({
+        branch_id: branch.id,
+        cashier_id: user.id,
+      });
+      const product = await seedProduct(branch.id, {
+        selling_price: '100.00',
+      });
+      const cookies = await loginAndGetCookies(user.email, password);
+
+      const created = await request(app.getHttpServer())
+        .post(`/api/v1/sales/${sale.id}/lines`)
+        .set('Cookie', cookies)
+        .send({ product_id: product.id, quantity: 2 })
+        .expect(201);
+      const lineId = created.body.lines[0].id;
+
+      const response = await request(app.getHttpServer())
+        .patch(`/api/v1/sales/${sale.id}/lines/${lineId}`)
+        .set('Cookie', cookies)
+        .send({ quantity: 5 })
+        .expect(200);
+
+      expect(response.body.subtotal).toBe('500.00');
+      expect(response.body.total).toBe('500.00');
+      expect(response.body.lines[0].quantity).toBe(5);
+      expect(response.body.lines[0].line_total).toBe('500.00');
+    });
+
+    it('clears a discount when both fields are null', async () => {
+      const branch = await seedBranch();
+      const { user, password } = await seedUser(UserRole.ADMIN, 'a@t.com');
+      const sale = await seedSale({
+        branch_id: branch.id,
+        cashier_id: user.id,
+      });
+      const product = await seedProduct(branch.id, {
+        selling_price: '100.00',
+      });
+      const cookies = await loginAndGetCookies(user.email, password);
+
+      const created = await request(app.getHttpServer())
+        .post(`/api/v1/sales/${sale.id}/lines`)
+        .set('Cookie', cookies)
+        .send({
+          product_id: product.id,
+          quantity: 2,
+          discount_type: DiscountType.PERCENT,
+          discount_value: 10,
+        })
+        .expect(201);
+      const lineId = created.body.lines[0].id;
+
+      const response = await request(app.getHttpServer())
+        .patch(`/api/v1/sales/${sale.id}/lines/${lineId}`)
+        .set('Cookie', cookies)
+        .send({ discount_type: null, discount_value: null })
+        .expect(200);
+
+      expect(response.body.lines[0].discount_type).toBeNull();
+      expect(response.body.lines[0].discount_value).toBeNull();
+      expect(response.body.lines[0].discount_amount).toBe('0.00');
+      expect(response.body.discount_total).toBe('0.00');
+    });
+
+    it('returns 400 when only one discount field is sent', async () => {
+      const branch = await seedBranch();
+      const { user, password } = await seedUser(UserRole.ADMIN, 'a@t.com');
+      const sale = await seedSale({
+        branch_id: branch.id,
+        cashier_id: user.id,
+      });
+      const product = await seedProduct(branch.id);
+      const cookies = await loginAndGetCookies(user.email, password);
+
+      const created = await request(app.getHttpServer())
+        .post(`/api/v1/sales/${sale.id}/lines`)
+        .set('Cookie', cookies)
+        .send({ product_id: product.id, quantity: 1 })
+        .expect(201);
+      const lineId = created.body.lines[0].id;
+
+      await request(app.getHttpServer())
+        .patch(`/api/v1/sales/${sale.id}/lines/${lineId}`)
+        .set('Cookie', cookies)
+        .send({ discount_type: DiscountType.PERCENT })
+        .expect(400);
+    });
+
+    it('returns 404 when line belongs to a different sale', async () => {
+      const branch = await seedBranch();
+      const { user, password } = await seedUser(UserRole.ADMIN, 'a@t.com');
+      const saleA = await seedSale({
+        branch_id: branch.id,
+        cashier_id: user.id,
+      });
+      const saleB = await seedSale({
+        branch_id: branch.id,
+        cashier_id: user.id,
+      });
+      const product = await seedProduct(branch.id);
+      const cookies = await loginAndGetCookies(user.email, password);
+
+      const created = await request(app.getHttpServer())
+        .post(`/api/v1/sales/${saleA.id}/lines`)
+        .set('Cookie', cookies)
+        .send({ product_id: product.id, quantity: 1 })
+        .expect(201);
+      const lineIdOnA = created.body.lines[0].id;
+
+      // Try to update A's line via B's URL
+      await request(app.getHttpServer())
+        .patch(`/api/v1/sales/${saleB.id}/lines/${lineIdOnA}`)
+        .set('Cookie', cookies)
+        .send({ quantity: 5 })
+        .expect(404);
+    });
+  });
+
+  describe('DELETE /api/v1/sales/:saleId/lines/:lineId', () => {
+    it('removes a line and returns 204; sale totals recomputed', async () => {
+      const branch = await seedBranch();
+      const { user, password } = await seedUser(UserRole.ADMIN, 'a@t.com');
+      const sale = await seedSale({
+        branch_id: branch.id,
+        cashier_id: user.id,
+      });
+      const product = await seedProduct(branch.id, {
+        selling_price: '100.00',
+      });
+      const cookies = await loginAndGetCookies(user.email, password);
+
+      const created = await request(app.getHttpServer())
+        .post(`/api/v1/sales/${sale.id}/lines`)
+        .set('Cookie', cookies)
+        .send({ product_id: product.id, quantity: 2 })
+        .expect(201);
+      const lineId = created.body.lines[0].id;
+
+      await request(app.getHttpServer())
+        .delete(`/api/v1/sales/${sale.id}/lines/${lineId}`)
+        .set('Cookie', cookies)
+        .expect(204);
+
+      // Line actually gone
+      const lineRepo = dataSource.getRepository(SaleLine);
+      const found = await lineRepo.findOne({ where: { id: lineId } });
+      expect(found).toBeNull();
+
+      // Sale totals reset to zero
+      const refreshed = await request(app.getHttpServer())
+        .get(`/api/v1/sales/${sale.id}`)
+        .set('Cookie', cookies)
+        .expect(200);
+      expect(refreshed.body.subtotal).toBe('0.00');
+      expect(refreshed.body.total).toBe('0.00');
+      expect(refreshed.body.lines).toHaveLength(0);
+    });
+
+    it('preserves line_number gaps after remove (does not renumber)', async () => {
+      const branch = await seedBranch();
+      const { user, password } = await seedUser(UserRole.ADMIN, 'a@t.com');
+      const sale = await seedSale({
+        branch_id: branch.id,
+        cashier_id: user.id,
+      });
+      const productA = await seedProduct(branch.id, { name: 'A' });
+      const productB = await seedProduct(branch.id, { name: 'B' });
+      const productC = await seedProduct(branch.id, { name: 'C' });
+      const cookies = await loginAndGetCookies(user.email, password);
+
+      await request(app.getHttpServer())
+        .post(`/api/v1/sales/${sale.id}/lines`)
+        .set('Cookie', cookies)
+        .send({ product_id: productA.id, quantity: 1 })
+        .expect(201);
+      const lineB = await request(app.getHttpServer())
+        .post(`/api/v1/sales/${sale.id}/lines`)
+        .set('Cookie', cookies)
+        .send({ product_id: productB.id, quantity: 1 })
+        .expect(201);
+      await request(app.getHttpServer())
+        .post(`/api/v1/sales/${sale.id}/lines`)
+        .set('Cookie', cookies)
+        .send({ product_id: productC.id, quantity: 1 })
+        .expect(201);
+
+      // Remove line B (line_number 2)
+      const lineBId = lineB.body.lines[1].id;
+      await request(app.getHttpServer())
+        .delete(`/api/v1/sales/${sale.id}/lines/${lineBId}`)
+        .set('Cookie', cookies)
+        .expect(204);
+
+      // Line C still has line_number 3 (not renumbered to 2)
+      const refreshed = await request(app.getHttpServer())
+        .get(`/api/v1/sales/${sale.id}`)
+        .set('Cookie', cookies)
+        .expect(200);
+      expect(refreshed.body.lines).toHaveLength(2);
+      expect(refreshed.body.lines[0].line_number).toBe(1);
+      expect(refreshed.body.lines[1].line_number).toBe(3);
+    });
+
+    it('returns 400 when sale is COMPLETED', async () => {
+      const branch = await seedBranch();
+      const { user, password } = await seedUser(UserRole.ADMIN, 'a@t.com');
+      const sale = await seedSale({
+        branch_id: branch.id,
+        cashier_id: user.id,
+      });
+      const product = await seedProduct(branch.id);
+      const cookies = await loginAndGetCookies(user.email, password);
+
+      const created = await request(app.getHttpServer())
+        .post(`/api/v1/sales/${sale.id}/lines`)
+        .set('Cookie', cookies)
+        .send({ product_id: product.id, quantity: 1 })
+        .expect(201);
+      const lineId = created.body.lines[0].id;
+
+      // Manually flip the sale to COMPLETED (bypassing the not-yet-built endpoint)
+      await dataSource.getRepository(Sale).update(sale.id, {
+        status: SaleStatus.COMPLETED,
+        sale_number: 'INV-20260825-0001',
+        completed_at: new Date(),
+      });
+
+      await request(app.getHttpServer())
+        .delete(`/api/v1/sales/${sale.id}/lines/${lineId}`)
+        .set('Cookie', cookies)
+        .expect(400);
     });
   });
 });

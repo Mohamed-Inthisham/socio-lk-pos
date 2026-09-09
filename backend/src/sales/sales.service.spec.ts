@@ -393,19 +393,19 @@ describe('SalesService', () => {
   });
 
   describe('findOne', () => {
-    it('returns the sale with nested branch and cashier', async () => {
-      const sale = { id: 's1', branch: {}, cashier: {} };
+    it('returns the sale with nested branch, cashier, and lines', async () => {
+      const sale = { id: 's1', branch: {}, cashier: {}, lines: [] };
       mockSalesRepo.findOne.mockResolvedValue(sale);
 
       const result = await service.findOne('s1');
 
       expect(mockSalesRepo.findOne).toHaveBeenCalledWith({
         where: { id: 's1' },
-        relations: ['branch', 'cashier'],
+        relations: ['branch', 'cashier', 'lines'],
+        order: { lines: { line_number: 'ASC' } },
       });
       expect(result).toBe(sale);
     });
-
     it('throws NotFoundException when the sale does not exist', async () => {
       mockSalesRepo.findOne.mockResolvedValue(null);
 

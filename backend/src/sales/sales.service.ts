@@ -156,17 +156,19 @@ export class SalesService {
   }
 
   /**
-   * Fetch one sale with nested branch + cashier. Lines and payments are
-   * NOT loaded here in C2 — they don't exist yet as entities. Once
-   * Slices D and E land, this method will grow to eager-load them so
-   * the frontend can render the full sale in one call.
+   * Fetch one sale with nested branch + cashier + lines. Lines are
+   * ordered by line_number ASC so the receipt/UI renders them in the
+   * cashier's original ring-up order (gaps from removes are preserved).
+   *
+   * Payments will join here when Slice E lands.
    *
    * Throws 404 if the sale doesn't exist.
    */
   async findOne(id: string): Promise<Sale> {
     const sale = await this.salesRepository.findOne({
       where: { id },
-      relations: ['branch', 'cashier'],
+      relations: ['branch', 'cashier', 'lines'],
+      order: { lines: { line_number: 'ASC' } },
     });
     if (!sale) {
       throw new NotFoundException('Sale not found');

@@ -88,7 +88,7 @@ export class SaleLine {
   @Column({ type: 'uuid', name: 'sale_id' })
   sale_id!: string;
 
-  @ManyToOne(() => Sale, { onDelete: 'CASCADE' })
+  @ManyToOne(() => Sale, (sale) => sale.lines, { onDelete: 'CASCADE' })
   @JoinColumn({ name: 'sale_id' })
   sale?: Sale;
 

@@ -3,6 +3,7 @@ import {
   PrimaryGeneratedColumn,
   Column,
   ManyToOne,
+  OneToMany,
   JoinColumn,
   CreateDateColumn,
   UpdateDateColumn,
@@ -14,6 +15,7 @@ import { Branch } from '../../branches/entities/branch.entity';
 import { User } from '../../users/entities/user.entity';
 import { SaleType } from '../enums/sale-type.enum';
 import { SaleStatus } from '../enums/sale-status.enum';
+import { SaleLine } from './sale-line.entity';
 
 /**
  * A Sale is a financial transaction — cart + payments + a lifecycle.
@@ -140,6 +142,9 @@ export class Sale {
   @ManyToOne(() => User, { onDelete: 'RESTRICT', nullable: true })
   @JoinColumn({ name: 'voided_by' })
   voider?: User;
+
+  @OneToMany(() => SaleLine, (line) => line.sale)
+  lines?: SaleLine[];
 
   @Index('idx_sales_created_at')
   @CreateDateColumn({ type: 'timestamptz', name: 'created_at' })
