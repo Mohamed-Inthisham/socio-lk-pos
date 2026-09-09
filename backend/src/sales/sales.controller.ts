@@ -24,6 +24,8 @@ import { UpdateSaleDto } from './dto/update-sale.dto';
 import { ListSalesQueryDto } from './dto/list-sales-query.dto';
 import { AddSaleLineDto } from './dto/add-sale-line.dto';
 import { UpdateSaleLineDto } from './dto/update-sale-line.dto';
+import { AddPaymentDto } from './dto/add-payment.dto';
+import { UpdatePaymentDto } from './dto/update-payment.dto';
 import { Roles } from '../auth/decorators/roles.decorator';
 import { UserRole } from '../users/enums/user-role.enum';
 import { CurrentUser } from '../auth/decorators/current-user.decorator';
@@ -259,5 +261,107 @@ export class SalesController {
     @Param('lineId', ParseUUIDPipe) lineId: string,
   ): Promise<void> {
     await this.salesService.removeLine(saleId, lineId);
+  }
+  // ---- Payment sub-resource endpoints ----
+  //
+  // Each mutation returns the whole updated sale (with nested lines,
+  // payments, and refreshed totals) so the POS frontend never needs a
+  // follow-up GET after recording a payment. DELETE returns 204.
+
+  @Post(':saleId/payments')
+  @Roles(UserRole.ADMIN, UserRole.MANAGER, UserRole.CASHIER)
+  @ApiOperation({
+    summary: 'Record a payment on a DRAFT sale',
+    description:
+      'Adds a tender to the sale. Multi-tender supported: a sale can ' +
+      'have multiple payments summing to the total. CASH requires ' +
+      'cash_received >= amount (change computed on receipt). CARD, ' +
+      'BANK_TRANSFER, KOKO, and MINTPAY all require reference_number ' +
+      'for reconciliation. amount cannot exceed the remaining balance. ' +
+      'Returns the updated sale with all lines, payments, and recomputed ' +
+      'amount_paid and change_due.',
+  })
+  @ApiParam({ name: 'saleId', description: 'Sale UUID', format: 'uuid' })
+  @ApiResponse({
+    status: 201,
+    description: 'Payment recorded; response is the updated sale',
+  })
+  @ApiResponse({
+    status: 400,
+    description:
+      'Validation failed, sale not DRAFT, amount exceeds remaining balance, ' +
+      'CASH cash_received missing or < amount, non-CASH cash_received set, ' +
+      'or non-CASH reference_number missing',
+  })
+  @ApiResponse({ status: 401, description: 'Not authenticated' })
+  @ApiResponse({ status: 404, description: 'Sale not found' })
+  async addPayment(
+    @Param('saleId', ParseUUIDPipe) saleId: string,
+    @Body() dto: AddPaymentDto,
+  ) {
+    await this.salesService.addPayment(saleId, dto);
+    return this.salesService.findOne(saleId);
+  }
+
+  @Patch(':saleId/payments/:paymentId')
+  @Roles(UserRole.ADMIN, UserRole.MANAGER, UserRole.CASHIER)
+  @ApiOperation({
+    summary: 'Update a payment on a DRAFT sale',
+    description:
+      'Partial update. Updatable fields: amount, cash_received, ' +
+      'reference_number, notes. payment_method is FROZEN — to change ' +
+      'method (e.g. CASH to CARD), remove and re-add the payment for a ' +
+      'clean audit trail. Cross-field rules revalidated against the ' +
+      'merged state. Returns the updated sale.',
+  })
+  @ApiParam({ name: 'saleId', description: 'Sale UUID', format: 'uuid' })
+  @ApiParam({ name: 'paymentId', description: 'Payment UUID', format: 'uuid' })
+  @ApiResponse({
+    status: 200,
+    description: 'Payment updated; response is the updated sale',
+  })
+  @ApiResponse({
+    status: 400,
+    description:
+      'Validation failed, sale not DRAFT, merged amount exceeds remaining ' +
+      'balance (excluding this payment), CASH cash_received < amount, or ' +
+      'attempted to clear reference_number on a non-CASH payment',
+  })
+  @ApiResponse({ status: 401, description: 'Not authenticated' })
+  @ApiResponse({ status: 404, description: 'Sale or payment not found' })
+  async updatePayment(
+    @Param('saleId', ParseUUIDPipe) saleId: string,
+    @Param('paymentId', ParseUUIDPipe) paymentId: string,
+    @Body() dto: UpdatePaymentDto,
+  ) {
+    await this.salesService.updatePayment(saleId, paymentId, dto);
+    return this.salesService.findOne(saleId);
+  }
+
+  @Delete(':saleId/payments/:paymentId')
+  @HttpCode(HttpStatus.NO_CONTENT)
+  @Roles(UserRole.ADMIN, UserRole.MANAGER, UserRole.CASHIER)
+  @ApiOperation({
+    summary: 'Remove a payment from a DRAFT sale',
+    description:
+      'Hard-deletes the payment and recomputes sale amount_paid and ' +
+      'change_due. Only DRAFT sales can have payments removed. Once the ' +
+      'sale is COMPLETED, payment reversal happens via sale-level VOID ' +
+      '(Slice G).',
+  })
+  @ApiParam({ name: 'saleId', description: 'Sale UUID', format: 'uuid' })
+  @ApiParam({ name: 'paymentId', description: 'Payment UUID', format: 'uuid' })
+  @ApiResponse({ status: 204, description: 'Payment removed' })
+  @ApiResponse({
+    status: 400,
+    description: 'Sale is not in DRAFT status',
+  })
+  @ApiResponse({ status: 401, description: 'Not authenticated' })
+  @ApiResponse({ status: 404, description: 'Sale or payment not found' })
+  async removePayment(
+    @Param('saleId', ParseUUIDPipe) saleId: string,
+    @Param('paymentId', ParseUUIDPipe) paymentId: string,
+  ): Promise<void> {
+    await this.salesService.removePayment(saleId, paymentId);
   }
 }

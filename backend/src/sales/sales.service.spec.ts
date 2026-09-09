@@ -400,16 +400,25 @@ describe('SalesService', () => {
   });
 
   describe('findOne', () => {
-    it('returns the sale with nested branch, cashier, and lines', async () => {
-      const sale = { id: 's1', branch: {}, cashier: {}, lines: [] };
+    it('returns the sale with nested branch, cashier, lines, and payments', async () => {
+      const sale = {
+        id: 's1',
+        branch: {},
+        cashier: {},
+        lines: [],
+        payments: [],
+      };
       mockSalesRepo.findOne.mockResolvedValue(sale);
 
       const result = await service.findOne('s1');
 
       expect(mockSalesRepo.findOne).toHaveBeenCalledWith({
         where: { id: 's1' },
-        relations: ['branch', 'cashier', 'lines'],
-        order: { lines: { line_number: 'ASC' } },
+        relations: ['branch', 'cashier', 'lines', 'payments'],
+        order: {
+          lines: { line_number: 'ASC' },
+          payments: { created_at: 'ASC' },
+        },
       });
       expect(result).toBe(sale);
     });

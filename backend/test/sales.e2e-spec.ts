@@ -17,6 +17,8 @@ import { SkuBarcodeCounter } from '../src/sku-barcode-counters/entities/sku-barc
 import { Supplier } from '../src/suppliers/entities/supplier.entity';
 import { SaleLine } from '../src/sales/entities/sale-line.entity';
 import { DiscountType } from '../src/sales/enums/discount-type.enum';
+import { Payment } from '../src/sales/entities/payment.entity';
+import { PaymentMethod } from '../src/sales/enums/payment-method.enum';
 
 describe('Sales (e2e)', () => {
   let app: INestApplication;
@@ -1134,6 +1136,465 @@ describe('Sales (e2e)', () => {
 
       await request(app.getHttpServer())
         .delete(`/api/v1/sales/${sale.id}/lines/${lineId}`)
+        .set('Cookie', cookies)
+        .expect(400);
+    });
+  });
+  describe('POST /api/v1/sales/:saleId/payments', () => {
+    it('records a CASH payment and returns the sale with recomputed totals', async () => {
+      const branch = await seedBranch();
+      const { user, password } = await seedUser(UserRole.ADMIN, 'a@t.com');
+      const sale = await seedSale({
+        branch_id: branch.id,
+        cashier_id: user.id,
+        total: '500.00',
+      });
+      const cookies = await loginAndGetCookies(user.email, password);
+
+      const response = await request(app.getHttpServer())
+        .post(`/api/v1/sales/${sale.id}/payments`)
+        .set('Cookie', cookies)
+        .send({
+          payment_method: PaymentMethod.CASH,
+          amount: 500,
+          cash_received: 500,
+        })
+        .expect(201);
+
+      // Response is the full sale, not just the payment
+      expect(response.body.id).toBe(sale.id);
+      expect(response.body.amount_paid).toBe('500.00');
+      expect(response.body.change_due).toBe('0.00');
+      expect(response.body.payments).toHaveLength(1);
+      expect(response.body.payments[0]).toMatchObject({
+        payment_method: PaymentMethod.CASH,
+        amount: '500.00',
+        cash_received: '500.00',
+        reference_number: null,
+      });
+    });
+
+    it('records CASH overpayment as change_due', async () => {
+      const branch = await seedBranch();
+      const { user, password } = await seedUser(UserRole.ADMIN, 'a@t.com');
+      const sale = await seedSale({
+        branch_id: branch.id,
+        cashier_id: user.id,
+        total: '950.00',
+      });
+      const cookies = await loginAndGetCookies(user.email, password);
+
+      // Customer hands over Rs. 1000 for a Rs. 950 sale → Rs. 50 change
+      const response = await request(app.getHttpServer())
+        .post(`/api/v1/sales/${sale.id}/payments`)
+        .set('Cookie', cookies)
+        .send({
+          payment_method: PaymentMethod.CASH,
+          amount: 950,
+          cash_received: 1000,
+        })
+        .expect(201);
+
+      expect(response.body.amount_paid).toBe('950.00');
+      expect(response.body.change_due).toBe('50.00');
+    });
+
+    it('records a CARD payment with reference_number', async () => {
+      const branch = await seedBranch();
+      const { user, password } = await seedUser(UserRole.ADMIN, 'a@t.com');
+      const sale = await seedSale({
+        branch_id: branch.id,
+        cashier_id: user.id,
+        total: '1000.00',
+      });
+      const cookies = await loginAndGetCookies(user.email, password);
+
+      const response = await request(app.getHttpServer())
+        .post(`/api/v1/sales/${sale.id}/payments`)
+        .set('Cookie', cookies)
+        .send({
+          payment_method: PaymentMethod.CARD,
+          amount: 1000,
+          reference_number: 'AUTH-482913',
+        })
+        .expect(201);
+
+      expect(response.body.payments[0]).toMatchObject({
+        payment_method: PaymentMethod.CARD,
+        amount: '1000.00',
+        cash_received: null,
+        reference_number: 'AUTH-482913',
+      });
+    });
+
+    it('supports multi-tender: split CARD + CASH', async () => {
+      const branch = await seedBranch();
+      const { user, password } = await seedUser(UserRole.ADMIN, 'a@t.com');
+      const sale = await seedSale({
+        branch_id: branch.id,
+        cashier_id: user.id,
+        total: '950.00',
+      });
+      const cookies = await loginAndGetCookies(user.email, password);
+
+      // Payment 1: Rs. 400 on CARD
+      await request(app.getHttpServer())
+        .post(`/api/v1/sales/${sale.id}/payments`)
+        .set('Cookie', cookies)
+        .send({
+          payment_method: PaymentMethod.CARD,
+          amount: 400,
+          reference_number: 'AUTH-1',
+        })
+        .expect(201);
+
+      // Payment 2: Rs. 550 cash + Rs. 50 change (customer paid Rs. 600)
+      const response = await request(app.getHttpServer())
+        .post(`/api/v1/sales/${sale.id}/payments`)
+        .set('Cookie', cookies)
+        .send({
+          payment_method: PaymentMethod.CASH,
+          amount: 550,
+          cash_received: 600,
+        })
+        .expect(201);
+
+      expect(response.body.payments).toHaveLength(2);
+      expect(response.body.amount_paid).toBe('950.00');
+      expect(response.body.change_due).toBe('50.00');
+      // Payments ordered by created_at ASC
+      expect(response.body.payments[0].payment_method).toBe(PaymentMethod.CARD);
+      expect(response.body.payments[1].payment_method).toBe(PaymentMethod.CASH);
+    });
+
+    it('records a KOKO payment with reference_number', async () => {
+      const branch = await seedBranch();
+      const { user, password } = await seedUser(UserRole.ADMIN, 'a@t.com');
+      const sale = await seedSale({
+        branch_id: branch.id,
+        cashier_id: user.id,
+        total: '2500.00',
+      });
+      const cookies = await loginAndGetCookies(user.email, password);
+
+      const response = await request(app.getHttpServer())
+        .post(`/api/v1/sales/${sale.id}/payments`)
+        .set('Cookie', cookies)
+        .send({
+          payment_method: PaymentMethod.KOKO,
+          amount: 2500,
+          reference_number: 'KOKO-TXN-XYZ',
+        })
+        .expect(201);
+
+      expect(response.body.payments[0].payment_method).toBe(PaymentMethod.KOKO);
+      expect(response.body.payments[0].reference_number).toBe('KOKO-TXN-XYZ');
+    });
+
+    it('returns 400 when amount exceeds remaining balance', async () => {
+      const branch = await seedBranch();
+      const { user, password } = await seedUser(UserRole.ADMIN, 'a@t.com');
+      const sale = await seedSale({
+        branch_id: branch.id,
+        cashier_id: user.id,
+        total: '500.00',
+      });
+      const cookies = await loginAndGetCookies(user.email, password);
+
+      await request(app.getHttpServer())
+        .post(`/api/v1/sales/${sale.id}/payments`)
+        .set('Cookie', cookies)
+        .send({
+          payment_method: PaymentMethod.CASH,
+          amount: 600,
+          cash_received: 600,
+        })
+        .expect(400);
+    });
+
+    it('returns 400 when CASH cash_received is missing', async () => {
+      const branch = await seedBranch();
+      const { user, password } = await seedUser(UserRole.ADMIN, 'a@t.com');
+      const sale = await seedSale({
+        branch_id: branch.id,
+        cashier_id: user.id,
+        total: '500.00',
+      });
+      const cookies = await loginAndGetCookies(user.email, password);
+
+      await request(app.getHttpServer())
+        .post(`/api/v1/sales/${sale.id}/payments`)
+        .set('Cookie', cookies)
+        .send({
+          payment_method: PaymentMethod.CASH,
+          amount: 500,
+        })
+        .expect(400);
+    });
+
+    it('returns 400 when non-CASH has no reference_number', async () => {
+      const branch = await seedBranch();
+      const { user, password } = await seedUser(UserRole.ADMIN, 'a@t.com');
+      const sale = await seedSale({
+        branch_id: branch.id,
+        cashier_id: user.id,
+        total: '500.00',
+      });
+      const cookies = await loginAndGetCookies(user.email, password);
+
+      await request(app.getHttpServer())
+        .post(`/api/v1/sales/${sale.id}/payments`)
+        .set('Cookie', cookies)
+        .send({
+          payment_method: PaymentMethod.CARD,
+          amount: 500,
+        })
+        .expect(400);
+    });
+
+    it('returns 400 when sale is COMPLETED', async () => {
+      const branch = await seedBranch();
+      const { user, password } = await seedUser(UserRole.ADMIN, 'a@t.com');
+      const sale = await seedSale({
+        branch_id: branch.id,
+        cashier_id: user.id,
+        status: SaleStatus.COMPLETED,
+        sale_number: 'INV-20260825-0001',
+        completed_at: new Date(),
+        total: '500.00',
+      });
+      const cookies = await loginAndGetCookies(user.email, password);
+
+      await request(app.getHttpServer())
+        .post(`/api/v1/sales/${sale.id}/payments`)
+        .set('Cookie', cookies)
+        .send({
+          payment_method: PaymentMethod.CASH,
+          amount: 500,
+          cash_received: 500,
+        })
+        .expect(400);
+    });
+
+    it('returns 401 when unauthenticated', async () => {
+      const branch = await seedBranch();
+      const { user } = await seedUser(UserRole.ADMIN, 'a@t.com');
+      const sale = await seedSale({
+        branch_id: branch.id,
+        cashier_id: user.id,
+        total: '500.00',
+      });
+
+      await request(app.getHttpServer())
+        .post(`/api/v1/sales/${sale.id}/payments`)
+        .send({
+          payment_method: PaymentMethod.CASH,
+          amount: 500,
+          cash_received: 500,
+        })
+        .expect(401);
+    });
+  });
+
+  describe('PATCH /api/v1/sales/:saleId/payments/:paymentId', () => {
+    it('updates amount and recomputes totals', async () => {
+      const branch = await seedBranch();
+      const { user, password } = await seedUser(UserRole.ADMIN, 'a@t.com');
+      const sale = await seedSale({
+        branch_id: branch.id,
+        cashier_id: user.id,
+        total: '1000.00',
+      });
+      const cookies = await loginAndGetCookies(user.email, password);
+
+      const created = await request(app.getHttpServer())
+        .post(`/api/v1/sales/${sale.id}/payments`)
+        .set('Cookie', cookies)
+        .send({
+          payment_method: PaymentMethod.CASH,
+          amount: 500,
+          cash_received: 500,
+        })
+        .expect(201);
+      const paymentId = created.body.payments[0].id;
+
+      const response = await request(app.getHttpServer())
+        .patch(`/api/v1/sales/${sale.id}/payments/${paymentId}`)
+        .set('Cookie', cookies)
+        .send({ amount: 800, cash_received: 800 })
+        .expect(200);
+
+      expect(response.body.amount_paid).toBe('800.00');
+      expect(response.body.payments[0].amount).toBe('800.00');
+    });
+
+    it('updates cash_received on a CASH payment (miscount correction)', async () => {
+      const branch = await seedBranch();
+      const { user, password } = await seedUser(UserRole.ADMIN, 'a@t.com');
+      const sale = await seedSale({
+        branch_id: branch.id,
+        cashier_id: user.id,
+        total: '500.00',
+      });
+      const cookies = await loginAndGetCookies(user.email, password);
+
+      const created = await request(app.getHttpServer())
+        .post(`/api/v1/sales/${sale.id}/payments`)
+        .set('Cookie', cookies)
+        .send({
+          payment_method: PaymentMethod.CASH,
+          amount: 500,
+          cash_received: 1000,
+        })
+        .expect(201);
+      const paymentId = created.body.payments[0].id;
+
+      // Cashier realizes customer gave Rs. 700, not Rs. 1000
+      const response = await request(app.getHttpServer())
+        .patch(`/api/v1/sales/${sale.id}/payments/${paymentId}`)
+        .set('Cookie', cookies)
+        .send({ cash_received: 700 })
+        .expect(200);
+
+      expect(response.body.change_due).toBe('200.00');
+      expect(response.body.payments[0].cash_received).toBe('700.00');
+    });
+
+    it('returns 400 when clearing reference_number on a CARD payment', async () => {
+      const branch = await seedBranch();
+      const { user, password } = await seedUser(UserRole.ADMIN, 'a@t.com');
+      const sale = await seedSale({
+        branch_id: branch.id,
+        cashier_id: user.id,
+        total: '500.00',
+      });
+      const cookies = await loginAndGetCookies(user.email, password);
+
+      const created = await request(app.getHttpServer())
+        .post(`/api/v1/sales/${sale.id}/payments`)
+        .set('Cookie', cookies)
+        .send({
+          payment_method: PaymentMethod.CARD,
+          amount: 500,
+          reference_number: 'AUTH-1',
+        })
+        .expect(201);
+      const paymentId = created.body.payments[0].id;
+
+      await request(app.getHttpServer())
+        .patch(`/api/v1/sales/${sale.id}/payments/${paymentId}`)
+        .set('Cookie', cookies)
+        .send({ reference_number: null })
+        .expect(400);
+    });
+
+    it('returns 404 when payment belongs to a different sale', async () => {
+      const branch = await seedBranch();
+      const { user, password } = await seedUser(UserRole.ADMIN, 'a@t.com');
+      const saleA = await seedSale({
+        branch_id: branch.id,
+        cashier_id: user.id,
+        total: '500.00',
+      });
+      const saleB = await seedSale({
+        branch_id: branch.id,
+        cashier_id: user.id,
+        total: '500.00',
+      });
+      const cookies = await loginAndGetCookies(user.email, password);
+
+      const created = await request(app.getHttpServer())
+        .post(`/api/v1/sales/${saleA.id}/payments`)
+        .set('Cookie', cookies)
+        .send({
+          payment_method: PaymentMethod.CASH,
+          amount: 500,
+          cash_received: 500,
+        })
+        .expect(201);
+      const paymentOnA = created.body.payments[0].id;
+
+      // Try to update A's payment via B's URL
+      await request(app.getHttpServer())
+        .patch(`/api/v1/sales/${saleB.id}/payments/${paymentOnA}`)
+        .set('Cookie', cookies)
+        .send({ amount: 300, cash_received: 300 })
+        .expect(404);
+    });
+  });
+
+  describe('DELETE /api/v1/sales/:saleId/payments/:paymentId', () => {
+    it('removes a payment and returns 204; sale totals recomputed', async () => {
+      const branch = await seedBranch();
+      const { user, password } = await seedUser(UserRole.ADMIN, 'a@t.com');
+      const sale = await seedSale({
+        branch_id: branch.id,
+        cashier_id: user.id,
+        total: '500.00',
+      });
+      const cookies = await loginAndGetCookies(user.email, password);
+
+      const created = await request(app.getHttpServer())
+        .post(`/api/v1/sales/${sale.id}/payments`)
+        .set('Cookie', cookies)
+        .send({
+          payment_method: PaymentMethod.CASH,
+          amount: 500,
+          cash_received: 500,
+        })
+        .expect(201);
+      const paymentId = created.body.payments[0].id;
+
+      await request(app.getHttpServer())
+        .delete(`/api/v1/sales/${sale.id}/payments/${paymentId}`)
+        .set('Cookie', cookies)
+        .expect(204);
+
+      // Payment actually gone
+      const paymentRepo = dataSource.getRepository(Payment);
+      const found = await paymentRepo.findOne({ where: { id: paymentId } });
+      expect(found).toBeNull();
+
+      // Sale totals reset
+      const refreshed = await request(app.getHttpServer())
+        .get(`/api/v1/sales/${sale.id}`)
+        .set('Cookie', cookies)
+        .expect(200);
+      expect(refreshed.body.amount_paid).toBe('0.00');
+      expect(refreshed.body.change_due).toBe('0.00');
+      expect(refreshed.body.payments).toHaveLength(0);
+    });
+
+    it('returns 400 when sale is COMPLETED', async () => {
+      const branch = await seedBranch();
+      const { user, password } = await seedUser(UserRole.ADMIN, 'a@t.com');
+      const sale = await seedSale({
+        branch_id: branch.id,
+        cashier_id: user.id,
+        total: '500.00',
+      });
+      const cookies = await loginAndGetCookies(user.email, password);
+
+      const created = await request(app.getHttpServer())
+        .post(`/api/v1/sales/${sale.id}/payments`)
+        .set('Cookie', cookies)
+        .send({
+          payment_method: PaymentMethod.CASH,
+          amount: 500,
+          cash_received: 500,
+        })
+        .expect(201);
+      const paymentId = created.body.payments[0].id;
+
+      // Flip to COMPLETED (bypass not-yet-built endpoint)
+      await dataSource.getRepository(Sale).update(sale.id, {
+        status: SaleStatus.COMPLETED,
+        sale_number: 'INV-20260825-0001',
+        completed_at: new Date(),
+      });
+
+      await request(app.getHttpServer())
+        .delete(`/api/v1/sales/${sale.id}/payments/${paymentId}`)
         .set('Cookie', cookies)
         .expect(400);
     });

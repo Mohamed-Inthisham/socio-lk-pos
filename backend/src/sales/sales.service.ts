@@ -162,26 +162,32 @@ export class SalesService {
   }
 
   /**
-   * Fetch one sale with nested branch + cashier + lines. Lines are
-   * ordered by line_number ASC so the receipt/UI renders them in the
-   * cashier's original ring-up order (gaps from removes are preserved).
+   * Fetch one sale with nested branch + cashier + lines + payments.
    *
-   * Payments will join here when Slice E lands.
+   * Lines are ordered by line_number ASC so the receipt/UI renders them
+   * in the cashier's original ring-up order (gaps from removes are
+   * preserved).
+   *
+   * Payments are ordered by created_at ASC — the tender-order matches
+   * how a receipt shows split-tender payments (Rs. 400 card first, then
+   * Rs. 550 cash, in the order the cashier processed them).
    *
    * Throws 404 if the sale doesn't exist.
    */
   async findOne(id: string): Promise<Sale> {
     const sale = await this.salesRepository.findOne({
       where: { id },
-      relations: ['branch', 'cashier', 'lines'],
-      order: { lines: { line_number: 'ASC' } },
+      relations: ['branch', 'cashier', 'lines', 'payments'],
+      order: {
+        lines: { line_number: 'ASC' },
+        payments: { created_at: 'ASC' },
+      },
     });
     if (!sale) {
       throw new NotFoundException('Sale not found');
     }
     return sale;
   }
-
   /**
    * Partial update on a DRAFT sale. Only notes and customer_id can be
    * changed via this endpoint. Attempting to update a COMPLETED or
