@@ -11,6 +11,8 @@ import { SaleLine } from './entities/sale-line.entity';
 import { SaleStatus } from './enums/sale-status.enum';
 import { SaleType } from './enums/sale-type.enum';
 import { DiscountType } from './enums/discount-type.enum';
+import { Payment } from './entities/payment.entity';
+import { PaymentMethod } from './enums/payment-method.enum';
 import { Branch } from '../branches/entities/branch.entity';
 import { User } from '../users/entities/user.entity';
 import { ProductsService } from '../products/products.service';
@@ -46,6 +48,10 @@ describe('SalesService', () => {
   };
 
   const mockSaleLinesRepo = {
+    findOne: jest.fn(),
+  };
+
+  const mockPaymentsRepo = {
     findOne: jest.fn(),
   };
 
@@ -130,6 +136,7 @@ describe('SalesService', () => {
         SalesService,
         { provide: getRepositoryToken(Sale), useValue: mockSalesRepo },
         { provide: getRepositoryToken(SaleLine), useValue: mockSaleLinesRepo },
+        { provide: getRepositoryToken(Payment), useValue: mockPaymentsRepo },
         { provide: getRepositoryToken(Branch), useValue: mockBranchesRepo },
         { provide: getRepositoryToken(User), useValue: mockUsersRepo },
         { provide: getDataSourceToken(), useValue: mockDataSource },
@@ -1135,6 +1142,516 @@ describe('SalesService', () => {
       await expect(service.removeLine('sale-1', 'line-1')).rejects.toThrow(
         NotFoundException,
       );
+    });
+  });
+  // ---- E2 seed helpers ----
+
+  const seedPayment = (
+    overrides: Partial<{
+      id: string;
+      sale_id: string;
+      payment_method: PaymentMethod;
+      amount: string;
+      cash_received: string | null;
+      reference_number: string | null;
+      notes: string | null;
+    }> = {},
+  ) => ({
+    id: 'payment-1',
+    sale_id: 'sale-1',
+    payment_method: PaymentMethod.CASH,
+    amount: '500.00',
+    cash_received: '500.00',
+    reference_number: null,
+    notes: null,
+    ...overrides,
+  });
+
+  describe('addPayment', () => {
+    it('inserts a CASH payment and recomputes totals', async () => {
+      mockQueryBuilder.getOne.mockResolvedValue(
+        seedDraftSale({ id: 'sale-1' }),
+      );
+      // remainingBalance query
+      mockQueryBuilder.getRawOne.mockResolvedValue({ sum: '0' });
+      mockManager.create.mockImplementation((_e, data) => data);
+      mockManager.save.mockImplementation((e) =>
+        Promise.resolve({ id: 'pay-new', ...e }),
+      );
+      // sale.total mock — the seedDraftSale doesn't include `total`
+      // so we override it inline via a fresh mock
+      mockQueryBuilder.getOne.mockResolvedValueOnce({
+        ...seedDraftSale(),
+        total: '500.00',
+      });
+
+      const result = await service.addPayment('sale-1', {
+        payment_method: PaymentMethod.CASH,
+        amount: 500,
+        cash_received: 500,
+      });
+
+      expect(mockManager.create).toHaveBeenCalledWith(
+        Payment,
+        expect.objectContaining({
+          sale_id: 'sale-1',
+          payment_method: PaymentMethod.CASH,
+          amount: '500.00',
+          cash_received: '500.00',
+          reference_number: null,
+        }),
+      );
+      expect(result.id).toBe('pay-new');
+      expect(mockManager.query).toHaveBeenCalled(); // recompute
+    });
+
+    it('inserts a CARD payment with reference_number', async () => {
+      mockQueryBuilder.getOne.mockResolvedValueOnce({
+        ...seedDraftSale(),
+        total: '1000.00',
+      });
+      mockQueryBuilder.getRawOne.mockResolvedValue({ sum: '0' });
+      mockManager.create.mockImplementation((_e, data) => data);
+      mockManager.save.mockImplementation((e) => Promise.resolve(e));
+
+      await service.addPayment('sale-1', {
+        payment_method: PaymentMethod.CARD,
+        amount: 1000,
+        reference_number: 'AUTH-482913',
+      });
+
+      expect(mockManager.create).toHaveBeenCalledWith(
+        Payment,
+        expect.objectContaining({
+          payment_method: PaymentMethod.CARD,
+          amount: '1000.00',
+          cash_received: null,
+          reference_number: 'AUTH-482913',
+        }),
+      );
+    });
+
+    it('inserts a KOKO payment with reference_number', async () => {
+      mockQueryBuilder.getOne.mockResolvedValueOnce({
+        ...seedDraftSale(),
+        total: '2500.00',
+      });
+      mockQueryBuilder.getRawOne.mockResolvedValue({ sum: '0' });
+      mockManager.create.mockImplementation((_e, data) => data);
+      mockManager.save.mockImplementation((e) => Promise.resolve(e));
+
+      await service.addPayment('sale-1', {
+        payment_method: PaymentMethod.KOKO,
+        amount: 2500,
+        reference_number: 'KOKO-TXN-XYZ',
+      });
+
+      expect(mockManager.create).toHaveBeenCalledWith(
+        Payment,
+        expect.objectContaining({
+          payment_method: PaymentMethod.KOKO,
+          reference_number: 'KOKO-TXN-XYZ',
+        }),
+      );
+    });
+
+    it('throws BadRequestException when CASH payment has no cash_received', async () => {
+      mockQueryBuilder.getOne.mockResolvedValueOnce({
+        ...seedDraftSale(),
+        total: '500.00',
+      });
+      mockQueryBuilder.getRawOne.mockResolvedValue({ sum: '0' });
+
+      await expect(
+        service.addPayment('sale-1', {
+          payment_method: PaymentMethod.CASH,
+          amount: 500,
+        }),
+      ).rejects.toThrow(BadRequestException);
+    });
+
+    it('throws BadRequestException when CASH cash_received is less than amount', async () => {
+      mockQueryBuilder.getOne.mockResolvedValueOnce({
+        ...seedDraftSale(),
+        total: '500.00',
+      });
+      mockQueryBuilder.getRawOne.mockResolvedValue({ sum: '0' });
+
+      await expect(
+        service.addPayment('sale-1', {
+          payment_method: PaymentMethod.CASH,
+          amount: 500,
+          cash_received: 400,
+        }),
+      ).rejects.toThrow(BadRequestException);
+    });
+
+    it('throws BadRequestException when non-CASH payment has cash_received', async () => {
+      mockQueryBuilder.getOne.mockResolvedValueOnce({
+        ...seedDraftSale(),
+        total: '500.00',
+      });
+      mockQueryBuilder.getRawOne.mockResolvedValue({ sum: '0' });
+
+      await expect(
+        service.addPayment('sale-1', {
+          payment_method: PaymentMethod.CARD,
+          amount: 500,
+          cash_received: 500,
+          reference_number: 'AUTH-1',
+        }),
+      ).rejects.toThrow(BadRequestException);
+    });
+
+    it('throws BadRequestException when non-CASH payment has no reference_number', async () => {
+      mockQueryBuilder.getOne.mockResolvedValueOnce({
+        ...seedDraftSale(),
+        total: '500.00',
+      });
+      mockQueryBuilder.getRawOne.mockResolvedValue({ sum: '0' });
+
+      await expect(
+        service.addPayment('sale-1', {
+          payment_method: PaymentMethod.CARD,
+          amount: 500,
+        }),
+      ).rejects.toThrow(BadRequestException);
+    });
+
+    it('throws BadRequestException when amount exceeds remaining balance', async () => {
+      mockQueryBuilder.getOne.mockResolvedValueOnce({
+        ...seedDraftSale(),
+        total: '500.00',
+      });
+      // Already paid 400, remaining = 100
+      mockQueryBuilder.getRawOne.mockResolvedValue({ sum: '400' });
+
+      await expect(
+        service.addPayment('sale-1', {
+          payment_method: PaymentMethod.CASH,
+          amount: 200,
+          cash_received: 200,
+        }),
+      ).rejects.toThrow(BadRequestException);
+    });
+
+    it('allows a payment that exactly closes the remaining balance', async () => {
+      mockQueryBuilder.getOne.mockResolvedValueOnce({
+        ...seedDraftSale(),
+        total: '500.00',
+      });
+      // Already paid 400, remaining = 100 — new payment of exactly 100 should succeed
+      mockQueryBuilder.getRawOne.mockResolvedValue({ sum: '400' });
+      mockManager.create.mockImplementation((_e, data) => data);
+      mockManager.save.mockImplementation((e) => Promise.resolve(e));
+
+      await service.addPayment('sale-1', {
+        payment_method: PaymentMethod.CASH,
+        amount: 100,
+        cash_received: 100,
+      });
+
+      expect(mockManager.create).toHaveBeenCalled();
+    });
+
+    it('throws NotFoundException when the sale does not exist', async () => {
+      mockQueryBuilder.getOne.mockResolvedValueOnce(null);
+
+      await expect(
+        service.addPayment('missing', {
+          payment_method: PaymentMethod.CASH,
+          amount: 100,
+          cash_received: 100,
+        }),
+      ).rejects.toThrow(NotFoundException);
+    });
+
+    it('throws BadRequestException when sale is not DRAFT', async () => {
+      mockQueryBuilder.getOne.mockResolvedValueOnce({
+        ...seedDraftSale({ status: SaleStatus.COMPLETED }),
+        total: '500.00',
+      });
+
+      await expect(
+        service.addPayment('sale-1', {
+          payment_method: PaymentMethod.CASH,
+          amount: 100,
+          cash_received: 100,
+        }),
+      ).rejects.toThrow(BadRequestException);
+    });
+
+    it('locks the sale row for update', async () => {
+      mockQueryBuilder.getOne.mockResolvedValueOnce({
+        ...seedDraftSale(),
+        total: '500.00',
+      });
+      mockQueryBuilder.getRawOne.mockResolvedValue({ sum: '0' });
+      mockManager.create.mockImplementation((_e, data) => data);
+      mockManager.save.mockImplementation((e) => Promise.resolve(e));
+
+      await service.addPayment('sale-1', {
+        payment_method: PaymentMethod.CASH,
+        amount: 500,
+        cash_received: 500,
+      });
+
+      expect(mockQueryBuilder.setLock).toHaveBeenCalledWith(
+        'pessimistic_write',
+      );
+    });
+  });
+
+  describe('updatePayment', () => {
+    it('updates amount and recomputes totals', async () => {
+      mockQueryBuilder.getOne.mockResolvedValueOnce({
+        ...seedDraftSale(),
+        total: '1000.00',
+      });
+      mockManager.findOne.mockResolvedValue(
+        seedPayment({ amount: '400.00', cash_received: '400.00' }),
+      );
+      // No other payments — but excludeAmount = 400, so remaining = 1000 - 0 + 400 = wait
+      // Actually: paidSoFar = SUM - excludeAmount = 400 - 400 = 0, remaining = 1000 - 0 = 1000
+      mockQueryBuilder.getRawOne.mockResolvedValue({ sum: '400' });
+      mockManager.save.mockImplementation((e) => Promise.resolve(e));
+
+      const result = await service.updatePayment('sale-1', 'payment-1', {
+        amount: 600,
+        cash_received: 600,
+      });
+
+      expect(result.amount).toBe('600.00');
+      expect(result.cash_received).toBe('600.00');
+    });
+
+    it('allows amount up to sale.total when this is the only payment', async () => {
+      mockQueryBuilder.getOne.mockResolvedValueOnce({
+        ...seedDraftSale(),
+        total: '1000.00',
+      });
+      mockManager.findOne.mockResolvedValue(
+        seedPayment({ amount: '500.00', cash_received: '500.00' }),
+      );
+      // Existing payment is 500 (the one being updated). Update to 1000 should succeed.
+      mockQueryBuilder.getRawOne.mockResolvedValue({ sum: '500' });
+      mockManager.save.mockImplementation((e) => Promise.resolve(e));
+
+      await service.updatePayment('sale-1', 'payment-1', {
+        amount: 1000,
+        cash_received: 1000,
+      });
+
+      expect(mockManager.save).toHaveBeenCalled();
+    });
+
+    it('throws BadRequestException when new amount would exceed remaining balance', async () => {
+      mockQueryBuilder.getOne.mockResolvedValueOnce({
+        ...seedDraftSale(),
+        total: '1000.00',
+      });
+      mockManager.findOne.mockResolvedValue(
+        seedPayment({ amount: '300.00', cash_received: '300.00' }),
+      );
+      // SUM = 300 (this) + 400 (other) = 700. excludeAmount = 300.
+      // paidSoFar = 700 - 300 = 400. remaining = 1000 - 400 = 600.
+      // Update to 700 should exceed (600).
+      mockQueryBuilder.getRawOne.mockResolvedValue({ sum: '700' });
+
+      await expect(
+        service.updatePayment('sale-1', 'payment-1', {
+          amount: 700,
+          cash_received: 700,
+        }),
+      ).rejects.toThrow(BadRequestException);
+    });
+
+    it('updates reference_number on a CARD payment', async () => {
+      mockQueryBuilder.getOne.mockResolvedValueOnce({
+        ...seedDraftSale(),
+        total: '1000.00',
+      });
+      mockManager.findOne.mockResolvedValue(
+        seedPayment({
+          payment_method: PaymentMethod.CARD,
+          amount: '1000.00',
+          cash_received: null,
+          reference_number: 'OLD-REF',
+        }),
+      );
+      mockQueryBuilder.getRawOne.mockResolvedValue({ sum: '1000' });
+      mockManager.save.mockImplementation((e) => Promise.resolve(e));
+
+      const result = await service.updatePayment('sale-1', 'payment-1', {
+        reference_number: 'NEW-REF',
+      });
+
+      expect(result.reference_number).toBe('NEW-REF');
+    });
+
+    it('throws BadRequestException when clearing reference on a CARD payment', async () => {
+      mockQueryBuilder.getOne.mockResolvedValueOnce({
+        ...seedDraftSale(),
+        total: '1000.00',
+      });
+      mockManager.findOne.mockResolvedValue(
+        seedPayment({
+          payment_method: PaymentMethod.CARD,
+          amount: '1000.00',
+          cash_received: null,
+          reference_number: 'AUTH-1',
+        }),
+      );
+
+      await expect(
+        service.updatePayment('sale-1', 'payment-1', {
+          reference_number: null,
+        }),
+      ).rejects.toThrow(BadRequestException);
+    });
+
+    it('updates cash_received on a CASH payment (cashier miscount fix)', async () => {
+      mockQueryBuilder.getOne.mockResolvedValueOnce({
+        ...seedDraftSale(),
+        total: '500.00',
+      });
+      mockManager.findOne.mockResolvedValue(
+        seedPayment({ amount: '500.00', cash_received: '1000.00' }),
+      );
+      mockQueryBuilder.getRawOne.mockResolvedValue({ sum: '500' });
+      mockManager.save.mockImplementation((e) => Promise.resolve(e));
+
+      const result = await service.updatePayment('sale-1', 'payment-1', {
+        cash_received: 700,
+      });
+
+      expect(result.cash_received).toBe('700.00');
+      expect(result.amount).toBe('500.00'); // unchanged
+    });
+
+    it('throws BadRequestException when merged cash_received < amount', async () => {
+      mockQueryBuilder.getOne.mockResolvedValueOnce({
+        ...seedDraftSale(),
+        total: '500.00',
+      });
+      mockManager.findOne.mockResolvedValue(
+        seedPayment({ amount: '500.00', cash_received: '500.00' }),
+      );
+      mockQueryBuilder.getRawOne.mockResolvedValue({ sum: '500' });
+
+      await expect(
+        service.updatePayment('sale-1', 'payment-1', {
+          cash_received: 400,
+        }),
+      ).rejects.toThrow(BadRequestException);
+    });
+
+    it('throws NotFoundException when payment belongs to a different sale', async () => {
+      mockQueryBuilder.getOne.mockResolvedValueOnce({
+        ...seedDraftSale({ id: 'sale-1' }),
+        total: '500.00',
+      });
+      mockManager.findOne.mockResolvedValue(
+        seedPayment({ sale_id: 'sale-99' }),
+      );
+
+      await expect(
+        service.updatePayment('sale-1', 'payment-1', { amount: 300 }),
+      ).rejects.toThrow(NotFoundException);
+    });
+
+    it('throws NotFoundException when the sale does not exist', async () => {
+      mockQueryBuilder.getOne.mockResolvedValueOnce(null);
+
+      await expect(
+        service.updatePayment('missing', 'payment-1', { amount: 300 }),
+      ).rejects.toThrow(NotFoundException);
+    });
+
+    it('throws BadRequestException when sale is not DRAFT', async () => {
+      mockQueryBuilder.getOne.mockResolvedValueOnce({
+        ...seedDraftSale({ status: SaleStatus.COMPLETED }),
+        total: '500.00',
+      });
+
+      await expect(
+        service.updatePayment('sale-1', 'payment-1', { amount: 300 }),
+      ).rejects.toThrow(BadRequestException);
+    });
+
+    it('throws NotFoundException when the payment does not exist', async () => {
+      mockQueryBuilder.getOne.mockResolvedValueOnce({
+        ...seedDraftSale(),
+        total: '500.00',
+      });
+      mockManager.findOne.mockResolvedValue(null);
+
+      await expect(
+        service.updatePayment('sale-1', 'missing', { amount: 300 }),
+      ).rejects.toThrow(NotFoundException);
+    });
+  });
+
+  describe('removePayment', () => {
+    it('removes the payment and recomputes totals', async () => {
+      const payment = seedPayment();
+      mockQueryBuilder.getOne.mockResolvedValueOnce({
+        ...seedDraftSale(),
+        total: '500.00',
+      });
+      mockManager.findOne.mockResolvedValue(payment);
+      mockManager.remove.mockResolvedValue(payment);
+
+      await service.removePayment('sale-1', 'payment-1');
+
+      expect(mockManager.remove).toHaveBeenCalledWith(payment);
+      expect(mockManager.query).toHaveBeenCalled();
+    });
+
+    it('throws NotFoundException when the sale does not exist', async () => {
+      mockQueryBuilder.getOne.mockResolvedValueOnce(null);
+
+      await expect(
+        service.removePayment('missing', 'payment-1'),
+      ).rejects.toThrow(NotFoundException);
+    });
+
+    it('throws BadRequestException when sale is not DRAFT', async () => {
+      mockQueryBuilder.getOne.mockResolvedValueOnce({
+        ...seedDraftSale({ status: SaleStatus.COMPLETED }),
+        total: '500.00',
+      });
+
+      await expect(
+        service.removePayment('sale-1', 'payment-1'),
+      ).rejects.toThrow(BadRequestException);
+      expect(mockManager.remove).not.toHaveBeenCalled();
+    });
+
+    it('throws NotFoundException when the payment does not exist', async () => {
+      mockQueryBuilder.getOne.mockResolvedValueOnce({
+        ...seedDraftSale(),
+        total: '500.00',
+      });
+      mockManager.findOne.mockResolvedValue(null);
+
+      await expect(service.removePayment('sale-1', 'missing')).rejects.toThrow(
+        NotFoundException,
+      );
+    });
+
+    it('throws NotFoundException when payment belongs to a different sale', async () => {
+      mockQueryBuilder.getOne.mockResolvedValueOnce({
+        ...seedDraftSale({ id: 'sale-1' }),
+        total: '500.00',
+      });
+      mockManager.findOne.mockResolvedValue(
+        seedPayment({ sale_id: 'sale-99' }),
+      );
+
+      await expect(
+        service.removePayment('sale-1', 'payment-1'),
+      ).rejects.toThrow(NotFoundException);
     });
   });
 });

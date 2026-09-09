@@ -8,14 +8,18 @@ import { InjectRepository, InjectDataSource } from '@nestjs/typeorm';
 import { DataSource, EntityManager, Repository } from 'typeorm';
 import { Sale } from './entities/sale.entity';
 import { SaleLine } from './entities/sale-line.entity';
+import { Payment } from './entities/payment.entity';
 import { SaleStatus } from './enums/sale-status.enum';
 import { SaleType } from './enums/sale-type.enum';
 import { DiscountType } from './enums/discount-type.enum';
+import { PaymentMethod } from './enums/payment-method.enum';
 import { CreateSaleDto } from './dto/create-sale.dto';
 import { UpdateSaleDto } from './dto/update-sale.dto';
 import { ListSalesQueryDto } from './dto/list-sales-query.dto';
 import { AddSaleLineDto } from './dto/add-sale-line.dto';
 import { UpdateSaleLineDto } from './dto/update-sale-line.dto';
+import { AddPaymentDto } from './dto/add-payment.dto';
+import { UpdatePaymentDto } from './dto/update-payment.dto';
 import { Branch } from '../branches/entities/branch.entity';
 import { User } from '../users/entities/user.entity';
 import { ProductsService } from '../products/products.service';
@@ -32,6 +36,8 @@ export class SalesService {
     private readonly salesRepository: Repository<Sale>,
     @InjectRepository(SaleLine)
     private readonly saleLinesRepository: Repository<SaleLine>,
+    @InjectRepository(Payment)
+    private readonly paymentsRepository: Repository<Payment>,
     @InjectRepository(Branch)
     private readonly branchesRepository: Repository<Branch>,
     @InjectRepository(User)
@@ -516,6 +522,228 @@ export class SalesService {
   }
 
   /**
+   * Add a new payment to a DRAFT sale. Called via the sub-resource endpoint
+   * POST /sales/:id/payments (wired in Slice E3).
+   *
+   * Workflow, all inside a single transaction with the sale row locked
+   * pessimistic_write:
+   *   1. Load + lock the parent sale, assert it's DRAFT
+   *   2. Validate method-specific field rules (CASH↔cash_received,
+   *      reference required for non-CASH)
+   *   3. Compute remaining balance = Sale.total - SUM(existing payments)
+   *      and assert amount <= remaining (protects DB backstop
+   *      CHK_sales_amount_paid_bounded from ever firing)
+   *   4. Insert the payment
+   *   5. Recompute sales.amount_paid and sales.change_due from all payments
+   *
+   * Returns the freshly inserted payment WITHOUT relations loaded — callers
+   * that need the full nested shape can re-fetch via findOne (which is
+   * exactly what the controller does in E3).
+   */
+  async addPayment(saleId: string, dto: AddPaymentDto): Promise<Payment> {
+    return this.dataSource.transaction(async (manager) => {
+      // 1. Load + lock the sale
+      const sale = await manager
+        .createQueryBuilder(Sale, 'sale')
+        .setLock('pessimistic_write')
+        .where('sale.id = :id', { id: saleId })
+        .getOne();
+      if (!sale) {
+        throw new NotFoundException('Sale not found');
+      }
+      if (sale.status !== SaleStatus.DRAFT) {
+        throw new BadRequestException(
+          `Cannot add a payment to a ${sale.status} sale. Only DRAFT sales are mutable.`,
+        );
+      }
+
+      // 2. Validate method-specific rules against the proposed payment
+      this.assertPaymentFieldsConsistent(
+        dto.payment_method,
+        dto.amount,
+        dto.cash_received ?? null,
+        dto.reference_number ?? null,
+      );
+
+      // 3. Assert amount does not overshoot remaining balance
+      const remaining = await this.remainingBalance(
+        manager,
+        saleId,
+        sale.total,
+      );
+      if (dto.amount > remaining) {
+        throw new BadRequestException(
+          `Payment amount ${dto.amount.toFixed(2)} exceeds remaining balance ${remaining.toFixed(2)}`,
+        );
+      }
+
+      // 4. Insert
+      const payment = manager.create(Payment, {
+        sale_id: saleId,
+        payment_method: dto.payment_method,
+        amount: this.roundToCents(dto.amount),
+        cash_received:
+          dto.cash_received === undefined
+            ? null
+            : this.roundToCents(dto.cash_received),
+        reference_number: dto.reference_number ?? null,
+        notes: dto.notes ?? null,
+      });
+      const saved = await manager.save(payment);
+
+      // 5. Recompute sale totals from payments
+      await this.recomputePaymentTotals(manager, saleId);
+
+      return saved;
+    });
+  }
+
+  /**
+   * Update an existing payment on a DRAFT sale. Called via
+   * PATCH /sales/:saleId/payments/:paymentId (wired in Slice E3).
+   *
+   * Updatable: amount, cash_received, reference_number, notes.
+   * Frozen: payment_method, sale_id (see UpdatePaymentDto for reasoning).
+   *
+   * PATCH semantics: undefined = don't touch, null = clear (nullable
+   * fields), value = set.
+   *
+   * All cross-field validation runs against the MERGED (existing + DTO)
+   * state, then the effective amount is bounded above by (Sale.total -
+   * SUM of OTHER payments). "Other" excludes the payment being updated.
+   */
+  async updatePayment(
+    saleId: string,
+    paymentId: string,
+    dto: UpdatePaymentDto,
+  ): Promise<Payment> {
+    return this.dataSource.transaction(async (manager) => {
+      // Load + lock the sale
+      const sale = await manager
+        .createQueryBuilder(Sale, 'sale')
+        .setLock('pessimistic_write')
+        .where('sale.id = :id', { id: saleId })
+        .getOne();
+      if (!sale) {
+        throw new NotFoundException('Sale not found');
+      }
+      if (sale.status !== SaleStatus.DRAFT) {
+        throw new BadRequestException(
+          `Cannot update a payment on a ${sale.status} sale. Only DRAFT sales are mutable.`,
+        );
+      }
+
+      // Load the payment and confirm it belongs to this sale
+      const payment = await manager.findOne(Payment, {
+        where: { id: paymentId },
+      });
+      if (!payment || payment.sale_id !== saleId) {
+        throw new NotFoundException('Payment not found');
+      }
+
+      // Merge DTO onto current payment state
+      const nextAmount = dto.amount ?? Number(payment.amount);
+      const nextCashReceived =
+        dto.cash_received !== undefined
+          ? dto.cash_received
+          : payment.cash_received === null
+            ? null
+            : Number(payment.cash_received);
+      const nextReferenceNumber =
+        dto.reference_number !== undefined
+          ? dto.reference_number
+          : payment.reference_number;
+
+      // Validate the merged state (method is frozen so use existing value)
+      this.assertPaymentFieldsConsistent(
+        payment.payment_method,
+        nextAmount,
+        nextCashReceived,
+        nextReferenceNumber,
+      );
+
+      // Bound nextAmount above by remaining balance excluding THIS payment.
+      // We pass the current payment's amount as "excludeAmount" so it's
+      // subtracted from the "already paid" total before computing remaining.
+      const remaining = await this.remainingBalance(
+        manager,
+        saleId,
+        sale.total,
+        Number(payment.amount),
+      );
+      if (nextAmount > remaining) {
+        throw new BadRequestException(
+          `Payment amount ${nextAmount.toFixed(2)} exceeds remaining balance ${remaining.toFixed(2)}`,
+        );
+      }
+
+      // Apply mutations. Only touch fields the DTO actually included.
+      if (dto.amount !== undefined) {
+        payment.amount = this.roundToCents(nextAmount);
+      }
+      if (dto.cash_received !== undefined) {
+        payment.cash_received =
+          nextCashReceived === null
+            ? null
+            : this.roundToCents(nextCashReceived);
+      }
+      if (dto.reference_number !== undefined) {
+        payment.reference_number = dto.reference_number;
+      }
+      if (dto.notes !== undefined) {
+        payment.notes = dto.notes;
+      }
+
+      const saved = await manager.save(payment);
+
+      // Recompute sale totals
+      await this.recomputePaymentTotals(manager, saleId);
+
+      return saved;
+    });
+  }
+
+  /**
+   * Remove a payment from a DRAFT sale. Called via
+   * DELETE /sales/:saleId/payments/:paymentId (wired in Slice E3).
+   *
+   * Hard delete — a DRAFT payment has no ledger commitment yet. If the
+   * parent sale ever completes, its remaining payments become immutable;
+   * this endpoint only applies to payments on a DRAFT sale.
+   *
+   * Runs inside a transaction with the parent sale row locked and
+   * recomputes amount_paid + change_due from the resulting payment set.
+   */
+  async removePayment(saleId: string, paymentId: string): Promise<void> {
+    await this.dataSource.transaction(async (manager) => {
+      const sale = await manager
+        .createQueryBuilder(Sale, 'sale')
+        .setLock('pessimistic_write')
+        .where('sale.id = :id', { id: saleId })
+        .getOne();
+      if (!sale) {
+        throw new NotFoundException('Sale not found');
+      }
+      if (sale.status !== SaleStatus.DRAFT) {
+        throw new BadRequestException(
+          `Cannot remove a payment from a ${sale.status} sale. Only DRAFT sales are mutable.`,
+        );
+      }
+
+      const payment = await manager.findOne(Payment, {
+        where: { id: paymentId },
+      });
+      if (!payment || payment.sale_id !== saleId) {
+        throw new NotFoundException('Payment not found');
+      }
+
+      await manager.remove(payment);
+
+      await this.recomputePaymentTotals(manager, saleId);
+    });
+  }
+
+  /**
    * Convert an ISO date/timestamp to an exclusive upper bound for
    * a created_at range filter.
    *
@@ -667,5 +895,129 @@ export class SalesService {
        WHERE sales.id = $1`,
       [saleId],
     );
+  }
+  /**
+   * Recompute Sale.amount_paid and Sale.change_due from the actual
+   * payments rows and write them back to the Sale in one round trip.
+   *
+   * Called after every payment mutation (add / update / remove).
+   * Recomputes from source rather than incremental delta math — if our
+   * arithmetic ever drifts due to a bug, the next mutation resets
+   * everything to truth. Self-healing beats fast-but-wrong.
+   *
+   * Formulas:
+   *   amount_paid = SUM(amount) across all payments
+   *   change_due  = SUM(cash_received - amount) across CASH payments only
+   *
+   * The CHK_payments_cash_received_covers_amount constraint guarantees
+   * cash_received >= amount for CASH rows, so change_due is always >= 0.
+   * FILTER (WHERE payment_method = 'CASH') scopes the change sum to only
+   * cash tenders — non-cash payments have cash_received IS NULL and
+   * would otherwise poison the sum.
+   *
+   * subtotal, discount_total, total, and tax_total are NOT touched by
+   * payment mutations. Different aggregate, different recompute helper.
+   *
+   * COALESCE handles the "sale has zero payments" case (SUM returns NULL
+   * on empty input, we need 0).
+   *
+   * Must be called inside a transaction — the caller is expected to
+   * have already locked the sale row with pessimistic_write.
+   */
+  private async recomputePaymentTotals(
+    manager: EntityManager,
+    saleId: string,
+  ): Promise<void> {
+    await manager.query(
+      `UPDATE sales
+       SET amount_paid = agg.amount_paid,
+           change_due = agg.change_due,
+           updated_at = now()
+       FROM (
+         SELECT
+           COALESCE(SUM(amount), 0) AS amount_paid,
+           COALESCE(
+             SUM(cash_received - amount) FILTER (WHERE payment_method = 'CASH'),
+             0
+           ) AS change_due
+         FROM payments
+         WHERE sale_id = $1
+       ) agg
+       WHERE sales.id = $1`,
+      [saleId],
+    );
+  }
+  /**
+   * Enforce cross-field payment invariants at the service. These rules
+   * span method + amount + cash_received + reference — too complex for
+   * DTO validators, too critical to leave to just the DB CHECKs.
+   *
+   * Rules:
+   *   - CASH: cash_received required, must be >= amount
+   *   - Non-CASH: cash_received forbidden (must be null)
+   *   - Non-CASH: reference_number required (bank/provider reconciliation)
+   *
+   * The DB CHK_payments_cash_received_only_for_cash and
+   * CHK_payments_cash_received_covers_amount backstop the CASH rules;
+   * this method surfaces clean 400s with actionable messages instead of
+   * letting the DB throw check violations as 500s.
+   */
+  private assertPaymentFieldsConsistent(
+    method: PaymentMethod,
+    amount: number,
+    cashReceived: number | null,
+    referenceNumber: string | null,
+  ): void {
+    if (method === PaymentMethod.CASH) {
+      if (cashReceived === null) {
+        throw new BadRequestException(
+          'cash_received is required for CASH payments',
+        );
+      }
+      if (cashReceived < amount) {
+        throw new BadRequestException(
+          `cash_received ${cashReceived.toFixed(2)} must be >= amount ${amount.toFixed(2)}`,
+        );
+      }
+    } else {
+      if (cashReceived !== null) {
+        throw new BadRequestException(
+          `cash_received must not be set for ${method} payments`,
+        );
+      }
+      if (!referenceNumber) {
+        throw new BadRequestException(
+          `reference_number is required for ${method} payments`,
+        );
+      }
+    }
+  }
+
+  /**
+   * Compute the remaining balance on a sale: Sale.total - SUM(payments).
+   *
+   * `excludeAmount` (used by updatePayment) subtracts the current
+   * payment's OLD amount from the sum before computing remaining, so
+   * that "the amount I'm about to overwrite" doesn't count against me.
+   * Without this, updating a Rs. 500 payment to Rs. 500 would fail
+   * because SUM would already include the 500 being replaced.
+   *
+   * Returns a Number (not string) because the caller compares it against
+   * the DTO's `amount: number`. Sale.total comes back as a string from
+   * TypeORM (Postgres numeric), so we Number() it here.
+   */
+  private async remainingBalance(
+    manager: EntityManager,
+    saleId: string,
+    saleTotal: string,
+    excludeAmount = 0,
+  ): Promise<number> {
+    const result = await manager
+      .createQueryBuilder(Payment, 'payment')
+      .select('COALESCE(SUM(payment.amount), 0)', 'sum')
+      .where('payment.sale_id = :saleId', { saleId })
+      .getRawOne<{ sum: string }>();
+    const paidSoFar = Number(result?.sum ?? 0) - excludeAmount;
+    return Number(saleTotal) - paidSoFar;
   }
 }
