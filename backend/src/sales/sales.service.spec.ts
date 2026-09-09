@@ -4,6 +4,7 @@ import {
   NotFoundException,
   BadRequestException,
   ForbiddenException,
+  ConflictException,
 } from '@nestjs/common';
 import { SalesService } from './sales.service';
 import { Sale } from './entities/sale.entity';
@@ -17,6 +18,8 @@ import { Branch } from '../branches/entities/branch.entity';
 import { User } from '../users/entities/user.entity';
 import { ProductsService } from '../products/products.service';
 import { SuppliersService } from '../suppliers/suppliers.service';
+import { StockService } from '../stock/stock.service';
+import { SaleNumberCountersService } from '../sale-number-counters/sale-number-counters.service';
 
 describe('SalesService', () => {
   let service: SalesService;
@@ -69,6 +72,7 @@ describe('SalesService', () => {
   const mockManager = {
     createQueryBuilder: jest.fn(() => mockQueryBuilder),
     findOne: jest.fn(),
+    find: jest.fn(),
     create: jest.fn(),
     save: jest.fn(),
     remove: jest.fn(),
@@ -85,6 +89,14 @@ describe('SalesService', () => {
 
   const mockSuppliersService = {
     findOne: jest.fn(),
+  };
+
+  const mockStockService = {
+    decrementForSale: jest.fn(),
+  };
+
+  const mockSaleNumberCountersService = {
+    generateNext: jest.fn(),
   };
 
   const seedActiveBranch = (overrides: Partial<Branch> = {}): Branch =>
@@ -142,6 +154,11 @@ describe('SalesService', () => {
         { provide: getDataSourceToken(), useValue: mockDataSource },
         { provide: ProductsService, useValue: mockProductsService },
         { provide: SuppliersService, useValue: mockSuppliersService },
+        { provide: StockService, useValue: mockStockService },
+        {
+          provide: SaleNumberCountersService,
+          useValue: mockSaleNumberCountersService,
+        },
       ],
     }).compile();
 
@@ -1661,6 +1678,257 @@ describe('SalesService', () => {
       await expect(
         service.removePayment('sale-1', 'payment-1'),
       ).rejects.toThrow(NotFoundException);
+    });
+  });
+  describe('completeSale', () => {
+    // Helper: seed a DRAFT sale that's ready to complete — total matches
+    // amount_paid, so the invariant check passes by default. Tests that
+    // exercise the invariant guard override the relevant field.
+    const seedCompletableSale = (overrides: Record<string, unknown> = {}) => ({
+      id: 'sale-1',
+      status: SaleStatus.DRAFT,
+      branch_id: 'branch-1',
+      total: '500.00',
+      amount_paid: '500.00',
+      ...overrides,
+    });
+
+    // Helper: seed a SaleLine ready for stock decrement. Defaults are for
+    // an in-house line (no external supplier).
+    const seedCompletableLine = (
+      overrides: Partial<{
+        id: string;
+        product_id: string;
+        product_name_snapshot: string;
+        quantity: number;
+        external_supplier_id: string | null;
+      }> = {},
+    ) => ({
+      id: 'line-1',
+      sale_id: 'sale-1',
+      product_id: 'prod-1',
+      product_name_snapshot: 'iPhone 15',
+      quantity: 2,
+      external_supplier_id: null,
+      ...overrides,
+    });
+
+    it('completes a DRAFT sale: decrements stock, issues sale_number, marks COMPLETED', async () => {
+      mockQueryBuilder.getOne.mockResolvedValueOnce(seedCompletableSale());
+      mockManager.find.mockResolvedValue([
+        seedCompletableLine({ product_id: 'prod-1', quantity: 2 }),
+        seedCompletableLine({
+          id: 'line-2',
+          product_id: 'prod-2',
+          product_name_snapshot: 'AirPods',
+          quantity: 1,
+        }),
+      ]);
+      mockStockService.decrementForSale.mockResolvedValue(undefined);
+      mockSaleNumberCountersService.generateNext.mockResolvedValue(
+        'INV-20260910-0001',
+      );
+      mockManager.query.mockResolvedValue(undefined);
+
+      await service.completeSale('sale-1');
+
+      // Stock decremented for each in-house line
+      expect(mockStockService.decrementForSale).toHaveBeenCalledTimes(2);
+      expect(mockStockService.decrementForSale).toHaveBeenCalledWith(
+        mockManager,
+        'prod-1',
+        'branch-1',
+        2,
+        'iPhone 15',
+      );
+      expect(mockStockService.decrementForSale).toHaveBeenCalledWith(
+        mockManager,
+        'prod-2',
+        'branch-1',
+        1,
+        'AirPods',
+      );
+
+      // Sale number issued with the transaction's manager (enlistment)
+      expect(mockSaleNumberCountersService.generateNext).toHaveBeenCalledWith(
+        'branch-1',
+        mockManager,
+      );
+
+      // Final UPDATE fires with COMPLETED status and the issued number
+      expect(mockManager.query).toHaveBeenCalledWith(
+        expect.stringContaining('UPDATE sales'),
+        [SaleStatus.COMPLETED, 'INV-20260910-0001', 'sale-1'],
+      );
+    });
+
+    it('skips stock decrement for lines sourced from an external supplier', async () => {
+      mockQueryBuilder.getOne.mockResolvedValueOnce(seedCompletableSale());
+      mockManager.find.mockResolvedValue([
+        // In-house line — should decrement
+        seedCompletableLine({ product_id: 'prod-in-house', quantity: 1 }),
+        // External-supplier line — should be skipped
+        seedCompletableLine({
+          id: 'line-2',
+          product_id: 'prod-friendly',
+          product_name_snapshot: 'iPhone from friend shop',
+          quantity: 1,
+          external_supplier_id: 'supplier-1',
+        }),
+      ]);
+      mockStockService.decrementForSale.mockResolvedValue(undefined);
+      mockSaleNumberCountersService.generateNext.mockResolvedValue(
+        'INV-20260910-0002',
+      );
+
+      await service.completeSale('sale-1');
+
+      expect(mockStockService.decrementForSale).toHaveBeenCalledTimes(1);
+      expect(mockStockService.decrementForSale).toHaveBeenCalledWith(
+        mockManager,
+        'prod-in-house',
+        'branch-1',
+        1,
+        'iPhone 15',
+      );
+      // Verify the friendly-shop product was NOT decremented
+      expect(mockStockService.decrementForSale).not.toHaveBeenCalledWith(
+        expect.anything(),
+        'prod-friendly',
+        expect.anything(),
+        expect.anything(),
+        expect.anything(),
+      );
+    });
+
+    it('throws NotFoundException when the sale does not exist', async () => {
+      mockQueryBuilder.getOne.mockResolvedValueOnce(null);
+
+      await expect(service.completeSale('missing')).rejects.toThrow(
+        NotFoundException,
+      );
+
+      // Nothing downstream ran
+      expect(mockManager.find).not.toHaveBeenCalled();
+      expect(mockStockService.decrementForSale).not.toHaveBeenCalled();
+      expect(mockSaleNumberCountersService.generateNext).not.toHaveBeenCalled();
+    });
+
+    it('throws BadRequestException when sale is COMPLETED', async () => {
+      mockQueryBuilder.getOne.mockResolvedValueOnce(
+        seedCompletableSale({ status: SaleStatus.COMPLETED }),
+      );
+
+      await expect(service.completeSale('sale-1')).rejects.toThrow(
+        BadRequestException,
+      );
+      expect(mockStockService.decrementForSale).not.toHaveBeenCalled();
+    });
+
+    it('throws BadRequestException when sale is VOIDED', async () => {
+      mockQueryBuilder.getOne.mockResolvedValueOnce(
+        seedCompletableSale({ status: SaleStatus.VOIDED }),
+      );
+
+      await expect(service.completeSale('sale-1')).rejects.toThrow(
+        BadRequestException,
+      );
+    });
+
+    it('throws BadRequestException when the sale has no lines', async () => {
+      mockQueryBuilder.getOne.mockResolvedValueOnce(seedCompletableSale());
+      mockManager.find.mockResolvedValue([]);
+
+      await expect(service.completeSale('sale-1')).rejects.toThrow(
+        BadRequestException,
+      );
+      // Guard fires before stock decrement + number issue
+      expect(mockStockService.decrementForSale).not.toHaveBeenCalled();
+      expect(mockSaleNumberCountersService.generateNext).not.toHaveBeenCalled();
+    });
+
+    it('throws BadRequestException when amount_paid does not equal total (underpaid)', async () => {
+      mockQueryBuilder.getOne.mockResolvedValueOnce(
+        seedCompletableSale({ total: '500.00', amount_paid: '400.00' }),
+      );
+      mockManager.find.mockResolvedValue([seedCompletableLine()]);
+
+      await expect(service.completeSale('sale-1')).rejects.toThrow(
+        BadRequestException,
+      );
+      expect(mockStockService.decrementForSale).not.toHaveBeenCalled();
+    });
+
+    it('accepts amount_paid == total on the exact cent boundary', async () => {
+      // 99.99 vs 99.99 is trivial. The real risk is fractional strings
+      // like SUM outputs. Simulate that: sale.amount_paid comes back
+      // as '99.99' from a SUM, sale.total is '99.99' from computed math.
+      mockQueryBuilder.getOne.mockResolvedValueOnce(
+        seedCompletableSale({ total: '99.99', amount_paid: '99.99' }),
+      );
+      mockManager.find.mockResolvedValue([seedCompletableLine()]);
+      mockStockService.decrementForSale.mockResolvedValue(undefined);
+      mockSaleNumberCountersService.generateNext.mockResolvedValue(
+        'INV-20260910-0003',
+      );
+
+      await expect(service.completeSale('sale-1')).resolves.toBeUndefined();
+    });
+
+    it('propagates ConflictException from StockService (insufficient stock rolls back)', async () => {
+      mockQueryBuilder.getOne.mockResolvedValueOnce(seedCompletableSale());
+      mockManager.find.mockResolvedValue([
+        seedCompletableLine({ product_id: 'prod-1', quantity: 100 }),
+      ]);
+      mockStockService.decrementForSale.mockRejectedValue(
+        new ConflictException(
+          'Insufficient stock for "iPhone 15": requested 100, available 3',
+        ),
+      );
+
+      await expect(service.completeSale('sale-1')).rejects.toThrow(
+        ConflictException,
+      );
+
+      // Number was NOT issued because the failure happened before that step
+      expect(mockSaleNumberCountersService.generateNext).not.toHaveBeenCalled();
+      // Final UPDATE was NOT executed
+      expect(mockManager.query).not.toHaveBeenCalled();
+    });
+
+    it('locks the sale row for update', async () => {
+      mockQueryBuilder.getOne.mockResolvedValueOnce(seedCompletableSale());
+      mockManager.find.mockResolvedValue([seedCompletableLine()]);
+      mockStockService.decrementForSale.mockResolvedValue(undefined);
+      mockSaleNumberCountersService.generateNext.mockResolvedValue(
+        'INV-20260910-0004',
+      );
+
+      await service.completeSale('sale-1');
+
+      expect(mockQueryBuilder.setLock).toHaveBeenCalledWith(
+        'pessimistic_write',
+      );
+    });
+
+    it('stops decrementing further lines if one throws (loop bail-out)', async () => {
+      mockQueryBuilder.getOne.mockResolvedValueOnce(seedCompletableSale());
+      mockManager.find.mockResolvedValue([
+        seedCompletableLine({ id: 'line-1', product_id: 'prod-1' }),
+        seedCompletableLine({ id: 'line-2', product_id: 'prod-2' }),
+        seedCompletableLine({ id: 'line-3', product_id: 'prod-3' }),
+      ]);
+      // Second line fails
+      mockStockService.decrementForSale
+        .mockResolvedValueOnce(undefined)
+        .mockRejectedValueOnce(new ConflictException('Insufficient stock'));
+
+      await expect(service.completeSale('sale-1')).rejects.toThrow(
+        ConflictException,
+      );
+
+      // Third line was never attempted
+      expect(mockStockService.decrementForSale).toHaveBeenCalledTimes(2);
     });
   });
 });

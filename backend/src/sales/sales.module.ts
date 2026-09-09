@@ -9,12 +9,16 @@ import { SalesService } from './sales.service';
 import { SalesController } from './sales.controller';
 import { ProductsModule } from '../products/products.module';
 import { SuppliersModule } from '../suppliers/suppliers.module';
+import { StockModule } from '../stock/stock.module';
+import { SaleNumberCountersModule } from '../sale-number-counters/sale-number-counters.module';
 
 @Module({
   imports: [
     TypeOrmModule.forFeature([Sale, SaleLine, Payment, Branch, User]),
     ProductsModule,
     SuppliersModule,
+    StockModule,
+    SaleNumberCountersModule,
   ],
   providers: [SalesService],
   controllers: [SalesController],

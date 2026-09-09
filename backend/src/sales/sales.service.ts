@@ -24,6 +24,8 @@ import { Branch } from '../branches/entities/branch.entity';
 import { User } from '../users/entities/user.entity';
 import { ProductsService } from '../products/products.service';
 import { SuppliersService } from '../suppliers/suppliers.service';
+import { StockService } from '../stock/stock.service';
+import { SaleNumberCountersService } from '../sale-number-counters/sale-number-counters.service';
 import {
   PaginatedResponse,
   paginate,
@@ -46,6 +48,8 @@ export class SalesService {
     private readonly dataSource: DataSource,
     private readonly productsService: ProductsService,
     private readonly suppliersService: SuppliersService,
+    private readonly stockService: StockService,
+    private readonly saleNumberCountersService: SaleNumberCountersService,
   ) {}
 
   /**
@@ -746,6 +750,126 @@ export class SalesService {
       await manager.remove(payment);
 
       await this.recomputePaymentTotals(manager, saleId);
+    });
+  }
+
+  /**
+   * Transition a DRAFT sale into COMPLETED. This is the point where a
+   * cashier-facing "Complete Sale" button actually commits money and
+   * inventory. Everything below happens atomically in a single
+   * transaction — if any step fails, nothing persists.
+   *
+   * Preconditions (400 unless noted):
+   *   - Sale exists (404)
+   *   - Sale is DRAFT (400 — completed/voided sales are immutable)
+   *   - Sale has at least one line (400 — client should never send this)
+   *   - amount_paid === total, compared as numbers (400 — the invariant
+   *     deferred from Slice E; DB CHK_sales_amount_paid_bounded stops
+   *     overpayment, this stops underpayment)
+   *
+   * Steps, in order:
+   *   1. Load + lock the sale (pessimistic_write on the sales row)
+   *   2. Run guards above
+   *   3. For each line where external_supplier_id IS NULL: decrement
+   *      stock via StockService.decrementForSale, enlisted in this
+   *      transaction. Lines sourced from friendly shops
+   *      (external_supplier_id set) are NOT decremented from our stock —
+   *      they were never our inventory. Insufficient stock throws 409
+   *      and rolls the whole transaction back (see Slice F design pass).
+   *   4. Issue sale_number via SaleNumberCountersService.generateNext,
+   *      enlisted in this transaction. If we roll back after this,
+   *      the counter is burned (gap in sequence) — accepted trade-off
+   *      per the counter service's own docstring.
+   *   5. UPDATE sales SET status=COMPLETED, completed_at=now(),
+   *      sale_number=<issued>.
+   *
+   * Returns void. The controller re-fetches via findOne to get the
+   * fully-hydrated response — matches the pattern from addLine/addPayment.
+   *
+   * @Auditable('Sale', AuditAction.COMPLETE) lands on the controller
+   * endpoint in Slice F2, not here (audit decorators are controller-level).
+   */
+  async completeSale(saleId: string): Promise<void> {
+    await this.dataSource.transaction(async (manager) => {
+      // 1. Load + lock the sale
+      const sale = await manager
+        .createQueryBuilder(Sale, 'sale')
+        .setLock('pessimistic_write')
+        .where('sale.id = :id', { id: saleId })
+        .getOne();
+      if (!sale) {
+        throw new NotFoundException('Sale not found');
+      }
+
+      // 2a. Must be DRAFT
+      if (sale.status !== SaleStatus.DRAFT) {
+        throw new BadRequestException(
+          `Cannot complete a ${sale.status} sale. Only DRAFT sales can be completed.`,
+        );
+      }
+
+      // 2b. Must have at least one line. Loaded separately from the
+      // sale (which was fetched without relations for locking) — we
+      // need the lines below anyway for stock decrement, so this
+      // doubles as the count check.
+      const lines = await manager.find(SaleLine, {
+        where: { sale_id: saleId },
+        order: { line_number: 'ASC' },
+      });
+      if (lines.length === 0) {
+        throw new BadRequestException(
+          'Cannot complete a sale with no lines. Add at least one line first.',
+        );
+      }
+
+      // 2c. amount_paid must equal total exactly. Both are numeric(12,2)
+      // strings from Postgres, so Number() them and compare on cents to
+      // avoid float-representation surprises. A mismatch by even 1 cent
+      // is a real problem — the DB CHK stops overpayment, we stop under.
+      const totalCents = Math.round(Number(sale.total) * 100);
+      const paidCents = Math.round(Number(sale.amount_paid) * 100);
+      if (paidCents !== totalCents) {
+        throw new BadRequestException(
+          `Cannot complete sale: amount_paid ${sale.amount_paid} does not equal total ${sale.total}`,
+        );
+      }
+
+      // 3. Decrement stock for each in-house line. External-supplier
+      // lines (sourced from friendly shops) don't touch our inventory —
+      // the settlement flow in Phase 6.7 tracks those separately.
+      // Any insufficient-stock throw here rolls back the whole transaction.
+      for (const line of lines) {
+        if (line.external_supplier_id !== null) {
+          continue;
+        }
+        await this.stockService.decrementForSale(
+          manager,
+          line.product_id,
+          sale.branch_id,
+          line.quantity,
+          line.product_name_snapshot,
+        );
+      }
+
+      // 4. Issue the invoice number. Enlisted in this transaction so
+      // a downstream rollback releases it (with a gap, which is fine).
+      const saleNumber = await this.saleNumberCountersService.generateNext(
+        sale.branch_id,
+        manager,
+      );
+
+      // 5. Flip the sale to COMPLETED. Direct UPDATE rather than
+      // manager.save(sale) so we set completed_at server-side via now()
+      // and avoid a second round trip for the reload.
+      await manager.query(
+        `UPDATE sales
+         SET status = $1,
+             sale_number = $2,
+             completed_at = now(),
+             updated_at = now()
+         WHERE id = $3`,
+        [SaleStatus.COMPLETED, saleNumber, saleId],
+      );
     });
   }
 

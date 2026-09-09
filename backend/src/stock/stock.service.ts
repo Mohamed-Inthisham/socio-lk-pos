@@ -7,7 +7,7 @@ import {
   forwardRef,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository } from 'typeorm';
+import { EntityManager, Repository } from 'typeorm';
 import { Stock } from './entities/stock.entity';
 import { CreateStockDto } from './dto/create-stock.dto';
 import { UpdateStockDto } from './dto/update-stock.dto';
@@ -173,6 +173,88 @@ export class StockService {
       manage_stock: true,
     });
     return this.stockRepository.save(stock);
+  }
+
+  /**
+   * Decrement stock for a sold line as part of a larger transaction
+   * (typically SalesService.completeSale). Enlists in the caller's
+   * EntityManager so that if the outer transaction rolls back — for
+   * any reason, including a later line failing — this decrement rolls
+   * back with it. Never opens its own transaction.
+   *
+   * Behavior:
+   *   - If no stock row exists for (product, branch): 500-level error.
+   *     Stock rows are auto-created at product creation (Phase 6.1), so
+   *     a missing row means data integrity is broken, not a business
+   *     condition the cashier can fix. Fail loudly.
+   *   - If stock.manage_stock is false: silent no-op. Untracked
+   *     products (services, unlimited SIMs, etc.) don't move inventory.
+   *   - If stock.quantity < qty: throw 409 Conflict with the product
+   *     name and current available quantity, so the frontend can show
+   *     "Only 3 of iPhone 15 Pro left" instead of a generic error.
+   *   - Otherwise: UPDATE stock SET quantity = quantity - qty.
+   *
+   * Concurrency:
+   *   We SELECT ... FOR UPDATE the stock row first to serialize
+   *   concurrent decrements of the same (product, branch). Without
+   *   the lock, two cashiers ringing up the last unit at the same
+   *   moment could both pass the quantity >= qty check and both
+   *   decrement, leaving quantity = -1. The DB CHK_stock_quantity_nonneg
+   *   would catch it as a 500, but we want a clean 409 for the loser
+   *   of the race, not a check violation.
+   *
+   * Why productNameForError is passed in rather than looked up:
+   *   The caller (SalesService.completeSale) already has the product
+   *   name from the sale line's product_name_snapshot column. Passing
+   *   it in saves a join and keeps this method single-purpose.
+   *
+   * Must be called inside a transaction; will throw if `manager` is
+   * outside one (TypeORM's setLock enforces this).
+   */
+  async decrementForSale(
+    manager: EntityManager,
+    productId: string,
+    branchId: string,
+    qty: number,
+    productNameForError: string,
+  ): Promise<void> {
+    // Lock the stock row for this (product, branch) pair. Serializes
+    // concurrent completeSale calls on the same product at the same branch.
+    const stock = await manager
+      .createQueryBuilder(Stock, 'stock')
+      .setLock('pessimistic_write')
+      .where('stock.product_id = :productId', { productId })
+      .andWhere('stock.branch_id = :branchId', { branchId })
+      .getOne();
+
+    if (!stock) {
+      // Data integrity failure — stock rows should always exist by
+      // the time a sale is completed. Bubble up as 500.
+      throw new Error(
+        `Stock row missing for product ${productId} at branch ${branchId}. ` +
+          `This indicates a data integrity issue — every product should have ` +
+          `a stock row auto-created at product creation.`,
+      );
+    }
+
+    // Untracked products (services, reloads, etc.) don't move inventory.
+    if (!stock.manage_stock) {
+      return;
+    }
+
+    if (stock.quantity < qty) {
+      throw new ConflictException(
+        `Insufficient stock for "${productNameForError}": ` +
+          `requested ${qty}, available ${stock.quantity}`,
+      );
+    }
+
+    await manager
+      .createQueryBuilder()
+      .update(Stock)
+      .set({ quantity: () => `quantity - ${qty}` })
+      .where('id = :id', { id: stock.id })
+      .execute();
   }
 
   /**

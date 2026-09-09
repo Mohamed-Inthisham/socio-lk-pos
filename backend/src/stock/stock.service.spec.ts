@@ -22,12 +22,16 @@ describe('StockService', () => {
 
   const mockProductsService = { findOne: jest.fn() };
   const mockBranchesService = { findOne: jest.fn() };
+  const mockManager = {
+    createQueryBuilder: jest.fn(),
+  };
 
   const activeProduct = { id: 'p1', name: 'iPhone', is_active: true };
   const activeBranch = { id: 'b1', name: 'Main Shop', is_active: true };
 
   beforeEach(async () => {
     jest.clearAllMocks();
+    mockManager.createQueryBuilder.mockReset();
 
     const module: TestingModule = await Test.createTestingModule({
       providers: [
@@ -335,6 +339,200 @@ describe('StockService', () => {
 
       expect(result).toBe(existing);
       expect(mockRepo.save).not.toHaveBeenCalled();
+    });
+  });
+  describe('decrementForSale', () => {
+    // Helper: build a chainable QueryBuilder mock that resolves getOne()
+    // to the provided stock row (or null for "no row found").
+    const buildSelectQB = (returnValue: unknown) => ({
+      setLock: jest.fn().mockReturnThis(),
+      where: jest.fn().mockReturnThis(),
+      andWhere: jest.fn().mockReturnThis(),
+      getOne: jest.fn().mockResolvedValue(returnValue),
+    });
+
+    // Helper: build a chainable QueryBuilder mock for the UPDATE path.
+    const buildUpdateQB = () => {
+      const execute = jest.fn().mockResolvedValue({ affected: 1 });
+      return {
+        update: jest.fn().mockReturnThis(),
+        set: jest.fn().mockReturnThis(),
+        where: jest.fn().mockReturnThis(),
+        execute,
+        _execute: execute, // handle to assert on
+      };
+    };
+
+    it('decrements quantity when stock is tracked and sufficient', async () => {
+      const stockRow = {
+        id: 'stock-1',
+        product_id: 'p1',
+        branch_id: 'b1',
+        quantity: 10,
+        manage_stock: true,
+      };
+      const updateQB = buildUpdateQB();
+      mockManager.createQueryBuilder
+        .mockReturnValueOnce(buildSelectQB(stockRow)) // SELECT ... FOR UPDATE
+        .mockReturnValueOnce(updateQB); // UPDATE
+
+      await service.decrementForSale(
+        mockManager as never,
+        'p1',
+        'b1',
+        3,
+        'iPhone 15 Pro',
+      );
+
+      // UPDATE was called with SQL-side arithmetic and scoped to the row id
+      expect(updateQB.update).toHaveBeenCalledWith(Stock);
+      expect(updateQB.set).toHaveBeenCalledWith(
+        expect.objectContaining({ quantity: expect.any(Function) }),
+      );
+      // Verify the arrow function produces 'quantity - 3', not a literal value
+      const setArg = updateQB.set.mock.calls[0][0] as {
+        quantity: () => string;
+      };
+      expect(setArg.quantity()).toBe('quantity - 3');
+      expect(updateQB.where).toHaveBeenCalledWith('id = :id', {
+        id: 'stock-1',
+      });
+      expect(updateQB._execute).toHaveBeenCalled();
+    });
+
+    it('no-ops silently when manage_stock is false', async () => {
+      const untrackedRow = {
+        id: 'stock-2',
+        product_id: 'p1',
+        branch_id: 'b1',
+        quantity: 0,
+        manage_stock: false, // service, unlimited SIM, etc.
+      };
+      mockManager.createQueryBuilder.mockReturnValueOnce(
+        buildSelectQB(untrackedRow),
+      );
+
+      await expect(
+        service.decrementForSale(
+          mockManager as never,
+          'p1',
+          'b1',
+          5,
+          'Mobile reload',
+        ),
+      ).resolves.toBeUndefined();
+
+      // Only the SELECT was called; no UPDATE was ever built
+      expect(mockManager.createQueryBuilder).toHaveBeenCalledTimes(1);
+    });
+
+    it('throws ConflictException with product name and available qty when insufficient', async () => {
+      const stockRow = {
+        id: 'stock-3',
+        product_id: 'p1',
+        branch_id: 'b1',
+        quantity: 2,
+        manage_stock: true,
+      };
+      mockManager.createQueryBuilder.mockReturnValueOnce(
+        buildSelectQB(stockRow),
+      );
+
+      await expect(
+        service.decrementForSale(
+          mockManager as never,
+          'p1',
+          'b1',
+          5,
+          'iPhone 15 Pro',
+        ),
+      ).rejects.toThrow(ConflictException);
+
+      // Reset and re-run to inspect the message (the same call twice is fine)
+      mockManager.createQueryBuilder.mockReturnValueOnce(
+        buildSelectQB(stockRow),
+      );
+      await expect(
+        service.decrementForSale(
+          mockManager as never,
+          'p1',
+          'b1',
+          5,
+          'iPhone 15 Pro',
+        ),
+      ).rejects.toThrow(/iPhone 15 Pro.*requested 5.*available 2/);
+    });
+
+    it('throws when stock row is missing (data integrity failure)', async () => {
+      mockManager.createQueryBuilder.mockReturnValueOnce(buildSelectQB(null));
+
+      await expect(
+        service.decrementForSale(
+          mockManager as never,
+          'ghost-product',
+          'b1',
+          1,
+          'Ghost Product',
+        ),
+      ).rejects.toThrow(/Stock row missing/);
+    });
+
+    it('acquires pessimistic_write lock on the stock row', async () => {
+      const stockRow = {
+        id: 'stock-4',
+        product_id: 'p1',
+        branch_id: 'b1',
+        quantity: 10,
+        manage_stock: true,
+      };
+      const selectQB = buildSelectQB(stockRow);
+      mockManager.createQueryBuilder
+        .mockReturnValueOnce(selectQB)
+        .mockReturnValueOnce(buildUpdateQB());
+
+      await service.decrementForSale(
+        mockManager as never,
+        'p1',
+        'b1',
+        1,
+        'iPhone',
+      );
+
+      expect(selectQB.setLock).toHaveBeenCalledWith('pessimistic_write');
+      expect(selectQB.where).toHaveBeenCalledWith(
+        'stock.product_id = :productId',
+        { productId: 'p1' },
+      );
+      expect(selectQB.andWhere).toHaveBeenCalledWith(
+        'stock.branch_id = :branchId',
+        { branchId: 'b1' },
+      );
+    });
+
+    it('allows decrementing to exactly zero (quantity === qty boundary)', async () => {
+      const stockRow = {
+        id: 'stock-5',
+        product_id: 'p1',
+        branch_id: 'b1',
+        quantity: 3,
+        manage_stock: true,
+      };
+      const updateQB = buildUpdateQB();
+      mockManager.createQueryBuilder
+        .mockReturnValueOnce(buildSelectQB(stockRow))
+        .mockReturnValueOnce(updateQB);
+
+      await expect(
+        service.decrementForSale(
+          mockManager as never,
+          'p1',
+          'b1',
+          3, // == quantity, should succeed
+          'Last iPhone',
+        ),
+      ).resolves.toBeUndefined();
+
+      expect(updateQB._execute).toHaveBeenCalled();
     });
   });
 });
