@@ -16,6 +16,7 @@ import { User } from '../../users/entities/user.entity';
 import { SaleType } from '../enums/sale-type.enum';
 import { SaleStatus } from '../enums/sale-status.enum';
 import { SaleLine } from './sale-line.entity';
+import { Payment } from './payment.entity';
 
 /**
  * A Sale is a financial transaction — cart + payments + a lifecycle.
@@ -49,6 +50,7 @@ import { SaleLine } from './sale-line.entity';
   'CHK_sales_sale_number_when_completed',
   `(status IN ('COMPLETED', 'VOIDED')) = (sale_number IS NOT NULL)`,
 )
+@Check('CHK_sales_amount_paid_bounded', `amount_paid <= total`)
 export class Sale {
   @PrimaryGeneratedColumn('uuid')
   id!: string;
@@ -145,6 +147,9 @@ export class Sale {
 
   @OneToMany(() => SaleLine, (line) => line.sale)
   lines?: SaleLine[];
+
+  @OneToMany(() => Payment, (payment) => payment.sale)
+  payments?: Payment[];
 
   @Index('idx_sales_created_at')
   @CreateDateColumn({ type: 'timestamptz', name: 'created_at' })
