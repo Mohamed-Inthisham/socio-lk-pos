@@ -19,6 +19,7 @@ import { SaleLine } from '../src/sales/entities/sale-line.entity';
 import { DiscountType } from '../src/sales/enums/discount-type.enum';
 import { Payment } from '../src/sales/entities/payment.entity';
 import { PaymentMethod } from '../src/sales/enums/payment-method.enum';
+import { Stock } from '../src/stock/entities/stock.entity';
 
 describe('Sales (e2e)', () => {
   let app: INestApplication;
@@ -164,6 +165,37 @@ describe('Sales (e2e)', () => {
         is_active: overrides.is_active ?? true,
       }),
     );
+  }
+
+  /**
+   * Seed or overwrite a stock row for a (product, branch). Products are
+   * auto-created with quantity=0 stock rows at product-creation time
+   * (Phase 6.1 hook), so this helper UPDATEs rather than INSERTs.
+   * Used to give test sales enough stock to complete against.
+   */
+  async function setStockQuantity(
+    productId: string,
+    branchId: string,
+    quantity: number,
+    manageStock = true,
+  ): Promise<void> {
+    const repo = dataSource.getRepository(Stock);
+    const existing = await repo.findOne({
+      where: { product_id: productId, branch_id: branchId },
+    });
+    if (existing) {
+      await repo.update(existing.id, { quantity, manage_stock: manageStock });
+    } else {
+      await repo.save(
+        repo.create({
+          product_id: productId,
+          branch_id: branchId,
+          quantity,
+          min_quantity: 0,
+          manage_stock: manageStock,
+        }),
+      );
+    }
   }
 
   async function loginAndGetCookies(
@@ -1597,6 +1629,420 @@ describe('Sales (e2e)', () => {
         .delete(`/api/v1/sales/${sale.id}/payments/${paymentId}`)
         .set('Cookie', cookies)
         .expect(400);
+    });
+  });
+  describe('POST /api/v1/sales/:id/complete', () => {
+    /**
+     * Helper: build a "ready to complete" DRAFT sale — one line, one
+     * CASH payment covering the full total. Individual tests override
+     * for edge cases (empty lines, underpaid, external supplier, etc).
+     */
+    async function seedReadyToCompleteSale(
+      branchId: string,
+      cashierId: string,
+      cookies: string[],
+      opts: {
+        productPrice?: string;
+        productName?: string;
+        stockQty?: number;
+        externalSupplierId?: string;
+        skipPayment?: boolean;
+      } = {},
+    ) {
+      const price = opts.productPrice ?? '100.00';
+      const product = await seedProduct(branchId, {
+        name: opts.productName ?? 'Test Product',
+        selling_price: price,
+      });
+      // Give it stock (Phase 6.1 auto-creates the row at qty=0)
+      if (opts.stockQty !== undefined) {
+        await setStockQuantity(product.id, branchId, opts.stockQty);
+      }
+      const sale = await seedSale({
+        branch_id: branchId,
+        cashier_id: cashierId,
+      });
+      await request(app.getHttpServer())
+        .post(`/api/v1/sales/${sale.id}/lines`)
+        .set('Cookie', cookies)
+        .send({
+          product_id: product.id,
+          quantity: 1,
+          external_supplier_id: opts.externalSupplierId,
+        })
+        .expect(201);
+      if (!opts.skipPayment) {
+        await request(app.getHttpServer())
+          .post(`/api/v1/sales/${sale.id}/payments`)
+          .set('Cookie', cookies)
+          .send({
+            payment_method: PaymentMethod.CASH,
+            amount: Number(price),
+            cash_received: Number(price),
+          })
+          .expect(201);
+      }
+      return { sale, product };
+    }
+
+    it('completes a paid DRAFT sale: decrements stock, issues sale_number, sets completed_at', async () => {
+      const branch = await seedBranch();
+      const { user, password } = await seedUser(UserRole.ADMIN, 'a@t.com');
+      const cookies = await loginAndGetCookies(user.email, password);
+      const { sale, product } = await seedReadyToCompleteSale(
+        branch.id,
+        user.id,
+        cookies,
+        { productPrice: '250.00', stockQty: 5 },
+      );
+
+      const response = await request(app.getHttpServer())
+        .post(`/api/v1/sales/${sale.id}/complete`)
+        .set('Cookie', cookies)
+        .expect(200);
+
+      // Response is the fully-hydrated completed sale
+      expect(response.body).toMatchObject({
+        id: sale.id,
+        status: SaleStatus.COMPLETED,
+        total: '250.00',
+        amount_paid: '250.00',
+      });
+      expect(response.body.sale_number).toMatch(/^INV-\d{8}-\d{4}$/);
+      expect(response.body.completed_at).toBeTruthy();
+      expect(response.body.branch).toMatchObject({ id: branch.id });
+      expect(response.body.cashier).toMatchObject({ id: user.id });
+      expect(response.body.lines).toHaveLength(1);
+      expect(response.body.payments).toHaveLength(1);
+
+      // Stock actually decremented in DB (5 - 1 = 4)
+      const stockRepo = dataSource.getRepository(Stock);
+      const stock = await stockRepo.findOne({
+        where: { product_id: product.id, branch_id: branch.id },
+      });
+      expect(stock?.quantity).toBe(4);
+    });
+
+    it('issues sequential sale_numbers within the same day at the same branch', async () => {
+      const branch = await seedBranch();
+      const { user, password } = await seedUser(UserRole.ADMIN, 'a@t.com');
+      const cookies = await loginAndGetCookies(user.email, password);
+
+      const first = await seedReadyToCompleteSale(branch.id, user.id, cookies, {
+        productName: 'Product A',
+        stockQty: 10,
+      });
+      const second = await seedReadyToCompleteSale(
+        branch.id,
+        user.id,
+        cookies,
+        {
+          productName: 'Product B',
+          stockQty: 10,
+        },
+      );
+
+      const resA = await request(app.getHttpServer())
+        .post(`/api/v1/sales/${first.sale.id}/complete`)
+        .set('Cookie', cookies)
+        .expect(200);
+      const resB = await request(app.getHttpServer())
+        .post(`/api/v1/sales/${second.sale.id}/complete`)
+        .set('Cookie', cookies)
+        .expect(200);
+
+      const matchA = (resA.body.sale_number as string).match(
+        /^INV-(\d{8})-(\d{4})$/,
+      );
+      const matchB = (resB.body.sale_number as string).match(
+        /^INV-(\d{8})-(\d{4})$/,
+      );
+      expect(matchA).not.toBeNull();
+      expect(matchB).not.toBeNull();
+      const [, dateA, numA] = matchA!;
+      const [, dateB, numB] = matchB!;
+      expect(dateA).toBe(dateB);
+      expect(Number(numB)).toBe(Number(numA) + 1);
+    });
+
+    it('skips stock decrement for external-supplier lines', async () => {
+      const branch = await seedBranch();
+      const { user, password } = await seedUser(UserRole.ADMIN, 'a@t.com');
+      const cookies = await loginAndGetCookies(user.email, password);
+
+      // Seed a supplier
+      const supplierRepo = dataSource.getRepository(Supplier);
+      const supplier = await supplierRepo.save({
+        name: 'Friendly Shop',
+        is_active: true,
+      } as Supplier);
+
+      // Line sourced from friendly shop — stock stays at 0
+      const { sale, product } = await seedReadyToCompleteSale(
+        branch.id,
+        user.id,
+        cookies,
+        {
+          productPrice: '500.00',
+          stockQty: 0, // deliberately zero — we're not decrementing this
+          externalSupplierId: supplier.id,
+        },
+      );
+
+      await request(app.getHttpServer())
+        .post(`/api/v1/sales/${sale.id}/complete`)
+        .set('Cookie', cookies)
+        .expect(200);
+
+      // Stock stayed at 0 — friendly-shop line did NOT touch our inventory
+      const stockRepo = dataSource.getRepository(Stock);
+      const stock = await stockRepo.findOne({
+        where: { product_id: product.id, branch_id: branch.id },
+      });
+      expect(stock?.quantity).toBe(0);
+    });
+
+    it('returns 409 and rolls back everything when stock is insufficient', async () => {
+      const branch = await seedBranch();
+      const { user, password } = await seedUser(UserRole.ADMIN, 'a@t.com');
+      const cookies = await loginAndGetCookies(user.email, password);
+      const { sale, product } = await seedReadyToCompleteSale(
+        branch.id,
+        user.id,
+        cookies,
+        { productPrice: '100.00', stockQty: 0 }, // trying to sell 1 with 0 in stock
+      );
+
+      const response = await request(app.getHttpServer())
+        .post(`/api/v1/sales/${sale.id}/complete`)
+        .set('Cookie', cookies)
+        .expect(409);
+
+      // Message names the product and available quantity
+      expect(response.body.message).toMatch(/Insufficient stock/);
+      expect(response.body.message).toMatch(/Test Product/);
+      expect(response.body.message).toMatch(/available 0/);
+
+      // Sale is still DRAFT — no sale_number, no completed_at
+      const refreshed = await request(app.getHttpServer())
+        .get(`/api/v1/sales/${sale.id}`)
+        .set('Cookie', cookies)
+        .expect(200);
+      expect(refreshed.body.status).toBe(SaleStatus.DRAFT);
+      expect(refreshed.body.sale_number).toBeNull();
+      expect(refreshed.body.completed_at).toBeNull();
+
+      // Stock unchanged
+      const stockRepo = dataSource.getRepository(Stock);
+      const stock = await stockRepo.findOne({
+        where: { product_id: product.id, branch_id: branch.id },
+      });
+      expect(stock?.quantity).toBe(0);
+    });
+
+    it('returns 400 when the sale has no lines', async () => {
+      const branch = await seedBranch();
+      const { user, password } = await seedUser(UserRole.ADMIN, 'a@t.com');
+      const sale = await seedSale({
+        branch_id: branch.id,
+        cashier_id: user.id,
+      });
+      const cookies = await loginAndGetCookies(user.email, password);
+
+      const response = await request(app.getHttpServer())
+        .post(`/api/v1/sales/${sale.id}/complete`)
+        .set('Cookie', cookies)
+        .expect(400);
+
+      expect(response.body.message).toMatch(/no lines/);
+    });
+
+    it('returns 400 when amount_paid does not equal total (underpaid)', async () => {
+      const branch = await seedBranch();
+      const { user, password } = await seedUser(UserRole.ADMIN, 'a@t.com');
+      const cookies = await loginAndGetCookies(user.email, password);
+      // seedReadyToCompleteSale with skipPayment: line added, no payment
+      const { sale } = await seedReadyToCompleteSale(
+        branch.id,
+        user.id,
+        cookies,
+        { productPrice: '100.00', stockQty: 5, skipPayment: true },
+      );
+
+      await request(app.getHttpServer())
+        .post(`/api/v1/sales/${sale.id}/complete`)
+        .set('Cookie', cookies)
+        .expect(400);
+    });
+
+    it('returns 400 when attempting to complete an already-COMPLETED sale', async () => {
+      const branch = await seedBranch();
+      const { user, password } = await seedUser(UserRole.ADMIN, 'a@t.com');
+      const cookies = await loginAndGetCookies(user.email, password);
+      const { sale } = await seedReadyToCompleteSale(
+        branch.id,
+        user.id,
+        cookies,
+        { productPrice: '100.00', stockQty: 5 },
+      );
+
+      // Complete it once
+      await request(app.getHttpServer())
+        .post(`/api/v1/sales/${sale.id}/complete`)
+        .set('Cookie', cookies)
+        .expect(200);
+
+      // Try to complete again — should 400 because status is no longer DRAFT
+      await request(app.getHttpServer())
+        .post(`/api/v1/sales/${sale.id}/complete`)
+        .set('Cookie', cookies)
+        .expect(400);
+    });
+
+    it('returns 404 when sale does not exist', async () => {
+      const { user, password } = await seedUser(UserRole.ADMIN, 'a@t.com');
+      const cookies = await loginAndGetCookies(user.email, password);
+      const fakeId = '00000000-0000-0000-0000-000000000000';
+
+      await request(app.getHttpServer())
+        .post(`/api/v1/sales/${fakeId}/complete`)
+        .set('Cookie', cookies)
+        .expect(404);
+    });
+
+    it('returns 401 when unauthenticated', async () => {
+      const branch = await seedBranch();
+      const { user } = await seedUser(UserRole.ADMIN, 'a@t.com');
+      const sale = await seedSale({
+        branch_id: branch.id,
+        cashier_id: user.id,
+      });
+
+      await request(app.getHttpServer())
+        .post(`/api/v1/sales/${sale.id}/complete`)
+        .expect(401);
+    });
+
+    it('cashier can complete their own branch sale', async () => {
+      const branch = await seedBranch();
+      const { user, password } = await seedUser(
+        UserRole.CASHIER,
+        'c@t.com',
+        branch.id,
+      );
+      const cookies = await loginAndGetCookies(user.email, password);
+      const { sale } = await seedReadyToCompleteSale(
+        branch.id,
+        user.id,
+        cookies,
+        { productPrice: '100.00', stockQty: 5 },
+      );
+
+      await request(app.getHttpServer())
+        .post(`/api/v1/sales/${sale.id}/complete`)
+        .set('Cookie', cookies)
+        .expect(200);
+    });
+
+    it('decrements multi-line sale stock correctly (per-line, per-product)', async () => {
+      const branch = await seedBranch();
+      const { user, password } = await seedUser(UserRole.ADMIN, 'a@t.com');
+      const cookies = await loginAndGetCookies(user.email, password);
+
+      const productA = await seedProduct(branch.id, {
+        name: 'Product A',
+        selling_price: '100.00',
+      });
+      const productB = await seedProduct(branch.id, {
+        name: 'Product B',
+        selling_price: '200.00',
+      });
+      await setStockQuantity(productA.id, branch.id, 10);
+      await setStockQuantity(productB.id, branch.id, 5);
+
+      const sale = await seedSale({
+        branch_id: branch.id,
+        cashier_id: user.id,
+      });
+      await request(app.getHttpServer())
+        .post(`/api/v1/sales/${sale.id}/lines`)
+        .set('Cookie', cookies)
+        .send({ product_id: productA.id, quantity: 3 })
+        .expect(201);
+      await request(app.getHttpServer())
+        .post(`/api/v1/sales/${sale.id}/lines`)
+        .set('Cookie', cookies)
+        .send({ product_id: productB.id, quantity: 2 })
+        .expect(201);
+      // Total: (100 * 3) + (200 * 2) = 700
+      await request(app.getHttpServer())
+        .post(`/api/v1/sales/${sale.id}/payments`)
+        .set('Cookie', cookies)
+        .send({
+          payment_method: PaymentMethod.CASH,
+          amount: 700,
+          cash_received: 700,
+        })
+        .expect(201);
+
+      await request(app.getHttpServer())
+        .post(`/api/v1/sales/${sale.id}/complete`)
+        .set('Cookie', cookies)
+        .expect(200);
+
+      const stockRepo = dataSource.getRepository(Stock);
+      const stockA = await stockRepo.findOne({
+        where: { product_id: productA.id, branch_id: branch.id },
+      });
+      const stockB = await stockRepo.findOne({
+        where: { product_id: productB.id, branch_id: branch.id },
+      });
+      expect(stockA?.quantity).toBe(7); // 10 - 3
+      expect(stockB?.quantity).toBe(3); // 5 - 2
+    });
+
+    it('does not decrement stock for products where manage_stock is false', async () => {
+      const branch = await seedBranch();
+      const { user, password } = await seedUser(UserRole.ADMIN, 'a@t.com');
+      const cookies = await loginAndGetCookies(user.email, password);
+
+      const product = await seedProduct(branch.id, {
+        name: 'Service Line',
+        selling_price: '500.00',
+      });
+      // manage_stock = false → the decrement should silently skip
+      await setStockQuantity(product.id, branch.id, 0, false);
+
+      const sale = await seedSale({
+        branch_id: branch.id,
+        cashier_id: user.id,
+      });
+      await request(app.getHttpServer())
+        .post(`/api/v1/sales/${sale.id}/lines`)
+        .set('Cookie', cookies)
+        .send({ product_id: product.id, quantity: 5 })
+        .expect(201);
+      await request(app.getHttpServer())
+        .post(`/api/v1/sales/${sale.id}/payments`)
+        .set('Cookie', cookies)
+        .send({
+          payment_method: PaymentMethod.CASH,
+          amount: 2500,
+          cash_received: 2500,
+        })
+        .expect(201);
+
+      await request(app.getHttpServer())
+        .post(`/api/v1/sales/${sale.id}/complete`)
+        .set('Cookie', cookies)
+        .expect(200);
+
+      // Stock stayed at 0 — untracked product, no decrement
+      const stockRepo = dataSource.getRepository(Stock);
+      const stock = await stockRepo.findOne({
+        where: { product_id: product.id, branch_id: branch.id },
+      });
+      expect(stock?.quantity).toBe(0);
     });
   });
 });

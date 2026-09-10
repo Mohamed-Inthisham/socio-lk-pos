@@ -30,6 +30,8 @@ import { Roles } from '../auth/decorators/roles.decorator';
 import { UserRole } from '../users/enums/user-role.enum';
 import { CurrentUser } from '../auth/decorators/current-user.decorator';
 import type { AuthenticatedUser } from '../auth/strategies/jwt.strategy';
+import { Auditable } from '../audit-log/decorators/auditable.decorator';
+import { AuditAction } from '../audit-log/enums/audit-action.enum';
 
 @ApiTags('Sales')
 @ApiCookieAuth('access_token')
@@ -363,5 +365,62 @@ export class SalesController {
     @Param('paymentId', ParseUUIDPipe) paymentId: string,
   ): Promise<void> {
     await this.salesService.removePayment(saleId, paymentId);
+  }
+  // ---- Lifecycle endpoints ----
+  //
+  // The moment a DRAFT sale becomes a real financial record. Stock
+  // moves, sale_number is issued, status flips to COMPLETED. First
+  // auditable event in the sales domain — DRAFT cart-building activity
+  // is noise, but this is a legal record and worth capturing.
+
+  @Post(':id/complete')
+  @HttpCode(HttpStatus.OK)
+  @Roles(UserRole.ADMIN, UserRole.MANAGER, UserRole.CASHIER)
+  @Auditable('Sale', AuditAction.COMPLETE)
+  @ApiOperation({
+    summary: 'Complete a DRAFT sale (transactional: stock + numbering)',
+    description:
+      'Transitions a DRAFT sale into COMPLETED in a single atomic ' +
+      'transaction. Decrements stock for every in-house line ' +
+      '(external-supplier lines belong to friendly shops and are ' +
+      'settled separately in Phase 6.7). Issues the invoice number ' +
+      'via the branch/date counter. Sets status=COMPLETED and ' +
+      'completed_at=now(). If any step fails — insufficient stock, ' +
+      'underpayment, missing lines — the whole transaction rolls back ' +
+      'and nothing changes.\n\n' +
+      'Preconditions: sale is DRAFT, has at least one line, and ' +
+      'amount_paid equals total exactly. Overpayment is already ' +
+      'blocked by the payment endpoint; this endpoint blocks ' +
+      'underpayment.\n\n' +
+      'Returns the fully-hydrated completed sale with nested branch, ' +
+      'cashier, lines, and payments.',
+  })
+  @ApiParam({ name: 'id', description: 'Sale UUID', format: 'uuid' })
+  @ApiResponse({
+    status: 200,
+    description:
+      'Sale completed; response is the fully-hydrated sale with the ' +
+      'newly-issued sale_number, completed_at timestamp, and COMPLETED status',
+  })
+  @ApiResponse({
+    status: 400,
+    description:
+      'Sale is not in DRAFT status, has no lines, or amount_paid does ' +
+      'not equal total',
+  })
+  @ApiResponse({ status: 401, description: 'Not authenticated' })
+  @ApiResponse({
+    status: 404,
+    description: 'Sale not found',
+  })
+  @ApiResponse({
+    status: 409,
+    description:
+      'Insufficient stock for one or more lines. Response body includes ' +
+      'the product name and current available quantity.',
+  })
+  async completeSale(@Param('id', ParseUUIDPipe) id: string) {
+    await this.salesService.completeSale(id);
+    return this.salesService.findOne(id);
   }
 }
