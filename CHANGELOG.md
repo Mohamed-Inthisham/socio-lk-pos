@@ -202,6 +202,85 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - 🧪 31 new unit tests + 8 new e2e tests — backend suite now 175 unit + 111 e2e = **286 tests total**, all green
 - 📗 `docs/backend/auth.md`, `docs/backend/rbac.md`, `docs/backend/database.md`, `docs/backend/products.md` updated for the branch link
 
+#### Suppliers Module (Phase 6.3, Slice A)
+- 🤝 `Supplier` entity for friendly shops that source stock we don't carry in-house (used-phone brokers, accessory suppliers)
+- 🔒 Case-insensitive unique name enforced via functional partial index `LOWER(name) WHERE deleted_at IS NULL`
+- ✂️ DTO layer trims all strings and converts empty strings to null on both create and update
+- 📞 Sri Lankan phone validation (`^0\d{9}$`)
+- 🧯 Soft-delete via `is_active` — deactivating preserves history on past sale lines
+- 🚪 7 endpoints: list, get, sales-count, create, update, deactivate, reactivate
+
+#### SaleNumberCounter (Phase 6.3, Slice B, internal)
+- 🔢 Per-branch, per-day invoice counter table (one row per `(branch_id, sale_date)`)
+- 🔐 Row-locked via `SELECT ... FOR UPDATE` — collision-safe under concurrent sale completion
+- 🧾 Format: `INV-YYYYMMDD-NNNN` (e.g., `INV-20260911-0007`)
+- 🌏 Day boundary in Asia/Colombo via `luxon`, not UTC — sales at 23:59 local get today's number
+- 🔁 Supports enlistment in an outer transaction so number issuance rolls back with the sale
+- 🚫 No HTTP surface — service consumed only by `SalesService.completeSale`
+
+#### Sale Entity + DRAFT CRUD (Phase 6.3, Slice C)
+- 🧾 `Sale` aggregate root with lifecycle enum (`DRAFT` → `COMPLETED` → `VOIDED`), sale_type, per-branch unique `sale_number`, snapshot money columns (`numeric(12,2)` as strings in TS)
+- ✅ 4 DB CHECK constraints: totals non-negative, voided-consistency biconditional, completed-consistency biconditional, sale-number-when-completed
+- 🔧 `SalesService` with DRAFT-only CRUD (create with cashier from JWT, findAll paginated + filtered, findOne with nested branch+cashier, update, discardDraft)
+- 🧰 Reusable `PaginationQueryDto` + `paginate()` helper added to `backend/src/common/dto/`
+- 🚪 5 top-level endpoints
+
+#### SaleLine + Line Management (Phase 6.3, Slice D)
+- 📋 `SaleLine` entity with 17 columns, 11 CHECK constraints, `UNIQUE(sale_id, line_number)`, partial index on `external_supplier_id WHERE NOT NULL`
+- 📸 Snapshot columns (`product_sku_snapshot`, `product_name_snapshot`, `unit_price`, `cost_price_snapshot`) freeze pricing at ring-up time — historical receipts don't drift with product edits
+- 💸 Discount model: client sends `{type, value}`, server resolves absolute `discount_amount`; DB CHK enforces `line_total = ROUND(unit_price * quantity - discount_amount, 2)`
+- 🎯 Half-up rounding to 2 decimals with `Number.EPSILON` guard against float-representation edge cases
+- 🔒 Transactional line mutations with `pessimistic_write` lock on parent sale
+- 🚫 Cross-branch product selling prohibited (product.branch_id must equal sale.branch_id)
+- 🏬 External supplier validated via `SuppliersService` when set; stock hooks skip these lines
+- ➕ Sale totals recomputed via single `UPDATE ... FROM (subquery)` after every mutation
+- 🚪 3 sub-resource endpoints returning the full updated sale
+
+#### Payment + Payment Management (Phase 6.3, Slice E)
+- 💳 `Payment` entity with `PaymentMethod` enum: CASH, CARD, BANK_TRANSFER, KOKO, MINTPAY (KOKO/MINTPAY are Sri Lankan BNPL — divergence from the original design's MOBILE_WALLET)
+- 💵 Multi-tender: N payments per sale, `SUM(amount)` tracked as `amount_paid`
+- 💴 CASH: `cash_received >= amount` required at DB (via CHK), change computed at receipt (`SUM(cash_received - amount) FILTER (WHERE method = 'CASH')`)
+- 🔖 Non-CASH: `reference_number` required at service layer for reconciliation
+- 🛑 Per-payment upper bound: `amount` cannot push `amount_paid` over sale total; DB `CHK_sales_amount_paid_bounded` as backstop
+- ❄️ `updatePayment` freezes `payment_method` — method changes require remove + re-add for clean audit trail
+- 🚪 3 sub-resource endpoints
+
+#### Stock Hooks + completeSale (Phase 6.3, Slice F)
+- 🔻 `StockService.decrementForSale(manager, productId, branchId, qty, productNameForError)` — enlists in caller's transaction, `SELECT ... FOR UPDATE` on the stock row, silent no-op when `manage_stock` is false, throws `ConflictException` (409) with product name + available qty when insufficient
+- ⚛️ `SalesService.completeSale(saleId)` — single atomic transaction: load+lock sale, guard DRAFT status, guard at-least-one-line, guard `amount_paid === total` via cents-integer comparison, loop decrement stock for in-house lines (external-supplier lines skipped), issue sale_number, flip status to COMPLETED
+- 🕰️ Timestamps set from DB clock via `now()`, not app clock — consistent with parallel sales at different app instances
+- 🚪 `POST /sales/:id/complete` — `@HttpCode(200)` (transition, not creation), `@Auditable('Sale', AuditAction.COMPLETE)` — first auditable event in sales domain
+- 🔀 Added `AuditAction.COMPLETE` + `AuditAction.VOID` to enum (VOID added preemptively for Slice G)
+
+#### Void (Phase 6.3, Slice G)
+- ↩️ `POST /sales/:id/void` — COMPLETED → VOIDED transition in a single atomic transaction: re-increments stock for in-house lines, stamps `reversed_at` + `reversal_reason` on every payment, sets `voided_at`, `voided_by`, `void_reason`
+- 🔨 `StockService.incrementForReversal` — mirror of `decrementForSale` with two deliberate asymmetries: no upper bound (stock can go arbitrarily high on reversal), no product name needed (no user-facing error)
+- 📝 `void_reason` required (min 3 chars after trim), enforced at DTO, service, AND DB (`CHK_sales_voided_consistency` extended)
+- 💰 `payments.reversed_at` + `reversal_reason` columns added; `CHK_payments_reversal_consistency` enforces the both-or-neither invariant
+- 🔒 Restricted to **admin + manager** — cashiers can complete but not void (supervisor swipe pattern)
+- 🔍 `@Auditable('Sale', AuditAction.VOID)` — second auditable event in sales domain
+- 🚫 VOIDED is terminal — no un-void endpoint by design. `sale_number`, `completed_at`, lines, and payment amounts all preserved on the voided record
+- 🗂️ External-supplier lines skipped on reversal (symmetric with completeSale's skip — never touched our stock, so nothing to reverse)
+- 🧾 Migration `AddVoidReasonAndPaymentReversal1789104759106`: adds `sales.void_reason`, `payments.reversed_at`, `payments.reversal_reason`, extends `CHK_sales_voided_consistency` to include void_reason, adds `CHK_payments_reversal_consistency`. Fully reversible.
+
+#### Backfill: Real Supplier Sales-Count (Phase 6.3, Slice H1)
+- 🔢 `SuppliersService.getSalesCount` — replaces the Slice A stub (returning 0 unconditionally) with a real query now that Sale + SaleLine exist
+- 🧮 `COUNT DISTINCT sale.id WHERE sale_lines.external_supplier_id = <supplier> AND sale.status = 'COMPLETED'` — a sale with 3 lines from Ranjith counts once (settlement mental model)
+- 🚫 VOIDED sales excluded (no longer owe the supplier); DRAFT sales excluded (not commitments)
+- 🔗 `SaleLine` added to `SuppliersModule.forFeature` (repository dependency only, no `SalesModule` import — avoids circular dependency)
+
+#### Sales Backend Testing (Phase 6.3)
+- 🧪 235 new tests (~148 unit + ~120 e2e) bringing the backend suite to **583 total** (345 unit + 238 e2e) — all green
+- 🌱 Sales e2e re-seeds `SkuBarcodeCounter` rows after truncation (sales flows create products)
+- 💰 Cents-integer comparison for money assertions — response bodies return money as strings, tests assert exact strings not float equality
+- 🗄️ E2e for stock-touching operations verifies DB state directly via `repo.findOne`, not just response body
+- 🔁 Void e2e uses the real `/complete` endpoint to set up state (not manual DB flips) — tests exercise the full production pipeline end-to-end
+- 📋 `mockDataSource.transaction` default in `beforeEach` invokes callback with `mockManager`; individual tests override with `mockImplementationOnce` for rollback simulation
+
+#### Backend Documentation (Phase 6.3)
+- 📗 `docs/backend/sales.md` — Sales Backend design, lifecycle, transactional flows (complete/void), endpoint reference, RBAC matrix, migration notes, test coverage, followups
+- 📇 `docs/backend/README.md` updated to index the new topic doc
+
 ### Changed
 - Migrated `LoginForm` from local state to Redux state management
 - Updated `App.jsx` with React Router setup and protected routes
@@ -220,9 +299,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Planned
 - Real dashboard layout with sidebar navigation
-- Product management module
-- POS checkout flow
-- Inventory tracking
+- ✅ ~~Product management module~~ (Phase 6.2 Path B — done)
+- POS terminal frontend (Phase 6.4 — consumes Sales backend)
+- Used-phones module: Customer, PhonePurchase, ProductUnit (Phase 6.3.5)
+- Parked sales, thermal receipts + SMS (Phase 6.5, 6.6)
+- External-sourcing settlement (Phase 6.7 — uses Supplier.getSalesCount)
 - Customer management
 - Reports & analytics
 - AWS deployment
