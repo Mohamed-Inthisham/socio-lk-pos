@@ -3,6 +3,9 @@ import { getRepositoryToken } from '@nestjs/typeorm';
 import { NotFoundException, ConflictException } from '@nestjs/common';
 import { SuppliersService } from './suppliers.service';
 import { Supplier } from './entities/supplier.entity';
+import { SaleLine } from '../sales/entities/sale-line.entity';
+import { Sale } from '../sales/entities/sale.entity';
+import { SaleStatus } from '../sales/enums/sale-status.enum';
 
 describe('SuppliersService', () => {
   let service: SuppliersService;
@@ -20,16 +23,43 @@ describe('SuppliersService', () => {
     createQueryBuilder: jest.fn(() => mockQueryBuilder),
   };
 
+  // Separate query-builder mock for the sales-count join query. Kept
+  // distinct from the supplier-name uniqueness mockQueryBuilder above
+  // so the two never interfere in tests that touch both (none currently,
+  // but cheap insurance).
+  const mockSaleLinesQueryBuilder = {
+    innerJoin: jest.fn().mockReturnThis(),
+    where: jest.fn().mockReturnThis(),
+    andWhere: jest.fn().mockReturnThis(),
+    select: jest.fn().mockReturnThis(),
+    getRawOne: jest.fn(),
+  };
+
+  const mockSaleLinesRepo = {
+    createQueryBuilder: jest.fn(() => mockSaleLinesQueryBuilder),
+  };
+
   beforeEach(async () => {
     jest.clearAllMocks();
     // Re-establish the query builder chain after clearAllMocks
     mockQueryBuilder.where.mockReturnThis();
     mockRepo.createQueryBuilder.mockReturnValue(mockQueryBuilder);
+    mockSaleLinesQueryBuilder.innerJoin.mockReturnThis();
+    mockSaleLinesQueryBuilder.where.mockReturnThis();
+    mockSaleLinesQueryBuilder.andWhere.mockReturnThis();
+    mockSaleLinesQueryBuilder.select.mockReturnThis();
+    mockSaleLinesRepo.createQueryBuilder.mockReturnValue(
+      mockSaleLinesQueryBuilder,
+    );
 
     const module: TestingModule = await Test.createTestingModule({
       providers: [
         SuppliersService,
         { provide: getRepositoryToken(Supplier), useValue: mockRepo },
+        {
+          provide: getRepositoryToken(SaleLine),
+          useValue: mockSaleLinesRepo,
+        },
       ],
     }).compile();
 
@@ -413,13 +443,68 @@ describe('SuppliersService', () => {
   });
 
   describe('getSalesCount', () => {
-    it('returns count: 0 for an existing supplier (stub until Slice H1)', async () => {
+    it('returns the COUNT DISTINCT sale_id from the join query', async () => {
       const existing = { id: 's1', name: 'Ranjith Mobile' };
       mockRepo.findOne.mockResolvedValue(existing);
+      // Postgres COUNT returns bigint → string from node-pg
+      mockSaleLinesQueryBuilder.getRawOne.mockResolvedValue({ count: '7' });
+
+      const result = await service.getSalesCount('s1');
+
+      expect(result).toEqual({ count: 7 });
+    });
+
+    it('returns count: 0 when the supplier has no COMPLETED sales', async () => {
+      const existing = { id: 's1', name: 'Ranjith Mobile' };
+      mockRepo.findOne.mockResolvedValue(existing);
+      mockSaleLinesQueryBuilder.getRawOne.mockResolvedValue({ count: '0' });
 
       const result = await service.getSalesCount('s1');
 
       expect(result).toEqual({ count: 0 });
+    });
+
+    it('handles null/undefined getRawOne result as count: 0', async () => {
+      // Defensive: if the query returns no row (shouldn't happen with
+      // COUNT, but the type says it can), we don't NaN-out.
+      const existing = { id: 's1', name: 'Ranjith Mobile' };
+      mockRepo.findOne.mockResolvedValue(existing);
+      mockSaleLinesQueryBuilder.getRawOne.mockResolvedValue(undefined);
+
+      const result = await service.getSalesCount('s1');
+
+      expect(result).toEqual({ count: 0 });
+    });
+
+    it('joins on Sale and filters by external_supplier_id + status=COMPLETED', async () => {
+      const existing = { id: 's1', name: 'Ranjith Mobile' };
+      mockRepo.findOne.mockResolvedValue(existing);
+      mockSaleLinesQueryBuilder.getRawOne.mockResolvedValue({ count: '3' });
+
+      await service.getSalesCount('s1');
+
+      // Verify the join target is Sale (not a string alias — this catches
+      // typos or someone changing to the wrong entity)
+      expect(mockSaleLinesQueryBuilder.innerJoin).toHaveBeenCalledWith(
+        Sale,
+        'sale',
+        'sale.id = line.sale_id',
+      );
+      // Filter on supplier id
+      expect(mockSaleLinesQueryBuilder.where).toHaveBeenCalledWith(
+        'line.external_supplier_id = :id',
+        { id: 's1' },
+      );
+      // Filter on COMPLETED status — CRITICAL, VOIDED and DRAFT must be excluded
+      expect(mockSaleLinesQueryBuilder.andWhere).toHaveBeenCalledWith(
+        'sale.status = :status',
+        { status: SaleStatus.COMPLETED },
+      );
+      // COUNT DISTINCT on sale_id, not COUNT(*) — one sale = one count
+      expect(mockSaleLinesQueryBuilder.select).toHaveBeenCalledWith(
+        'COUNT(DISTINCT line.sale_id)',
+        'count',
+      );
     });
 
     it('throws NotFoundException when the supplier does not exist', async () => {
@@ -428,6 +513,10 @@ describe('SuppliersService', () => {
       await expect(service.getSalesCount('missing')).rejects.toThrow(
         NotFoundException,
       );
+
+      // The count query should NEVER run if the supplier is missing —
+      // 404 short-circuits before the join. Verifies fail-fast ordering.
+      expect(mockSaleLinesRepo.createQueryBuilder).not.toHaveBeenCalled();
     });
   });
 });

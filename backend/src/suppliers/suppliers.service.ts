@@ -6,6 +6,9 @@ import {
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import { Supplier } from './entities/supplier.entity';
+import { SaleLine } from '../sales/entities/sale-line.entity';
+import { Sale } from '../sales/entities/sale.entity';
+import { SaleStatus } from '../sales/enums/sale-status.enum';
 import { CreateSupplierDto } from './dto/create-supplier.dto';
 import { UpdateSupplierDto } from './dto/update-supplier.dto';
 
@@ -14,6 +17,8 @@ export class SuppliersService {
   constructor(
     @InjectRepository(Supplier)
     private readonly suppliersRepository: Repository<Supplier>,
+    @InjectRepository(SaleLine)
+    private readonly saleLinesRepository: Repository<SaleLine>,
   ) {}
 
   /**
@@ -113,19 +118,44 @@ export class SuppliersService {
   }
 
   /**
-   * Count SaleLines that reference this supplier as an external source.
+   * Count DISTINCT COMPLETED sales in which this supplier appears as an
+   * external source on at least one line. Answers the user-facing question
+   * "how many sales has this supplier been involved in?" — where a sale
+   * with three lines from Ranjith counts once, not three times.
    *
-   * STUB in Slice A2 — returns 0 unconditionally because the SaleLine entity
-   * doesn't exist yet. Replaced with a real query in Slice H1 after Sales
-   * lands (Slice C onward).
+   * Status filter: COMPLETED only. DRAFT sales are unfinalized carts, not
+   * real commitments (a cashier might drop the supplier line before
+   * completing). VOIDED sales were reversed and no longer owe the supplier
+   * anything — including them would misleadingly block deactivation and
+   * inflate settlement dashboards.
    *
-   * The method exists now so the controller in Slice A3 can wire the endpoint
-   * and the frontend contract is stable from day one.
+   * Used by:
+   *  - the admin supplier page ("cannot deactivate, has 12 sales" context)
+   *  - the Phase 6.7 settlement flow ("how much do we owe this shop?")
+   *
+   * Returns { count } — object rather than bare number so future additions
+   * (e.g. { count, total_amount, oldest_unsettled }) don't break clients.
+   *
+   * The 404-on-missing-supplier guard runs BEFORE the count query. Cheaper
+   * than a JOIN when the supplier doesn't exist, and matches every other
+   * endpoint's "resolve target first" pattern.
    */
   async getSalesCount(id: string): Promise<{ count: number }> {
-    // Verify the supplier exists — 404 if not, matching other endpoints
+    // 404 if the supplier doesn't exist — matches other endpoints
     await this.findOne(id);
-    return { count: 0 };
+
+    const result = await this.saleLinesRepository
+      .createQueryBuilder('line')
+      .innerJoin(Sale, 'sale', 'sale.id = line.sale_id')
+      .where('line.external_supplier_id = :id', { id })
+      .andWhere('sale.status = :status', { status: SaleStatus.COMPLETED })
+      .select('COUNT(DISTINCT line.sale_id)', 'count')
+      .getRawOne<{ count: string }>();
+
+    // COUNT returns bigint from Postgres, which comes back as a string via
+    // node-pg. Number() is safe here — a shop with 2^53 sales is not a
+    // realistic scenario in this decade.
+    return { count: Number(result?.count ?? 0) };
   }
 
   /**

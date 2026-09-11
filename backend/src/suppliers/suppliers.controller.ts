@@ -80,9 +80,13 @@ export class SuppliersController {
   @ApiOperation({
     summary: 'Get the number of sale lines referencing this supplier',
     description:
-      'Admin-only. Used by the frontend to show "cannot deactivate, has X sales" ' +
-      'context on the supplier admin page, and by the 6.7 settlement flow. ' +
-      'Currently returns {count: 0} — real query lands in Slice H1 after Sales.',
+      'Admin-only. Returns the number of DISTINCT COMPLETED sales in which ' +
+      'this supplier appears as an external source on at least one line. ' +
+      'A sale with multiple lines from the same supplier counts once. ' +
+      'VOIDED and DRAFT sales are excluded — the count reflects sales that ' +
+      'actually owe the supplier money. Used by the admin supplier page for ' +
+      '"cannot deactivate, has X sales" context, and by the Phase 6.7 ' +
+      'settlement flow to compute what we owe each friendly shop.',
   })
   @ApiParam({ name: 'id', description: 'Supplier UUID', format: 'uuid' })
   @ApiResponse({
