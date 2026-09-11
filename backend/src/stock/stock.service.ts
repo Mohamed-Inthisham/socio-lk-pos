@@ -258,6 +258,81 @@ export class StockService {
   }
 
   /**
+   * Re-increment stock for a line on a voided sale, as part of a larger
+   * transaction (typically SalesService.voidSale). Enlists in the caller's
+   * EntityManager so that if the outer transaction rolls back — for any
+   * reason, including a later line failing — this increment rolls back
+   * with it. Never opens its own transaction.
+   *
+   * The mirror of decrementForSale, with two deliberate asymmetries:
+   *
+   *   1. No upper bound to check. Adding stock back can't fail on
+   *      business grounds — inventory can go arbitrarily high on
+   *      reversal. That means no 409 path here; the method has fewer
+   *      branches than its twin.
+   *
+   *   2. Missing stock row is still a 500-level integrity error. A
+   *      COMPLETED sale had this line's stock decremented at complete
+   *      time — the row MUST exist by the time we're voiding. If it
+   *      doesn't, something is very wrong with the data, not with
+   *      this business flow.
+   *
+   * Behavior:
+   *   - If no stock row exists for (product, branch): raw Error → 500.
+   *   - If stock.manage_stock is false: silent no-op. Symmetric to
+   *     decrement — we never touched it going in, don't touch it coming
+   *     out. Services, reloads, unlimited SIMs, etc.
+   *   - Otherwise: UPDATE stock SET quantity = quantity + qty.
+   *
+   * Concurrency:
+   *   We SELECT ... FOR UPDATE the stock row before mutating, same as
+   *   decrementForSale. Serializes against concurrent decrements or
+   *   increments of the same (product, branch). Without the lock, a
+   *   void racing against another cashier's completeSale on the same
+   *   product could interleave reads and produce a lost update.
+   *
+   * Must be called inside a transaction; will throw if `manager` is
+   * outside one (TypeORM's setLock enforces this).
+   */
+  async incrementForReversal(
+    manager: EntityManager,
+    productId: string,
+    branchId: string,
+    qty: number,
+  ): Promise<void> {
+    const stock = await manager
+      .createQueryBuilder(Stock, 'stock')
+      .setLock('pessimistic_write')
+      .where('stock.product_id = :productId', { productId })
+      .andWhere('stock.branch_id = :branchId', { branchId })
+      .getOne();
+
+    if (!stock) {
+      // Data integrity failure — if we're voiding a sale, this line's
+      // stock row was here when we decremented at complete time. Its
+      // absence now indicates the row was deleted out from under us,
+      // which should never happen.
+      throw new Error(
+        `Stock row missing for product ${productId} at branch ${branchId}. ` +
+          `This indicates a data integrity issue — stock rows for voided ` +
+          `sale lines must exist at void time.`,
+      );
+    }
+
+    // Untracked products don't move inventory in either direction.
+    if (!stock.manage_stock) {
+      return;
+    }
+
+    await manager
+      .createQueryBuilder()
+      .update(Stock)
+      .set({ quantity: () => `quantity + ${qty}` })
+      .where('id = :id', { id: stock.id })
+      .execute();
+  }
+
+  /**
    * Attach the computed low_stock_alert flag to a Stock row.
    * Rule: alert fires when tracking is enabled AND quantity is at or
    * below the minimum threshold.

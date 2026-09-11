@@ -20,6 +20,7 @@ import { AddSaleLineDto } from './dto/add-sale-line.dto';
 import { UpdateSaleLineDto } from './dto/update-sale-line.dto';
 import { AddPaymentDto } from './dto/add-payment.dto';
 import { UpdatePaymentDto } from './dto/update-payment.dto';
+import { VoidSaleDto } from './dto/void-sale.dto';
 import { Branch } from '../branches/entities/branch.entity';
 import { User } from '../users/entities/user.entity';
 import { ProductsService } from '../products/products.service';
@@ -869,6 +870,158 @@ export class SalesService {
              updated_at = now()
          WHERE id = $3`,
         [SaleStatus.COMPLETED, saleNumber, saleId],
+      );
+    });
+  }
+
+  /**
+   * Transition a COMPLETED sale into VOIDED. This is the reversal of
+   * completeSale — everything below happens atomically in a single
+   * transaction. If any step fails, nothing persists: the sale stays
+   * COMPLETED, stock stays where it was, payments stay live.
+   *
+   * Void is a financial reversal, not a deletion. The sale row stays
+   * in the ledger forever with its original sale_number, cashier,
+   * lines, and payments intact. What changes:
+   *   - status: COMPLETED → VOIDED
+   *   - voided_at: now() (DB clock, not app clock)
+   *   - voided_by: the user who authorized the void
+   *   - void_reason: the reason the user provided
+   *   - stock: re-incremented for every in-house line
+   *   - payments: reversed_at + reversal_reason stamped on every row
+   *
+   * completed_at is preserved (the sale WAS completed, that fact
+   * doesn't change). sale_number is preserved (invoice numbers are
+   * forever, gaps are how audits detect tampering). Lines are
+   * untouched — the void reason lives at sale level, not per-line.
+   *
+   * Preconditions:
+   *   - Sale exists (404)
+   *   - Sale is COMPLETED (400 — can't void DRAFT that never was real,
+   *     can't void VOIDED — VOIDED is terminal by design)
+   *   - void_reason is present and non-blank (enforced at DTO + here
+   *     as a defense-in-depth guard for internal callers)
+   *
+   * Steps, in order, all inside a single transaction with the sale
+   * row locked pessimistic_write:
+   *
+   *   1. Load + lock the sale (serializes against concurrent complete/void
+   *      on the same row).
+   *   2. Guard sale is COMPLETED.
+   *   3. Guard void_reason is non-blank after trim.
+   *   4. Load all lines and payments for this sale (need both for the
+   *      mutations below; single-fetch each rather than one-by-one).
+   *   5. For each line where external_supplier_id IS NULL: re-increment
+   *      stock via StockService.incrementForReversal. External-supplier
+   *      lines were never decremented from our stock, so nothing to
+   *      reverse — symmetric to completeSale's skip.
+   *   6. UPDATE payments SET reversed_at=now(), reversal_reason=<trimmed>
+   *      for all payments on this sale. Single UPDATE statement rather
+   *      than a loop — payments don't need per-row logic, and this
+   *      keeps the round trip count down.
+   *   7. UPDATE sales SET status=VOIDED, voided_at=now(),
+   *      voided_by=<userId>, void_reason=<trimmed>. Direct UPDATE so
+   *      timestamps come from the DB clock, same pattern as completeSale.
+   *
+   * Returns void. Controller re-fetches via findOne to get the
+   * fully-hydrated response.
+   *
+   * @Auditable('Sale', AuditAction.VOID) lands on the controller endpoint
+   * in Step 7, not here (audit decorators are controller-level).
+   */
+  async voidSale(
+    saleId: string,
+    voidedById: string,
+    dto: VoidSaleDto,
+  ): Promise<void> {
+    // Defense-in-depth trim + non-blank check. DTO already does this,
+    // but internal callers (future queues, admin scripts) may skip the
+    // DTO layer. Same-value redundancy — DB CHK is the final backstop.
+    const trimmedReason = dto.void_reason?.trim() ?? '';
+    if (trimmedReason.length < 3) {
+      throw new BadRequestException(
+        'void_reason is required (min 3 characters after trimming)',
+      );
+    }
+
+    await this.dataSource.transaction(async (manager) => {
+      // 1. Load + lock the sale
+      const sale = await manager
+        .createQueryBuilder(Sale, 'sale')
+        .setLock('pessimistic_write')
+        .where('sale.id = :id', { id: saleId })
+        .getOne();
+      if (!sale) {
+        throw new NotFoundException('Sale not found');
+      }
+
+      // 2. Must be COMPLETED. DRAFT can't be voided (it never was a
+      //    real financial record — use DELETE to discard). VOIDED is
+      //    terminal — the enum docstring is authoritative.
+      if (sale.status !== SaleStatus.COMPLETED) {
+        throw new BadRequestException(
+          `Cannot void a ${sale.status} sale. Only COMPLETED sales can be voided.`,
+        );
+      }
+
+      // 3. reason already validated at DTO + line above; nothing more to check.
+
+      // 4. Load lines and payments. Lines are needed for the stock
+      //    re-increment loop; payments are read implicitly by the UPDATE
+      //    below (no need to materialize them into JS objects — but we
+      //    do want to know if there are any, for a hypothetical future
+      //    early-exit optimization).
+      const lines = await manager.find(SaleLine, {
+        where: { sale_id: saleId },
+      });
+      // Any COMPLETED sale has at least one line — enforced by
+      // completeSale's own guard — so we don't check length here.
+
+      // 5. Re-increment stock for each in-house line. Sequential (not
+      //    Promise.all) so pessimistic_write locks on stock rows
+      //    serialize cleanly per (product, branch), matching the
+      //    completeSale pattern.
+      for (const line of lines) {
+        if (line.external_supplier_id !== null) {
+          continue;
+        }
+        await this.stockService.incrementForReversal(
+          manager,
+          line.product_id,
+          sale.branch_id,
+          line.quantity,
+        );
+      }
+
+      // 6. Mark every payment on this sale as reversed. Single UPDATE
+      //    rather than looping per-payment — payments don't need any
+      //    per-row logic here, and a single round trip is cheaper.
+      //    reversal_reason is copied from the sale's void_reason (design
+      //    decision — cashier enters the reason once at sale level,
+      //    every payment inherits it). The CHK_payments_reversal_consistency
+      //    is satisfied by setting both columns together.
+      await manager.query(
+        `UPDATE payments
+         SET reversed_at = now(),
+             reversal_reason = $1,
+             updated_at = now()
+         WHERE sale_id = $2`,
+        [trimmedReason, saleId],
+      );
+
+      // 7. Flip the sale to VOIDED. Direct UPDATE for DB-clock timestamps
+      //    and single round trip, same as completeSale. All four void
+      //    fields set together — CHK_sales_voided_consistency verifies
+      //    the biconditional.
+      await manager.query(
+        `UPDATE sales
+         SET status = $1,
+             voided_at = now(),
+             voided_by = $2,
+             void_reason = $3,
+             updated_at = now()
+         WHERE id = $4`,
+        [SaleStatus.VOIDED, voidedById, trimmedReason, saleId],
       );
     });
   }

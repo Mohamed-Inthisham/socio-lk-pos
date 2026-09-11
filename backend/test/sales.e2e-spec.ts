@@ -2045,4 +2045,485 @@ describe('Sales (e2e)', () => {
       expect(stock?.quantity).toBe(0);
     });
   });
+
+  describe('POST /api/v1/sales/:id/void', () => {
+    /**
+     * Helper: build and immediately COMPLETE a sale so we have a real
+     * VOIDable sale to work with. Void tests always start from
+     * COMPLETED (DRAFT-void is a rejected state, not a starting state).
+     *
+     * Reuses seedReadyToCompleteSale + the /complete endpoint to keep
+     * void tests exercising the real production flow end-to-end. No
+     * shortcuts like manual sale.status='COMPLETED' UPDATE — that would
+     * bypass the stock-decrement side effect and produce a DB state that
+     * void couldn't validly operate on.
+     */
+    async function seedCompletedSale(
+      branchId: string,
+      cashierId: string,
+      cookies: string[],
+      opts: {
+        productPrice?: string;
+        productName?: string;
+        stockQty?: number;
+        externalSupplierId?: string;
+      } = {},
+    ) {
+      const price = opts.productPrice ?? '100.00';
+      const product = await seedProduct(branchId, {
+        name: opts.productName ?? 'Test Product',
+        selling_price: price,
+      });
+      if (opts.stockQty !== undefined) {
+        await setStockQuantity(product.id, branchId, opts.stockQty);
+      }
+      const sale = await seedSale({
+        branch_id: branchId,
+        cashier_id: cashierId,
+      });
+      await request(app.getHttpServer())
+        .post(`/api/v1/sales/${sale.id}/lines`)
+        .set('Cookie', cookies)
+        .send({
+          product_id: product.id,
+          quantity: 1,
+          external_supplier_id: opts.externalSupplierId,
+        })
+        .expect(201);
+      await request(app.getHttpServer())
+        .post(`/api/v1/sales/${sale.id}/payments`)
+        .set('Cookie', cookies)
+        .send({
+          payment_method: PaymentMethod.CASH,
+          amount: Number(price),
+          cash_received: Number(price),
+        })
+        .expect(201);
+      const completed = await request(app.getHttpServer())
+        .post(`/api/v1/sales/${sale.id}/complete`)
+        .set('Cookie', cookies)
+        .expect(200);
+      return { sale, product, saleNumber: completed.body.sale_number };
+    }
+
+    const validReason = 'Customer returned defective phone';
+
+    it('voids a COMPLETED sale: re-increments stock, marks payments reversed, flips to VOIDED', async () => {
+      const branch = await seedBranch();
+      const { user, password } = await seedUser(UserRole.ADMIN, 'a@t.com');
+      const cookies = await loginAndGetCookies(user.email, password);
+      // Start with stock 5, sell 1 → after complete stock is 4, after void back to 5
+      const { sale, product, saleNumber } = await seedCompletedSale(
+        branch.id,
+        user.id,
+        cookies,
+        { productPrice: '250.00', stockQty: 5 },
+      );
+
+      const response = await request(app.getHttpServer())
+        .post(`/api/v1/sales/${sale.id}/void`)
+        .set('Cookie', cookies)
+        .send({ void_reason: validReason })
+        .expect(200);
+
+      // Response is fully-hydrated voided sale
+      expect(response.body).toMatchObject({
+        id: sale.id,
+        status: SaleStatus.VOIDED,
+        void_reason: validReason,
+        voided_by: user.id,
+        // Preserved from complete:
+        sale_number: saleNumber,
+        total: '250.00',
+        amount_paid: '250.00',
+      });
+      expect(response.body.voided_at).toBeTruthy();
+      expect(response.body.completed_at).toBeTruthy(); // NOT cleared
+
+      // Lines unchanged
+      expect(response.body.lines).toHaveLength(1);
+
+      // Payments stamped with reversal fields
+      expect(response.body.payments).toHaveLength(1);
+      expect(response.body.payments[0].reversed_at).toBeTruthy();
+      expect(response.body.payments[0].reversal_reason).toBe(validReason);
+      // Payment amount UNCHANGED — void doesn't zero out payment amounts
+      expect(response.body.payments[0].amount).toBe('250.00');
+
+      // Stock actually re-incremented in DB (4 → 5)
+      const stockRepo = dataSource.getRepository(Stock);
+      const stock = await stockRepo.findOne({
+        where: { product_id: product.id, branch_id: branch.id },
+      });
+      expect(stock?.quantity).toBe(5);
+    });
+
+    it('trims whitespace from void_reason before persisting', async () => {
+      const branch = await seedBranch();
+      const { user, password } = await seedUser(UserRole.ADMIN, 'a@t.com');
+      const cookies = await loginAndGetCookies(user.email, password);
+      const { sale } = await seedCompletedSale(branch.id, user.id, cookies, {
+        stockQty: 5,
+      });
+
+      const response = await request(app.getHttpServer())
+        .post(`/api/v1/sales/${sale.id}/void`)
+        .set('Cookie', cookies)
+        .send({ void_reason: '   Duplicate transaction   ' })
+        .expect(200);
+
+      expect(response.body.void_reason).toBe('Duplicate transaction');
+      expect(response.body.payments[0].reversal_reason).toBe(
+        'Duplicate transaction',
+      );
+    });
+
+    it('skips stock re-increment for external-supplier lines', async () => {
+      const branch = await seedBranch();
+      const { user, password } = await seedUser(UserRole.ADMIN, 'a@t.com');
+      const cookies = await loginAndGetCookies(user.email, password);
+
+      const supplierRepo = dataSource.getRepository(Supplier);
+      const supplier = await supplierRepo.save({
+        name: 'Friendly Shop',
+        is_active: true,
+      } as Supplier);
+
+      // External line — completeSale didn't decrement stock, so void
+      // shouldn't re-increment. Stock stays at 0 throughout.
+      const { sale, product } = await seedCompletedSale(
+        branch.id,
+        user.id,
+        cookies,
+        {
+          productPrice: '500.00',
+          stockQty: 0,
+          externalSupplierId: supplier.id,
+        },
+      );
+
+      await request(app.getHttpServer())
+        .post(`/api/v1/sales/${sale.id}/void`)
+        .set('Cookie', cookies)
+        .send({ void_reason: validReason })
+        .expect(200);
+
+      const stockRepo = dataSource.getRepository(Stock);
+      const stock = await stockRepo.findOne({
+        where: { product_id: product.id, branch_id: branch.id },
+      });
+      expect(stock?.quantity).toBe(0); // never touched, symmetric with complete
+    });
+
+    it('preserves sale_number and completed_at after void', async () => {
+      const branch = await seedBranch();
+      const { user, password } = await seedUser(UserRole.ADMIN, 'a@t.com');
+      const cookies = await loginAndGetCookies(user.email, password);
+      const { sale, saleNumber } = await seedCompletedSale(
+        branch.id,
+        user.id,
+        cookies,
+        { stockQty: 5 },
+      );
+
+      // Grab completed_at from the completed sale to compare after void
+      const beforeVoid = await request(app.getHttpServer())
+        .get(`/api/v1/sales/${sale.id}`)
+        .set('Cookie', cookies)
+        .expect(200);
+      const originalCompletedAt = beforeVoid.body.completed_at;
+
+      const response = await request(app.getHttpServer())
+        .post(`/api/v1/sales/${sale.id}/void`)
+        .set('Cookie', cookies)
+        .send({ void_reason: validReason })
+        .expect(200);
+
+      // Invoice number stays — audit trail integrity
+      expect(response.body.sale_number).toBe(saleNumber);
+      // completed_at stays — the sale WAS completed, that fact doesn't change
+      expect(response.body.completed_at).toBe(originalCompletedAt);
+    });
+
+    it('multi-line + multi-payment void re-increments each in-house line and stamps every payment', async () => {
+      const branch = await seedBranch();
+      const { user, password } = await seedUser(UserRole.ADMIN, 'a@t.com');
+      const cookies = await loginAndGetCookies(user.email, password);
+
+      const productA = await seedProduct(branch.id, {
+        name: 'A',
+        selling_price: '100.00',
+      });
+      const productB = await seedProduct(branch.id, {
+        name: 'B',
+        selling_price: '200.00',
+      });
+      await setStockQuantity(productA.id, branch.id, 10);
+      await setStockQuantity(productB.id, branch.id, 5);
+
+      const sale = await seedSale({
+        branch_id: branch.id,
+        cashier_id: user.id,
+      });
+      await request(app.getHttpServer())
+        .post(`/api/v1/sales/${sale.id}/lines`)
+        .set('Cookie', cookies)
+        .send({ product_id: productA.id, quantity: 3 })
+        .expect(201);
+      await request(app.getHttpServer())
+        .post(`/api/v1/sales/${sale.id}/lines`)
+        .set('Cookie', cookies)
+        .send({ product_id: productB.id, quantity: 2 })
+        .expect(201);
+      // Total: 300 + 400 = 700. Split-tender: 400 card + 300 cash
+      await request(app.getHttpServer())
+        .post(`/api/v1/sales/${sale.id}/payments`)
+        .set('Cookie', cookies)
+        .send({
+          payment_method: PaymentMethod.CARD,
+          amount: 400,
+          reference_number: 'AUTH-1',
+        })
+        .expect(201);
+      await request(app.getHttpServer())
+        .post(`/api/v1/sales/${sale.id}/payments`)
+        .set('Cookie', cookies)
+        .send({
+          payment_method: PaymentMethod.CASH,
+          amount: 300,
+          cash_received: 300,
+        })
+        .expect(201);
+      await request(app.getHttpServer())
+        .post(`/api/v1/sales/${sale.id}/complete`)
+        .set('Cookie', cookies)
+        .expect(200);
+      // After complete: stockA=7, stockB=3
+
+      const response = await request(app.getHttpServer())
+        .post(`/api/v1/sales/${sale.id}/void`)
+        .set('Cookie', cookies)
+        .send({ void_reason: validReason })
+        .expect(200);
+
+      // Both payments stamped with same reversal_reason
+      expect(response.body.payments).toHaveLength(2);
+      for (const p of response.body.payments) {
+        expect(p.reversed_at).toBeTruthy();
+        expect(p.reversal_reason).toBe(validReason);
+      }
+
+      // Both stocks restored to original quantities
+      const stockRepo = dataSource.getRepository(Stock);
+      const stockA = await stockRepo.findOne({
+        where: { product_id: productA.id, branch_id: branch.id },
+      });
+      const stockB = await stockRepo.findOne({
+        where: { product_id: productB.id, branch_id: branch.id },
+      });
+      expect(stockA?.quantity).toBe(10); // 7 + 3 back
+      expect(stockB?.quantity).toBe(5); // 3 + 2 back
+    });
+
+    it('returns 400 when void_reason is missing', async () => {
+      const branch = await seedBranch();
+      const { user, password } = await seedUser(UserRole.ADMIN, 'a@t.com');
+      const cookies = await loginAndGetCookies(user.email, password);
+      const { sale } = await seedCompletedSale(branch.id, user.id, cookies, {
+        stockQty: 5,
+      });
+
+      await request(app.getHttpServer())
+        .post(`/api/v1/sales/${sale.id}/void`)
+        .set('Cookie', cookies)
+        .send({})
+        .expect(400);
+    });
+
+    it('returns 400 when void_reason is whitespace-only', async () => {
+      const branch = await seedBranch();
+      const { user, password } = await seedUser(UserRole.ADMIN, 'a@t.com');
+      const cookies = await loginAndGetCookies(user.email, password);
+      const { sale } = await seedCompletedSale(branch.id, user.id, cookies, {
+        stockQty: 5,
+      });
+
+      await request(app.getHttpServer())
+        .post(`/api/v1/sales/${sale.id}/void`)
+        .set('Cookie', cookies)
+        .send({ void_reason: '     ' })
+        .expect(400);
+    });
+
+    it('returns 400 when void_reason is too short (< 3 chars after trim)', async () => {
+      const branch = await seedBranch();
+      const { user, password } = await seedUser(UserRole.ADMIN, 'a@t.com');
+      const cookies = await loginAndGetCookies(user.email, password);
+      const { sale } = await seedCompletedSale(branch.id, user.id, cookies, {
+        stockQty: 5,
+      });
+
+      await request(app.getHttpServer())
+        .post(`/api/v1/sales/${sale.id}/void`)
+        .set('Cookie', cookies)
+        .send({ void_reason: 'no' })
+        .expect(400);
+    });
+
+    it('returns 400 when attempting to void a DRAFT sale', async () => {
+      const branch = await seedBranch();
+      const { user, password } = await seedUser(UserRole.ADMIN, 'a@t.com');
+      const sale = await seedSale({
+        branch_id: branch.id,
+        cashier_id: user.id,
+      });
+      const cookies = await loginAndGetCookies(user.email, password);
+
+      await request(app.getHttpServer())
+        .post(`/api/v1/sales/${sale.id}/void`)
+        .set('Cookie', cookies)
+        .send({ void_reason: validReason })
+        .expect(400);
+    });
+
+    it('returns 400 when attempting to void an already-VOIDED sale (terminal state)', async () => {
+      const branch = await seedBranch();
+      const { user, password } = await seedUser(UserRole.ADMIN, 'a@t.com');
+      const cookies = await loginAndGetCookies(user.email, password);
+      const { sale } = await seedCompletedSale(branch.id, user.id, cookies, {
+        stockQty: 5,
+      });
+
+      // First void — succeeds
+      await request(app.getHttpServer())
+        .post(`/api/v1/sales/${sale.id}/void`)
+        .set('Cookie', cookies)
+        .send({ void_reason: validReason })
+        .expect(200);
+
+      // Second void — VOIDED is terminal
+      await request(app.getHttpServer())
+        .post(`/api/v1/sales/${sale.id}/void`)
+        .set('Cookie', cookies)
+        .send({ void_reason: 'Trying again' })
+        .expect(400);
+    });
+
+    it('returns 403 when cashier attempts to void (admin/manager only)', async () => {
+      const branch = await seedBranch();
+      const cashier = await seedUser(UserRole.CASHIER, 'c@t.com', branch.id);
+      const cookies = await loginAndGetCookies(
+        cashier.user.email,
+        cashier.password,
+      );
+      // Cashier completes their own sale (they're allowed)
+      const { sale } = await seedCompletedSale(
+        branch.id,
+        cashier.user.id,
+        cookies,
+        { stockQty: 5 },
+      );
+
+      // But they can't void it — supervisor swipe required
+      await request(app.getHttpServer())
+        .post(`/api/v1/sales/${sale.id}/void`)
+        .set('Cookie', cookies)
+        .send({ void_reason: validReason })
+        .expect(403);
+    });
+
+    it('manager can void a sale', async () => {
+      const branch = await seedBranch();
+      // Cashier completes the sale
+      const cashier = await seedUser(UserRole.CASHIER, 'c@t.com', branch.id);
+      const cashierCookies = await loginAndGetCookies(
+        cashier.user.email,
+        cashier.password,
+      );
+      const { sale } = await seedCompletedSale(
+        branch.id,
+        cashier.user.id,
+        cashierCookies,
+        { stockQty: 5 },
+      );
+
+      // Manager voids it
+      const manager = await seedUser(UserRole.MANAGER, 'm@t.com', branch.id);
+      const managerCookies = await loginAndGetCookies(
+        manager.user.email,
+        manager.password,
+      );
+
+      const response = await request(app.getHttpServer())
+        .post(`/api/v1/sales/${sale.id}/void`)
+        .set('Cookie', managerCookies)
+        .send({ void_reason: validReason })
+        .expect(200);
+
+      // voided_by attributed to the manager, not the original cashier
+      expect(response.body.voided_by).toBe(manager.user.id);
+      expect(response.body.status).toBe(SaleStatus.VOIDED);
+    });
+
+    it('returns 404 when sale does not exist', async () => {
+      const { user, password } = await seedUser(UserRole.ADMIN, 'a@t.com');
+      const cookies = await loginAndGetCookies(user.email, password);
+      const fakeId = '00000000-0000-0000-0000-000000000000';
+
+      await request(app.getHttpServer())
+        .post(`/api/v1/sales/${fakeId}/void`)
+        .set('Cookie', cookies)
+        .send({ void_reason: validReason })
+        .expect(404);
+    });
+
+    it('returns 401 when unauthenticated', async () => {
+      const branch = await seedBranch();
+      const { user, password } = await seedUser(UserRole.ADMIN, 'a@t.com');
+      const cookies = await loginAndGetCookies(user.email, password);
+      const { sale } = await seedCompletedSale(branch.id, user.id, cookies, {
+        stockQty: 5,
+      });
+
+      await request(app.getHttpServer())
+        .post(`/api/v1/sales/${sale.id}/void`)
+        .send({ void_reason: validReason })
+        .expect(401);
+    });
+
+    it('DB directly reflects VOIDED status, all void fields, and reversed payments', async () => {
+      // Belt-and-suspenders: response body is one thing, but the DB is
+      // the source of truth. Verify directly what's persisted.
+      const branch = await seedBranch();
+      const { user, password } = await seedUser(UserRole.ADMIN, 'a@t.com');
+      const cookies = await loginAndGetCookies(user.email, password);
+      const { sale } = await seedCompletedSale(branch.id, user.id, cookies, {
+        stockQty: 5,
+      });
+
+      await request(app.getHttpServer())
+        .post(`/api/v1/sales/${sale.id}/void`)
+        .set('Cookie', cookies)
+        .send({ void_reason: validReason })
+        .expect(200);
+
+      const saleRepo = dataSource.getRepository(Sale);
+      const persisted = await saleRepo.findOne({ where: { id: sale.id } });
+      expect(persisted?.status).toBe(SaleStatus.VOIDED);
+      expect(persisted?.voided_at).toBeTruthy();
+      expect(persisted?.voided_by).toBe(user.id);
+      expect(persisted?.void_reason).toBe(validReason);
+
+      // Every payment on this sale has both reversal fields set
+      const paymentRepo = dataSource.getRepository(Payment);
+      const payments = await paymentRepo.find({
+        where: { sale_id: sale.id },
+      });
+      expect(payments.length).toBeGreaterThan(0);
+      for (const p of payments) {
+        expect(p.reversed_at).toBeTruthy();
+        expect(p.reversal_reason).toBe(validReason);
+      }
+    });
+  });
 });

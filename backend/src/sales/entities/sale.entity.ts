@@ -40,7 +40,12 @@ import { Payment } from './payment.entity';
 )
 @Check(
   'CHK_sales_voided_consistency',
-  `(status = 'VOIDED') = (voided_at IS NOT NULL AND voided_by IS NOT NULL)`,
+  `(status = 'VOIDED') = (
+     voided_at IS NOT NULL
+     AND voided_by IS NOT NULL
+     AND void_reason IS NOT NULL
+     AND length(trim(void_reason)) > 0
+   )`,
 )
 @Check(
   'CHK_sales_completed_consistency',
@@ -144,6 +149,9 @@ export class Sale {
   @ManyToOne(() => User, { onDelete: 'RESTRICT', nullable: true })
   @JoinColumn({ name: 'voided_by' })
   voider?: User;
+
+  @Column({ type: 'text', nullable: true, name: 'void_reason' })
+  void_reason!: string | null;
 
   @OneToMany(() => SaleLine, (line) => line.sale)
   lines?: SaleLine[];

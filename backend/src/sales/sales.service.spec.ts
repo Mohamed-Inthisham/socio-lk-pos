@@ -93,6 +93,7 @@ describe('SalesService', () => {
 
   const mockStockService = {
     decrementForSale: jest.fn(),
+    incrementForReversal: jest.fn(),
   };
 
   const mockSaleNumberCountersService = {
@@ -1929,6 +1930,275 @@ describe('SalesService', () => {
 
       // Third line was never attempted
       expect(mockStockService.decrementForSale).toHaveBeenCalledTimes(2);
+    });
+  });
+
+  describe('voidSale', () => {
+    // Helper: seed a COMPLETED sale that's ready to be voided. Tests
+    // exercising the status guard override the status field.
+    const seedVoidableSale = (overrides: Record<string, unknown> = {}) => ({
+      id: 'sale-1',
+      status: SaleStatus.COMPLETED,
+      branch_id: 'branch-1',
+      sale_number: 'INV-20260910-0001',
+      ...overrides,
+    });
+
+    // Helper: seed a SaleLine for the stock re-increment loop. Defaults
+    // to an in-house line (no external supplier) so the increment fires.
+    const seedVoidableLine = (
+      overrides: Partial<{
+        id: string;
+        product_id: string;
+        quantity: number;
+        external_supplier_id: string | null;
+      }> = {},
+    ) => ({
+      id: 'line-1',
+      sale_id: 'sale-1',
+      product_id: 'prod-1',
+      quantity: 2,
+      external_supplier_id: null,
+      ...overrides,
+    });
+
+    const validDto = { void_reason: 'Customer returned defective phone' };
+
+    it('voids a COMPLETED sale: re-increments stock, marks payments reversed, flips to VOIDED', async () => {
+      mockQueryBuilder.getOne.mockResolvedValueOnce(seedVoidableSale());
+      mockManager.find.mockResolvedValue([
+        seedVoidableLine({ product_id: 'prod-1', quantity: 2 }),
+        seedVoidableLine({
+          id: 'line-2',
+          product_id: 'prod-2',
+          quantity: 1,
+        }),
+      ]);
+      mockStockService.incrementForReversal.mockResolvedValue(undefined);
+      mockManager.query.mockResolvedValue(undefined);
+
+      await service.voidSale('sale-1', 'admin-1', validDto);
+
+      // Stock re-incremented for each in-house line
+      expect(mockStockService.incrementForReversal).toHaveBeenCalledTimes(2);
+      expect(mockStockService.incrementForReversal).toHaveBeenCalledWith(
+        mockManager,
+        'prod-1',
+        'branch-1',
+        2,
+      );
+      expect(mockStockService.incrementForReversal).toHaveBeenCalledWith(
+        mockManager,
+        'prod-2',
+        'branch-1',
+        1,
+      );
+
+      // Payments UPDATE fires with the trimmed reason
+      expect(mockManager.query).toHaveBeenCalledWith(
+        expect.stringContaining('UPDATE payments'),
+        ['Customer returned defective phone', 'sale-1'],
+      );
+
+      // Sale UPDATE fires with VOIDED status, voidedBy, and reason
+      expect(mockManager.query).toHaveBeenCalledWith(
+        expect.stringContaining('UPDATE sales'),
+        [
+          SaleStatus.VOIDED,
+          'admin-1',
+          'Customer returned defective phone',
+          'sale-1',
+        ],
+      );
+    });
+
+    it('skips stock re-increment for lines sourced from an external supplier', async () => {
+      mockQueryBuilder.getOne.mockResolvedValueOnce(seedVoidableSale());
+      mockManager.find.mockResolvedValue([
+        // In-house — should re-increment
+        seedVoidableLine({ product_id: 'prod-in-house', quantity: 3 }),
+        // External-supplier — should be skipped (was never our stock)
+        seedVoidableLine({
+          id: 'line-2',
+          product_id: 'prod-friendly',
+          quantity: 5,
+          external_supplier_id: 'supplier-1',
+        }),
+      ]);
+      mockStockService.incrementForReversal.mockResolvedValue(undefined);
+
+      await service.voidSale('sale-1', 'admin-1', validDto);
+
+      expect(mockStockService.incrementForReversal).toHaveBeenCalledTimes(1);
+      expect(mockStockService.incrementForReversal).toHaveBeenCalledWith(
+        mockManager,
+        'prod-in-house',
+        'branch-1',
+        3,
+      );
+      // Friendly-shop line was NOT re-incremented — symmetric with completeSale's skip
+      expect(mockStockService.incrementForReversal).not.toHaveBeenCalledWith(
+        expect.anything(),
+        'prod-friendly',
+        expect.anything(),
+        expect.anything(),
+      );
+    });
+
+    it('trims whitespace from void_reason before persisting', async () => {
+      mockQueryBuilder.getOne.mockResolvedValueOnce(seedVoidableSale());
+      mockManager.find.mockResolvedValue([seedVoidableLine()]);
+      mockStockService.incrementForReversal.mockResolvedValue(undefined);
+
+      await service.voidSale('sale-1', 'admin-1', {
+        void_reason: '   Duplicate transaction   ',
+      });
+
+      // Both queries receive the trimmed string, byte-for-byte identical
+      expect(mockManager.query).toHaveBeenCalledWith(
+        expect.stringContaining('UPDATE payments'),
+        ['Duplicate transaction', 'sale-1'],
+      );
+      expect(mockManager.query).toHaveBeenCalledWith(
+        expect.stringContaining('UPDATE sales'),
+        [SaleStatus.VOIDED, 'admin-1', 'Duplicate transaction', 'sale-1'],
+      );
+    });
+
+    it('throws NotFoundException when the sale does not exist', async () => {
+      mockQueryBuilder.getOne.mockResolvedValueOnce(null);
+
+      await expect(
+        service.voidSale('missing', 'admin-1', validDto),
+      ).rejects.toThrow(NotFoundException);
+
+      // Nothing downstream ran
+      expect(mockManager.find).not.toHaveBeenCalled();
+      expect(mockStockService.incrementForReversal).not.toHaveBeenCalled();
+      expect(mockManager.query).not.toHaveBeenCalled();
+    });
+
+    it('throws BadRequestException when sale is DRAFT (cannot void an unfinalized sale)', async () => {
+      mockQueryBuilder.getOne.mockResolvedValueOnce(
+        seedVoidableSale({ status: SaleStatus.DRAFT }),
+      );
+
+      await expect(
+        service.voidSale('sale-1', 'admin-1', validDto),
+      ).rejects.toThrow(BadRequestException);
+      expect(mockStockService.incrementForReversal).not.toHaveBeenCalled();
+    });
+
+    it('throws BadRequestException when sale is already VOIDED (terminal state)', async () => {
+      mockQueryBuilder.getOne.mockResolvedValueOnce(
+        seedVoidableSale({ status: SaleStatus.VOIDED }),
+      );
+
+      await expect(
+        service.voidSale('sale-1', 'admin-1', validDto),
+      ).rejects.toThrow(BadRequestException);
+      expect(mockStockService.incrementForReversal).not.toHaveBeenCalled();
+    });
+
+    it('throws BadRequestException when void_reason is missing', async () => {
+      // Fails at the pre-transaction guard — sale is never even fetched
+      await expect(
+        service.voidSale('sale-1', 'admin-1', {
+          void_reason: undefined as unknown as string,
+        }),
+      ).rejects.toThrow(BadRequestException);
+      expect(mockDataSource.transaction).not.toHaveBeenCalled();
+    });
+
+    it('throws BadRequestException when void_reason is whitespace-only', async () => {
+      // Defense-in-depth: DTO should catch this, but internal callers
+      // that bypass the DTO shouldn't be able to slip a blank reason.
+      await expect(
+        service.voidSale('sale-1', 'admin-1', { void_reason: '     ' }),
+      ).rejects.toThrow(BadRequestException);
+      expect(mockDataSource.transaction).not.toHaveBeenCalled();
+    });
+
+    it('throws BadRequestException when void_reason is too short after trim', async () => {
+      await expect(
+        service.voidSale('sale-1', 'admin-1', { void_reason: 'no' }),
+      ).rejects.toThrow(BadRequestException);
+      expect(mockDataSource.transaction).not.toHaveBeenCalled();
+    });
+
+    it('propagates errors from stock re-increment (data integrity failure rolls back)', async () => {
+      mockQueryBuilder.getOne.mockResolvedValueOnce(seedVoidableSale());
+      mockManager.find.mockResolvedValue([seedVoidableLine()]);
+      mockStockService.incrementForReversal.mockRejectedValue(
+        new Error('Stock row missing for product prod-1 at branch branch-1'),
+      );
+
+      await expect(
+        service.voidSale('sale-1', 'admin-1', validDto),
+      ).rejects.toThrow(/Stock row missing/);
+
+      // Sale UPDATE was NOT executed — nothing flipped to VOIDED
+      expect(mockManager.query).not.toHaveBeenCalledWith(
+        expect.stringContaining('UPDATE sales'),
+        expect.anything(),
+      );
+      // Payments UPDATE was also NOT executed (increment failed before it)
+      expect(mockManager.query).not.toHaveBeenCalledWith(
+        expect.stringContaining('UPDATE payments'),
+        expect.anything(),
+      );
+    });
+
+    it('locks the sale row for update', async () => {
+      mockQueryBuilder.getOne.mockResolvedValueOnce(seedVoidableSale());
+      mockManager.find.mockResolvedValue([seedVoidableLine()]);
+      mockStockService.incrementForReversal.mockResolvedValue(undefined);
+
+      await service.voidSale('sale-1', 'admin-1', validDto);
+
+      expect(mockQueryBuilder.setLock).toHaveBeenCalledWith(
+        'pessimistic_write',
+      );
+    });
+
+    it('stops re-incrementing further lines if one throws (loop bail-out)', async () => {
+      mockQueryBuilder.getOne.mockResolvedValueOnce(seedVoidableSale());
+      mockManager.find.mockResolvedValue([
+        seedVoidableLine({ id: 'line-1', product_id: 'prod-1' }),
+        seedVoidableLine({ id: 'line-2', product_id: 'prod-2' }),
+        seedVoidableLine({ id: 'line-3', product_id: 'prod-3' }),
+      ]);
+      mockStockService.incrementForReversal
+        .mockResolvedValueOnce(undefined)
+        .mockRejectedValueOnce(new Error('Stock row missing'));
+
+      await expect(
+        service.voidSale('sale-1', 'admin-1', validDto),
+      ).rejects.toThrow();
+
+      // Third line was never attempted — sequential loop bails on first throw
+      expect(mockStockService.incrementForReversal).toHaveBeenCalledTimes(2);
+    });
+
+    it('stamps payments UPDATE before sales UPDATE (order matters for the transaction)', async () => {
+      mockQueryBuilder.getOne.mockResolvedValueOnce(seedVoidableSale());
+      mockManager.find.mockResolvedValue([seedVoidableLine()]);
+      mockStockService.incrementForReversal.mockResolvedValue(undefined);
+
+      await service.voidSale('sale-1', 'admin-1', validDto);
+
+      // Extract only the query() calls, not any other mock.query invocations
+      const calls = mockManager.query.mock.calls;
+      const paymentsIdx = calls.findIndex((c) =>
+        (c[0] as string).includes('UPDATE payments'),
+      );
+      const salesIdx = calls.findIndex((c) =>
+        (c[0] as string).includes('UPDATE sales'),
+      );
+
+      expect(paymentsIdx).toBeGreaterThanOrEqual(0);
+      expect(salesIdx).toBeGreaterThanOrEqual(0);
+      expect(paymentsIdx).toBeLessThan(salesIdx);
     });
   });
 });

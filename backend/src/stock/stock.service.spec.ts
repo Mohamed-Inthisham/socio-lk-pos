@@ -535,4 +535,163 @@ describe('StockService', () => {
       expect(updateQB._execute).toHaveBeenCalled();
     });
   });
+
+  describe('incrementForReversal', () => {
+    // Reuse the same query-builder helpers as decrementForSale — the
+    // shape is identical (SELECT ... FOR UPDATE + optional UPDATE).
+    const buildSelectQB = (returnValue: unknown) => ({
+      setLock: jest.fn().mockReturnThis(),
+      where: jest.fn().mockReturnThis(),
+      andWhere: jest.fn().mockReturnThis(),
+      getOne: jest.fn().mockResolvedValue(returnValue),
+    });
+
+    const buildUpdateQB = () => {
+      const execute = jest.fn().mockResolvedValue({ affected: 1 });
+      return {
+        update: jest.fn().mockReturnThis(),
+        set: jest.fn().mockReturnThis(),
+        where: jest.fn().mockReturnThis(),
+        execute,
+        _execute: execute,
+      };
+    };
+
+    it('increments quantity when stock is tracked', async () => {
+      const stockRow = {
+        id: 'stock-1',
+        product_id: 'p1',
+        branch_id: 'b1',
+        quantity: 5,
+        manage_stock: true,
+      };
+      const updateQB = buildUpdateQB();
+      mockManager.createQueryBuilder
+        .mockReturnValueOnce(buildSelectQB(stockRow))
+        .mockReturnValueOnce(updateQB);
+
+      await service.incrementForReversal(mockManager as never, 'p1', 'b1', 3);
+
+      // UPDATE was called with SQL-side arithmetic — 'quantity + 3', not
+      // a read-then-write JS expression. This is the anti-lost-update path.
+      expect(updateQB.update).toHaveBeenCalledWith(Stock);
+      const setArg = updateQB.set.mock.calls[0][0] as {
+        quantity: () => string;
+      };
+      expect(setArg.quantity()).toBe('quantity + 3');
+      expect(updateQB.where).toHaveBeenCalledWith('id = :id', {
+        id: 'stock-1',
+      });
+      expect(updateQB._execute).toHaveBeenCalled();
+    });
+
+    it('no-ops silently when manage_stock is false', async () => {
+      const untrackedRow = {
+        id: 'stock-2',
+        product_id: 'p1',
+        branch_id: 'b1',
+        quantity: 0,
+        manage_stock: false,
+      };
+      mockManager.createQueryBuilder.mockReturnValueOnce(
+        buildSelectQB(untrackedRow),
+      );
+
+      await expect(
+        service.incrementForReversal(mockManager as never, 'p1', 'b1', 5),
+      ).resolves.toBeUndefined();
+
+      // Only SELECT was called; no UPDATE ever built. Symmetric to
+      // decrementForSale's no-op path for services/reloads.
+      expect(mockManager.createQueryBuilder).toHaveBeenCalledTimes(1);
+    });
+
+    it('throws when stock row is missing (data integrity failure)', async () => {
+      mockManager.createQueryBuilder.mockReturnValueOnce(buildSelectQB(null));
+
+      await expect(
+        service.incrementForReversal(
+          mockManager as never,
+          'ghost-product',
+          'b1',
+          1,
+        ),
+      ).rejects.toThrow(/Stock row missing/);
+    });
+
+    it('acquires pessimistic_write lock on the stock row', async () => {
+      const stockRow = {
+        id: 'stock-3',
+        product_id: 'p1',
+        branch_id: 'b1',
+        quantity: 10,
+        manage_stock: true,
+      };
+      const selectQB = buildSelectQB(stockRow);
+      mockManager.createQueryBuilder
+        .mockReturnValueOnce(selectQB)
+        .mockReturnValueOnce(buildUpdateQB());
+
+      await service.incrementForReversal(mockManager as never, 'p1', 'b1', 1);
+
+      // Locking is non-negotiable even though increment can't fail on
+      // business grounds — races with concurrent decrements would
+      // otherwise produce lost updates.
+      expect(selectQB.setLock).toHaveBeenCalledWith('pessimistic_write');
+      expect(selectQB.where).toHaveBeenCalledWith(
+        'stock.product_id = :productId',
+        { productId: 'p1' },
+      );
+      expect(selectQB.andWhere).toHaveBeenCalledWith(
+        'stock.branch_id = :branchId',
+        { branchId: 'b1' },
+      );
+    });
+
+    it('allows large increments (no upper bound)', async () => {
+      // Sanity: increment has no ConflictException path. Voiding a
+      // bulk sale should not fail because inventory got "too high".
+      const stockRow = {
+        id: 'stock-4',
+        product_id: 'p1',
+        branch_id: 'b1',
+        quantity: 5,
+        manage_stock: true,
+      };
+      const updateQB = buildUpdateQB();
+      mockManager.createQueryBuilder
+        .mockReturnValueOnce(buildSelectQB(stockRow))
+        .mockReturnValueOnce(updateQB);
+
+      await expect(
+        service.incrementForReversal(mockManager as never, 'p1', 'b1', 10000),
+      ).resolves.toBeUndefined();
+
+      const setArg = updateQB.set.mock.calls[0][0] as {
+        quantity: () => string;
+      };
+      expect(setArg.quantity()).toBe('quantity + 10000');
+    });
+
+    it('increments by 1 (smallest realistic void quantity)', async () => {
+      const stockRow = {
+        id: 'stock-5',
+        product_id: 'p1',
+        branch_id: 'b1',
+        quantity: 0,
+        manage_stock: true,
+      };
+      const updateQB = buildUpdateQB();
+      mockManager.createQueryBuilder
+        .mockReturnValueOnce(buildSelectQB(stockRow))
+        .mockReturnValueOnce(updateQB);
+
+      await service.incrementForReversal(mockManager as never, 'p1', 'b1', 1);
+
+      const setArg = updateQB.set.mock.calls[0][0] as {
+        quantity: () => string;
+      };
+      expect(setArg.quantity()).toBe('quantity + 1');
+    });
+  });
 });

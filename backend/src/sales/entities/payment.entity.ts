@@ -54,6 +54,10 @@ import { PaymentMethod } from '../enums/payment-method.enum';
   'CHK_payments_cash_received_covers_amount',
   `cash_received IS NULL OR cash_received >= amount`,
 )
+@Check(
+  'CHK_payments_reversal_consistency',
+  `(reversed_at IS NOT NULL) = (reversal_reason IS NOT NULL AND length(trim(reversal_reason)) > 0)`,
+)
 export class Payment {
   @PrimaryGeneratedColumn('uuid')
   id!: string;
@@ -100,6 +104,19 @@ export class Payment {
 
   @Column({ type: 'text', nullable: true })
   notes!: string | null;
+
+  // Set together (both NULL, or both populated) when the parent Sale
+  // is voided in Slice G. reversal_reason mirrors sale.void_reason at
+  // void time — the cashier enters the reason once at the sale level,
+  // and the void transaction stamps it onto every payment. The
+  // both-or-neither invariant is enforced by CHK_payments_reversal_consistency;
+  // the "iff parent sale is VOIDED" invariant lives at the service
+  // layer (cross-table CHECKs aren't supported in Postgres).
+  @Column({ type: 'timestamptz', nullable: true, name: 'reversed_at' })
+  reversed_at!: Date | null;
+
+  @Column({ type: 'text', nullable: true, name: 'reversal_reason' })
+  reversal_reason!: string | null;
 
   @CreateDateColumn({ type: 'timestamptz', name: 'created_at' })
   created_at!: Date;

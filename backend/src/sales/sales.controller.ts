@@ -26,6 +26,7 @@ import { AddSaleLineDto } from './dto/add-sale-line.dto';
 import { UpdateSaleLineDto } from './dto/update-sale-line.dto';
 import { AddPaymentDto } from './dto/add-payment.dto';
 import { UpdatePaymentDto } from './dto/update-payment.dto';
+import { VoidSaleDto } from './dto/void-sale.dto';
 import { Roles } from '../auth/decorators/roles.decorator';
 import { UserRole } from '../users/enums/user-role.enum';
 import { CurrentUser } from '../auth/decorators/current-user.decorator';
@@ -145,7 +146,7 @@ export class SalesController {
     description:
       'Hard-deletes a DRAFT sale. Only DRAFT sales can be discarded — a ' +
       'DRAFT never became a real financial record, so no history is lost. ' +
-      'Completed sales must be VOIDED, never deleted (endpoint lands in Slice G).',
+      'Completed sales must be VOIDED via POST /sales/:id/void, never deleted.',
   })
   @ApiParam({ name: 'id', description: 'Sale UUID', format: 'uuid' })
   @ApiResponse({ status: 204, description: 'DRAFT sale discarded' })
@@ -421,6 +422,63 @@ export class SalesController {
   })
   async completeSale(@Param('id', ParseUUIDPipe) id: string) {
     await this.salesService.completeSale(id);
+    return this.salesService.findOne(id);
+  }
+
+  @Post(':id/void')
+  @HttpCode(HttpStatus.OK)
+  @Roles(UserRole.ADMIN, UserRole.MANAGER)
+  @Auditable('Sale', AuditAction.VOID)
+  @ApiOperation({
+    summary:
+      'Void a COMPLETED sale (transactional: stock reversal + payment reversal)',
+    description:
+      'Transitions a COMPLETED sale into VOIDED in a single atomic ' +
+      'transaction. Re-increments stock for every in-house line ' +
+      '(external-supplier lines were never our inventory, so nothing to ' +
+      'reverse). Stamps reversed_at and reversal_reason on every payment ' +
+      'on this sale. Sets status=VOIDED, voided_at=now(), voided_by=<caller>, ' +
+      'and void_reason=<trimmed reason>. If any step fails, the whole ' +
+      'transaction rolls back and nothing changes.\n\n' +
+      'Restricted to ADMIN and MANAGER — voiding a sale is a financial ' +
+      'reversal that requires supervisor authority. Cashiers can complete ' +
+      'sales but not void them (standard "supervisor swipe" pattern).\n\n' +
+      'VOIDED is TERMINAL. There is no un-void endpoint — if a void was ' +
+      'itself a mistake, create a new sale. The original sale_number, ' +
+      'completed_at, lines, and payment amounts are all preserved on the ' +
+      'voided record for audit purposes.\n\n' +
+      'Preconditions: sale is COMPLETED (DRAFT sales are discarded via ' +
+      'DELETE, VOIDED sales are terminal). void_reason is required and ' +
+      'must be at least 3 non-whitespace characters.\n\n' +
+      'Returns the fully-hydrated voided sale with nested branch, cashier, ' +
+      'lines, and payments (with their reversal stamps).',
+  })
+  @ApiParam({ name: 'id', description: 'Sale UUID', format: 'uuid' })
+  @ApiResponse({
+    status: 200,
+    description:
+      'Sale voided; response is the fully-hydrated sale with VOIDED status, ' +
+      'voided_at/voided_by/void_reason set, and every payment stamped with ' +
+      'reversed_at and reversal_reason',
+  })
+  @ApiResponse({
+    status: 400,
+    description:
+      'Sale is not in COMPLETED status (DRAFT or VOIDED), or void_reason ' +
+      'is missing/blank/too short',
+  })
+  @ApiResponse({ status: 401, description: 'Not authenticated' })
+  @ApiResponse({
+    status: 403,
+    description: 'Cashier attempted to void a sale (admin or manager only)',
+  })
+  @ApiResponse({ status: 404, description: 'Sale not found' })
+  async voidSale(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body() dto: VoidSaleDto,
+    @CurrentUser() user: AuthenticatedUser,
+  ) {
+    await this.salesService.voidSale(id, user.id, dto);
     return this.salesService.findOne(id);
   }
 }
