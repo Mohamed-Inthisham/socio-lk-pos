@@ -27,6 +27,7 @@ import { ProductsService } from '../products/products.service';
 import { SuppliersService } from '../suppliers/suppliers.service';
 import { StockService } from '../stock/stock.service';
 import { SaleNumberCountersService } from '../sale-number-counters/sale-number-counters.service';
+import { CustomersService } from '../customers/customers.service';
 import {
   PaginatedResponse,
   paginate,
@@ -51,7 +52,43 @@ export class SalesService {
     private readonly suppliersService: SuppliersService,
     private readonly stockService: StockService,
     private readonly saleNumberCountersService: SaleNumberCountersService,
+    private readonly customersService: CustomersService,
   ) {}
+
+  /**
+   * Resolves a customer_id from client input, ensuring it references
+   * an existing, non-deleted customer. Returns the customer_id unchanged
+   * on success (for symmetry with future normalization needs) or throws
+   * BadRequestException on invalid reference.
+   *
+   * Deliberately does NOT distinguish "nonexistent" from "soft-deleted"
+   * in the error — clients don't need to know why a customer_id is
+   * unusable, just that it is. Same 400 status for both matches the
+   * codebase convention for cross-entity payload references (see
+   * branch_id / product_id validation elsewhere).
+   *
+   * Throws NotFoundException? No — this is a payload validation on
+   * POST/PATCH, not a URL parameter lookup. 400 matches the semantic:
+   * the request payload references a nonexistent resource, so the
+   * request itself is malformed.
+   */
+  private async assertCustomerReference(customerId: string): Promise<void> {
+    try {
+      const customer = await this.customersService.findOne(customerId);
+      if (customer.deleted_at) {
+        throw new BadRequestException(
+          `customer_id ${customerId} refers to a deleted customer`,
+        );
+      }
+    } catch (err) {
+      if (err instanceof NotFoundException) {
+        throw new BadRequestException(
+          `customer_id ${customerId} does not exist`,
+        );
+      }
+      throw err;
+    }
+  }
 
   /**
    * Create a new DRAFT sale. Called by an authenticated user via the
@@ -100,6 +137,10 @@ export class SalesService {
       throw new ForbiddenException(
         'You can only create sales at your own branch',
       );
+    }
+
+    if (dto.customer_id) {
+      await this.assertCustomerReference(dto.customer_id);
     }
 
     const sale = this.salesRepository.create({
@@ -210,9 +251,15 @@ export class SalesService {
 
     // DTO layer trims strings and converts empty strings to null.
     // undefined = don't touch, null = clear, string = set.
-    if (dto.customer_id !== undefined) sale.customer_id = dto.customer_id;
+    // If customer_id is being SET (not cleared), validate it references
+    // an existing, non-deleted customer.
+    if (dto.customer_id !== undefined) {
+      if (dto.customer_id !== null) {
+        await this.assertCustomerReference(dto.customer_id);
+      }
+      sale.customer_id = dto.customer_id;
+    }
     if (dto.notes !== undefined) sale.notes = dto.notes;
-
     return this.salesRepository.save(sale);
   }
 

@@ -20,6 +20,7 @@ import { ProductsService } from '../products/products.service';
 import { SuppliersService } from '../suppliers/suppliers.service';
 import { StockService } from '../stock/stock.service';
 import { SaleNumberCountersService } from '../sale-number-counters/sale-number-counters.service';
+import { CustomersService } from '../customers/customers.service';
 
 describe('SalesService', () => {
   let service: SalesService;
@@ -100,6 +101,10 @@ describe('SalesService', () => {
     generateNext: jest.fn(),
   };
 
+  const mockCustomersService = {
+    findOne: jest.fn(),
+  };
+
   const seedActiveBranch = (overrides: Partial<Branch> = {}): Branch =>
     ({
       id: 'branch-1',
@@ -160,6 +165,7 @@ describe('SalesService', () => {
           provide: SaleNumberCountersService,
           useValue: mockSaleNumberCountersService,
         },
+        { provide: CustomersService, useValue: mockCustomersService },
       ],
     }).compile();
 
@@ -200,6 +206,10 @@ describe('SalesService', () => {
     it('accepts optional customer_id and notes', async () => {
       mockUsersRepo.findOne.mockResolvedValue(seedCashier());
       mockBranchesRepo.findOne.mockResolvedValue(seedActiveBranch());
+      mockCustomersService.findOne.mockResolvedValue({
+        id: 'cust-1',
+        deleted_at: null,
+      });
       mockSalesRepo.create.mockImplementation((e) => e);
       mockSalesRepo.save.mockImplementation((e) => Promise.resolve(e));
 
@@ -284,6 +294,50 @@ describe('SalesService', () => {
       await expect(
         service.create({ branch_id: 'branch-2' }, 'cashier-1'),
       ).rejects.toThrow(ForbiddenException);
+    });
+
+    // ---- customer_id validation (Phase 6.3.5 Slice B) ----
+
+    it('throws BadRequestException when customer_id refers to a nonexistent customer', async () => {
+      mockUsersRepo.findOne.mockResolvedValue(seedCashier());
+      mockBranchesRepo.findOne.mockResolvedValue(seedActiveBranch());
+      mockCustomersService.findOne.mockRejectedValue(
+        new NotFoundException('Customer not found'),
+      );
+
+      await expect(
+        service.create(
+          { branch_id: 'branch-1', customer_id: 'missing-cust' },
+          'cashier-1',
+        ),
+      ).rejects.toThrow(BadRequestException);
+    });
+
+    it('throws BadRequestException when customer_id refers to a soft-deleted customer', async () => {
+      mockUsersRepo.findOne.mockResolvedValue(seedCashier());
+      mockBranchesRepo.findOne.mockResolvedValue(seedActiveBranch());
+      mockCustomersService.findOne.mockResolvedValue({
+        id: 'deleted-cust',
+        deleted_at: new Date(),
+      });
+
+      await expect(
+        service.create(
+          { branch_id: 'branch-1', customer_id: 'deleted-cust' },
+          'cashier-1',
+        ),
+      ).rejects.toThrow(BadRequestException);
+    });
+
+    it('does not call customersService.findOne when customer_id is omitted', async () => {
+      mockUsersRepo.findOne.mockResolvedValue(seedCashier());
+      mockBranchesRepo.findOne.mockResolvedValue(seedActiveBranch());
+      mockSalesRepo.create.mockImplementation((e) => e);
+      mockSalesRepo.save.mockImplementation((e) => Promise.resolve(e));
+
+      await service.create({ branch_id: 'branch-1' }, 'cashier-1');
+
+      expect(mockCustomersService.findOne).not.toHaveBeenCalled();
     });
   });
 
@@ -458,6 +512,10 @@ describe('SalesService', () => {
         notes: null,
       };
       mockSalesRepo.findOne.mockResolvedValue(sale);
+      mockCustomersService.findOne.mockResolvedValue({
+        id: 'cust-99',
+        deleted_at: null,
+      });
       mockSalesRepo.save.mockImplementation((e) => Promise.resolve(e));
 
       const result = await service.update('s1', {
@@ -528,6 +586,58 @@ describe('SalesService', () => {
       await expect(service.update('missing', {})).rejects.toThrow(
         NotFoundException,
       );
+    });
+
+    // ---- customer_id validation (Phase 6.3.5 Slice B) ----
+
+    it('throws BadRequestException when updating to a nonexistent customer_id', async () => {
+      mockSalesRepo.findOne.mockResolvedValue({
+        id: 's1',
+        status: SaleStatus.DRAFT,
+        customer_id: null,
+      });
+      mockCustomersService.findOne.mockRejectedValue(
+        new NotFoundException('Customer not found'),
+      );
+
+      await expect(
+        service.update('s1', { customer_id: 'missing-cust' }),
+      ).rejects.toThrow(BadRequestException);
+
+      // Sale should not be saved when validation fails
+      expect(mockSalesRepo.save).not.toHaveBeenCalled();
+    });
+
+    it('throws BadRequestException when updating to a soft-deleted customer_id', async () => {
+      mockSalesRepo.findOne.mockResolvedValue({
+        id: 's1',
+        status: SaleStatus.DRAFT,
+        customer_id: null,
+      });
+      mockCustomersService.findOne.mockResolvedValue({
+        id: 'deleted-cust',
+        deleted_at: new Date(),
+      });
+
+      await expect(
+        service.update('s1', { customer_id: 'deleted-cust' }),
+      ).rejects.toThrow(BadRequestException);
+
+      expect(mockSalesRepo.save).not.toHaveBeenCalled();
+    });
+
+    it('does not call customersService.findOne when clearing customer_id (null)', async () => {
+      const sale = {
+        id: 's1',
+        status: SaleStatus.DRAFT,
+        customer_id: 'cust-old',
+      };
+      mockSalesRepo.findOne.mockResolvedValue(sale);
+      mockSalesRepo.save.mockImplementation((e) => Promise.resolve(e));
+
+      await service.update('s1', { customer_id: null });
+
+      expect(mockCustomersService.findOne).not.toHaveBeenCalled();
     });
   });
 
