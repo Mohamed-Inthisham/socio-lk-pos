@@ -20,6 +20,7 @@ import { DiscountType } from '../src/sales/enums/discount-type.enum';
 import { Payment } from '../src/sales/entities/payment.entity';
 import { PaymentMethod } from '../src/sales/enums/payment-method.enum';
 import { Stock } from '../src/stock/entities/stock.entity';
+import { Customer } from '../src/customers/entities/customer.entity';
 
 describe('Sales (e2e)', () => {
   let app: INestApplication;
@@ -95,6 +96,21 @@ describe('Sales (e2e)', () => {
       }),
     );
     return { user, password };
+  }
+
+  async function seedCustomer(
+    overrides: Partial<Customer> = {},
+  ): Promise<Customer> {
+    const repo = dataSource.getRepository(Customer);
+    return repo.save(
+      repo.create({
+        name: 'Kamal Perera',
+        phone: '0771234567',
+        nic: null,
+        notes: null,
+        ...overrides,
+      }),
+    );
   }
 
   async function seedSale(overrides: Partial<Sale>): Promise<Sale> {
@@ -258,25 +274,25 @@ describe('Sales (e2e)', () => {
 
     it('accepts optional notes and customer_id', async () => {
       const branch = await seedBranch();
+      const customer = await seedCustomer();
       const { user, password } = await seedUser(
         UserRole.CASHIER,
         'c@t.com',
         branch.id,
       );
       const cookies = await loginAndGetCookies(user.email, password);
-      const customerId = '11111111-1111-4111-8111-111111111111';
 
       const response = await request(app.getHttpServer())
         .post('/api/v1/sales')
         .set('Cookie', cookies)
         .send({
           branch_id: branch.id,
-          customer_id: customerId,
+          customer_id: customer.id,
           notes: '  SMS receipt  ',
         })
         .expect(201);
 
-      expect(response.body.customer_id).toBe(customerId);
+      expect(response.body.customer_id).toBe(customer.id);
       expect(response.body.notes).toBe('SMS receipt');
     });
 
@@ -358,6 +374,48 @@ describe('Sales (e2e)', () => {
         .post('/api/v1/sales')
         .set('Cookie', cookies)
         .send({ branch_id: 'not-a-uuid' })
+        .expect(400);
+    });
+
+    // ---- customer_id validation (Phase 6.3.5 Slice B) ----
+
+    it('returns 400 when customer_id refers to a nonexistent customer', async () => {
+      const branch = await seedBranch();
+      const { user, password } = await seedUser(
+        UserRole.CASHIER,
+        'c@t.com',
+        branch.id,
+      );
+      const cookies = await loginAndGetCookies(user.email, password);
+
+      await request(app.getHttpServer())
+        .post('/api/v1/sales')
+        .set('Cookie', cookies)
+        .send({
+          branch_id: branch.id,
+          customer_id: '00000000-0000-4000-8000-000000000000',
+        })
+        .expect(400);
+    });
+
+    it('returns 400 when customer_id refers to a soft-deleted customer', async () => {
+      const branch = await seedBranch();
+      const customer = await seedCustomer();
+      await dataSource.getRepository(Customer).softRemove(customer);
+      const { user, password } = await seedUser(
+        UserRole.CASHIER,
+        'c@t.com',
+        branch.id,
+      );
+      const cookies = await loginAndGetCookies(user.email, password);
+
+      await request(app.getHttpServer())
+        .post('/api/v1/sales')
+        .set('Cookie', cookies)
+        .send({
+          branch_id: branch.id,
+          customer_id: customer.id,
+        })
         .expect(400);
     });
 
@@ -620,21 +678,79 @@ describe('Sales (e2e)', () => {
 
     it('updates customer_id', async () => {
       const branch = await seedBranch();
+      const customer = await seedCustomer();
       const { user, password } = await seedUser(UserRole.ADMIN, 'a@t.com');
       const sale = await seedSale({
         branch_id: branch.id,
         cashier_id: user.id,
       });
       const cookies = await loginAndGetCookies(user.email, password);
-      const customerId = '33333333-3333-4333-8333-333333333333';
 
       const response = await request(app.getHttpServer())
         .patch(`/api/v1/sales/${sale.id}`)
         .set('Cookie', cookies)
-        .send({ customer_id: customerId })
+        .send({ customer_id: customer.id })
         .expect(200);
 
-      expect(response.body.customer_id).toBe(customerId);
+      expect(response.body.customer_id).toBe(customer.id);
+    });
+
+    // ---- customer_id validation (Phase 6.3.5 Slice B) ----
+
+    it('returns 400 when customer_id refers to a nonexistent customer', async () => {
+      const branch = await seedBranch();
+      const { user, password } = await seedUser(UserRole.ADMIN, 'a@t.com');
+      const sale = await seedSale({
+        branch_id: branch.id,
+        cashier_id: user.id,
+      });
+      const cookies = await loginAndGetCookies(user.email, password);
+
+      await request(app.getHttpServer())
+        .patch(`/api/v1/sales/${sale.id}`)
+        .set('Cookie', cookies)
+        .send({ customer_id: '00000000-0000-4000-8000-000000000000' })
+        .expect(400);
+    });
+
+    it('returns 400 when customer_id refers to a soft-deleted customer', async () => {
+      const branch = await seedBranch();
+      const customer = await seedCustomer();
+      await dataSource.getRepository(Customer).softRemove(customer);
+      const { user, password } = await seedUser(UserRole.ADMIN, 'a@t.com');
+      const sale = await seedSale({
+        branch_id: branch.id,
+        cashier_id: user.id,
+      });
+      const cookies = await loginAndGetCookies(user.email, password);
+
+      await request(app.getHttpServer())
+        .patch(`/api/v1/sales/${sale.id}`)
+        .set('Cookie', cookies)
+        .send({ customer_id: customer.id })
+        .expect(400);
+    });
+
+    it('allows clearing customer_id (null) without a valid reference', async () => {
+      const branch = await seedBranch();
+      const customer = await seedCustomer();
+      const { user, password } = await seedUser(UserRole.ADMIN, 'a@t.com');
+      const sale = await seedSale({
+        branch_id: branch.id,
+        cashier_id: user.id,
+        customer_id: customer.id,
+      });
+      // Soft-delete the customer AFTER assigning — should still allow null clear
+      await dataSource.getRepository(Customer).softRemove(customer);
+      const cookies = await loginAndGetCookies(user.email, password);
+
+      const response = await request(app.getHttpServer())
+        .patch(`/api/v1/sales/${sale.id}`)
+        .set('Cookie', cookies)
+        .send({ customer_id: null })
+        .expect(200);
+
+      expect(response.body.customer_id).toBeNull();
     });
 
     it('returns 400 when updating a COMPLETED sale', async () => {
