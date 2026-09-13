@@ -21,6 +21,7 @@ import { StockModule } from './stock/stock.module';
 import { SuppliersModule } from './suppliers/suppliers.module';
 import { SaleNumberCountersModule } from './sale-number-counters/sale-number-counters.module';
 import { SalesModule } from './sales/sales.module';
+import { CustomersModule } from './customers/customers.module';
 
 @Module({
   imports: [
@@ -58,6 +59,7 @@ import { SalesModule } from './sales/sales.module';
     SuppliersModule,
     SaleNumberCountersModule,
     SalesModule,
+    CustomersModule,
   ],
   controllers: [AppController],
   providers: [
