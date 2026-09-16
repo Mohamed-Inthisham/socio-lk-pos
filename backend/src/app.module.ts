@@ -23,6 +23,7 @@ import { SaleNumberCountersModule } from './sale-number-counters/sale-number-cou
 import { SalesModule } from './sales/sales.module';
 import { CustomersModule } from './customers/customers.module';
 import { ProductUnitsModule } from './product-units/product-units.module';
+import { PhonePurchasesModule } from './phone-purchases/phone-purchases.module';
 
 @Module({
   imports: [
@@ -62,6 +63,7 @@ import { ProductUnitsModule } from './product-units/product-units.module';
     SalesModule,
     CustomersModule,
     ProductUnitsModule,
+    PhonePurchasesModule,
   ],
   controllers: [AppController],
   providers: [

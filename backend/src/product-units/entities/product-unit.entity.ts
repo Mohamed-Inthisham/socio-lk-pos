@@ -12,6 +12,7 @@ import {
 import { Product } from '../../products/entities/product.entity';
 import { Branch } from '../../branches/entities/branch.entity';
 import { ProductUnitStatus } from '../enums/product-unit-status.enum';
+import { PhonePurchase } from '../../phone-purchases/entities/phone-purchase.entity';
 
 @Entity('product_units')
 @Check(`"status" IN ('IN_STOCK', 'SOLD', 'RETURNED', 'WRITTEN_OFF')`)
@@ -54,6 +55,17 @@ export class ProductUnit {
 
   @Column({ type: 'uuid', nullable: true })
   phone_purchase_id!: string | null;
+
+  @ManyToOne(
+    () => PhonePurchase,
+    (phonePurchase) => phonePurchase.product_units,
+    {
+      onDelete: 'RESTRICT',
+      nullable: true,
+    },
+  )
+  @JoinColumn({ name: 'phone_purchase_id' })
+  phone_purchase?: PhonePurchase;
 
   @CreateDateColumn({ type: 'timestamptz' })
   created_at!: Date;
