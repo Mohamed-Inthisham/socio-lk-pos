@@ -21,6 +21,8 @@ import { SuppliersService } from '../suppliers/suppliers.service';
 import { StockService } from '../stock/stock.service';
 import { SaleNumberCountersService } from '../sale-number-counters/sale-number-counters.service';
 import { CustomersService } from '../customers/customers.service';
+import { ProductUnitsService } from '../product-units/product-units.service';
+import { ProductUnitStatus } from '../product-units/enums/product-unit-status.enum';
 
 describe('SalesService', () => {
   let service: SalesService;
@@ -166,6 +168,13 @@ describe('SalesService', () => {
           useValue: mockSaleNumberCountersService,
         },
         { provide: CustomersService, useValue: mockCustomersService },
+        {
+          provide: ProductUnitsService,
+          useValue: {
+            markSoldForSale: jest.fn(),
+            markAvailableForReversal: jest.fn(),
+          },
+        },
       ],
     }).compile();
 
@@ -695,6 +704,7 @@ describe('SalesService', () => {
       buying_price: string;
       branch_id: string;
       is_active: boolean;
+      is_serialized: boolean;
     }> = {},
   ) => ({
     id: 'prod-1',
@@ -2310,5 +2320,596 @@ describe('SalesService', () => {
       expect(salesIdx).toBeGreaterThanOrEqual(0);
       expect(paymentsIdx).toBeLessThan(salesIdx);
     });
+  });
+
+  // ============================================================
+  // Slice E — mode-aware addLine
+  // ============================================================
+
+  // ---- Non-serialized: reject non-null imei_snapshot ----
+
+  it('rejects non-null imei_snapshot on a non-serialized in-house line', async () => {
+    mockQueryBuilder.getOne.mockResolvedValue(seedDraftSale());
+    mockProductsService.findOne.mockResolvedValue(
+      seedProduct({ is_serialized: false }),
+    );
+
+    await expect(
+      service.addLine(
+        'sale-1',
+        {
+          product_id: 'prod-1',
+          quantity: 1,
+          imei_snapshot: '354789102345678',
+        },
+        'cashier-1',
+      ),
+    ).rejects.toThrow(/is not serialized; imei_snapshot must not be set/);
+  });
+
+  it('rejects non-null imei_snapshot on a non-serialized external-sourced line', async () => {
+    mockQueryBuilder.getOne.mockResolvedValue(seedDraftSale());
+    mockProductsService.findOne.mockResolvedValue(
+      seedProduct({ is_serialized: false }),
+    );
+    mockSuppliersService.findOne.mockResolvedValue(seedSupplier());
+
+    await expect(
+      service.addLine(
+        'sale-1',
+        {
+          product_id: 'prod-1',
+          quantity: 1,
+          external_supplier_id: 'supplier-1',
+          imei_snapshot: '354789102345678',
+        },
+        'cashier-1',
+      ),
+    ).rejects.toThrow(/is not serialized; imei_snapshot must not be set/);
+  });
+
+  // ---- In-house serialized ----
+
+  it('stores product_unit_id and PU-sourced snapshots on serialized in-house line', async () => {
+    mockQueryBuilder.getOne.mockResolvedValue(
+      seedDraftSale({ branch_id: 'branch-1' }),
+    );
+    mockQueryBuilder.getRawOne.mockResolvedValue({ max: '0' });
+    mockProductsService.findOne.mockResolvedValue(
+      seedProduct({
+        id: 'prod-1',
+        is_serialized: true,
+        branch_id: 'branch-1',
+        selling_price: '250000.00',
+        buying_price: '999999.00',
+      }),
+    );
+    mockManager.findOne.mockResolvedValue({
+      id: 'unit-1',
+      imei: '354789102345678',
+      status: ProductUnitStatus.IN_STOCK,
+      product_id: 'prod-1',
+      branch_id: 'branch-1',
+      selling_price: '260000.00',
+      buying_price: '210000.00',
+    });
+    mockManager.create.mockImplementation((_e, data) => data);
+    mockManager.save.mockImplementation((e) =>
+      Promise.resolve({ id: 'line-new', ...e }),
+    );
+
+    await service.addLine(
+      'sale-1',
+      {
+        product_id: 'prod-1',
+        quantity: 1,
+        imei_snapshot: '354789102345678',
+      },
+      'cashier-1',
+    );
+
+    expect(mockManager.create).toHaveBeenCalledWith(
+      SaleLine,
+      expect.objectContaining({
+        product_unit_id: 'unit-1',
+        imei_snapshot: '354789102345678', // from PU, authoritative
+        unit_price: '260000.00', // PU price used
+        cost_price_snapshot: '210000.00', // PU cost always
+        quantity: 1,
+      }),
+    );
+  });
+
+  it('falls back to Product.selling_price when PU.selling_price is null', async () => {
+    mockQueryBuilder.getOne.mockResolvedValue(
+      seedDraftSale({ branch_id: 'branch-1' }),
+    );
+    mockQueryBuilder.getRawOne.mockResolvedValue({ max: '0' });
+    mockProductsService.findOne.mockResolvedValue(
+      seedProduct({
+        id: 'prod-1',
+        is_serialized: true,
+        branch_id: 'branch-1',
+        selling_price: '250000.00',
+      }),
+    );
+    mockManager.findOne.mockResolvedValue({
+      id: 'unit-1',
+      imei: '354789102345678',
+      status: ProductUnitStatus.IN_STOCK,
+      product_id: 'prod-1',
+      branch_id: 'branch-1',
+      selling_price: null,
+      buying_price: '210000.00',
+    });
+    mockManager.create.mockImplementation((_e, data) => data);
+    mockManager.save.mockImplementation((e) => Promise.resolve(e));
+
+    await service.addLine(
+      'sale-1',
+      {
+        product_id: 'prod-1',
+        quantity: 1,
+        imei_snapshot: '354789102345678',
+      },
+      'cashier-1',
+    );
+
+    expect(mockManager.create).toHaveBeenCalledWith(
+      SaleLine,
+      expect.objectContaining({
+        unit_price: '250000.00', // Product fallback
+        cost_price_snapshot: '210000.00', // still PU, no fallback
+      }),
+    );
+  });
+
+  it('throws BadRequestException when both PU and Product selling_price are null', async () => {
+    mockQueryBuilder.getOne.mockResolvedValue(
+      seedDraftSale({ branch_id: 'branch-1' }),
+    );
+    mockProductsService.findOne.mockResolvedValue(
+      seedProduct({
+        id: 'prod-1',
+        is_serialized: true,
+        branch_id: 'branch-1',
+        selling_price: null as unknown as string,
+      }),
+    );
+    mockManager.findOne.mockResolvedValue({
+      id: 'unit-1',
+      imei: '354789102345678',
+      status: ProductUnitStatus.IN_STOCK,
+      product_id: 'prod-1',
+      branch_id: 'branch-1',
+      selling_price: null,
+      buying_price: '210000.00',
+    });
+
+    await expect(
+      service.addLine(
+        'sale-1',
+        {
+          product_id: 'prod-1',
+          quantity: 1,
+          imei_snapshot: '354789102345678',
+        },
+        'cashier-1',
+      ),
+    ).rejects.toThrow(/no selling price set on unit or product/);
+  });
+
+  it('throws BadRequestException when serialized in-house imei_snapshot missing', async () => {
+    mockQueryBuilder.getOne.mockResolvedValue(seedDraftSale());
+    mockProductsService.findOne.mockResolvedValue(
+      seedProduct({ is_serialized: true }),
+    );
+
+    await expect(
+      service.addLine(
+        'sale-1',
+        { product_id: 'prod-1', quantity: 1 },
+        'cashier-1',
+      ),
+    ).rejects.toThrow(/imei_snapshot is required/);
+  });
+
+  it('throws BadRequestException when serialized in-house quantity != 1', async () => {
+    mockQueryBuilder.getOne.mockResolvedValue(seedDraftSale());
+    mockProductsService.findOne.mockResolvedValue(
+      seedProduct({ is_serialized: true }),
+    );
+
+    await expect(
+      service.addLine(
+        'sale-1',
+        {
+          product_id: 'prod-1',
+          quantity: 2,
+          imei_snapshot: '354789102345678',
+        },
+        'cashier-1',
+      ),
+    ).rejects.toThrow(/quantity must be 1/);
+  });
+
+  it('throws BadRequestException when IMEI is not found in stock', async () => {
+    mockQueryBuilder.getOne.mockResolvedValue(seedDraftSale());
+    mockProductsService.findOne.mockResolvedValue(
+      seedProduct({ is_serialized: true }),
+    );
+    mockManager.findOne.mockResolvedValue(null);
+
+    await expect(
+      service.addLine(
+        'sale-1',
+        {
+          product_id: 'prod-1',
+          quantity: 1,
+          imei_snapshot: '354789102345678',
+        },
+        'cashier-1',
+      ),
+    ).rejects.toThrow(/is not in stock/);
+  });
+
+  it('throws BadRequestException when IMEI belongs to a different product', async () => {
+    mockQueryBuilder.getOne.mockResolvedValue(
+      seedDraftSale({ branch_id: 'branch-1' }),
+    );
+    mockProductsService.findOne.mockResolvedValue(
+      seedProduct({
+        id: 'prod-1',
+        is_serialized: true,
+        branch_id: 'branch-1',
+      }),
+    );
+    mockManager.findOne.mockResolvedValue({
+      id: 'unit-1',
+      imei: '354789102345678',
+      status: ProductUnitStatus.IN_STOCK,
+      product_id: 'prod-OTHER',
+      branch_id: 'branch-1',
+      selling_price: '260000.00',
+      buying_price: '210000.00',
+    });
+
+    await expect(
+      service.addLine(
+        'sale-1',
+        {
+          product_id: 'prod-1',
+          quantity: 1,
+          imei_snapshot: '354789102345678',
+        },
+        'cashier-1',
+      ),
+    ).rejects.toThrow(/does not belong to product/);
+  });
+
+  it('throws BadRequestException when IMEI is at a different branch', async () => {
+    mockQueryBuilder.getOne.mockResolvedValue(
+      seedDraftSale({ branch_id: 'branch-1' }),
+    );
+    mockProductsService.findOne.mockResolvedValue(
+      seedProduct({
+        id: 'prod-1',
+        is_serialized: true,
+        branch_id: 'branch-1',
+      }),
+    );
+    mockManager.findOne.mockResolvedValue({
+      id: 'unit-1',
+      imei: '354789102345678',
+      status: ProductUnitStatus.IN_STOCK,
+      product_id: 'prod-1',
+      branch_id: 'branch-OTHER',
+      selling_price: '260000.00',
+      buying_price: '210000.00',
+    });
+
+    await expect(
+      service.addLine(
+        'sale-1',
+        {
+          product_id: 'prod-1',
+          quantity: 1,
+          imei_snapshot: '354789102345678',
+        },
+        'cashier-1',
+      ),
+    ).rejects.toThrow(/is not available at this branch/);
+  });
+
+  it('throws ConflictException with structured payload when IMEI is SOLD', async () => {
+    mockQueryBuilder.getOne.mockResolvedValue(
+      seedDraftSale({ branch_id: 'branch-1' }),
+    );
+    mockProductsService.findOne.mockResolvedValue(
+      seedProduct({
+        id: 'prod-1',
+        is_serialized: true,
+        branch_id: 'branch-1',
+      }),
+    );
+    mockManager.findOne.mockResolvedValue({
+      id: 'unit-1',
+      imei: '354789102345678',
+      status: ProductUnitStatus.SOLD,
+      product_id: 'prod-1',
+      branch_id: 'branch-1',
+      selling_price: '260000.00',
+      buying_price: '210000.00',
+    });
+
+    try {
+      await service.addLine(
+        'sale-1',
+        {
+          product_id: 'prod-1',
+          quantity: 1,
+          imei_snapshot: '354789102345678',
+        },
+        'cashier-1',
+      );
+      fail('expected ConflictException');
+    } catch (err) {
+      expect(err).toBeInstanceOf(ConflictException);
+      expect((err as ConflictException).getResponse()).toMatchObject({
+        message: expect.stringContaining('SOLD'),
+        existing_unit: {
+          id: 'unit-1',
+          status: ProductUnitStatus.SOLD,
+          product_id: 'prod-1',
+          branch_id: 'branch-1',
+        },
+      });
+    }
+  });
+
+  it('throws ConflictException when IMEI is RETURNED', async () => {
+    mockQueryBuilder.getOne.mockResolvedValue(
+      seedDraftSale({ branch_id: 'branch-1' }),
+    );
+    mockProductsService.findOne.mockResolvedValue(
+      seedProduct({
+        id: 'prod-1',
+        is_serialized: true,
+        branch_id: 'branch-1',
+      }),
+    );
+    mockManager.findOne.mockResolvedValue({
+      id: 'unit-1',
+      imei: '354789102345678',
+      status: ProductUnitStatus.RETURNED,
+      product_id: 'prod-1',
+      branch_id: 'branch-1',
+      selling_price: '260000.00',
+      buying_price: '210000.00',
+    });
+
+    try {
+      await service.addLine(
+        'sale-1',
+        {
+          product_id: 'prod-1',
+          quantity: 1,
+          imei_snapshot: '354789102345678',
+        },
+        'cashier-1',
+      );
+      fail('expected ConflictException');
+    } catch (err) {
+      expect(err).toBeInstanceOf(ConflictException);
+      expect((err as ConflictException).getResponse()).toMatchObject({
+        message: expect.stringContaining('RETURNED'),
+        existing_unit: expect.objectContaining({
+          status: ProductUnitStatus.RETURNED,
+        }),
+      });
+    }
+  });
+
+  it('throws ConflictException when IMEI is WRITTEN_OFF', async () => {
+    mockQueryBuilder.getOne.mockResolvedValue(
+      seedDraftSale({ branch_id: 'branch-1' }),
+    );
+    mockProductsService.findOne.mockResolvedValue(
+      seedProduct({
+        id: 'prod-1',
+        is_serialized: true,
+        branch_id: 'branch-1',
+      }),
+    );
+    mockManager.findOne.mockResolvedValue({
+      id: 'unit-1',
+      imei: '354789102345678',
+      status: ProductUnitStatus.WRITTEN_OFF,
+      product_id: 'prod-1',
+      branch_id: 'branch-1',
+      selling_price: '260000.00',
+      buying_price: '210000.00',
+    });
+
+    try {
+      await service.addLine(
+        'sale-1',
+        {
+          product_id: 'prod-1',
+          quantity: 1,
+          imei_snapshot: '354789102345678',
+        },
+        'cashier-1',
+      );
+      fail('expected ConflictException');
+    } catch (err) {
+      expect(err).toBeInstanceOf(ConflictException);
+      expect((err as ConflictException).getResponse()).toMatchObject({
+        message: expect.stringContaining('WRITTEN_OFF'),
+        existing_unit: expect.objectContaining({
+          status: ProductUnitStatus.WRITTEN_OFF,
+        }),
+      });
+    }
+  });
+
+  // ---- External-sourced serialized ----
+
+  it('stores imei_snapshot verbatim on external-sourced serialized line (no PU lookup)', async () => {
+    // getOne calls: 1) sale load, 2) collision check → null (no match)
+    mockQueryBuilder.getOne
+      .mockResolvedValueOnce(seedDraftSale({ branch_id: 'branch-1' }))
+      .mockResolvedValueOnce(null);
+    mockQueryBuilder.getRawOne.mockResolvedValue({ max: '0' });
+    mockProductsService.findOne.mockResolvedValue(
+      seedProduct({
+        id: 'prod-1',
+        is_serialized: true,
+        branch_id: 'branch-1',
+        selling_price: '250000.00',
+        buying_price: '220000.00',
+      }),
+    );
+    mockSuppliersService.findOne.mockResolvedValue(seedSupplier());
+    mockManager.create.mockImplementation((_e, data) => data);
+    mockManager.save.mockImplementation((e) => Promise.resolve(e));
+
+    await service.addLine(
+      'sale-1',
+      {
+        product_id: 'prod-1',
+        quantity: 1,
+        external_supplier_id: 'supplier-1',
+        imei_snapshot: '999888777666555',
+      },
+      'cashier-1',
+    );
+
+    expect(mockManager.findOne).not.toHaveBeenCalled(); // no PU lookup
+    expect(mockManager.create).toHaveBeenCalledWith(
+      SaleLine,
+      expect.objectContaining({
+        product_unit_id: null,
+        imei_snapshot: '999888777666555', // free text, verbatim
+        external_supplier_id: 'supplier-1',
+        unit_price: '250000.00', // Product price
+        cost_price_snapshot: '220000.00', // Product cost
+      }),
+    );
+  });
+
+  it('throws BadRequestException when external-sourced serialized imei_snapshot missing', async () => {
+    mockQueryBuilder.getOne.mockResolvedValue(seedDraftSale());
+    mockProductsService.findOne.mockResolvedValue(
+      seedProduct({ is_serialized: true }),
+    );
+    mockSuppliersService.findOne.mockResolvedValue(seedSupplier());
+
+    await expect(
+      service.addLine(
+        'sale-1',
+        {
+          product_id: 'prod-1',
+          quantity: 1,
+          external_supplier_id: 'supplier-1',
+        },
+        'cashier-1',
+      ),
+    ).rejects.toThrow(/imei_snapshot is required/);
+  });
+
+  it('throws BadRequestException when external-sourced serialized quantity != 1', async () => {
+    mockQueryBuilder.getOne.mockResolvedValue(seedDraftSale());
+    mockProductsService.findOne.mockResolvedValue(
+      seedProduct({ is_serialized: true }),
+    );
+    mockSuppliersService.findOne.mockResolvedValue(seedSupplier());
+
+    await expect(
+      service.addLine(
+        'sale-1',
+        {
+          product_id: 'prod-1',
+          quantity: 2,
+          external_supplier_id: 'supplier-1',
+          imei_snapshot: '354789102345678',
+        },
+        'cashier-1',
+      ),
+    ).rejects.toThrow(/quantity must be 1/);
+  });
+
+  it('throws ConflictException when external imei_snapshot matches an IN_STOCK PU', async () => {
+    // getOne calls: 1) sale load, 2) collision check → found IN_STOCK unit
+    mockQueryBuilder.getOne
+      .mockResolvedValueOnce(seedDraftSale({ branch_id: 'branch-1' }))
+      .mockResolvedValueOnce({
+        id: 'unit-conflict',
+        imei: '354789102345678',
+        status: ProductUnitStatus.IN_STOCK,
+        product_id: 'prod-inhouse',
+        branch_id: 'branch-1',
+      });
+    mockProductsService.findOne.mockResolvedValue(
+      seedProduct({ is_serialized: true }),
+    );
+    mockSuppliersService.findOne.mockResolvedValue(seedSupplier());
+
+    try {
+      await service.addLine(
+        'sale-1',
+        {
+          product_id: 'prod-1',
+          quantity: 1,
+          external_supplier_id: 'supplier-1',
+          imei_snapshot: '354789102345678',
+        },
+        'cashier-1',
+      );
+      fail('expected ConflictException');
+    } catch (err) {
+      expect(err).toBeInstanceOf(ConflictException);
+      expect((err as ConflictException).getResponse()).toMatchObject({
+        message: expect.stringContaining('currently in your stock'),
+        existing_unit: {
+          id: 'unit-conflict',
+          product_id: 'prod-inhouse',
+          branch_id: 'branch-1',
+        },
+      });
+    }
+  });
+
+  it('allows external imei_snapshot matching a SOLD PU (historical, not diagnostic)', async () => {
+    // Collision check returns null because the SQL filters by status=IN_STOCK.
+    // We simulate that: the query for status=IN_STOCK finds nothing even if
+    // a SOLD row exists in the "real" DB.
+    mockQueryBuilder.getOne
+      .mockResolvedValueOnce(seedDraftSale({ branch_id: 'branch-1' }))
+      .mockResolvedValueOnce(null);
+    mockQueryBuilder.getRawOne.mockResolvedValue({ max: '0' });
+    mockProductsService.findOne.mockResolvedValue(
+      seedProduct({
+        id: 'prod-1',
+        is_serialized: true,
+        branch_id: 'branch-1',
+      }),
+    );
+    mockSuppliersService.findOne.mockResolvedValue(seedSupplier());
+    mockManager.create.mockImplementation((_e, data) => data);
+    mockManager.save.mockImplementation((e) => Promise.resolve(e));
+
+    await expect(
+      service.addLine(
+        'sale-1',
+        {
+          product_id: 'prod-1',
+          quantity: 1,
+          external_supplier_id: 'supplier-1',
+          imei_snapshot: '354789102345678',
+        },
+        'cashier-1',
+      ),
+    ).resolves.toBeDefined();
   });
 });

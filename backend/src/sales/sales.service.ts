@@ -3,12 +3,17 @@ import {
   NotFoundException,
   BadRequestException,
   ForbiddenException,
+  ConflictException,
 } from '@nestjs/common';
 import { InjectRepository, InjectDataSource } from '@nestjs/typeorm';
 import { DataSource, EntityManager, Repository } from 'typeorm';
 import { Sale } from './entities/sale.entity';
 import { SaleLine } from './entities/sale-line.entity';
 import { Payment } from './entities/payment.entity';
+import { ProductUnit } from '../product-units/entities/product-unit.entity';
+import { Product } from '../products/entities/product.entity';
+import { ProductUnitStatus } from '../product-units/enums/product-unit-status.enum';
+import { ProductUnitsService } from '../product-units/product-units.service';
 import { SaleStatus } from './enums/sale-status.enum';
 import { SaleType } from './enums/sale-type.enum';
 import { DiscountType } from './enums/discount-type.enum';
@@ -53,6 +58,7 @@ export class SalesService {
     private readonly stockService: StockService,
     private readonly saleNumberCountersService: SaleNumberCountersService,
     private readonly customersService: CustomersService,
+    private readonly productUnitsService: ProductUnitsService,
   ) {}
 
   /**
@@ -284,26 +290,48 @@ export class SalesService {
 
   /**
    * Add a new line to a DRAFT sale. Called via the sub-resource endpoint
-   * POST /sales/:id/lines (wired in Slice D3).
+   * POST /sales/:id/lines.
    *
-   * Workflow, all inside a single transaction with the sale row locked
-   * pessimistic_write:
-   *   1. Load + lock the parent sale, assert it's DRAFT
-   *   2. Resolve the product (must exist, be active, belong to same branch)
-   *   3. If external_supplier_id set, resolve the supplier (must exist + active)
-   *   4. Compute next line_number as max + 1 within this sale
-   *   5. Resolve discount_amount from the client's (type, value) input
-   *   6. Compute line_total from the reconciliation formula
-   *   7. Insert the line, snapshotting product identity + pricing
-   *   8. Recompute sale totals from the resulting line set
+   * Three line modes, dispatched on (product.is_serialized,
+   * dto.external_supplier_id):
    *
-   * Snapshot columns (sku, name, unit_price, cost_price) are frozen from
-   * the product at THIS moment. Later product edits do not retroactively
-   * change what the customer was charged.
+   *   IN_HOUSE_NON_SERIALIZED (default retail):
+   *     - imei_snapshot must be null (Slice E rule)
+   *     - unit_price / cost_price from Product
+   *     - stored: product_unit_id=null, external_supplier_id=null
+   *     - complete-time: stock decremented, no PU flip
    *
-   * Returns the freshly inserted line WITHOUT relations loaded — callers
-   * that need the full nested shape can re-fetch. Keeps the transaction
-   * short.
+   *   IN_HOUSE_SERIALIZED (used phone / IMEI'd retail):
+   *     - imei_snapshot required (looked up as IMEI)
+   *     - quantity must be 1
+   *     - resolves ProductUnit; Q3 failures produce distinct errors
+   *     - unit_price: PU.selling_price → Product.selling_price → 400
+   *     - cost_price: PU.buying_price always
+   *     - stored: product_unit_id set, imei_snapshot from PU (authoritative)
+   *     - complete-time: stock decremented, PU flipped IN_STOCK→SOLD
+   *
+   *   EXTERNAL (friendly-shop sourced, serialized or not):
+   *     - supplier validated (existing behavior)
+   *     - if product.is_serialized: imei_snapshot required (free text),
+   *       quantity must be 1, IN_STOCK collision check (Q7)
+   *     - if non-serialized: imei_snapshot must be null
+   *     - unit_price / cost_price from Product
+   *     - stored: product_unit_id=null, external_supplier_id set
+   *     - complete-time: no stock touch, no PU flip
+   *
+   * Workflow (all inside a single transaction with sale row locked
+   * pessimistic_write):
+   *   1. Load + lock the sale, assert it's DRAFT
+   *   2. Resolve product (exists, active, same branch as sale)
+   *   3. Dispatch to per-mode validation + resolution — determines the
+   *      four snapshot values (product_unit_id, imei_snapshot,
+   *      unit_price, cost_price)
+   *   4. Assign line_number as max + 1
+   *   5. Resolve discount_amount from client (type, value)
+   *   6. Compute line_total per the CHK formula
+   *   7. Insert; recompute sale totals
+   *
+   * Returns the freshly inserted line WITHOUT relations loaded.
    */
   async addLine(
     saleId: string,
@@ -339,8 +367,18 @@ export class SalesService {
         );
       }
 
-      // 3. Resolve external supplier if provided
+      // 3. Per-mode resolution. These four values are the snapshot the
+      //    insert step commits. Only the serialized-in-house branch
+      //    overrides unit_price / cost_price / imei_snapshot from Product
+      //    defaults; other modes fall through to the Product-based values.
+      const clientImei = dto.imei_snapshot ?? null;
+      let productUnitId: string | null = null;
+      let imeiSnapshot: string | null = clientImei;
+      let unitPrice: string = product.selling_price;
+      let costPrice: string = product.buying_price;
+
       if (dto.external_supplier_id) {
+        // EXTERNAL branch — resolve supplier (existing behavior)
         const supplier = await this.suppliersService.findOne(
           dto.external_supplier_id,
         );
@@ -349,10 +387,60 @@ export class SalesService {
             `Supplier "${supplier.name}" is not active`,
           );
         }
+
+        if (product.is_serialized) {
+          // EXTERNAL + serialized: IMEI required as free text,
+          // quantity=1, IN_STOCK collision check per Q7.
+          if (clientImei === null) {
+            throw new BadRequestException(
+              `imei_snapshot is required for serialized product "${product.name}"`,
+            );
+          }
+          if (dto.quantity !== 1) {
+            throw new BadRequestException(
+              `quantity must be 1 for serialized product "${product.name}"`,
+            );
+          }
+          await this.assertExternalSerializedImeiNotInStock(
+            manager,
+            clientImei,
+          );
+          // imeiSnapshot already set to clientImei above; leave product-
+          // based prices in place (settlement with supplier in Phase 6.7
+          // uses these to compute margin owed).
+        } else {
+          // EXTERNAL + non-serialized: no IMEI allowed.
+          this.assertNoImeiOnNonSerializedLine(clientImei, product.name);
+        }
+      } else if (product.is_serialized) {
+        // IN_HOUSE_SERIALIZED — resolve PU, all four Q3 checks, price fallback.
+        if (clientImei === null) {
+          throw new BadRequestException(
+            `imei_snapshot is required for serialized product "${product.name}"`,
+          );
+        }
+        if (dto.quantity !== 1) {
+          throw new BadRequestException(
+            `quantity must be 1 for serialized product "${product.name}"`,
+          );
+        }
+        const resolved = await this.resolveInHouseSerializedLine(
+          manager,
+          sale.branch_id,
+          product,
+          clientImei,
+        );
+        productUnitId = resolved.productUnitId;
+        imeiSnapshot = resolved.imeiSnapshot;
+        unitPrice = resolved.unitPrice;
+        costPrice = resolved.costPrice;
+      } else {
+        // IN_HOUSE_NON_SERIALIZED — no IMEI allowed.
+        this.assertNoImeiOnNonSerializedLine(clientImei, product.name);
       }
 
       // 4. Assign line_number as max + 1 within this sale. The sale row
-      // is locked, so concurrent adds on the same sale serialize here.
+      //    is locked, so concurrent adds on the same sale serialize here.
       const maxRow = await manager
         .createQueryBuilder(SaleLine, 'line')
         .select('COALESCE(MAX(line.line_number), 0)', 'max')
@@ -360,11 +448,11 @@ export class SalesService {
         .getRawOne<{ max: string }>();
       const nextLineNumber = Number(maxRow?.max ?? 0) + 1;
 
-      // 5. Resolve discount amount from client input
+      // 5. Resolve discount amount from client input (uses per-mode unit_price)
       const discountType = dto.discount_type ?? null;
       const discountValue = dto.discount_value ?? null;
       const discountAmount = this.resolveDiscountAmount(
-        product.selling_price,
+        unitPrice,
         dto.quantity,
         discountType,
         discountValue,
@@ -372,20 +460,20 @@ export class SalesService {
 
       // 6. Compute line_total (must match CHK_sale_lines_line_total exactly)
       const lineTotal = this.computeLineTotal(
-        product.selling_price,
+        unitPrice,
         dto.quantity,
         discountAmount,
       );
 
-      // 7. Insert the line
+      // 7. Insert the line with per-mode snapshot values
       const line = manager.create(SaleLine, {
         sale_id: saleId,
         line_number: nextLineNumber,
         product_id: product.id,
         product_sku_snapshot: product.sku,
         product_name_snapshot: product.name,
-        unit_price: product.selling_price,
-        cost_price_snapshot: product.buying_price,
+        unit_price: unitPrice,
+        cost_price_snapshot: costPrice,
         quantity: dto.quantity,
         discount_type: discountType,
         discount_value:
@@ -395,7 +483,8 @@ export class SalesService {
         discount_amount: discountAmount,
         line_total: lineTotal,
         external_supplier_id: dto.external_supplier_id ?? null,
-        imei_snapshot: dto.imei_snapshot ?? null,
+        imei_snapshot: imeiSnapshot,
+        product_unit_id: productUnitId,
       });
       const saved = await manager.save(line);
 
@@ -1349,5 +1438,168 @@ export class SalesService {
       .getRawOne<{ sum: string }>();
     const paidSoFar = Number(result?.sum ?? 0) - excludeAmount;
     return Number(saleTotal) - paidSoFar;
+  }
+
+  /**
+   * Guard for serialized in-house lines: assert the client didn't send
+   * imei_snapshot on a non-serialized product line, and (for
+   * external-sourced non-serialized) same rule.
+   *
+   * The three legal shapes (see Slice E Q1 CHECK constraint reasoning):
+   *   Non-serialized (external or in-house): imei_snapshot MUST be null.
+   *   Serialized in-house: imei_snapshot required (looked up as IMEI).
+   *   Serialized external: imei_snapshot required (stored as free text).
+   *
+   * This method covers only the non-serialized rejection. The serialized
+   * "required" checks live inside the mode-specific resolve helpers so
+   * their error messages can be mode-specific.
+   */
+  private assertNoImeiOnNonSerializedLine(
+    imeiSnapshot: string | null,
+    productName: string,
+  ): void {
+    if (imeiSnapshot !== null) {
+      throw new BadRequestException(
+        `Product "${productName}" is not serialized; imei_snapshot must not be set`,
+      );
+    }
+  }
+
+  /**
+   * Guard for external-sourced serialized lines: reject if the free-text
+   * imei_snapshot happens to match a ProductUnit currently in IN_STOCK.
+   *
+   * Rationale (Slice E Q7): catches the specific inventory-drift failure
+   * mode where a UI bug or misclick sets external_supplier_id on a line
+   * that should be in-house. Without this check, the sale completes,
+   * skips stock decrement AND skips PU flip — physical phone leaves the
+   * shop but both stock and PU status say we still have it.
+   *
+   * Only IN_STOCK is diagnostic. SOLD/RETURNED/WRITTEN_OFF matches are
+   * historical coincidences (or genuine IMEI-uniqueness violations
+   * outside our control) and not something to block a sale on.
+   *
+   * Runs inside the caller's transaction, so the collision check and the
+   * subsequent insert both see the same snapshot.
+   */
+  private async assertExternalSerializedImeiNotInStock(
+    manager: EntityManager,
+    imei: string,
+  ): Promise<void> {
+    const conflicting = await manager
+      .createQueryBuilder(ProductUnit, 'unit')
+      .where('unit.imei = :imei', { imei })
+      .andWhere('unit.status = :status', {
+        status: ProductUnitStatus.IN_STOCK,
+      })
+      .getOne();
+
+    if (conflicting) {
+      throw new ConflictException({
+        message:
+          `IMEI '${imei}' is currently in your stock (status: IN_STOCK). ` +
+          `If you meant to sell your own inventory, remove external_supplier_id.`,
+        existing_unit: {
+          id: conflicting.id,
+          product_id: conflicting.product_id,
+          branch_id: conflicting.branch_id,
+        },
+      });
+    }
+  }
+
+  /**
+   * Resolve the ProductUnit for a serialized in-house sale line and
+   * return the four snapshot values addLine needs: product_unit_id,
+   * imei_snapshot (from the PU, not the client — PU is source of truth),
+   * unit_price (PU.selling_price → Product.selling_price → 400), and
+   * cost_price (always PU.buying_price, no fallback).
+   *
+   * Four failure modes per Slice E Q3:
+   *   1. IMEI not found          → BadRequest 400 (payload-referenced entity)
+   *   2. Product mismatch        → BadRequest 400 (payload integrity)
+   *   3. Branch mismatch         → BadRequest 400 (payload integrity, NOT
+   *                                Forbidden — the cashier is at their
+   *                                own branch; the IMEI just isn't there)
+   *   4. Non-IN_STOCK status     → Conflict 409 with existing_unit payload
+   *                                (mirrors Slice D IMEI collision shape)
+   *
+   * Price fallback per Slice E Q6:
+   *   PU.selling_price → Product.selling_price → 400 "no selling price set"
+   *   Handles both used-phone (per-unit price required, Product has 0)
+   *   and new-serialized-phone (Product list price is authoritative, PU
+   *   price left null) cases correctly.
+   *
+   * cost_price is ALWAYS PU.buying_price. No fallback — used phones cost
+   * varies per unit; averaging via Product.buying_price would corrupt
+   * margin reports.
+   *
+   * Query is by imei alone (no product/branch/status filter) so we can
+   * distinguish failure modes for actionable error messages. Runs inside
+   * caller's transaction; no lock — the complete-time markSoldForSale
+   * lock is the sole gate (Slice E Q5).
+   */
+  private async resolveInHouseSerializedLine(
+    manager: EntityManager,
+    saleBranchId: string,
+    product: Product,
+    imei: string,
+  ): Promise<{
+    productUnitId: string;
+    imeiSnapshot: string;
+    unitPrice: string;
+    costPrice: string;
+  }> {
+    const unit = await manager.findOne(ProductUnit, {
+      where: { imei },
+    });
+
+    // 1. Not found
+    if (!unit) {
+      throw new BadRequestException(`IMEI '${imei}' is not in stock`);
+    }
+
+    // 2. Product mismatch — payload integrity
+    if (unit.product_id !== product.id) {
+      throw new BadRequestException(
+        `IMEI '${imei}' does not belong to product "${product.name}"`,
+      );
+    }
+
+    // 3. Branch mismatch — payload integrity, not a cross-branch
+    //    authorization issue (the cashier IS at their own branch).
+    if (unit.branch_id !== saleBranchId) {
+      throw new BadRequestException(
+        `IMEI '${imei}' is not available at this branch`,
+      );
+    }
+
+    // 4. Non-IN_STOCK — state conflict, structured payload
+    if (unit.status !== ProductUnitStatus.IN_STOCK) {
+      throw new ConflictException({
+        message: `IMEI '${imei}' is not available (status: ${unit.status})`,
+        existing_unit: {
+          id: unit.id,
+          status: unit.status,
+          product_id: unit.product_id,
+          branch_id: unit.branch_id,
+        },
+      });
+    }
+
+    // Price resolution: PU.selling_price → Product.selling_price → 400
+    const unitPrice = unit.selling_price ?? product.selling_price ?? null;
+    if (unitPrice === null) {
+      throw new BadRequestException(
+        `Cannot price IMEI '${imei}' — no selling price set on unit or product`,
+      );
+    }
+
+    return {
+      productUnitId: unit.id,
+      imeiSnapshot: unit.imei, // PU is source of truth
+      unitPrice,
+      costPrice: unit.buying_price,
+    };
   }
 }
