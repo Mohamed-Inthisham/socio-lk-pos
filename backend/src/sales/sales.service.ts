@@ -497,26 +497,39 @@ export class SalesService {
 
   /**
    * Update an existing line on a DRAFT sale. Called via
-   * PATCH /sales/:saleId/lines/:lineId (wired in Slice D3).
+   * PATCH /sales/:saleId/lines/:lineId.
    *
-   * Updatable fields: quantity, discount (both type+value together),
-   * external_supplier_id, imei_snapshot. Snapshot fields (sku, name,
-   * unit_price, cost_price) and line_number are frozen — see
-   * UpdateSaleLineDto for the reasoning.
+   * Mode-aware (Slice E Q8): what's mutable depends on the line's mode,
+   * determined by the STORED product's is_serialized and the STORED
+   * external_supplier_id — NOT what the DTO tries to change. Mode
+   * changes are forbidden; to switch modes, removeLine + addLine.
    *
-   * PATCH semantics: undefined = don't touch, null = clear (for
-   * nullable fields), value = set.
+   *   Non-serialized (either sourcing):
+   *     - quantity, discount, external_supplier_id: mutable
+   *     - imei_snapshot: must be null (rejected if set)
    *
-   * Discount is a two-field unit: both discount_type and discount_value
-   * must be updated together (both to null to clear, or both to values).
-   * Sending only one raises 400. This is enforced against the MERGED
-   * state (existing + DTO) so a caller changing only the type of an
-   * already-discounted line without touching the value would fail here —
-   * intended, because "change type but keep value" is almost always a
-   * mistake (percent 500 means something very different from amount 500).
+   *   Serialized in-house:
+   *     - discount: mutable
+   *     - quantity: frozen at 1 (rejected if != 1)
+   *     - external_supplier_id: frozen (rejected if included at all —
+   *       mode change would need PU un-link)
+   *     - imei_snapshot: frozen (rejected if included at all — changing
+   *       IMEI = changing physical phone = removeLine + addLine)
    *
-   * Runs inside a transaction with the parent sale row locked. Recomputes
-   * sale totals from source at the end.
+   *   Serialized external:
+   *     - discount, imei_snapshot: mutable (imei_snapshot re-runs the
+   *       IN_STOCK collision check from Q7)
+   *     - quantity: frozen at 1
+   *     - external_supplier_id: frozen (mode change to in-house would
+   *       need PU resolution)
+   *
+   * PATCH semantics preserved: undefined = don't touch, null = clear
+   * (nullable fields), value = set. Frozen-field rejections fire only
+   * when the field is INCLUDED in the DTO — silent "don't touch" is
+   * always allowed.
+   *
+   * Runs inside a transaction with the parent sale row locked
+   * pessimistic_write. Recomputes sale totals from source at the end.
    */
   async updateLine(
     saleId: string,
@@ -524,7 +537,7 @@ export class SalesService {
     dto: UpdateSaleLineDto,
   ): Promise<SaleLine> {
     return this.dataSource.transaction(async (manager) => {
-      // Load + lock the sale (same pattern as addLine)
+      // Load + lock the sale
       const sale = await manager
         .createQueryBuilder(Sale, 'sale')
         .setLock('pessimistic_write')
@@ -547,20 +560,80 @@ export class SalesService {
         throw new NotFoundException('Sale line not found');
       }
 
-      // Validate external supplier if being changed to a non-null value
-      if (dto.external_supplier_id) {
-        const supplier = await this.suppliersService.findOne(
-          dto.external_supplier_id,
-        );
-        if (!supplier.is_active) {
+      // Determine mode from STORED state. Load the product to check
+      // is_serialized (not carried on SaleLine — snapshot has sku/name
+      // but not is_serialized).
+      const product = await this.productsService.findOne(line.product_id);
+      const isSerialized = product.is_serialized;
+      const isExternal = line.external_supplier_id !== null;
+
+      // Mode-specific guards. Each guard checks only fields the client
+      // actually included (undefined = don't touch, silently allowed).
+
+      if (isSerialized) {
+        // Serialized: quantity locked at 1, external_supplier_id frozen.
+        if (dto.quantity !== undefined && dto.quantity !== 1) {
           throw new BadRequestException(
-            `Supplier "${supplier.name}" is not active`,
+            `quantity must be 1 for serialized product "${product.name}"`,
           );
+        }
+        if (dto.external_supplier_id !== undefined) {
+          throw new BadRequestException(
+            `Cannot change external_supplier_id on a serialized line. ` +
+              `Remove the line and add a new one to change sourcing.`,
+          );
+        }
+
+        if (isExternal) {
+          // External serialized: imei_snapshot editable with collision check.
+          if (dto.imei_snapshot !== undefined && dto.imei_snapshot !== null) {
+            await this.assertExternalSerializedImeiNotInStock(
+              manager,
+              dto.imei_snapshot,
+            );
+          }
+          // Nulling imei_snapshot on external serialized is nonsensical
+          // (it's the only IMEI record for the line) but the DB CHECK
+          // constraint doesn't forbid it — leave to service:
+          if (dto.imei_snapshot === null) {
+            throw new BadRequestException(
+              `imei_snapshot is required for serialized external-sourced line`,
+            );
+          }
+        } else {
+          // In-house serialized: imei_snapshot frozen entirely.
+          if (dto.imei_snapshot !== undefined) {
+            throw new BadRequestException(
+              `Cannot change imei_snapshot on a serialized in-house line. ` +
+                `Remove the line and add a new one to change the IMEI.`,
+            );
+          }
+        }
+      } else {
+        // Non-serialized (either sourcing): imei_snapshot must be null.
+        if (dto.imei_snapshot !== undefined && dto.imei_snapshot !== null) {
+          throw new BadRequestException(
+            `Product "${product.name}" is not serialized; ` +
+              `imei_snapshot must not be set`,
+          );
+        }
+        // Non-serialized allows external_supplier_id toggle (existing
+        // behavior). Validate supplier if setting to a non-null value.
+        if (dto.external_supplier_id) {
+          const supplier = await this.suppliersService.findOne(
+            dto.external_supplier_id,
+          );
+          if (!supplier.is_active) {
+            throw new BadRequestException(
+              `Supplier "${supplier.name}" is not active`,
+            );
+          }
         }
       }
 
-      // Merge DTO onto current line state to get the "effective" values.
-      // For each field: undefined means keep existing, otherwise apply.
+      // Merge DTO onto current line state to get the "effective" values
+      // for discount recompute. Same logic as before — mode guards above
+      // already blocked the invalid touches.
       const nextQuantity = dto.quantity ?? line.quantity;
 
       const discountTypeTouched = dto.discount_type !== undefined;
@@ -574,17 +647,12 @@ export class SalesService {
           ? null
           : Number(line.discount_value);
 
-      // If exactly one of the discount fields was touched, that's an
-      // inconsistent update. Both together, or neither, are the only
-      // valid options.
       if (discountTypeTouched !== discountValueTouched) {
         throw new BadRequestException(
           'discount_type and discount_value must be updated together',
         );
       }
 
-      // Recompute discount_amount + line_total against the merged state.
-      // unit_price never changes on update, so use line.unit_price.
       const nextDiscountAmount = this.resolveDiscountAmount(
         line.unit_price,
         nextQuantity,
