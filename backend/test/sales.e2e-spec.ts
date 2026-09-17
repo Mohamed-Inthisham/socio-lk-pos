@@ -21,6 +21,9 @@ import { Payment } from '../src/sales/entities/payment.entity';
 import { PaymentMethod } from '../src/sales/enums/payment-method.enum';
 import { Stock } from '../src/stock/entities/stock.entity';
 import { Customer } from '../src/customers/entities/customer.entity';
+import { ProductUnit } from '../src/product-units/entities/product-unit.entity';
+import { ProductUnitStatus } from '../src/product-units/enums/product-unit-status.enum';
+import { PhonePurchase } from '../src/phone-purchases/entities/phone-purchase.entity';
 
 describe('Sales (e2e)', () => {
   let app: INestApplication;
@@ -142,6 +145,7 @@ describe('Sales (e2e)', () => {
       selling_price?: string;
       buying_price?: string;
       is_active?: boolean;
+      is_serialized?: boolean;
     } = {},
   ): Promise<Product> {
     const brandRepo = dataSource.getRepository(Brand);
@@ -179,6 +183,7 @@ describe('Sales (e2e)', () => {
         buying_price: overrides.buying_price ?? '80000.00',
         selling_price: overrides.selling_price ?? '100000.00',
         is_active: overrides.is_active ?? true,
+        is_serialized: overrides.is_serialized ?? false,
       }),
     );
   }
@@ -214,11 +219,95 @@ describe('Sales (e2e)', () => {
     }
   }
 
+  /**
+   * Seed a PhonePurchase parent row for a ProductUnit. Slice D's schema
+   * requires customer_id, branch_id, cashier_id, total_amount — all
+   * NOT NULL. Used only by seedProductUnit; not directly by tests.
+   */
+  async function seedPhonePurchase(
+    branchId: string,
+    cashierId: string,
+    customerId: string,
+    totalAmount = '100000.00',
+  ): Promise<PhonePurchase> {
+    const repo = dataSource.getRepository(PhonePurchase);
+    return repo.save(
+      repo.create({
+        customer_id: customerId,
+        branch_id: branchId,
+        cashier_id: cashierId,
+        total_amount: totalAmount,
+        notes: null,
+      }),
+    );
+  }
+
+  /**
+   * Seed a ProductUnit row against an existing serialized product.
+   * Requires a PhonePurchase parent (Slice D FK), so this helper also
+   * lazily seeds a Customer + PhonePurchase for the unit.
+   *
+   * `imei` should be unique across a test — the global unique index on
+   * product_units.imei will otherwise reject the insert.
+   *
+   * `status` defaults to IN_STOCK. Tests exercising cross-DRAFT races or
+   * error paths override with SOLD / RETURNED / WRITTEN_OFF.
+   *
+   * `selling_price` defaults to null (per Slice D's "price-later"
+   * Cashier Option C) so tests can distinguish the PU→Product fallback
+   * path from the PU-price-used path by passing an explicit value.
+   */
+
+  async function seedProductUnit(
+    productId: string,
+    branchId: string,
+    cashierId: string,
+    imei: string,
+    overrides: {
+      status?: ProductUnitStatus;
+      buying_price?: string;
+      selling_price?: string | null;
+      customerId?: string;
+    } = {},
+  ): Promise<ProductUnit> {
+    // Lazily seed a customer + phone-purchase for FK integrity
+    const customerId =
+      overrides.customerId ??
+      (
+        await seedCustomer({
+          name: `PU seed customer ${imei.slice(-4)}`,
+          phone: `077${imei.slice(-7)}`,
+        })
+      ).id;
+    const phonePurchase = await seedPhonePurchase(
+      branchId,
+      cashierId,
+      customerId,
+      overrides.buying_price ?? '80000.00',
+    );
+
+    const repo = dataSource.getRepository(ProductUnit);
+    return repo.save(
+      repo.create({
+        product_id: productId,
+        branch_id: branchId,
+        imei,
+        status: overrides.status ?? ProductUnitStatus.IN_STOCK,
+        buying_price: overrides.buying_price ?? '80000.00',
+        selling_price:
+          overrides.selling_price === undefined
+            ? null
+            : overrides.selling_price,
+        phone_purchase_id: phonePurchase.id,
+      }),
+    );
+  }
+
   async function loginAndGetCookies(
     email: string,
     password: string,
   ): Promise<string[]> {
-    await new Promise((r) => setTimeout(r, 110));
+    await new Promise((r) => setTimeout(r, 500));
     const response = await request(app.getHttpServer())
       .post('/api/v1/auth/login')
       .send({ email, password })
@@ -2640,6 +2729,1241 @@ describe('Sales (e2e)', () => {
         expect(p.reversed_at).toBeTruthy();
         expect(p.reversal_reason).toBe(validReason);
       }
+    });
+  });
+
+  // ============================================================
+  // Slice E — Serialized product line handling
+  // POST /sales/:id/lines with is_serialized products
+  // ============================================================
+  describe('POST /api/v1/sales/:saleId/lines — Slice E serialized', () => {
+    // ---- Non-serialized: reject imei_snapshot ----
+
+    it('returns 400 when imei_snapshot is set on a non-serialized in-house line', async () => {
+      const branch = await seedBranch();
+      const { user, password } = await seedUser(UserRole.ADMIN, 'a@t.com');
+      const sale = await seedSale({
+        branch_id: branch.id,
+        cashier_id: user.id,
+      });
+      const product = await seedProduct(branch.id, { is_serialized: false });
+      const cookies = await loginAndGetCookies(user.email, password);
+
+      const response = await request(app.getHttpServer())
+        .post(`/api/v1/sales/${sale.id}/lines`)
+        .set('Cookie', cookies)
+        .send({
+          product_id: product.id,
+          quantity: 1,
+          imei_snapshot: '354789102345678',
+        })
+        .expect(400);
+
+      expect(response.body.message).toMatch(
+        /is not serialized; imei_snapshot must not be set/,
+      );
+    });
+
+    // ---- Serialized in-house: happy path + all four Q3 failure modes ----
+
+    it('adds a serialized in-house line: stores product_unit_id, snapshots imei from PU, uses PU price', async () => {
+      const branch = await seedBranch();
+      const { user, password } = await seedUser(UserRole.ADMIN, 'a@t.com');
+      const cookies = await loginAndGetCookies(user.email, password);
+      const sale = await seedSale({
+        branch_id: branch.id,
+        cashier_id: user.id,
+      });
+      const product = await seedProduct(branch.id, {
+        name: 'iPhone 15 (used)',
+        is_serialized: true,
+        selling_price: '250000.00',
+        buying_price: '200000.00',
+      });
+      const unit = await seedProductUnit(
+        product.id,
+        branch.id,
+        user.id,
+        '354789102345678',
+        {
+          selling_price: '260000.00', // PU price overrides Product
+          buying_price: '210000.00', // PU cost is authoritative
+        },
+      );
+
+      const response = await request(app.getHttpServer())
+        .post(`/api/v1/sales/${sale.id}/lines`)
+        .set('Cookie', cookies)
+        .send({
+          product_id: product.id,
+          quantity: 1,
+          imei_snapshot: '354789102345678',
+        })
+        .expect(201);
+
+      expect(response.body.lines).toHaveLength(1);
+      expect(response.body.lines[0]).toMatchObject({
+        product_id: product.id,
+        product_unit_id: unit.id,
+        imei_snapshot: '354789102345678',
+        unit_price: '260000.00', // PU price used, not Product's 250000
+        cost_price_snapshot: '210000.00', // PU cost always
+        quantity: 1,
+      });
+
+      // DB directly reflects the link
+      const lineRepo = dataSource.getRepository(SaleLine);
+      const persisted = await lineRepo.findOne({
+        where: { id: response.body.lines[0].id },
+      });
+      expect(persisted?.product_unit_id).toBe(unit.id);
+      expect(persisted?.imei_snapshot).toBe('354789102345678');
+    });
+
+    it('falls back to Product.selling_price when PU.selling_price is null', async () => {
+      const branch = await seedBranch();
+      const { user, password } = await seedUser(UserRole.ADMIN, 'a@t.com');
+      const cookies = await loginAndGetCookies(user.email, password);
+      const sale = await seedSale({
+        branch_id: branch.id,
+        cashier_id: user.id,
+      });
+      const product = await seedProduct(branch.id, {
+        is_serialized: true,
+        selling_price: '250000.00',
+      });
+      await seedProductUnit(product.id, branch.id, user.id, '354789102999888', {
+        selling_price: null, // no per-unit price — falls back to Product
+      });
+
+      const response = await request(app.getHttpServer())
+        .post(`/api/v1/sales/${sale.id}/lines`)
+        .set('Cookie', cookies)
+        .send({
+          product_id: product.id,
+          quantity: 1,
+          imei_snapshot: '354789102999888',
+        })
+        .expect(201);
+
+      expect(response.body.lines[0].unit_price).toBe('250000.00'); // Product fallback
+    });
+    // Note: the "PU.selling_price null AND Product.selling_price null → 400"
+    // branch cannot be reached via legitimate data because products.selling_price
+    // is NOT NULL in the schema. The service-side guard is defense-in-depth for
+    // a future migration that makes Product.selling_price nullable. Unit-tested;
+    // no e2e equivalent possible today.
+
+    it('returns 400 when imei_snapshot is missing on serialized in-house line', async () => {
+      const branch = await seedBranch();
+      const { user, password } = await seedUser(UserRole.ADMIN, 'a@t.com');
+      const cookies = await loginAndGetCookies(user.email, password);
+      const sale = await seedSale({
+        branch_id: branch.id,
+        cashier_id: user.id,
+      });
+      const product = await seedProduct(branch.id, { is_serialized: true });
+
+      const response = await request(app.getHttpServer())
+        .post(`/api/v1/sales/${sale.id}/lines`)
+        .set('Cookie', cookies)
+        .send({ product_id: product.id, quantity: 1 })
+        .expect(400);
+
+      expect(response.body.message).toMatch(/imei_snapshot is required/);
+    });
+
+    it('returns 400 when quantity != 1 on a serialized in-house line', async () => {
+      const branch = await seedBranch();
+      const { user, password } = await seedUser(UserRole.ADMIN, 'a@t.com');
+      const cookies = await loginAndGetCookies(user.email, password);
+      const sale = await seedSale({
+        branch_id: branch.id,
+        cashier_id: user.id,
+      });
+      const product = await seedProduct(branch.id, { is_serialized: true });
+      await seedProductUnit(product.id, branch.id, user.id, '354789102222222');
+
+      await request(app.getHttpServer())
+        .post(`/api/v1/sales/${sale.id}/lines`)
+        .set('Cookie', cookies)
+        .send({
+          product_id: product.id,
+          quantity: 2,
+          imei_snapshot: '354789102222222',
+        })
+        .expect(400);
+    });
+
+    it('returns 400 when IMEI is not in stock (Q3 case 1)', async () => {
+      const branch = await seedBranch();
+      const { user, password } = await seedUser(UserRole.ADMIN, 'a@t.com');
+      const cookies = await loginAndGetCookies(user.email, password);
+      const sale = await seedSale({
+        branch_id: branch.id,
+        cashier_id: user.id,
+      });
+      const product = await seedProduct(branch.id, { is_serialized: true });
+      // Deliberately no seedProductUnit — the IMEI doesn't exist
+
+      const response = await request(app.getHttpServer())
+        .post(`/api/v1/sales/${sale.id}/lines`)
+        .set('Cookie', cookies)
+        .send({
+          product_id: product.id,
+          quantity: 1,
+          imei_snapshot: '354789102333333',
+        })
+        .expect(400);
+
+      expect(response.body.message).toMatch(/is not in stock/);
+    });
+
+    it('returns 400 when IMEI belongs to a different product (Q3 case 2)', async () => {
+      const branch = await seedBranch();
+      const { user, password } = await seedUser(UserRole.ADMIN, 'a@t.com');
+      const cookies = await loginAndGetCookies(user.email, password);
+      const sale = await seedSale({
+        branch_id: branch.id,
+        cashier_id: user.id,
+      });
+      const productA = await seedProduct(branch.id, {
+        name: 'Product A',
+        is_serialized: true,
+      });
+      const productB = await seedProduct(branch.id, {
+        name: 'Product B',
+        is_serialized: true,
+      });
+      await seedProductUnit(productB.id, branch.id, user.id, '354789102444444');
+
+      // Client sends productA + IMEI belonging to productB
+      const response = await request(app.getHttpServer())
+        .post(`/api/v1/sales/${sale.id}/lines`)
+        .set('Cookie', cookies)
+        .send({
+          product_id: productA.id,
+          quantity: 1,
+          imei_snapshot: '354789102444444',
+        })
+        .expect(400);
+
+      expect(response.body.message).toMatch(/does not belong to product/);
+    });
+
+    it('returns 400 when IMEI is at a different branch (Q3 case 3 via product mismatch)', async () => {
+      const branchA = await seedBranch({ name: 'Branch A' });
+      const branchB = await seedBranch({ name: 'Branch B' });
+      const { user, password } = await seedUser(UserRole.ADMIN, 'a@t.com');
+      const cookies = await loginAndGetCookies(user.email, password);
+      const sale = await seedSale({
+        branch_id: branchA.id,
+        cashier_id: user.id,
+      });
+      const product = await seedProduct(branchA.id, { is_serialized: true });
+      // PU is at branchB, but sale is at branchA
+      // Note: the PU must reference a product at its own branch, so we seed a
+      // parallel product at branchB with the target IMEI
+      const productAtB = await seedProduct(branchB.id, {
+        is_serialized: true,
+      });
+      await seedProductUnit(
+        productAtB.id,
+        branchB.id,
+        user.id,
+        '354789102555555',
+      );
+
+      // But client tries to reference this IMEI on saleA (branchA) with the branchA product
+      const response = await request(app.getHttpServer())
+        .post(`/api/v1/sales/${sale.id}/lines`)
+        .set('Cookie', cookies)
+        .send({
+          product_id: product.id,
+          quantity: 1,
+          imei_snapshot: '354789102555555',
+        })
+        .expect(400);
+
+      // This will hit "product mismatch" first (Q3 order: not-found →
+      // product → branch → status). The message will be about product
+      // mismatch, not branch. That's the correct behavior — we test
+      // pure branch mismatch by aligning the product.
+      expect(response.body.message).toMatch(/does not belong to product/);
+    });
+
+    it('returns 409 with existing_unit payload when IMEI is SOLD (Q3 case 4)', async () => {
+      const branch = await seedBranch();
+      const { user, password } = await seedUser(UserRole.ADMIN, 'a@t.com');
+      const cookies = await loginAndGetCookies(user.email, password);
+      const sale = await seedSale({
+        branch_id: branch.id,
+        cashier_id: user.id,
+      });
+      const product = await seedProduct(branch.id, { is_serialized: true });
+      const unit = await seedProductUnit(
+        product.id,
+        branch.id,
+        user.id,
+        '354789102666666',
+        { status: ProductUnitStatus.SOLD },
+      );
+
+      const response = await request(app.getHttpServer())
+        .post(`/api/v1/sales/${sale.id}/lines`)
+        .set('Cookie', cookies)
+        .send({
+          product_id: product.id,
+          quantity: 1,
+          imei_snapshot: '354789102666666',
+        })
+        .expect(409);
+
+      expect(response.body.message).toMatch(/SOLD/);
+      expect(response.body.existing_unit).toMatchObject({
+        id: unit.id,
+        status: ProductUnitStatus.SOLD,
+        product_id: product.id,
+        branch_id: branch.id,
+      });
+    });
+
+    it('returns 409 when IMEI is RETURNED', async () => {
+      const branch = await seedBranch();
+      const { user, password } = await seedUser(UserRole.ADMIN, 'a@t.com');
+      const cookies = await loginAndGetCookies(user.email, password);
+      const sale = await seedSale({
+        branch_id: branch.id,
+        cashier_id: user.id,
+      });
+      const product = await seedProduct(branch.id, { is_serialized: true });
+      await seedProductUnit(product.id, branch.id, user.id, '354789102777777', {
+        status: ProductUnitStatus.RETURNED,
+      });
+
+      const response = await request(app.getHttpServer())
+        .post(`/api/v1/sales/${sale.id}/lines`)
+        .set('Cookie', cookies)
+        .send({
+          product_id: product.id,
+          quantity: 1,
+          imei_snapshot: '354789102777777',
+        })
+        .expect(409);
+
+      expect(response.body.message).toMatch(/RETURNED/);
+    });
+
+    // ---- External-sourced serialized ----
+
+    it('adds an external-sourced serialized line: no PU lookup, uses Product prices, verbatim imei', async () => {
+      const branch = await seedBranch();
+      const { user, password } = await seedUser(UserRole.ADMIN, 'a@t.com');
+      const cookies = await loginAndGetCookies(user.email, password);
+      const sale = await seedSale({
+        branch_id: branch.id,
+        cashier_id: user.id,
+      });
+      const product = await seedProduct(branch.id, {
+        is_serialized: true,
+        selling_price: '250000.00',
+        buying_price: '220000.00',
+      });
+      const supplier = await dataSource.getRepository(Supplier).save({
+        name: 'Friendly Shop',
+        is_active: true,
+      } as Supplier);
+
+      const response = await request(app.getHttpServer())
+        .post(`/api/v1/sales/${sale.id}/lines`)
+        .set('Cookie', cookies)
+        .send({
+          product_id: product.id,
+          quantity: 1,
+          external_supplier_id: supplier.id,
+          imei_snapshot: '999888777666555',
+        })
+        .expect(201);
+
+      expect(response.body.lines[0]).toMatchObject({
+        product_unit_id: null, // no PU link
+        imei_snapshot: '999888777666555', // free text verbatim
+        external_supplier_id: supplier.id,
+        unit_price: '250000.00', // Product price
+        cost_price_snapshot: '220000.00', // Product cost
+      });
+    });
+
+    it('returns 409 when external imei_snapshot matches an IN_STOCK PU (Q7)', async () => {
+      const branch = await seedBranch();
+      const { user, password } = await seedUser(UserRole.ADMIN, 'a@t.com');
+      const cookies = await loginAndGetCookies(user.email, password);
+      const sale = await seedSale({
+        branch_id: branch.id,
+        cashier_id: user.id,
+      });
+      const inHouseProduct = await seedProduct(branch.id, {
+        name: 'In-house iPhone',
+        is_serialized: true,
+      });
+      const existingUnit = await seedProductUnit(
+        inHouseProduct.id,
+        branch.id,
+        user.id,
+        '354789102888888',
+        { status: ProductUnitStatus.IN_STOCK },
+      );
+
+      // Now try to sell an "external" phone with the SAME IMEI
+      const externalProduct = await seedProduct(branch.id, {
+        name: 'External iPhone',
+        is_serialized: true,
+      });
+      const supplier = await dataSource.getRepository(Supplier).save({
+        name: 'Friendly Shop',
+        is_active: true,
+      } as Supplier);
+
+      const response = await request(app.getHttpServer())
+        .post(`/api/v1/sales/${sale.id}/lines`)
+        .set('Cookie', cookies)
+        .send({
+          product_id: externalProduct.id,
+          quantity: 1,
+          external_supplier_id: supplier.id,
+          imei_snapshot: '354789102888888',
+        })
+        .expect(409);
+
+      expect(response.body.message).toMatch(/currently in your stock/);
+      expect(response.body.existing_unit).toMatchObject({
+        id: existingUnit.id,
+        product_id: inHouseProduct.id,
+        branch_id: branch.id,
+      });
+    });
+
+    it('allows external imei_snapshot matching a SOLD PU (historical, not diagnostic)', async () => {
+      const branch = await seedBranch();
+      const { user, password } = await seedUser(UserRole.ADMIN, 'a@t.com');
+      const cookies = await loginAndGetCookies(user.email, password);
+      const sale = await seedSale({
+        branch_id: branch.id,
+        cashier_id: user.id,
+      });
+      const inHouseProduct = await seedProduct(branch.id, {
+        is_serialized: true,
+      });
+      // SOLD PU — collision check filters by status=IN_STOCK, so this is fine
+      await seedProductUnit(
+        inHouseProduct.id,
+        branch.id,
+        user.id,
+        '354789102999000',
+        { status: ProductUnitStatus.SOLD },
+      );
+
+      const externalProduct = await seedProduct(branch.id, {
+        is_serialized: true,
+      });
+      const supplier = await dataSource.getRepository(Supplier).save({
+        name: 'Friendly Shop 2',
+        is_active: true,
+      } as Supplier);
+
+      await request(app.getHttpServer())
+        .post(`/api/v1/sales/${sale.id}/lines`)
+        .set('Cookie', cookies)
+        .send({
+          product_id: externalProduct.id,
+          quantity: 1,
+          external_supplier_id: supplier.id,
+          imei_snapshot: '354789102999000',
+        })
+        .expect(201);
+    });
+  });
+
+  // ============================================================
+  // Slice E — Mode-aware updateLine
+  // PATCH /sales/:saleId/lines/:lineId
+  // ============================================================
+  describe('PATCH /api/v1/sales/:saleId/lines/:lineId — Slice E serialized', () => {
+    it('rejects setting imei_snapshot on a non-serialized line', async () => {
+      const branch = await seedBranch();
+      const { user, password } = await seedUser(UserRole.ADMIN, 'a@t.com');
+      const cookies = await loginAndGetCookies(user.email, password);
+      const sale = await seedSale({
+        branch_id: branch.id,
+        cashier_id: user.id,
+      });
+      const product = await seedProduct(branch.id, { is_serialized: false });
+
+      const created = await request(app.getHttpServer())
+        .post(`/api/v1/sales/${sale.id}/lines`)
+        .set('Cookie', cookies)
+        .send({ product_id: product.id, quantity: 2 })
+        .expect(201);
+      const lineId = created.body.lines[0].id;
+
+      await request(app.getHttpServer())
+        .patch(`/api/v1/sales/${sale.id}/lines/${lineId}`)
+        .set('Cookie', cookies)
+        .send({ imei_snapshot: '354789102345678' })
+        .expect(400);
+    });
+
+    it('rejects quantity != 1 on a serialized in-house line', async () => {
+      const branch = await seedBranch();
+      const { user, password } = await seedUser(UserRole.ADMIN, 'a@t.com');
+      const cookies = await loginAndGetCookies(user.email, password);
+      const sale = await seedSale({
+        branch_id: branch.id,
+        cashier_id: user.id,
+      });
+      const product = await seedProduct(branch.id, {
+        is_serialized: true,
+        selling_price: '250000.00',
+      });
+      await seedProductUnit(product.id, branch.id, user.id, '354789101010101');
+
+      const created = await request(app.getHttpServer())
+        .post(`/api/v1/sales/${sale.id}/lines`)
+        .set('Cookie', cookies)
+        .send({
+          product_id: product.id,
+          quantity: 1,
+          imei_snapshot: '354789101010101',
+        })
+        .expect(201);
+      const lineId = created.body.lines[0].id;
+
+      await request(app.getHttpServer())
+        .patch(`/api/v1/sales/${sale.id}/lines/${lineId}`)
+        .set('Cookie', cookies)
+        .send({ quantity: 3 })
+        .expect(400);
+    });
+
+    it('rejects imei_snapshot change on a serialized in-house line', async () => {
+      const branch = await seedBranch();
+      const { user, password } = await seedUser(UserRole.ADMIN, 'a@t.com');
+      const cookies = await loginAndGetCookies(user.email, password);
+      const sale = await seedSale({
+        branch_id: branch.id,
+        cashier_id: user.id,
+      });
+      const product = await seedProduct(branch.id, {
+        is_serialized: true,
+        selling_price: '250000.00',
+      });
+      await seedProductUnit(product.id, branch.id, user.id, '354789101010102');
+
+      const created = await request(app.getHttpServer())
+        .post(`/api/v1/sales/${sale.id}/lines`)
+        .set('Cookie', cookies)
+        .send({
+          product_id: product.id,
+          quantity: 1,
+          imei_snapshot: '354789101010102',
+        })
+        .expect(201);
+      const lineId = created.body.lines[0].id;
+
+      await request(app.getHttpServer())
+        .patch(`/api/v1/sales/${sale.id}/lines/${lineId}`)
+        .set('Cookie', cookies)
+        .send({ imei_snapshot: '999999999999999' })
+        .expect(400);
+    });
+
+    it('allows discount edit on a serialized in-house line', async () => {
+      const branch = await seedBranch();
+      const { user, password } = await seedUser(UserRole.ADMIN, 'a@t.com');
+      const cookies = await loginAndGetCookies(user.email, password);
+      const sale = await seedSale({
+        branch_id: branch.id,
+        cashier_id: user.id,
+      });
+      const product = await seedProduct(branch.id, {
+        is_serialized: true,
+        selling_price: '250000.00',
+      });
+      await seedProductUnit(product.id, branch.id, user.id, '354789101010103');
+
+      const created = await request(app.getHttpServer())
+        .post(`/api/v1/sales/${sale.id}/lines`)
+        .set('Cookie', cookies)
+        .send({
+          product_id: product.id,
+          quantity: 1,
+          imei_snapshot: '354789101010103',
+        })
+        .expect(201);
+      const lineId = created.body.lines[0].id;
+
+      const response = await request(app.getHttpServer())
+        .patch(`/api/v1/sales/${sale.id}/lines/${lineId}`)
+        .set('Cookie', cookies)
+        .send({
+          discount_type: DiscountType.AMOUNT,
+          discount_value: 5000,
+        })
+        .expect(200);
+
+      expect(response.body.lines[0].discount_amount).toBe('5000.00');
+      expect(response.body.lines[0].line_total).toBe('245000.00');
+    });
+
+    it('allows imei_snapshot edit on a serialized external line (no collision)', async () => {
+      const branch = await seedBranch();
+      const { user, password } = await seedUser(UserRole.ADMIN, 'a@t.com');
+      const cookies = await loginAndGetCookies(user.email, password);
+      const sale = await seedSale({
+        branch_id: branch.id,
+        cashier_id: user.id,
+      });
+      const product = await seedProduct(branch.id, {
+        is_serialized: true,
+        selling_price: '250000.00',
+      });
+      const supplier = await dataSource.getRepository(Supplier).save({
+        name: 'Friendly Shop',
+        is_active: true,
+      } as Supplier);
+
+      const created = await request(app.getHttpServer())
+        .post(`/api/v1/sales/${sale.id}/lines`)
+        .set('Cookie', cookies)
+        .send({
+          product_id: product.id,
+          quantity: 1,
+          external_supplier_id: supplier.id,
+          imei_snapshot: '111222333444555',
+        })
+        .expect(201);
+      const lineId = created.body.lines[0].id;
+
+      const response = await request(app.getHttpServer())
+        .patch(`/api/v1/sales/${sale.id}/lines/${lineId}`)
+        .set('Cookie', cookies)
+        .send({ imei_snapshot: '999888777666555' })
+        .expect(200);
+
+      expect(response.body.lines[0].imei_snapshot).toBe('999888777666555');
+    });
+
+    it('rejects imei_snapshot edit on external line if new IMEI matches IN_STOCK PU (Q7)', async () => {
+      const branch = await seedBranch();
+      const { user, password } = await seedUser(UserRole.ADMIN, 'a@t.com');
+      const cookies = await loginAndGetCookies(user.email, password);
+      const sale = await seedSale({
+        branch_id: branch.id,
+        cashier_id: user.id,
+      });
+      const externalProduct = await seedProduct(branch.id, {
+        name: 'External',
+        is_serialized: true,
+      });
+      const inHouseProduct = await seedProduct(branch.id, {
+        name: 'In-house',
+        is_serialized: true,
+      });
+      const supplier = await dataSource.getRepository(Supplier).save({
+        name: 'Friendly Shop',
+        is_active: true,
+      } as Supplier);
+
+      // Existing IN_STOCK PU
+      await seedProductUnit(
+        inHouseProduct.id,
+        branch.id,
+        user.id,
+        '354789104040404',
+        { status: ProductUnitStatus.IN_STOCK },
+      );
+
+      // External line with a different IMEI
+      const created = await request(app.getHttpServer())
+        .post(`/api/v1/sales/${sale.id}/lines`)
+        .set('Cookie', cookies)
+        .send({
+          product_id: externalProduct.id,
+          quantity: 1,
+          external_supplier_id: supplier.id,
+          imei_snapshot: '111222333444555',
+        })
+        .expect(201);
+      const lineId = created.body.lines[0].id;
+
+      // Try to edit the IMEI to one that matches an IN_STOCK PU
+      await request(app.getHttpServer())
+        .patch(`/api/v1/sales/${sale.id}/lines/${lineId}`)
+        .set('Cookie', cookies)
+        .send({ imei_snapshot: '354789104040404' })
+        .expect(409);
+    });
+  });
+
+  // ============================================================
+  // Slice E — Complete/void with serialized lines + atomicity
+  // POST /sales/:id/complete and /void
+  // ============================================================
+  describe('POST /api/v1/sales/:id/complete + /void — Slice E serialized', () => {
+    /**
+     * Helper: seed a serialized in-house product + PU + a sale with one
+     * serialized line + a matching payment, ready to complete.
+     * Returns everything the tests need for DB assertions.
+     */
+    async function seedReadyToCompleteSerialized(
+      branchId: string,
+      cashierId: string,
+      cookies: string[],
+      opts: {
+        imei?: string;
+        puSellingPrice?: string;
+        puBuyingPrice?: string;
+        stockQty?: number;
+      } = {},
+    ) {
+      const imei = opts.imei ?? '350000000000001';
+      const puPrice = opts.puSellingPrice ?? '250000.00';
+      const product = await seedProduct(branchId, {
+        name: 'Serialized Phone',
+        is_serialized: true,
+        selling_price: '260000.00', // Product default (used only for fallback)
+        buying_price: '220000.00',
+      });
+      // Seed stock at a specific quantity so we can verify decrement
+      await setStockQuantity(product.id, branchId, opts.stockQty ?? 5);
+      const unit = await seedProductUnit(
+        product.id,
+        branchId,
+        cashierId,
+        imei,
+        {
+          selling_price: puPrice,
+          buying_price: opts.puBuyingPrice ?? '210000.00',
+        },
+      );
+      const sale = await seedSale({
+        branch_id: branchId,
+        cashier_id: cashierId,
+      });
+      await request(app.getHttpServer())
+        .post(`/api/v1/sales/${sale.id}/lines`)
+        .set('Cookie', cookies)
+        .send({ product_id: product.id, quantity: 1, imei_snapshot: imei })
+        .expect(201);
+      await request(app.getHttpServer())
+        .post(`/api/v1/sales/${sale.id}/payments`)
+        .set('Cookie', cookies)
+        .send({
+          payment_method: PaymentMethod.CASH,
+          amount: Number(puPrice),
+          cash_received: Number(puPrice),
+        })
+        .expect(201);
+      return { sale, product, unit };
+    }
+
+    // ---- Complete: serialized happy path + PU state ----
+
+    it('completes a serialized in-house sale: PU flipped to SOLD, stock decremented', async () => {
+      const branch = await seedBranch();
+      const { user, password } = await seedUser(UserRole.ADMIN, 'a@t.com');
+      const cookies = await loginAndGetCookies(user.email, password);
+      const { sale, product, unit } = await seedReadyToCompleteSerialized(
+        branch.id,
+        user.id,
+        cookies,
+        { stockQty: 5 },
+      );
+
+      await request(app.getHttpServer())
+        .post(`/api/v1/sales/${sale.id}/complete`)
+        .set('Cookie', cookies)
+        .expect(200);
+
+      // PU flipped to SOLD in DB
+      const puRepo = dataSource.getRepository(ProductUnit);
+      const puAfter = await puRepo.findOne({ where: { id: unit.id } });
+      expect(puAfter?.status).toBe(ProductUnitStatus.SOLD);
+
+      // Stock decremented from 5 to 4
+      const stockRepo = dataSource.getRepository(Stock);
+      const stockAfter = await stockRepo.findOne({
+        where: { product_id: product.id, branch_id: branch.id },
+      });
+      expect(stockAfter?.quantity).toBe(4);
+    });
+
+    it('completes a mixed sale: PU flip only for serialized in-house line', async () => {
+      const branch = await seedBranch();
+      const { user, password } = await seedUser(UserRole.ADMIN, 'a@t.com');
+      const cookies = await loginAndGetCookies(user.email, password);
+
+      // Line 1: serialized in-house
+      const serializedProduct = await seedProduct(branch.id, {
+        name: 'Serialized',
+        is_serialized: true,
+        selling_price: '250000.00',
+      });
+      await setStockQuantity(serializedProduct.id, branch.id, 3);
+      const serializedUnit = await seedProductUnit(
+        serializedProduct.id,
+        branch.id,
+        user.id,
+        '350000000000010',
+        { selling_price: '250000.00' },
+      );
+
+      // Line 2: non-serialized in-house
+      const chargerProduct = await seedProduct(branch.id, {
+        name: 'Charger',
+        selling_price: '2000.00',
+      });
+      await setStockQuantity(chargerProduct.id, branch.id, 10);
+
+      // Line 3: external-sourced serialized (no PU, no stock touch)
+      const supplier = await dataSource.getRepository(Supplier).save({
+        name: 'Friendly Shop',
+        is_active: true,
+      } as Supplier);
+      const externalProduct = await seedProduct(branch.id, {
+        name: 'External',
+        is_serialized: true,
+        selling_price: '180000.00',
+      });
+
+      const sale = await seedSale({
+        branch_id: branch.id,
+        cashier_id: user.id,
+      });
+
+      await request(app.getHttpServer())
+        .post(`/api/v1/sales/${sale.id}/lines`)
+        .set('Cookie', cookies)
+        .send({
+          product_id: serializedProduct.id,
+          quantity: 1,
+          imei_snapshot: '350000000000010',
+        })
+        .expect(201);
+      await request(app.getHttpServer())
+        .post(`/api/v1/sales/${sale.id}/lines`)
+        .set('Cookie', cookies)
+        .send({ product_id: chargerProduct.id, quantity: 2 })
+        .expect(201);
+      await request(app.getHttpServer())
+        .post(`/api/v1/sales/${sale.id}/lines`)
+        .set('Cookie', cookies)
+        .send({
+          product_id: externalProduct.id,
+          quantity: 1,
+          external_supplier_id: supplier.id,
+          imei_snapshot: '999888777666555',
+        })
+        .expect(201);
+
+      // Total: 250000 + 4000 + 180000 = 434000
+      await request(app.getHttpServer())
+        .post(`/api/v1/sales/${sale.id}/payments`)
+        .set('Cookie', cookies)
+        .send({
+          payment_method: PaymentMethod.CASH,
+          amount: 434000,
+          cash_received: 434000,
+        })
+        .expect(201);
+
+      await request(app.getHttpServer())
+        .post(`/api/v1/sales/${sale.id}/complete`)
+        .set('Cookie', cookies)
+        .expect(200);
+
+      // Serialized in-house: PU flipped, stock decremented
+      const puRepo = dataSource.getRepository(ProductUnit);
+      const stockRepo = dataSource.getRepository(Stock);
+      const serializedPUAfter = await puRepo.findOne({
+        where: { id: serializedUnit.id },
+      });
+      expect(serializedPUAfter?.status).toBe(ProductUnitStatus.SOLD);
+      const serializedStockAfter = await stockRepo.findOne({
+        where: {
+          product_id: serializedProduct.id,
+          branch_id: branch.id,
+        },
+      });
+      expect(serializedStockAfter?.quantity).toBe(2); // 3 - 1
+
+      // Non-serialized in-house: stock decremented (no PU to check)
+      const chargerStockAfter = await stockRepo.findOne({
+        where: { product_id: chargerProduct.id, branch_id: branch.id },
+      });
+      expect(chargerStockAfter?.quantity).toBe(8); // 10 - 2
+    });
+
+    // ---- Complete: cross-DRAFT race (crown jewel) ----
+
+    it('CROWN JEWEL: cross-DRAFT race — second complete gets 409, whole transaction rolls back', async () => {
+      const branch = await seedBranch();
+      const { user, password } = await seedUser(UserRole.ADMIN, 'a@t.com');
+      const cookies = await loginAndGetCookies(user.email, password);
+
+      const product = await seedProduct(branch.id, {
+        name: 'Contested Phone',
+        is_serialized: true,
+        selling_price: '250000.00',
+      });
+      await setStockQuantity(product.id, branch.id, 5); // enough for both attempts
+      const unit = await seedProductUnit(
+        product.id,
+        branch.id,
+        user.id,
+        '355555555555555',
+        { selling_price: '250000.00' },
+      );
+
+      // Two DRAFTs, both referencing the same IMEI (allowed per Q5)
+      const saleA = await seedSale({
+        branch_id: branch.id,
+        cashier_id: user.id,
+      });
+      const saleB = await seedSale({
+        branch_id: branch.id,
+        cashier_id: user.id,
+      });
+
+      for (const sid of [saleA.id, saleB.id]) {
+        await request(app.getHttpServer())
+          .post(`/api/v1/sales/${sid}/lines`)
+          .set('Cookie', cookies)
+          .send({
+            product_id: product.id,
+            quantity: 1,
+            imei_snapshot: '355555555555555',
+          })
+          .expect(201);
+        await request(app.getHttpServer())
+          .post(`/api/v1/sales/${sid}/payments`)
+          .set('Cookie', cookies)
+          .send({
+            payment_method: PaymentMethod.CASH,
+            amount: 250000,
+            cash_received: 250000,
+          })
+          .expect(201);
+      }
+
+      // Sale A completes first
+      await request(app.getHttpServer())
+        .post(`/api/v1/sales/${saleA.id}/complete`)
+        .set('Cookie', cookies)
+        .expect(200);
+
+      // Snapshot state before Sale B's failed complete attempt
+      const stockRepo = dataSource.getRepository(Stock);
+      const puRepo = dataSource.getRepository(ProductUnit);
+      const saleRepo = dataSource.getRepository(Sale);
+
+      const stockBefore = await stockRepo.findOne({
+        where: { product_id: product.id, branch_id: branch.id },
+      });
+      const puBefore = await puRepo.findOne({ where: { id: unit.id } });
+      const saleBBefore = await saleRepo.findOne({
+        where: { id: saleB.id },
+      });
+
+      expect(stockBefore?.quantity).toBe(4); // A's complete decremented from 5
+      expect(puBefore?.status).toBe(ProductUnitStatus.SOLD); // A's complete flipped it
+      expect(saleBBefore?.status).toBe(SaleStatus.DRAFT); // B still DRAFT
+
+      // Sale B attempts to complete — MUST fail with 409, and the failure
+      // MUST leave ZERO partial state. The atomicity crown-jewel.
+      const response = await request(app.getHttpServer())
+        .post(`/api/v1/sales/${saleB.id}/complete`)
+        .set('Cookie', cookies)
+        .expect(409);
+
+      expect(response.body.message).toMatch(/status is SOLD/);
+      expect(response.body.existing_unit).toMatchObject({
+        id: unit.id,
+        status: ProductUnitStatus.SOLD,
+      });
+
+      // Verify NOTHING changed from Sale B's failed attempt:
+      const stockAfter = await stockRepo.findOne({
+        where: { product_id: product.id, branch_id: branch.id },
+      });
+      const puAfter = await puRepo.findOne({ where: { id: unit.id } });
+      const saleBAfter = await saleRepo.findOne({
+        where: { id: saleB.id },
+      });
+
+      // Stock unchanged from A's decrement — B's decrement was rolled back
+      // by the PU flip failure. This is the atomicity proof: if PU flip
+      // fails, the whole transaction (including Stock decrement) rolls back.
+      expect(stockAfter?.quantity).toBe(4);
+      // PU unchanged
+      expect(puAfter?.status).toBe(ProductUnitStatus.SOLD);
+      // Sale B still DRAFT — no partial flip, no sale_number issued
+      expect(saleBAfter?.status).toBe(SaleStatus.DRAFT);
+      expect(saleBAfter?.sale_number).toBeNull();
+      expect(saleBAfter?.completed_at).toBeNull();
+    });
+
+    // ---- Void: PU restored ----
+
+    it('voids a serialized in-house sale: PU flipped back to IN_STOCK, stock restored', async () => {
+      const branch = await seedBranch();
+      const { user, password } = await seedUser(UserRole.ADMIN, 'a@t.com');
+      const cookies = await loginAndGetCookies(user.email, password);
+      const { sale, product, unit } = await seedReadyToCompleteSerialized(
+        branch.id,
+        user.id,
+        cookies,
+        { stockQty: 3 },
+      );
+
+      // Complete first
+      await request(app.getHttpServer())
+        .post(`/api/v1/sales/${sale.id}/complete`)
+        .set('Cookie', cookies)
+        .expect(200);
+
+      // Snapshot post-complete state
+      const puRepo = dataSource.getRepository(ProductUnit);
+      const stockRepo = dataSource.getRepository(Stock);
+      let puState = await puRepo.findOne({ where: { id: unit.id } });
+      let stockState = await stockRepo.findOne({
+        where: { product_id: product.id, branch_id: branch.id },
+      });
+      expect(puState?.status).toBe(ProductUnitStatus.SOLD);
+      expect(stockState?.quantity).toBe(2); // 3 - 1
+
+      // Void
+      await request(app.getHttpServer())
+        .post(`/api/v1/sales/${sale.id}/void`)
+        .set('Cookie', cookies)
+        .send({ void_reason: 'Customer changed mind' })
+        .expect(200);
+
+      // PU back to IN_STOCK; stock restored
+      puState = await puRepo.findOne({ where: { id: unit.id } });
+      stockState = await stockRepo.findOne({
+        where: { product_id: product.id, branch_id: branch.id },
+      });
+      expect(puState?.status).toBe(ProductUnitStatus.IN_STOCK);
+      expect(stockState?.quantity).toBe(3); // back to original
+    });
+
+    it('voids a mixed sale: only serialized in-house PU is flipped back', async () => {
+      const branch = await seedBranch();
+      const { user, password } = await seedUser(UserRole.ADMIN, 'a@t.com');
+      const cookies = await loginAndGetCookies(user.email, password);
+
+      // Serialized in-house + non-serialized + external serialized
+      const serializedProduct = await seedProduct(branch.id, {
+        name: 'Serialized',
+        is_serialized: true,
+        selling_price: '250000.00',
+      });
+      await setStockQuantity(serializedProduct.id, branch.id, 5);
+      const serializedUnit = await seedProductUnit(
+        serializedProduct.id,
+        branch.id,
+        user.id,
+        '350000000000020',
+        { selling_price: '250000.00' },
+      );
+
+      const chargerProduct = await seedProduct(branch.id, {
+        name: 'Charger',
+        selling_price: '2000.00',
+      });
+      await setStockQuantity(chargerProduct.id, branch.id, 10);
+
+      const supplier = await dataSource.getRepository(Supplier).save({
+        name: 'Friendly Shop',
+        is_active: true,
+      } as Supplier);
+      const externalProduct = await seedProduct(branch.id, {
+        name: 'External',
+        is_serialized: true,
+        selling_price: '180000.00',
+      });
+
+      const sale = await seedSale({
+        branch_id: branch.id,
+        cashier_id: user.id,
+      });
+
+      await request(app.getHttpServer())
+        .post(`/api/v1/sales/${sale.id}/lines`)
+        .set('Cookie', cookies)
+        .send({
+          product_id: serializedProduct.id,
+          quantity: 1,
+          imei_snapshot: '350000000000020',
+        })
+        .expect(201);
+      await request(app.getHttpServer())
+        .post(`/api/v1/sales/${sale.id}/lines`)
+        .set('Cookie', cookies)
+        .send({ product_id: chargerProduct.id, quantity: 2 })
+        .expect(201);
+      await request(app.getHttpServer())
+        .post(`/api/v1/sales/${sale.id}/lines`)
+        .set('Cookie', cookies)
+        .send({
+          product_id: externalProduct.id,
+          quantity: 1,
+          external_supplier_id: supplier.id,
+          imei_snapshot: '999888777666666',
+        })
+        .expect(201);
+      await request(app.getHttpServer())
+        .post(`/api/v1/sales/${sale.id}/payments`)
+        .set('Cookie', cookies)
+        .send({
+          payment_method: PaymentMethod.CASH,
+          amount: 434000,
+          cash_received: 434000,
+        })
+        .expect(201);
+      await request(app.getHttpServer())
+        .post(`/api/v1/sales/${sale.id}/complete`)
+        .set('Cookie', cookies)
+        .expect(200);
+
+      // Void
+      await request(app.getHttpServer())
+        .post(`/api/v1/sales/${sale.id}/void`)
+        .set('Cookie', cookies)
+        .send({ void_reason: 'Full refund requested' })
+        .expect(200);
+
+      // Serialized in-house PU flipped back to IN_STOCK
+      const puRepo = dataSource.getRepository(ProductUnit);
+      const stockRepo = dataSource.getRepository(Stock);
+      const puAfter = await puRepo.findOne({
+        where: { id: serializedUnit.id },
+      });
+      expect(puAfter?.status).toBe(ProductUnitStatus.IN_STOCK);
+
+      // Serialized in-house stock: back to 5
+      const serializedStock = await stockRepo.findOne({
+        where: {
+          product_id: serializedProduct.id,
+          branch_id: branch.id,
+        },
+      });
+      expect(serializedStock?.quantity).toBe(5);
+
+      // Non-serialized stock: back to 10
+      const chargerStock = await stockRepo.findOne({
+        where: { product_id: chargerProduct.id, branch_id: branch.id },
+      });
+      expect(chargerStock?.quantity).toBe(10);
+    });
+
+    // ---- Void-then-resell: the key void-back semantics from Q5 ----
+
+    it('void-then-resell: after void, same PU can be sold on a new sale', async () => {
+      const branch = await seedBranch();
+      const { user, password } = await seedUser(UserRole.ADMIN, 'a@t.com');
+      const cookies = await loginAndGetCookies(user.email, password);
+      const product = await seedProduct(branch.id, {
+        name: 'Resellable',
+        is_serialized: true,
+        selling_price: '200000.00',
+      });
+      await setStockQuantity(product.id, branch.id, 3);
+      const unit = await seedProductUnit(
+        product.id,
+        branch.id,
+        user.id,
+        '350000000000030',
+        { selling_price: '200000.00' },
+      );
+
+      // First sale: complete then void
+      const saleA = await seedSale({
+        branch_id: branch.id,
+        cashier_id: user.id,
+      });
+      await request(app.getHttpServer())
+        .post(`/api/v1/sales/${saleA.id}/lines`)
+        .set('Cookie', cookies)
+        .send({
+          product_id: product.id,
+          quantity: 1,
+          imei_snapshot: '350000000000030',
+        })
+        .expect(201);
+      await request(app.getHttpServer())
+        .post(`/api/v1/sales/${saleA.id}/payments`)
+        .set('Cookie', cookies)
+        .send({
+          payment_method: PaymentMethod.CASH,
+          amount: 200000,
+          cash_received: 200000,
+        })
+        .expect(201);
+      await request(app.getHttpServer())
+        .post(`/api/v1/sales/${saleA.id}/complete`)
+        .set('Cookie', cookies)
+        .expect(200);
+      await request(app.getHttpServer())
+        .post(`/api/v1/sales/${saleA.id}/void`)
+        .set('Cookie', cookies)
+        .send({ void_reason: 'Customer changed mind' })
+        .expect(200);
+
+      // PU is back to IN_STOCK
+      const puRepo = dataSource.getRepository(ProductUnit);
+      const puAfterVoid = await puRepo.findOne({ where: { id: unit.id } });
+      expect(puAfterVoid?.status).toBe(ProductUnitStatus.IN_STOCK);
+
+      // New sale can add the same IMEI
+      const saleB = await seedSale({
+        branch_id: branch.id,
+        cashier_id: user.id,
+      });
+      await request(app.getHttpServer())
+        .post(`/api/v1/sales/${saleB.id}/lines`)
+        .set('Cookie', cookies)
+        .send({
+          product_id: product.id,
+          quantity: 1,
+          imei_snapshot: '350000000000030',
+        })
+        .expect(201);
+      await request(app.getHttpServer())
+        .post(`/api/v1/sales/${saleB.id}/payments`)
+        .set('Cookie', cookies)
+        .send({
+          payment_method: PaymentMethod.CASH,
+          amount: 200000,
+          cash_received: 200000,
+        })
+        .expect(201);
+      await request(app.getHttpServer())
+        .post(`/api/v1/sales/${saleB.id}/complete`)
+        .set('Cookie', cookies)
+        .expect(200);
+
+      // PU is SOLD again
+      const puAfterResell = await puRepo.findOne({ where: { id: unit.id } });
+      expect(puAfterResell?.status).toBe(ProductUnitStatus.SOLD);
+
+      // Two sale_line rows now reference this PU historically — both valid
+      const saleLineRepo = dataSource.getRepository(SaleLine);
+      const linesReferencingUnit = await saleLineRepo.find({
+        where: { product_unit_id: unit.id },
+      });
+      expect(linesReferencingUnit).toHaveLength(2);
     });
   });
 });
