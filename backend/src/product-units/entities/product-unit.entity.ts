@@ -6,6 +6,7 @@ import {
   Index,
   JoinColumn,
   ManyToOne,
+  OneToMany,
   PrimaryGeneratedColumn,
   UpdateDateColumn,
 } from 'typeorm';
@@ -13,6 +14,7 @@ import { Product } from '../../products/entities/product.entity';
 import { Branch } from '../../branches/entities/branch.entity';
 import { ProductUnitStatus } from '../enums/product-unit-status.enum';
 import { PhonePurchase } from '../../phone-purchases/entities/phone-purchase.entity';
+import { SaleLine } from '../../sales/entities/sale-line.entity';
 
 @Entity('product_units')
 @Check(`"status" IN ('IN_STOCK', 'SOLD', 'RETURNED', 'WRITTEN_OFF')`)
@@ -72,4 +74,19 @@ export class ProductUnit {
 
   @UpdateDateColumn({ type: 'timestamptz' })
   updated_at!: Date;
+
+  /**
+   * All sale lines that have referenced this ProductUnit. A PU can
+   * appear on more than one sale line across its lifetime — e.g. sold
+   * on sale A (status → SOLD), then sale A voided (status → IN_STOCK
+   * again, but sale A's line still legitimately references the PU
+   * historically), then sold again on sale B. Both sale_line rows are
+   * valid steady state.
+   *
+   * Populated only on explicit load — not eagerly hydrated (see Slice E
+   * Q9). Kept as an inverse-side declaration to enable typed joins from
+   * ProductUnit queries when analytics or reporting need it.
+   */
+  @OneToMany(() => SaleLine, (line) => line.product_unit)
+  sale_lines?: SaleLine[];
 }
