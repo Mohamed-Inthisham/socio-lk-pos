@@ -1039,21 +1039,39 @@ export class SalesService {
         );
       }
 
-      // 3. Decrement stock for each in-house line. External-supplier
-      // lines (sourced from friendly shops) don't touch our inventory —
-      // the settlement flow in Phase 6.7 tracks those separately.
-      // Any insufficient-stock throw here rolls back the whole transaction.
+      // 3. Per-line state transitions for the sale being COMPLETED.
+      //    Two orthogonal decisions per line (Slice E derived-from-Q4):
+      //      Stock decrement: gated on `external_supplier_id === null`.
+      //        External-supplier lines don't touch our inventory —
+      //        settlement in Phase 6.7 tracks those separately.
+      //      PU flip: gated on `product_unit_id !== null`.
+      //        Set only on serialized in-house lines. External-sourced
+      //        serialized has product_unit_id=null (imei_snapshot is
+      //        free text); non-serialized always has it null.
+      //
+      //    Lock ordering per Q4: Stock row (coarser, per product+branch)
+      //    before ProductUnit row (finer, per single unit). Any throw
+      //    inside either call rolls back the whole transaction.
+      //
+      //    Non-IN_STOCK PU here fires the cross-DRAFT race conflict
+      //    (Q5) — two DRAFTs held the same IMEI, another sale completed
+      //    first, this one loses with 409 + existing_unit payload.
       for (const line of lines) {
-        if (line.external_supplier_id !== null) {
-          continue;
+        if (line.external_supplier_id === null) {
+          await this.stockService.decrementForSale(
+            manager,
+            line.product_id,
+            sale.branch_id,
+            line.quantity,
+            line.product_name_snapshot,
+          );
         }
-        await this.stockService.decrementForSale(
-          manager,
-          line.product_id,
-          sale.branch_id,
-          line.quantity,
-          line.product_name_snapshot,
-        );
+        if (line.product_unit_id !== null) {
+          await this.productUnitsService.markSoldForSale(
+            manager,
+            line.product_unit_id,
+          );
+        }
       }
 
       // 4. Issue the invoice number. Enlisted in this transaction so
@@ -1181,20 +1199,35 @@ export class SalesService {
       // Any COMPLETED sale has at least one line — enforced by
       // completeSale's own guard — so we don't check length here.
 
-      // 5. Re-increment stock for each in-house line. Sequential (not
-      //    Promise.all) so pessimistic_write locks on stock rows
-      //    serialize cleanly per (product, branch), matching the
-      //    completeSale pattern.
+      // 5. Per-line state REVERSALS for the sale being VOIDED. Symmetric
+      //    to completeSale's step 3, in the same lock order (Stock first,
+      //    then PU). Same two orthogonal gates:
+      //      Stock re-increment: gated on `external_supplier_id === null`.
+      //      PU flip SOLD → IN_STOCK: gated on `product_unit_id !== null`.
+      //
+      //    Sequential (not Promise.all) so pessimistic_write locks
+      //    serialize cleanly per (product, branch) and per PU, matching
+      //    the completeSale pattern.
+      //
+      //    Non-SOLD PU here is a 500 integrity error — a COMPLETED
+      //    sale's serialized in-house lines MUST have their PUs in
+      //    SOLD status (completeSale flipped them). Any other status
+      //    means the state machine was bypassed.
       for (const line of lines) {
-        if (line.external_supplier_id !== null) {
-          continue;
+        if (line.external_supplier_id === null) {
+          await this.stockService.incrementForReversal(
+            manager,
+            line.product_id,
+            sale.branch_id,
+            line.quantity,
+          );
         }
-        await this.stockService.incrementForReversal(
-          manager,
-          line.product_id,
-          sale.branch_id,
-          line.quantity,
-        );
+        if (line.product_unit_id !== null) {
+          await this.productUnitsService.markAvailableForReversal(
+            manager,
+            line.product_unit_id,
+          );
+        }
       }
 
       // 6. Mark every payment on this sale as reversed. Single UPDATE
