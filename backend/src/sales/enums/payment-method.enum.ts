@@ -15,12 +15,29 @@
  *   transaction IDs via their apps; require reference_number for
  *   reconciliation with the provider's settlement reports.
  *
+ * TRADE_IN: customer trades in a used phone as (partial) payment. The
+ *   payment carries trade_in_product_id + trade_in_imei +
+ *   trade_in_buying_price (all required) plus optional
+ *   trade_in_selling_price and trade_in_notes. amount MUST equal
+ *   trade_in_buying_price (schema CHK backstops service). No
+ *   cash_received, no reference_number. During DRAFT the trade-in
+ *   phone is not yet in stock -- the PhonePurchase, ProductUnit, and
+ *   Stock increment are materialized atomically at completeSale, and
+ *   the resulting PhonePurchase id is stamped onto
+ *   trade_in_phone_purchase_id. Voiding a sale with TRADE_IN flips
+ *   the incoming ProductUnit IN_STOCK -> RETURNED and decrements Stock.
+ *
  * Enforcement:
  *   - reference_number is nullable at the DB level (future methods may
  *     not need one), but REQUIRED for all methods except CASH at the
  *     service layer.
  *   - cash_received is nullable, NON-NULL and >= amount only when
  *     payment_method = CASH (enforced by CHK constraints and service).
+ *   - TRADE_IN payments require trade_in_product_id, trade_in_imei,
+ *     and trade_in_buying_price; forbid cash_received and (implicitly)
+ *     reference_number. Non-TRADE_IN payments must leave all six
+ *     trade_in_* fields NULL. Enforced by CHK_payments_trade_in_*
+ *     constraints and by the service layer.
  */
 export enum PaymentMethod {
   CASH = 'CASH',
@@ -28,4 +45,5 @@ export enum PaymentMethod {
   BANK_TRANSFER = 'BANK_TRANSFER',
   KOKO = 'KOKO',
   MINTPAY = 'MINTPAY',
+  TRADE_IN = 'TRADE_IN',
 }
