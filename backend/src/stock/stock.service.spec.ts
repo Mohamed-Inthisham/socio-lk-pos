@@ -694,4 +694,182 @@ describe('StockService', () => {
       expect(setArg.quantity()).toBe('quantity + 1');
     });
   });
+
+  describe('decrementForVoidedTradeIn', () => {
+    // Same QB shape as decrementForSale / incrementForReversal.
+    // SELECT ... FOR UPDATE, then UPDATE with SQL-side arithmetic.
+    const buildSelectQB = (returnValue: unknown) => ({
+      setLock: jest.fn().mockReturnThis(),
+      where: jest.fn().mockReturnThis(),
+      andWhere: jest.fn().mockReturnThis(),
+      getOne: jest.fn().mockResolvedValue(returnValue),
+    });
+
+    const buildUpdateQB = () => {
+      const execute = jest.fn().mockResolvedValue({ affected: 1 });
+      return {
+        update: jest.fn().mockReturnThis(),
+        set: jest.fn().mockReturnThis(),
+        where: jest.fn().mockReturnThis(),
+        execute,
+        _execute: execute,
+      };
+    };
+
+    it('decrements quantity when stock is tracked and sufficient', async () => {
+      const stockRow = {
+        id: 'stock-1',
+        product_id: 'p1',
+        branch_id: 'b1',
+        quantity: 5,
+        manage_stock: true,
+      };
+      const updateQB = buildUpdateQB();
+      mockManager.createQueryBuilder
+        .mockReturnValueOnce(buildSelectQB(stockRow))
+        .mockReturnValueOnce(updateQB);
+
+      await service.decrementForVoidedTradeIn(
+        mockManager as never,
+        'p1',
+        'b1',
+        1,
+      );
+
+      // SQL-side arithmetic — mirrors decrementForSale exactly.
+      expect(updateQB.update).toHaveBeenCalledWith(Stock);
+      const setArg = updateQB.set.mock.calls[0][0] as {
+        quantity: () => string;
+      };
+      expect(setArg.quantity()).toBe('quantity - 1');
+      expect(updateQB.where).toHaveBeenCalledWith('id = :id', {
+        id: 'stock-1',
+      });
+      expect(updateQB._execute).toHaveBeenCalled();
+    });
+
+    it('no-ops silently when manage_stock is false', async () => {
+      // Defensive branch — trade-in phones are serialized so
+      // manage_stock is always true in real flow, but the sibling
+      // methods respect this and we do the same for consistency.
+      const untrackedRow = {
+        id: 'stock-2',
+        product_id: 'p1',
+        branch_id: 'b1',
+        quantity: 3,
+        manage_stock: false,
+      };
+      mockManager.createQueryBuilder.mockReturnValueOnce(
+        buildSelectQB(untrackedRow),
+      );
+
+      await expect(
+        service.decrementForVoidedTradeIn(mockManager as never, 'p1', 'b1', 1),
+      ).resolves.toBeUndefined();
+
+      // Only SELECT was called; no UPDATE.
+      expect(mockManager.createQueryBuilder).toHaveBeenCalledTimes(1);
+    });
+
+    it('throws when stock row is missing (data integrity failure)', async () => {
+      mockManager.createQueryBuilder.mockReturnValueOnce(buildSelectQB(null));
+
+      await expect(
+        service.decrementForVoidedTradeIn(
+          mockManager as never,
+          'ghost-product',
+          'b1',
+          1,
+        ),
+      ).rejects.toThrow(/Stock row missing/);
+    });
+
+    it('throws ConflictException with void-context message when insufficient (defensive)', async () => {
+      // Should never happen in real flow (a trade-in being voided was
+      // intook via the same-numbered sale's createForTradeIn, so the
+      // Stock row was incremented). But if data corruption causes it,
+      // the error message names the void context, not a "for sale"
+      // context — so operators know what to investigate.
+      const stockRow = {
+        id: 'stock-3',
+        product_id: 'p1',
+        branch_id: 'b1',
+        quantity: 0,
+        manage_stock: true,
+      };
+      // Two mock returns because we assert on the exception twice —
+      // each service call consumes one mockReturnValueOnce.
+      mockManager.createQueryBuilder
+        .mockReturnValueOnce(buildSelectQB(stockRow))
+        .mockReturnValueOnce(buildSelectQB(stockRow));
+
+      await expect(
+        service.decrementForVoidedTradeIn(mockManager as never, 'p1', 'b1', 1),
+      ).rejects.toThrow(ConflictException);
+      await expect(
+        service.decrementForVoidedTradeIn(mockManager as never, 'p1', 'b1', 1),
+      ).rejects.toThrow(/voided trade-in/);
+    });
+
+    it('acquires pessimistic_write lock on the stock row', async () => {
+      const stockRow = {
+        id: 'stock-4',
+        product_id: 'p1',
+        branch_id: 'b1',
+        quantity: 10,
+        manage_stock: true,
+      };
+      const selectQB = buildSelectQB(stockRow);
+      mockManager.createQueryBuilder
+        .mockReturnValueOnce(selectQB)
+        .mockReturnValueOnce(buildUpdateQB());
+
+      await service.decrementForVoidedTradeIn(
+        mockManager as never,
+        'p1',
+        'b1',
+        1,
+      );
+
+      expect(selectQB.setLock).toHaveBeenCalledWith('pessimistic_write');
+      expect(selectQB.where).toHaveBeenCalledWith(
+        'stock.product_id = :productId',
+        { productId: 'p1' },
+      );
+      expect(selectQB.andWhere).toHaveBeenCalledWith(
+        'stock.branch_id = :branchId',
+        { branchId: 'b1' },
+      );
+    });
+
+    it('decrements by 1 (normal trade-in void quantity)', async () => {
+      // A trade-in is always 1 phone per PhonePurchase in Slice D/G.
+      // This test is essentially the happy path renamed — it exists to
+      // pin the quantity=1 semantic contract so a future "batch trade-in"
+      // feature would need to explicitly extend it.
+      const stockRow = {
+        id: 'stock-5',
+        product_id: 'p1',
+        branch_id: 'b1',
+        quantity: 1,
+        manage_stock: true,
+      };
+      const updateQB = buildUpdateQB();
+      mockManager.createQueryBuilder
+        .mockReturnValueOnce(buildSelectQB(stockRow))
+        .mockReturnValueOnce(updateQB);
+
+      await service.decrementForVoidedTradeIn(
+        mockManager as never,
+        'p1',
+        'b1',
+        1,
+      );
+
+      const setArg = updateQB.set.mock.calls[0][0] as {
+        quantity: () => string;
+      };
+      expect(setArg.quantity()).toBe('quantity - 1');
+    });
+  });
 });
