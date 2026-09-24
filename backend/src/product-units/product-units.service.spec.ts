@@ -530,4 +530,169 @@ describe('ProductUnitsService', () => {
       expect(mockUpdateQb.execute).not.toHaveBeenCalled();
     });
   });
+
+  // ---- markReturnedForVoid ----
+
+  describe('markReturnedForVoid', () => {
+    let mockReadQb: {
+      setLock: jest.Mock;
+      where: jest.Mock;
+      getOne: jest.Mock;
+    };
+    let mockUpdateQb: {
+      update: jest.Mock;
+      set: jest.Mock;
+      where: jest.Mock;
+      execute: jest.Mock;
+    };
+    let mockManager: { createQueryBuilder: jest.Mock };
+
+    beforeEach(() => {
+      mockReadQb = {
+        setLock: jest.fn().mockReturnThis(),
+        where: jest.fn().mockReturnThis(),
+        getOne: jest.fn(),
+      };
+      mockUpdateQb = {
+        update: jest.fn().mockReturnThis(),
+        set: jest.fn().mockReturnThis(),
+        where: jest.fn().mockReturnThis(),
+        execute: jest.fn().mockResolvedValue({ affected: 1 }),
+      };
+      mockManager = {
+        createQueryBuilder: jest.fn((entityArg?: unknown) =>
+          entityArg ? mockReadQb : mockUpdateQb,
+        ),
+      };
+    });
+
+    it('flips IN_STOCK to RETURNED and returns the unit on the happy path', async () => {
+      const unit = {
+        id: 'u-1',
+        imei: '354789102345678',
+        status: ProductUnitStatus.IN_STOCK,
+        product_id: 'p-1',
+        branch_id: 'b-1',
+      };
+      mockReadQb.getOne.mockResolvedValue(unit);
+
+      const result = await service.markReturnedForVoid(
+        mockManager as unknown as import('typeorm').EntityManager,
+        'u-1',
+      );
+
+      expect(mockReadQb.setLock).toHaveBeenCalledWith('pessimistic_write');
+      expect(mockReadQb.where).toHaveBeenCalledWith('unit.id = :unitId', {
+        unitId: 'u-1',
+      });
+      expect(mockUpdateQb.update).toHaveBeenCalledWith(ProductUnit);
+      expect(mockUpdateQb.set).toHaveBeenCalledWith({
+        status: ProductUnitStatus.RETURNED,
+      });
+      expect(mockUpdateQb.where).toHaveBeenCalledWith('id = :id', {
+        id: 'u-1',
+      });
+      expect(mockUpdateQb.execute).toHaveBeenCalled();
+      // Returned unit gives voidSale product_id + branch_id for the
+      // paired stock decrement, no second read needed.
+      expect(result).toBe(unit);
+    });
+
+    it('throws raw Error when the unit does not exist (data integrity)', async () => {
+      mockReadQb.getOne.mockResolvedValue(null);
+
+      await expect(
+        service.markReturnedForVoid(
+          mockManager as unknown as import('typeorm').EntityManager,
+          'u-missing',
+        ),
+      ).rejects.toThrow(
+        'ProductUnit u-missing not found at trade-in-void time',
+      );
+    });
+
+    it('throws ConflictException with structured payload when status is SOLD (resold before void)', async () => {
+      const unit = {
+        id: 'u-1',
+        imei: '354789102345678',
+        status: ProductUnitStatus.SOLD,
+        product_id: 'p-1',
+        branch_id: 'b-1',
+      };
+      mockReadQb.getOne.mockResolvedValue(unit);
+
+      try {
+        await service.markReturnedForVoid(
+          mockManager as unknown as import('typeorm').EntityManager,
+          'u-1',
+        );
+        fail('expected ConflictException to be thrown');
+      } catch (err) {
+        expect(err).toBeInstanceOf(ConflictException);
+        const response = (err as ConflictException).getResponse();
+        expect(response).toMatchObject({
+          message: expect.stringContaining('resold in a subsequent sale'),
+          existing_unit: {
+            id: 'u-1',
+            status: ProductUnitStatus.SOLD,
+            product_id: 'p-1',
+            branch_id: 'b-1',
+          },
+        });
+      }
+    });
+
+    it('throws raw Error when status is RETURNED (integrity: state machine bypassed)', async () => {
+      mockReadQb.getOne.mockResolvedValue({
+        id: 'u-1',
+        imei: '354789102345678',
+        status: ProductUnitStatus.RETURNED,
+        product_id: 'p-1',
+        branch_id: 'b-1',
+      });
+
+      await expect(
+        service.markReturnedForVoid(
+          mockManager as unknown as import('typeorm').EntityManager,
+          'u-1',
+        ),
+      ).rejects.toThrow(/expected IN_STOCK or SOLD/);
+    });
+
+    it('throws raw Error when status is WRITTEN_OFF (integrity)', async () => {
+      mockReadQb.getOne.mockResolvedValue({
+        id: 'u-1',
+        imei: '354789102345678',
+        status: ProductUnitStatus.WRITTEN_OFF,
+        product_id: 'p-1',
+        branch_id: 'b-1',
+      });
+
+      await expect(
+        service.markReturnedForVoid(
+          mockManager as unknown as import('typeorm').EntityManager,
+          'u-1',
+        ),
+      ).rejects.toThrow(/expected IN_STOCK or SOLD/);
+    });
+
+    it('does NOT run the UPDATE when the status check fails', async () => {
+      mockReadQb.getOne.mockResolvedValue({
+        id: 'u-1',
+        imei: '354789102345678',
+        status: ProductUnitStatus.SOLD,
+        product_id: 'p-1',
+        branch_id: 'b-1',
+      });
+
+      await expect(
+        service.markReturnedForVoid(
+          mockManager as unknown as import('typeorm').EntityManager,
+          'u-1',
+        ),
+      ).rejects.toThrow(ConflictException);
+
+      expect(mockUpdateQb.execute).not.toHaveBeenCalled();
+    });
+  });
 });

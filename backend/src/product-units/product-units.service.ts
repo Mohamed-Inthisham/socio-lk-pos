@@ -230,4 +230,117 @@ export class ProductUnitsService {
       .where('id = :id', { id: unit.id })
       .execute();
   }
+
+  /**
+   * Flip a ProductUnit from IN_STOCK to RETURNED as part of voiding a
+   * sale that had a TRADE_IN payment. Enlists in the caller's
+   * EntityManager (typically SalesService.voidSale) so any downstream
+   * failure rolls it back with the rest of the void transaction. Never
+   * opens its own transaction.
+   *
+   * This is the third variant in the mark* family, with a hybrid error
+   * shape drawn from both siblings:
+   *
+   *   - IN_STOCK: happy path, flip to RETURNED and return the unit.
+   *
+   *   - SOLD: business-legit conflict. The trade-in phone was intook
+   *     via this sale's createForTradeIn, but has since been sold on a
+   *     SUBSEQUENT sale. Voiding this sale would leave the ledger
+   *     inconsistent (this sale VOIDED "returning" a phone that's now
+   *     with another customer via the newer sale). Throw
+   *     ConflictException with a structured payload mirroring
+   *     markSoldForSale's shape, so voidSale can surface a clear 409
+   *     to the operator: "void the subsequent sale first."
+   *     FOLLOWUP: enrich the payload with resold_in_sale_id via
+   *     `SELECT sale_id FROM sale_lines WHERE product_unit_id = <id>`.
+   *
+   *   - RETURNED or WRITTEN_OFF: integrity error, raw 500. A
+   *     COMPLETED sale being voided should NEVER have its trade-in
+   *     PU in RETURNED (double-void?) or WRITTEN_OFF (some path we
+   *     don't have yet). Fail loudly.
+   *
+   *   - Missing PU: integrity error, raw 500. FK RESTRICT should
+   *     prevent this.
+   *
+   * Return value: the ProductUnit (deliberately diverges from the
+   * void-returning siblings — the caller needs product_id and branch_id
+   * for the paired stockService.decrementForVoidedTradeIn call, and a
+   * second read to hydrate them would be wasteful).
+   *
+   * Note: this is the FIRST path in the codebase that transitions a
+   * PU to RETURNED. A separate customer-return endpoint (someone
+   * physically brings a sold phone back for a refund) is still a
+   * followup — that path would need its own method (e.g.
+   * markReturnedForCustomerReturn) with different preconditions
+   * (SOLD → RETURNED, not IN_STOCK → RETURNED).
+   *
+   * Concurrency: same setLock pattern as the siblings. Serializes
+   * concurrent operations on the same PU (e.g. two operators trying
+   * to void two different sales that both touch this PU).
+   *
+   * Must be called inside a transaction.
+   */
+  async markReturnedForVoid(
+    manager: EntityManager,
+    unitId: string,
+  ): Promise<ProductUnit> {
+    const unit = await manager
+      .createQueryBuilder(ProductUnit, 'unit')
+      .setLock('pessimistic_write')
+      .where('unit.id = :unitId', { unitId })
+      .getOne();
+
+    if (!unit) {
+      // Data integrity failure — FK RESTRICT prevents deletion.
+      throw new Error(
+        `ProductUnit ${unitId} not found at trade-in-void time. ` +
+          `This indicates a data integrity issue — the RESTRICT FK on ` +
+          `product_units.phone_purchase_id should prevent this.`,
+      );
+    }
+
+    if (unit.status === ProductUnitStatus.SOLD) {
+      // Business-legit: the trade-in phone was resold before this void.
+      // Block-the-void per Q7. Operator must void the subsequent sale
+      // first.
+      throw new ConflictException({
+        message:
+          `Cannot void this sale: trade-in phone (IMEI '${unit.imei}') ` +
+          `has been resold in a subsequent sale. Void the subsequent ` +
+          `sale first, or contact an administrator.`,
+        existing_unit: {
+          id: unit.id,
+          status: unit.status,
+          product_id: unit.product_id,
+          branch_id: unit.branch_id,
+        },
+      });
+    }
+
+    if (unit.status !== ProductUnitStatus.IN_STOCK) {
+      // RETURNED or WRITTEN_OFF at void time is state-machine bypass.
+      // A COMPLETED sale's trade-in PU MUST be IN_STOCK (its
+      // createForTradeIn created it that way) or SOLD (handled above).
+      // Anything else means an unknown code path touched it.
+      throw new Error(
+        `ProductUnit ${unitId} has status ${unit.status} at ` +
+          `trade-in-void time, expected IN_STOCK or SOLD. The PU state ` +
+          `machine was bypassed by an unknown code path.`,
+      );
+    }
+
+    await manager
+      .createQueryBuilder()
+      .update(ProductUnit)
+      .set({ status: ProductUnitStatus.RETURNED })
+      .where('id = :id', { id: unit.id })
+      .execute();
+
+    // Return the (pre-update) unit so the caller has product_id and
+    // branch_id for the paired stockService.decrementForVoidedTradeIn.
+    // The status field on the returned object is stale (still IN_STOCK)
+    // — the caller must not rely on it. Callers today (voidSale) only
+    // read product_id/branch_id, so this is safe.
+    return unit;
+  }
 }
