@@ -608,6 +608,216 @@ describe('PhonePurchasesService', () => {
   // helper is responsible for, in isolation from the full transaction
   // orchestration.
 
+  // ---- createForTradeIn (manager-enlisted trade-in materialization) ----
+
+  describe('createForTradeIn', () => {
+    // Reusable input shape — matches the entity-string types (buying_price
+    // and selling_price come off the Payment row as numeric strings).
+    const validInput = (): {
+      customer_id: string;
+      branch_id: string;
+      cashier_id: string;
+      product_id: string;
+      imei: string;
+      buying_price: string;
+      selling_price: string | null;
+      notes: string | null;
+    } => ({
+      customer_id: 'cust-1',
+      branch_id: 'branch-1',
+      cashier_id: 'cashier-1',
+      product_id: 'prod-1',
+      imei: '356938035643809',
+      buying_price: '60000.00',
+      selling_price: '75000.00',
+      notes: 'Trade-in against new phone',
+    });
+
+    // Configure the lookup sequence for createForTradeIn (only 2 reads):
+    //   1. product (Product) — via assertProductReference
+    //   2. IMEI check (ProductUnit) — via assertImeiAvailable
+    // No cashier / customer / branch reads (those are the parent Sale's
+    // responsibility per the design docstring).
+    const setupHappyPathLookups = (overrides?: {
+      product?: unknown;
+      existingUnit?: unknown;
+    }) => {
+      const pick = <T>(key: string, fallback: T): unknown =>
+        overrides && key in overrides
+          ? (overrides as Record<string, unknown>)[key]
+          : fallback;
+
+      mockManager.findOne
+        .mockResolvedValueOnce(pick('product', validSerializedProduct()))
+        .mockResolvedValueOnce(pick('existingUnit', null));
+    };
+
+    it('creates PhonePurchase + ProductUnit + increments Stock via the caller manager', async () => {
+      setupHappyPathLookups();
+      mockManager.create.mockImplementation((_entity, data) => data);
+      mockManager.save.mockImplementation((e) =>
+        Promise.resolve({
+          id: e.imei ? 'unit-1' : 'purchase-1',
+          ...e,
+        }),
+      );
+      mockStockService.incrementForReversal.mockResolvedValue(undefined);
+
+      const result = await service.createForTradeIn(
+        mockManager as never,
+        validInput(),
+      );
+
+      // PhonePurchase created with correct shape. buying_price comes
+      // in already as a numeric string from the Payment row, so
+      // total_amount is stored as-is without .toFixed() reformatting.
+      expect(mockManager.create).toHaveBeenCalledWith(
+        PhonePurchase,
+        expect.objectContaining({
+          customer_id: 'cust-1',
+          branch_id: 'branch-1',
+          cashier_id: 'cashier-1',
+          total_amount: '60000.00',
+          notes: 'Trade-in against new phone',
+        }),
+      );
+
+      // ProductUnit created IN_STOCK, linked to the (mocked) purchase id
+      expect(mockManager.create).toHaveBeenCalledWith(
+        ProductUnit,
+        expect.objectContaining({
+          product_id: 'prod-1',
+          branch_id: 'branch-1',
+          imei: '356938035643809',
+          status: ProductUnitStatus.IN_STOCK,
+          buying_price: '60000.00',
+          selling_price: '75000.00',
+          phone_purchase_id: 'purchase-1',
+        }),
+      );
+
+      // Stock incremented via the caller's manager (enlistment proof)
+      expect(mockStockService.incrementForReversal).toHaveBeenCalledWith(
+        mockManager,
+        'prod-1',
+        'branch-1',
+        1,
+      );
+
+      // Returned shape gives caller both the PP (for stamping) and PU
+      // (for potential future use / logging)
+      expect(result.phone_purchase).toEqual(
+        expect.objectContaining({ id: 'purchase-1' }),
+      );
+      expect(result.product_unit).toEqual(
+        expect.objectContaining({ id: 'unit-1' }),
+      );
+    });
+
+    it('passes null through for selling_price and notes when the input has them null', async () => {
+      setupHappyPathLookups();
+      mockManager.create.mockImplementation((_e, data) => data);
+      mockManager.save.mockImplementation((e) =>
+        Promise.resolve({ id: e.imei ? 'unit-2' : 'purchase-2', ...e }),
+      );
+      mockStockService.incrementForReversal.mockResolvedValue(undefined);
+
+      await service.createForTradeIn(mockManager as never, {
+        ...validInput(),
+        selling_price: null,
+        notes: null,
+      });
+
+      // Notes null goes to PhonePurchase
+      expect(mockManager.create).toHaveBeenCalledWith(
+        PhonePurchase,
+        expect.objectContaining({ notes: null }),
+      );
+      // selling_price null goes to ProductUnit
+      expect(mockManager.create).toHaveBeenCalledWith(
+        ProductUnit,
+        expect.objectContaining({ selling_price: null }),
+      );
+    });
+
+    it('throws ConflictException with existing_unit payload on IMEI collision', async () => {
+      // Cross-DRAFT race arbiter behavior: the pre-check inside
+      // createForTradeIn returns 409 (best-effort UX); the global
+      // unique index backstops any race that leaks through.
+      const existingUnit = {
+        id: 'unit-99',
+        status: ProductUnitStatus.SOLD,
+        product_id: 'prod-old',
+      };
+      setupHappyPathLookups({ existingUnit });
+
+      try {
+        await service.createForTradeIn(mockManager as never, validInput());
+        fail('Expected ConflictException');
+      } catch (err) {
+        expect(err).toBeInstanceOf(ConflictException);
+        const response = (err as ConflictException).getResponse() as {
+          message: string;
+          existing_unit: { id: string; status: string; product_id: string };
+        };
+        expect(response.existing_unit).toEqual({
+          id: 'unit-99',
+          status: ProductUnitStatus.SOLD,
+          product_id: 'prod-old',
+        });
+      }
+
+      // Full rollback proof: no PP/PU created, no Stock touched
+      expect(mockManager.create).not.toHaveBeenCalled();
+      expect(mockStockService.incrementForReversal).not.toHaveBeenCalled();
+    });
+
+    it('throws BadRequestException when product is not serialized (defensive: addPayment should have caught it)', async () => {
+      setupHappyPathLookups({
+        product: { ...validSerializedProduct(), is_serialized: false },
+      });
+
+      await expect(
+        service.createForTradeIn(mockManager as never, validInput()),
+      ).rejects.toThrow(BadRequestException);
+      expect(mockManager.create).not.toHaveBeenCalled();
+      expect(mockStockService.incrementForReversal).not.toHaveBeenCalled();
+    });
+
+    it('throws BadRequestException when product does not exist (defensive)', async () => {
+      // Product was deleted/deactivated between addPayment and completeSale.
+      // Real edge case, not a code bug.
+      setupHappyPathLookups({ product: null });
+
+      await expect(
+        service.createForTradeIn(mockManager as never, validInput()),
+      ).rejects.toThrow(BadRequestException);
+      expect(mockManager.create).not.toHaveBeenCalled();
+      expect(mockStockService.incrementForReversal).not.toHaveBeenCalled();
+    });
+
+    it('propagates errors from stock increment (integrity failure rolls the caller transaction back)', async () => {
+      setupHappyPathLookups();
+      mockManager.create.mockImplementation((_e, data) => data);
+      mockManager.save.mockImplementation((e) =>
+        Promise.resolve({ id: e.imei ? 'unit-x' : 'purchase-x', ...e }),
+      );
+      mockStockService.incrementForReversal.mockRejectedValue(
+        new Error('Stock row missing for product prod-1 at branch branch-1'),
+      );
+
+      await expect(
+        service.createForTradeIn(mockManager as never, validInput()),
+      ).rejects.toThrow('Stock row missing');
+
+      // Method threw — caller transaction rolls back everything the
+      // manager did (PP save, PU save). We can't test the rollback
+      // itself at the unit level (that's the transaction manager's
+      // job); the e2e crown-jewel test proves it end-to-end.
+      // What we CAN prove here: the method did NOT swallow the error.
+    });
+  });
+
   describe('assertBranchAccess (implicit via create)', () => {
     // Setup: bypass all other checks and confirm branch access alone
     // is the gate. We do this by seeding the cashier with a specific

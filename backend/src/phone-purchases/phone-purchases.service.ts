@@ -189,6 +189,132 @@ export class PhonePurchasesService {
     return purchase;
   }
 
+  /**
+   * Materialize a trade-in inside a caller's transaction: create a
+   * PhonePurchase + ProductUnit (IN_STOCK) + Stock increment, atomically.
+   * Enlists in the caller's EntityManager (typically
+   * SalesService.completeSale) — never opens its own transaction.
+   *
+   * This is the payment-time sibling of create(), scoped for the
+   * TRADE_IN payment lifecycle: during DRAFT the trade-in fields live
+   * on the Payment row; at completeSale we materialize them via this
+   * method and stamp the resulting PhonePurchase id back onto the
+   * Payment (see SalesService.completeSale).
+   *
+   * Differences from create() and their rationale:
+   *
+   *   - No cashier lookup, no branch access check. The parent Sale
+   *     has already been through both at addLine / addPayment /
+   *     completeSale time. Re-checking here would create weird failure
+   *     modes if the sale's cashier was soft-deleted between draft and
+   *     complete.
+   *
+   *   - No customer / branch re-validation. Both come from the parent
+   *     Sale, which validated them at its own creation time (Sale
+   *     customer_id is only settable via the sale, branch_id is pinned
+   *     at draft time). Product and IMEI ARE re-validated here — those
+   *     could legitimately change (product deactivated, IMEI intook
+   *     via another path) between DRAFT and complete.
+   *
+   *   - Takes fully-resolved input rather than a DTO. The caller has
+   *     already validated the DTO at addPayment time and stored the
+   *     values on the Payment row; we take them from the row.
+   *     buying_price / selling_price come in as numeric-string (the
+   *     entity type) rather than number, since they're read straight
+   *     off the Payment row.
+   *
+   *   - Returns { phone_purchase, product_unit } instead of a
+   *     hydrated PhonePurchase. Relations are NOT hydrated — the
+   *     caller (completeSale) only needs phone_purchase.id to stamp
+   *     on the Payment and product_unit's identity for potential
+   *     future logging. Callers that need a hydrated view should
+   *     `findOne` after their transaction commits.
+   *
+   * Steps:
+   *   1. assertProductReference (product exists, at branch, serialized)
+   *   2. assertImeiAvailable (409 + existing_unit payload on collision)
+   *   3. Insert PhonePurchase row (total_amount = buying_price for
+   *      single-unit purchases, same as create())
+   *   4. Insert ProductUnit row (IN_STOCK, linked to purchase)
+   *   5. Increment Stock via stockService.incrementForReversal (the
+   *      existing dual-purpose method: intake AND void-reversal use it)
+   *
+   * Any throw rolls back the caller's entire transaction (per
+   * TypeORM's transaction semantics). The unique index on
+   * product_units.imei is the ultimate race arbiter — the pre-check
+   * in step 2 is best-effort UX; a concurrent insert between step 2
+   * and step 4 would hit the unique index at step 4 and raise a raw
+   * error the caller sees as 500. Slice E accepted the same
+   * trade-off for outgoing serialized lines; a followup unifies both
+   * paths into consistent 409 handling via SQL-error interception.
+   *
+   * Must be called inside a transaction; StockService.incrementForReversal
+   * uses setLock which throws if the manager isn't in one.
+   */
+  async createForTradeIn(
+    manager: EntityManager,
+    input: {
+      customer_id: string;
+      branch_id: string;
+      cashier_id: string;
+      product_id: string;
+      imei: string;
+      buying_price: string;
+      selling_price: string | null;
+      notes: string | null;
+    },
+  ): Promise<{ phone_purchase: PhonePurchase; product_unit: ProductUnit }> {
+    // 1. Product must exist, be at this branch, and be serialized.
+    //    Cheap check; catches product deactivation between DRAFT and
+    //    complete.
+    await this.assertProductReference(
+      input.product_id,
+      input.branch_id,
+      manager,
+    );
+
+    // 2. IMEI availability best-effort pre-check. Same helper as
+    //    create(); returns the same 409 + existing_unit payload shape
+    //    on collision. The global unique index backstops any race.
+    await this.assertImeiAvailable(input.imei, manager);
+
+    // 3. Insert PhonePurchase. total_amount = buying_price (single
+    //    unit per purchase). buying_price is already a numeric string
+    //    from the Payment row, so no .toFixed() reformatting needed.
+    const purchase = manager.create(PhonePurchase, {
+      customer_id: input.customer_id,
+      branch_id: input.branch_id,
+      cashier_id: input.cashier_id,
+      total_amount: input.buying_price,
+      notes: input.notes,
+    });
+    const savedPurchase = await manager.save(purchase);
+
+    // 4. Insert ProductUnit (IN_STOCK), linked to the PhonePurchase.
+    const unit = manager.create(ProductUnit, {
+      product_id: input.product_id,
+      branch_id: input.branch_id,
+      imei: input.imei,
+      status: ProductUnitStatus.IN_STOCK,
+      buying_price: input.buying_price,
+      selling_price: input.selling_price,
+      phone_purchase_id: savedPurchase.id,
+    });
+    const savedUnit = await manager.save(unit);
+
+    // 5. Increment Stock. Reuses the existing dual-purpose
+    //    incrementForReversal (already used for both intake via
+    //    create() and void reversal). Locks the Stock row internally.
+    await this.stockService.incrementForReversal(
+      manager,
+      input.product_id,
+      input.branch_id,
+      1,
+    );
+
+    return { phone_purchase: savedPurchase, product_unit: savedUnit };
+  }
+
   // ---- Private validation helpers ----
   //
   // Each helper throws the appropriate NestJS exception for its
