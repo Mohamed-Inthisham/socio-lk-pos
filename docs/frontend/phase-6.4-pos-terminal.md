@@ -1,6 +1,8 @@
 # Phase 6.4 — POS Terminal (Frontend) — Planning
 
-**Status:** planning. No code yet. Design decisions Q1–Q21 were answered on 2026-10-12 (§8, "Decisions"). Two new questions raised by those answers (Q22, Q23) and the phone-purchase intake scope question (§10) are still open.
+**Status:** planning. No code yet. Design decisions Q1–Q23 are answered (§8, "Decisions"). Two scheduling questions remain (§8, "Still open"); neither blocks P0.
+
+**Target setup:** a laptop (1366×768 reference) with a USB/HID barcode scanner as the till. Tablet and phone layouts are supported as secondary.
 
 **Backend contract:** [docs/backend/sales.md](../backend/sales.md), [docs/backend/used-phones.md](../backend/used-phones.md), Swagger at `/api/docs` (dev). All endpoints below are under `/api/v1` and use the httpOnly-cookie session.
 
@@ -263,7 +265,7 @@ Final bindings get a usability pass with an actual cashier after P1.
 Keyboard shortcuts are an accelerator, never the only way to do something.
 
 - **Every hotkey action has a visible button.** The shortcut shows as a `Kbd` chip on the button only on devices with a fine pointer and hover (`@media (hover: hover) and (pointer: fine)`).
-- **Scanners on tablets/phones:** Bluetooth scanners in HID mode type into the focused input exactly as on desktop. Camera scanning is a separate decision (Q22).
+- **Scanners on tablets/phones:** Bluetooth scanners in HID mode type into the focused input exactly as on desktop. No camera scanning (Q22).
 - **No auto-focus loop on touch devices.** Re-focusing the scan input after every action would keep popping the on-screen keyboard. On touch-only devices the scan input focuses only when tapped or after a scan submit.
 - **Touch targets** are at least 44×44 px; the quantity stepper uses buttons, not `+`/`-` keys.
 - **Dialogs become bottom sheets** below `md` (the existing `Drawer` primitive or a full-height `Dialog` variant), with the primary action pinned at the bottom above the safe-area inset.
@@ -283,7 +285,7 @@ Keyboard shortcuts are an accelerator, never the only way to do something.
 
 **Shared primitives stay in `components/common/`** (Button, InputField, Select, Table, Dialog, ConfirmDialog, Tooltip, Drawer). New primitives added there only if generic: `MoneyText` (LKR formatting + `tabular-nums`), `Kbd` (shortcut chip, hidden on touch), `Toast` (Q5), `StatusBanner`, `ResponsiveDialog` (renders `Dialog` at `≥ md`, a bottom sheet below it; every terminal dialog uses this), `useMediaQuery` hook.
 
-**Visual direction (Q6):** modern and clean within Path B's existing tokens — card surfaces with soft borders and rounded corners, generous spacing, large `tabular-nums` totals, the cyan/sky accent reserved for the primary action (Pay / Complete), dark mode supported via the existing `themeStore`. No new UI library. Screenshots at 390 px, 768 px and 1366 px are reviewed at the end of P0.
+**Visual direction (Q6):** modern and clean within Path B's existing tokens — card surfaces with soft borders and rounded corners, generous spacing, large `tabular-nums` totals, the cyan/sky accent reserved for the primary action (Pay / Complete), dark mode supported via the existing `themeStore`. No new UI library. The design target is a 1366×768 laptop (Q23): the desktop layout must fit there with the totals/payments column fully visible. Screenshots at 1366 px (primary), 768 px and 390 px are reviewed at the end of P0.
 
 **Responsive rendering:** the cart renders as a table at `≥ md` (`CartTable`) and as stacked cards below it (`CartCardList`), sharing one row-model selector, so both show the same data and actions.
 
@@ -362,18 +364,17 @@ Q6, Q9, Q11, Q12 and Q17 were answered explicitly. The rest were not called out,
 | Q19 | Customer detach with trade-in | Default — frontend blocks it |
 | Q20 | Language | Default — English only |
 | Q21 | Cashier landing | Default — `/pos` |
+| **Q22** | **Camera scanning** | **None.** The shop has a hardware barcode scanner; it types into the scan input like a keyboard. Camera scanning is dropped from the roadmap, not deferred |
+| **Q23** | **Primary till device** | **A laptop** with the barcode scanner. Desktop-first: the `≥ lg` layout at **1366×768** is the design target (it must fit without scrolling the totals/payments column); 1920×1080 is checked too. Tablet and phone layouts stay fully usable (Q6), as the secondary case |
 
 ### Still open
 
-**Q22. Camera barcode scanning on phones/tablets.** Raised by Q6. A phone or tablet without a Bluetooth scanner has no fast way to read a barcode or IMEI label.
-- (a) None in 6.4: manual entry, plus Bluetooth scanners (HID mode works on Android/iOS). (b) The browser `BarcodeDetector` API — no dependency, but Chromium-only (no iOS Safari). (c) A library such as `@zxing/browser`, which works cross-browser at the cost of extra bundle size; it needs HTTPS and camera permission.
-- **Recommended: (a) for 6.4, (c) as R1.1** once the target devices are known (Q23).
-
-**Q23. Primary till device.** "Mobile responsive" can mean "usable on a phone" or "the phone is the till". The answer sets which layout gets polished first and how much touch work goes into P0–P5.
-- (a) Desktop/laptop + USB scanner is the till; tablet/phone is secondary (a manager checking sales, a quick sale on the floor). (b) A tablet is the till. (c) A phone is the till.
-- **Recommended: (a)** — build desktop-first, but every flow must be completable on a 390 px phone.
+- **Phone purchase intake screen** (`POST /phone-purchases`, buying a phone outright): in 6.4 or later? Currently listed as deferred in §10.
+- **When to land the Q13 backend change** (`customer` relation on `GET /sales/:id`): a small backend PR before P0, or as part of P2.
 
 ### Question record
+
+Q22 and Q23 were raised after the first round, so they appear only in the table above.
 
 The original questions as asked, kept for the reasoning. The table above is authoritative.
 
@@ -496,6 +497,6 @@ Not in Phase 6.4:
 - **Product-unit admin browser** (`/product-units` list/detail).
 - **Refunds / partial returns** (void is all-or-nothing; customer-return flow is a backend followup).
 - **Payment edit** (`PATCH` payments), sale-level notes, recent-sales filters beyond today — R1.1.
-- **Camera barcode/IMEI scanning** on phones and tablets — R1.1 candidate, pending Q22/Q23.
+- **Camera barcode/IMEI scanning** — not planned; the shop uses a hardware scanner (Q22).
 - **Offline mode**, multi-language UI, cash drawer integration, card-terminal integration, customer-facing display.
 - **Multi-branch scoping** of reads (R9).
