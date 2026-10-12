@@ -1,7 +1,7 @@
 import { INestApplication } from '@nestjs/common';
 import request from 'supertest';
 import * as bcrypt from 'bcrypt';
-import { DataSource } from 'typeorm';
+import { DataSource, In } from 'typeorm';
 import { createTestApp, truncateAllTables } from './setup';
 import { User } from '../src/users/entities/user.entity';
 import { UserRole } from '../src/users/enums/user-role.enum';
@@ -4583,6 +4583,134 @@ describe('Sales (e2e)', () => {
             .getRepository(ProductUnit)
             .count({ where: { status: ProductUnitStatus.RETURNED } }),
         ).toBe(0);
+      });
+    });
+
+    // ---- Crown jewels: trade-in atomicity ----
+
+    describe('TRADE_IN atomicity — crown jewels', () => {
+      /**
+       * Full-row snapshot of everything a complete/void could touch:
+       * the sales, their payments, every PU with the given IMEI, stock
+       * for both fixture products, and all PhonePurchases. Comparing
+       * before/after with toEqual catches any partial write, including
+       * a same-status re-write that bumps updated_at.
+       */
+      async function snapshot(
+        ctx: TradeInCtx,
+        saleIds: string[],
+        imei: string,
+      ) {
+        return {
+          sales: await dataSource
+            .getRepository(Sale)
+            .find({ where: { id: In(saleIds) }, order: { id: 'ASC' } }),
+          payments: await dataSource
+            .getRepository(Payment)
+            .find({ where: { sale_id: In(saleIds) }, order: { id: 'ASC' } }),
+          units: await dataSource
+            .getRepository(ProductUnit)
+            .find({ where: { imei }, order: { id: 'ASC' } }),
+          stock: await dataSource.getRepository(Stock).find({
+            where: {
+              product_id: In([ctx.newProduct.id, ctx.usedProduct.id]),
+              branch_id: ctx.branch.id,
+            },
+            order: { product_id: 'ASC' },
+          }),
+          purchases: await dataSource
+            .getRepository(PhonePurchase)
+            .find({ order: { id: 'ASC' } }),
+        };
+      }
+
+      it('CROWN JEWEL: two DRAFTs trading in the same IMEI — second complete gets 409 and leaves zero partial state', async () => {
+        const ctx = await setupTradeIn();
+
+        // Both DRAFTs accept the same trade-in IMEI: nothing is
+        // materialized until complete, so addPayment's pre-check passes
+        // for both.
+        const saleA = await draftWithLine(ctx);
+        await addTradeIn(ctx, saleA.id, IMEI_A, 60000);
+        await addCash(ctx, saleA.id, 40000);
+        const saleB = await draftWithLine(ctx);
+        await addTradeIn(ctx, saleB.id, IMEI_A, 60000);
+        await addCash(ctx, saleB.id, 40000);
+
+        // Sale A wins
+        await completeReq(ctx, saleA.id);
+        const winner = await unitByImei(IMEI_A);
+        expect(winner?.status).toBe(ProductUnitStatus.IN_STOCK);
+
+        const before = await snapshot(ctx, [saleA.id, saleB.id], IMEI_A);
+        expect(before.purchases).toHaveLength(1);
+        expect(before.units).toHaveLength(1);
+        expect(before.stock.map((s) => s.quantity).sort()).toEqual([1, 4]);
+
+        // Sale B loses. Its outgoing decrement runs BEFORE the trade-in
+        // loop, so the 409 must roll that back too.
+        const response = await completeReq(ctx, saleB.id, 409);
+        expect(response.body.message).toMatch(/IMEI already exists/);
+        expect(response.body.existing_unit).toMatchObject({
+          id: winner!.id,
+          status: ProductUnitStatus.IN_STOCK,
+          product_id: ctx.usedProduct.id,
+        });
+
+        const after = await snapshot(ctx, [saleA.id, saleB.id], IMEI_A);
+        expect(after).toEqual(before);
+
+        // Spelled out for the reader: B is untouched DRAFT, unstamped
+        const saleBAfter = after.sales.find((s) => s.id === saleB.id);
+        expect(saleBAfter?.status).toBe(SaleStatus.DRAFT);
+        expect(saleBAfter?.sale_number).toBeNull();
+        expect(saleBAfter?.completed_at).toBeNull();
+        const saleBTradeIn = after.payments.find(
+          (p) =>
+            p.sale_id === saleB.id &&
+            p.payment_method === PaymentMethod.TRADE_IN,
+        );
+        expect(saleBTradeIn?.trade_in_phone_purchase_id).toBeNull();
+      });
+
+      it('CROWN JEWEL: void blocked by resale — 409, Sale-A stays COMPLETED, Sale-B and the PU untouched', async () => {
+        const ctx = await setupTradeIn();
+
+        // Sale A intakes IMEI_A as a trade-in
+        const saleA = await draftWithLine(ctx);
+        await addTradeIn(ctx, saleA.id, IMEI_A, 60000);
+        await addCash(ctx, saleA.id, 40000);
+        await completeReq(ctx, saleA.id);
+
+        // Sale B sells that same phone to someone else
+        const saleB = await resellTradeIn(ctx, IMEI_A);
+
+        const before = await snapshot(ctx, [saleA.id, saleB.id], IMEI_A);
+        expect(before.units).toHaveLength(1);
+        expect(before.units[0].status).toBe(ProductUnitStatus.SOLD);
+        // used: +1 (A intake) -1 (B sale) = 0; new: 5 - 1 (A) = 4
+        expect(before.stock.map((s) => s.quantity).sort()).toEqual([0, 4]);
+
+        // Void A. Its outgoing reversal (new phone stock +1) runs BEFORE
+        // the trade-in loop, so the 409 must roll that back too.
+        const response = await voidReq(ctx, saleA.id, 409);
+        expect(response.body.message).toMatch(/resold in a subsequent sale/);
+        expect(response.body.existing_unit).toMatchObject({
+          id: before.units[0].id,
+          status: ProductUnitStatus.SOLD,
+        });
+
+        const after = await snapshot(ctx, [saleA.id, saleB.id], IMEI_A);
+        expect(after).toEqual(before);
+
+        // Spelled out for the reader
+        const saleAAfter = after.sales.find((s) => s.id === saleA.id);
+        expect(saleAAfter?.status).toBe(SaleStatus.COMPLETED);
+        expect(saleAAfter?.voided_at).toBeNull();
+        expect(after.units[0].status).toBe(ProductUnitStatus.SOLD);
+        for (const p of after.payments) {
+          expect(p.reversed_at).toBeNull();
+        }
       });
     });
   });
