@@ -3966,4 +3966,624 @@ describe('Sales (e2e)', () => {
       expect(linesReferencingUnit).toHaveLength(2);
     });
   });
+
+  // ============================================================
+  // Slice G — TRADE_IN payments
+  // ============================================================
+
+  describe('TRADE_IN payments — Slice G', () => {
+    const IMEI_A = '356938035643809';
+    const IMEI_B = '490154203237518';
+
+    /**
+     * Shared fixture: admin + cookies, a customer (TRADE_IN requires one),
+     * a non-serialized "new phone" with stock for the outgoing line, and
+     * a serialized "used phone" SKU (stock 0) that trade-ins intake into.
+     */
+    async function setupTradeIn(opts: { newStockQty?: number } = {}) {
+      const branch = await seedBranch();
+      const { user, password } = await seedUser(UserRole.ADMIN, 'a@t.com');
+      const cookies = await loginAndGetCookies(user.email, password);
+      const customer = await seedCustomer({
+        name: 'Trade-in Customer',
+        phone: '0779990001',
+      });
+      const newProduct = await seedProduct(branch.id, {
+        name: 'New Phone',
+        selling_price: '100000.00',
+      });
+      await setStockQuantity(newProduct.id, branch.id, opts.newStockQty ?? 5);
+      const usedProduct = await seedProduct(branch.id, {
+        name: 'Used iPhone 12',
+        is_serialized: true,
+        selling_price: '90000.00',
+        buying_price: '60000.00',
+      });
+      await setStockQuantity(usedProduct.id, branch.id, 0);
+      return { branch, user, cookies, customer, newProduct, usedProduct };
+    }
+    type TradeInCtx = Awaited<ReturnType<typeof setupTradeIn>>;
+
+    /** DRAFT sale with a customer and one New Phone line (total 100000). */
+    async function draftWithLine(ctx: TradeInCtx): Promise<Sale> {
+      const sale = await seedSale({
+        branch_id: ctx.branch.id,
+        cashier_id: ctx.user.id,
+        customer_id: ctx.customer.id,
+      });
+      await request(app.getHttpServer())
+        .post(`/api/v1/sales/${sale.id}/lines`)
+        .set('Cookie', ctx.cookies)
+        .send({ product_id: ctx.newProduct.id, quantity: 1 })
+        .expect(201);
+      return sale;
+    }
+
+    function tradeInBody(
+      ctx: TradeInCtx,
+      imei: string,
+      amount: number,
+      extra: Record<string, unknown> = {},
+    ) {
+      return {
+        payment_method: PaymentMethod.TRADE_IN,
+        amount,
+        trade_in_product_id: ctx.usedProduct.id,
+        trade_in_imei: imei,
+        trade_in_buying_price: amount,
+        trade_in_selling_price: 75000,
+        trade_in_notes: 'Screen scratch, battery 89%',
+        ...extra,
+      };
+    }
+
+    function addTradeIn(
+      ctx: TradeInCtx,
+      saleId: string,
+      imei: string,
+      amount: number,
+      expected = 201,
+      extra: Record<string, unknown> = {},
+    ) {
+      return request(app.getHttpServer())
+        .post(`/api/v1/sales/${saleId}/payments`)
+        .set('Cookie', ctx.cookies)
+        .send(tradeInBody(ctx, imei, amount, extra))
+        .expect(expected);
+    }
+
+    function addCash(
+      ctx: TradeInCtx,
+      saleId: string,
+      amount: number,
+      cashReceived = amount,
+    ) {
+      return request(app.getHttpServer())
+        .post(`/api/v1/sales/${saleId}/payments`)
+        .set('Cookie', ctx.cookies)
+        .send({
+          payment_method: PaymentMethod.CASH,
+          amount,
+          cash_received: cashReceived,
+        })
+        .expect(201);
+    }
+
+    function completeReq(ctx: TradeInCtx, saleId: string, expected = 200) {
+      return request(app.getHttpServer())
+        .post(`/api/v1/sales/${saleId}/complete`)
+        .set('Cookie', ctx.cookies)
+        .expect(expected);
+    }
+
+    function voidReq(ctx: TradeInCtx, saleId: string, expected = 200) {
+      return request(app.getHttpServer())
+        .post(`/api/v1/sales/${saleId}/void`)
+        .set('Cookie', ctx.cookies)
+        .send({ void_reason: 'Customer changed mind' })
+        .expect(expected);
+    }
+
+    /**
+     * Sell a previously traded-in phone on a fresh sale and complete it.
+     * PU selling_price is 75000 (from tradeInBody), so the line is 75000.
+     */
+    async function resellTradeIn(ctx: TradeInCtx, imei: string): Promise<Sale> {
+      const sale = await seedSale({
+        branch_id: ctx.branch.id,
+        cashier_id: ctx.user.id,
+      });
+      await request(app.getHttpServer())
+        .post(`/api/v1/sales/${sale.id}/lines`)
+        .set('Cookie', ctx.cookies)
+        .send({
+          product_id: ctx.usedProduct.id,
+          quantity: 1,
+          imei_snapshot: imei,
+        })
+        .expect(201);
+      await addCash(ctx, sale.id, 75000);
+      await completeReq(ctx, sale.id);
+      return sale;
+    }
+
+    async function stockQty(productId: string, branchId: string) {
+      const stock = await dataSource
+        .getRepository(Stock)
+        .findOne({ where: { product_id: productId, branch_id: branchId } });
+      return stock?.quantity;
+    }
+
+    function unitByImei(imei: string) {
+      return dataSource.getRepository(ProductUnit).findOne({ where: { imei } });
+    }
+
+    function purchasesFor(customerId: string) {
+      return dataSource
+        .getRepository(PhonePurchase)
+        .find({ where: { customer_id: customerId } });
+    }
+
+    function paymentsOf(saleId: string) {
+      return dataSource
+        .getRepository(Payment)
+        .find({ where: { sale_id: saleId }, order: { created_at: 'ASC' } });
+    }
+
+    // ---- POST /payments — TRADE_IN ----
+
+    describe('POST /api/v1/sales/:saleId/payments — TRADE_IN', () => {
+      it('records a TRADE_IN payment with all trade-in fields (no inventory yet)', async () => {
+        const ctx = await setupTradeIn();
+        const sale = await draftWithLine(ctx);
+
+        const response = await addTradeIn(ctx, sale.id, IMEI_A, 60000);
+
+        expect(response.body.amount_paid).toBe('60000.00');
+        expect(response.body.payments).toHaveLength(1);
+        expect(response.body.payments[0]).toMatchObject({
+          payment_method: PaymentMethod.TRADE_IN,
+          amount: '60000.00',
+          cash_received: null,
+          reference_number: null,
+          trade_in_product_id: ctx.usedProduct.id,
+          trade_in_imei: IMEI_A,
+          trade_in_buying_price: '60000.00',
+          trade_in_selling_price: '75000.00',
+          trade_in_notes: 'Screen scratch, battery 89%',
+          trade_in_phone_purchase_id: null,
+        });
+        // DRAFT: nothing materialized
+        expect(await unitByImei(IMEI_A)).toBeNull();
+        expect(await purchasesFor(ctx.customer.id)).toHaveLength(0);
+        expect(await stockQty(ctx.usedProduct.id, ctx.branch.id)).toBe(0);
+      });
+
+      it('returns 400 when a required trade-in field is missing', async () => {
+        const ctx = await setupTradeIn();
+        const sale = await draftWithLine(ctx);
+
+        const response = await addTradeIn(ctx, sale.id, IMEI_A, 60000, 400, {
+          trade_in_imei: undefined,
+        });
+        expect(response.body.message).toMatch(/TRADE_IN payments require/);
+      });
+
+      it('returns 400 when amount does not equal trade_in_buying_price', async () => {
+        const ctx = await setupTradeIn();
+        const sale = await draftWithLine(ctx);
+
+        const response = await addTradeIn(ctx, sale.id, IMEI_A, 60000, 400, {
+          trade_in_buying_price: 55000,
+        });
+        expect(response.body.message).toMatch(
+          /must equal trade_in_buying_price/,
+        );
+      });
+
+      it('returns 409 with existing_unit when the IMEI is already in inventory', async () => {
+        const ctx = await setupTradeIn();
+        const existing = await seedProductUnit(
+          ctx.usedProduct.id,
+          ctx.branch.id,
+          ctx.user.id,
+          IMEI_A,
+        );
+        const sale = await draftWithLine(ctx);
+
+        const response = await addTradeIn(ctx, sale.id, IMEI_A, 60000, 409);
+        expect(response.body.existing_unit).toMatchObject({
+          id: existing.id,
+          status: ProductUnitStatus.IN_STOCK,
+        });
+        expect(await paymentsOf(sale.id)).toHaveLength(0);
+      });
+
+      it('returns 401 when unauthenticated', async () => {
+        const ctx = await setupTradeIn();
+        const sale = await draftWithLine(ctx);
+
+        await request(app.getHttpServer())
+          .post(`/api/v1/sales/${sale.id}/payments`)
+          .send(tradeInBody(ctx, IMEI_A, 60000))
+          .expect(401);
+      });
+
+      it('returns 400 when the sale is COMPLETED', async () => {
+        const ctx = await setupTradeIn();
+        const sale = await draftWithLine(ctx);
+        await addCash(ctx, sale.id, 100000);
+        await completeReq(ctx, sale.id);
+
+        const response = await addTradeIn(ctx, sale.id, IMEI_A, 60000, 400);
+        expect(response.body.message).toMatch(/COMPLETED/);
+        expect(await paymentsOf(sale.id)).toHaveLength(1); // just the CASH
+      });
+
+      it('GET /sales/:id shows the trade-in fields on the payment', async () => {
+        const ctx = await setupTradeIn();
+        const sale = await draftWithLine(ctx);
+        await addTradeIn(ctx, sale.id, IMEI_A, 60000);
+
+        const response = await request(app.getHttpServer())
+          .get(`/api/v1/sales/${sale.id}`)
+          .set('Cookie', ctx.cookies)
+          .expect(200);
+
+        expect(response.body.payments).toHaveLength(1);
+        expect(response.body.payments[0]).toMatchObject({
+          payment_method: PaymentMethod.TRADE_IN,
+          trade_in_product_id: ctx.usedProduct.id,
+          trade_in_imei: IMEI_A,
+          trade_in_buying_price: '60000.00',
+          trade_in_selling_price: '75000.00',
+          trade_in_phone_purchase_id: null,
+        });
+      });
+
+      it('accepts a second TRADE_IN with a different IMEI on the same sale', async () => {
+        const ctx = await setupTradeIn();
+        const sale = await draftWithLine(ctx);
+        await addTradeIn(ctx, sale.id, IMEI_A, 60000);
+
+        const response = await addTradeIn(ctx, sale.id, IMEI_B, 40000);
+
+        expect(response.body.payments).toHaveLength(2);
+        expect(response.body.amount_paid).toBe('100000.00');
+        expect(
+          response.body.payments.map(
+            (p: { trade_in_imei: string }) => p.trade_in_imei,
+          ),
+        ).toEqual([IMEI_A, IMEI_B]);
+      });
+    });
+
+    // ---- PATCH /payments/:paymentId — TRADE_IN freeze ----
+
+    describe('PATCH /api/v1/sales/:saleId/payments/:paymentId — TRADE_IN', () => {
+      it('returns 400 when patching amount on a TRADE_IN payment', async () => {
+        const ctx = await setupTradeIn();
+        const sale = await draftWithLine(ctx);
+        const added = await addTradeIn(ctx, sale.id, IMEI_A, 60000);
+        const paymentId = added.body.payments[0].id as string;
+
+        const response = await request(app.getHttpServer())
+          .patch(`/api/v1/sales/${sale.id}/payments/${paymentId}`)
+          .set('Cookie', ctx.cookies)
+          .send({ amount: 55000 })
+          .expect(400);
+
+        expect(response.body.message).toMatch(
+          /amount cannot be updated on a TRADE_IN payment/,
+        );
+        const [payment] = await paymentsOf(sale.id);
+        expect(payment.amount).toBe('60000.00');
+      });
+
+      it('allows patching notes on a TRADE_IN payment', async () => {
+        const ctx = await setupTradeIn();
+        const sale = await draftWithLine(ctx);
+        const added = await addTradeIn(ctx, sale.id, IMEI_A, 60000);
+        const paymentId = added.body.payments[0].id as string;
+
+        const response = await request(app.getHttpServer())
+          .patch(`/api/v1/sales/${sale.id}/payments/${paymentId}`)
+          .set('Cookie', ctx.cookies)
+          .send({ notes: 'Customer kept the case' })
+          .expect(200);
+
+        expect(response.body.payments[0]).toMatchObject({
+          notes: 'Customer kept the case',
+          amount: '60000.00',
+          trade_in_buying_price: '60000.00',
+        });
+      });
+
+      it('still allows patching amount on a non-TRADE_IN payment (regression)', async () => {
+        const ctx = await setupTradeIn();
+        const sale = await draftWithLine(ctx);
+        const added = await addCash(ctx, sale.id, 50000);
+        const paymentId = added.body.payments[0].id as string;
+
+        const response = await request(app.getHttpServer())
+          .patch(`/api/v1/sales/${sale.id}/payments/${paymentId}`)
+          .set('Cookie', ctx.cookies)
+          .send({ amount: 40000 })
+          .expect(200);
+
+        expect(response.body.payments[0].amount).toBe('40000.00');
+        expect(response.body.amount_paid).toBe('40000.00');
+      });
+    });
+
+    // ---- POST /complete — trade-in materialization ----
+
+    describe('POST /api/v1/sales/:id/complete — TRADE_IN', () => {
+      it('materializes the trade-in: PhonePurchase created, PU IN_STOCK, stock incremented, payment stamped', async () => {
+        const ctx = await setupTradeIn();
+        const sale = await draftWithLine(ctx);
+        await addTradeIn(ctx, sale.id, IMEI_A, 60000);
+        await addCash(ctx, sale.id, 40000);
+
+        const response = await completeReq(ctx, sale.id);
+        expect(response.body.status).toBe(SaleStatus.COMPLETED);
+
+        const purchases = await purchasesFor(ctx.customer.id);
+        expect(purchases).toHaveLength(1);
+        expect(purchases[0]).toMatchObject({
+          branch_id: ctx.branch.id,
+          cashier_id: ctx.user.id,
+          total_amount: '60000.00',
+          notes: 'Screen scratch, battery 89%',
+        });
+
+        const unit = await unitByImei(IMEI_A);
+        expect(unit).toMatchObject({
+          product_id: ctx.usedProduct.id,
+          branch_id: ctx.branch.id,
+          status: ProductUnitStatus.IN_STOCK,
+          buying_price: '60000.00',
+          selling_price: '75000.00',
+          phone_purchase_id: purchases[0].id,
+        });
+
+        // Incoming +1 on the used SKU, outgoing -1 on the new phone
+        expect(await stockQty(ctx.usedProduct.id, ctx.branch.id)).toBe(1);
+        expect(await stockQty(ctx.newProduct.id, ctx.branch.id)).toBe(4);
+
+        const tradeIn = (await paymentsOf(sale.id)).find(
+          (p) => p.payment_method === PaymentMethod.TRADE_IN,
+        );
+        expect(tradeIn?.trade_in_phone_purchase_id).toBe(purchases[0].id);
+      });
+
+      it('returns 409 and rolls back fully when the IMEI was intaken elsewhere after addPayment', async () => {
+        const ctx = await setupTradeIn();
+        const sale = await draftWithLine(ctx);
+        await addTradeIn(ctx, sale.id, IMEI_A, 60000);
+        await addCash(ctx, sale.id, 40000);
+
+        // Same IMEI intaken via another path (e.g. direct phone purchase)
+        // between addPayment and complete.
+        const other = await seedProductUnit(
+          ctx.usedProduct.id,
+          ctx.branch.id,
+          ctx.user.id,
+          IMEI_A,
+        );
+
+        const response = await completeReq(ctx, sale.id, 409);
+        expect(response.body.existing_unit).toMatchObject({ id: other.id });
+
+        // Outgoing decrement rolled back along with everything else
+        expect(await stockQty(ctx.newProduct.id, ctx.branch.id)).toBe(5);
+        expect(await stockQty(ctx.usedProduct.id, ctx.branch.id)).toBe(0);
+        expect(await purchasesFor(ctx.customer.id)).toHaveLength(0);
+        expect(
+          await dataSource
+            .getRepository(ProductUnit)
+            .count({ where: { imei: IMEI_A } }),
+        ).toBe(1); // only the "other" unit
+
+        const refreshed = await request(app.getHttpServer())
+          .get(`/api/v1/sales/${sale.id}`)
+          .set('Cookie', ctx.cookies)
+          .expect(200);
+        expect(refreshed.body.status).toBe(SaleStatus.DRAFT);
+        expect(refreshed.body.sale_number).toBeNull();
+        const tradeIn = refreshed.body.payments.find(
+          (p: { payment_method: string }) =>
+            p.payment_method === PaymentMethod.TRADE_IN,
+        );
+        expect(tradeIn.trade_in_phone_purchase_id).toBeNull();
+      });
+
+      it('returns 409 on insufficient outgoing stock and creates no trade-in inventory', async () => {
+        const ctx = await setupTradeIn({ newStockQty: 0 });
+        const sale = await draftWithLine(ctx);
+        await addTradeIn(ctx, sale.id, IMEI_A, 60000);
+        await addCash(ctx, sale.id, 40000);
+
+        const response = await completeReq(ctx, sale.id, 409);
+        expect(response.body.message).toMatch(/Insufficient stock/);
+
+        expect(await purchasesFor(ctx.customer.id)).toHaveLength(0);
+        expect(await unitByImei(IMEI_A)).toBeNull();
+        expect(await stockQty(ctx.usedProduct.id, ctx.branch.id)).toBe(0);
+        const saleAfter = await dataSource
+          .getRepository(Sale)
+          .findOne({ where: { id: sale.id } });
+        expect(saleAfter?.status).toBe(SaleStatus.DRAFT);
+      });
+
+      it('completes a TRADE_IN + CASH split with change due', async () => {
+        const ctx = await setupTradeIn();
+        const sale = await draftWithLine(ctx);
+        await addTradeIn(ctx, sale.id, IMEI_A, 60000);
+        // Customer hands over 50000 cash for the 40000 balance
+        await addCash(ctx, sale.id, 40000, 50000);
+
+        const response = await completeReq(ctx, sale.id);
+
+        expect(response.body.status).toBe(SaleStatus.COMPLETED);
+        expect(response.body.sale_number).toEqual(expect.any(String));
+        expect(response.body.amount_paid).toBe('100000.00');
+        expect(response.body.change_due).toBe('10000.00');
+        expect(await purchasesFor(ctx.customer.id)).toHaveLength(1);
+      });
+
+      it('completes a sale paid entirely by trade-in (zero cash)', async () => {
+        const ctx = await setupTradeIn();
+        const sale = await draftWithLine(ctx);
+        await addTradeIn(ctx, sale.id, IMEI_A, 100000);
+
+        const response = await completeReq(ctx, sale.id);
+
+        expect(response.body.status).toBe(SaleStatus.COMPLETED);
+        expect(response.body.amount_paid).toBe('100000.00');
+        expect(response.body.change_due).toBe('0.00');
+        expect(response.body.payments).toHaveLength(1);
+        expect((await unitByImei(IMEI_A))?.status).toBe(
+          ProductUnitStatus.IN_STOCK,
+        );
+      });
+    });
+
+    // ---- POST /void — trade-in reversal ----
+
+    describe('POST /api/v1/sales/:id/void — TRADE_IN', () => {
+      it('voids a sale with a TRADE_IN: PU RETURNED, used stock decremented, payments reversed', async () => {
+        const ctx = await setupTradeIn();
+        const sale = await draftWithLine(ctx);
+        await addTradeIn(ctx, sale.id, IMEI_A, 60000);
+        await addCash(ctx, sale.id, 40000);
+        await completeReq(ctx, sale.id);
+        expect(await stockQty(ctx.usedProduct.id, ctx.branch.id)).toBe(1);
+
+        const response = await voidReq(ctx, sale.id);
+        expect(response.body.status).toBe(SaleStatus.VOIDED);
+
+        expect((await unitByImei(IMEI_A))?.status).toBe(
+          ProductUnitStatus.RETURNED,
+        );
+        expect(await stockQty(ctx.usedProduct.id, ctx.branch.id)).toBe(0);
+        expect(await stockQty(ctx.newProduct.id, ctx.branch.id)).toBe(5);
+        // PhonePurchase stays as history
+        expect(await purchasesFor(ctx.customer.id)).toHaveLength(1);
+        for (const p of await paymentsOf(sale.id)) {
+          expect(p.reversed_at).not.toBeNull();
+        }
+      });
+
+      it('returns 409 when the trade-in phone was resold, leaving both sales untouched', async () => {
+        const ctx = await setupTradeIn();
+        const saleA = await draftWithLine(ctx);
+        await addTradeIn(ctx, saleA.id, IMEI_A, 60000);
+        await addCash(ctx, saleA.id, 40000);
+        await completeReq(ctx, saleA.id);
+        const saleB = await resellTradeIn(ctx, IMEI_A);
+
+        const response = await voidReq(ctx, saleA.id, 409);
+        expect(response.body.message).toMatch(/resold in a subsequent sale/);
+        expect(response.body.existing_unit).toMatchObject({
+          status: ProductUnitStatus.SOLD,
+        });
+
+        const saleRepo = dataSource.getRepository(Sale);
+        expect(
+          (await saleRepo.findOne({ where: { id: saleA.id } }))?.status,
+        ).toBe(SaleStatus.COMPLETED);
+        expect(
+          (await saleRepo.findOne({ where: { id: saleB.id } }))?.status,
+        ).toBe(SaleStatus.COMPLETED);
+        expect((await unitByImei(IMEI_A))?.status).toBe(ProductUnitStatus.SOLD);
+      });
+
+      it('reverses both directions on a sale with a serialized outgoing line and a TRADE_IN', async () => {
+        const ctx = await setupTradeIn();
+        const serialized = await seedProduct(ctx.branch.id, {
+          name: 'Serialized New Phone',
+          is_serialized: true,
+          selling_price: '100000.00',
+        });
+        await setStockQuantity(serialized.id, ctx.branch.id, 2);
+        const outgoing = await seedProductUnit(
+          serialized.id,
+          ctx.branch.id,
+          ctx.user.id,
+          '350000000000777',
+          { selling_price: '100000.00' },
+        );
+        const sale = await seedSale({
+          branch_id: ctx.branch.id,
+          cashier_id: ctx.user.id,
+          customer_id: ctx.customer.id,
+        });
+        await request(app.getHttpServer())
+          .post(`/api/v1/sales/${sale.id}/lines`)
+          .set('Cookie', ctx.cookies)
+          .send({
+            product_id: serialized.id,
+            quantity: 1,
+            imei_snapshot: '350000000000777',
+          })
+          .expect(201);
+        await addTradeIn(ctx, sale.id, IMEI_A, 60000);
+        await addCash(ctx, sale.id, 40000);
+        await completeReq(ctx, sale.id);
+
+        await voidReq(ctx, sale.id);
+
+        // Outgoing: SOLD → IN_STOCK, stock restored
+        const outgoingAfter = await dataSource
+          .getRepository(ProductUnit)
+          .findOne({ where: { id: outgoing.id } });
+        expect(outgoingAfter?.status).toBe(ProductUnitStatus.IN_STOCK);
+        expect(await stockQty(serialized.id, ctx.branch.id)).toBe(2);
+        // Incoming: IN_STOCK → RETURNED, stock back to 0
+        expect((await unitByImei(IMEI_A))?.status).toBe(
+          ProductUnitStatus.RETURNED,
+        );
+        expect(await stockQty(ctx.usedProduct.id, ctx.branch.id)).toBe(0);
+      });
+
+      it('reverses both trade-ins on a sale with two TRADE_IN payments', async () => {
+        const ctx = await setupTradeIn();
+        const sale = await draftWithLine(ctx);
+        await addTradeIn(ctx, sale.id, IMEI_A, 60000);
+        await addTradeIn(ctx, sale.id, IMEI_B, 40000);
+        await completeReq(ctx, sale.id);
+        expect(await stockQty(ctx.usedProduct.id, ctx.branch.id)).toBe(2);
+
+        await voidReq(ctx, sale.id);
+
+        expect((await unitByImei(IMEI_A))?.status).toBe(
+          ProductUnitStatus.RETURNED,
+        );
+        expect((await unitByImei(IMEI_B))?.status).toBe(
+          ProductUnitStatus.RETURNED,
+        );
+        expect(await stockQty(ctx.usedProduct.id, ctx.branch.id)).toBe(0);
+      });
+
+      it('voids a sale with no TRADE_IN exactly as before (regression)', async () => {
+        const ctx = await setupTradeIn();
+        const sale = await draftWithLine(ctx);
+        await addCash(ctx, sale.id, 100000);
+        await completeReq(ctx, sale.id);
+        expect(await stockQty(ctx.newProduct.id, ctx.branch.id)).toBe(4);
+
+        const response = await voidReq(ctx, sale.id);
+
+        expect(response.body.status).toBe(SaleStatus.VOIDED);
+        expect(await stockQty(ctx.newProduct.id, ctx.branch.id)).toBe(5);
+        expect(await stockQty(ctx.usedProduct.id, ctx.branch.id)).toBe(0);
+        expect(
+          await dataSource
+            .getRepository(ProductUnit)
+            .count({ where: { status: ProductUnitStatus.RETURNED } }),
+        ).toBe(0);
+      });
+    });
+  });
 });
