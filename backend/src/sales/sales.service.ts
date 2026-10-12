@@ -216,7 +216,13 @@ export class SalesService {
   }
 
   /**
-   * Fetch one sale with nested branch + cashier + lines + payments.
+   * Fetch one sale with nested branch + cashier + customer + lines +
+   * payments.
+   *
+   * withDeleted: a soft-deleted customer (or cashier) is still shown on
+   * the sale. The sale is a historical record and must keep naming who
+   * it was for and who rang it up. Sales themselves have no soft delete,
+   * so this only affects the joined relations.
    *
    * Lines are ordered by line_number ASC so the receipt/UI renders them
    * in the cashier's original ring-up order (gaps from removes are
@@ -231,7 +237,8 @@ export class SalesService {
   async findOne(id: string): Promise<Sale> {
     const sale = await this.salesRepository.findOne({
       where: { id },
-      relations: ['branch', 'cashier', 'lines', 'payments'],
+      relations: ['branch', 'cashier', 'customer', 'lines', 'payments'],
+      withDeleted: true,
       order: {
         lines: { line_number: 'ASC' },
         payments: { created_at: 'ASC' },
@@ -266,9 +273,15 @@ export class SalesService {
         await this.assertCustomerReference(dto.customer_id);
       }
       sale.customer_id = dto.customer_id;
+      // findOne loaded the customer relation, and save() lets a loaded
+      // relation override the FK column — the old customer (or null)
+      // would be written back. Drop it so customer_id drives the write.
+      delete sale.customer;
     }
     if (dto.notes !== undefined) sale.notes = dto.notes;
-    return this.salesRepository.save(sale);
+    await this.salesRepository.save(sale);
+    // Re-read so the response carries the newly attached customer.
+    return this.findOne(id);
   }
 
   /**
