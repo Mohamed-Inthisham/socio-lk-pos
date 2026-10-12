@@ -865,6 +865,8 @@ export class SalesService {
    *
    * Updatable: amount, cash_received, reference_number, notes.
    * Frozen: payment_method, sale_id (see UpdatePaymentDto for reasoning).
+   * TRADE_IN payments: only notes is updatable; see
+   * assertNoTradeInFreezesViolated.
    *
    * PATCH semantics: undefined = don't touch, null = clear (nullable
    * fields), value = set.
@@ -901,6 +903,10 @@ export class SalesService {
       if (!payment || payment.sale_id !== saleId) {
         throw new NotFoundException('Payment not found');
       }
+
+      // TRADE_IN payments are frozen except for notes; trade_in_* fields
+      // are never patchable on any payment (Q2 lock).
+      this.assertNoTradeInFreezesViolated(payment, dto);
 
       // Merge DTO onto current payment state
       const nextAmount = dto.amount ?? Number(payment.amount);
@@ -1651,6 +1657,58 @@ export class SalesService {
       throw new BadRequestException(
         `TRADE_IN payment amount ${amount.toFixed(2)} must equal ` +
           `trade_in_buying_price ${buyingPrice.toFixed(2)}`,
+      );
+    }
+  }
+
+  /**
+   * Enforce the updatePayment freeze rules for trade-ins (Q2 lock).
+   *
+   * - Any payment: trade_in_* fields are never patchable. UpdatePaymentDto
+   *   doesn't declare them, so detection uses Object.hasOwn on the raw
+   *   DTO (catches explicit nulls too). On non-TRADE_IN payments this
+   *   also prevents the DB CHK_payments_trade_in_fields_null_when_not_trade_in
+   *   from surfacing as a 500.
+   * - TRADE_IN payments: amount, cash_received, and reference_number are
+   *   frozen too. Only notes is editable. Renegotiating a trade-in means
+   *   removing the payment and adding a new one.
+   *
+   * Declared fields use `!== undefined` rather than Object.hasOwn because
+   * class-transformer may materialize absent optional properties as
+   * own-undefined.
+   */
+  private assertNoTradeInFreezesViolated(
+    payment: Payment,
+    dto: UpdatePaymentDto,
+  ): void {
+    const tradeInFields = [
+      'trade_in_product_id',
+      'trade_in_imei',
+      'trade_in_buying_price',
+      'trade_in_selling_price',
+      'trade_in_notes',
+      'trade_in_phone_purchase_id',
+    ];
+    const smuggled = tradeInFields.filter((field) => Object.hasOwn(dto, field));
+    if (smuggled.length > 0) {
+      throw new BadRequestException(
+        `${smuggled.join(', ')} cannot be updated; trade-in fields are ` +
+          'frozen. Remove the payment and add a new one instead.',
+      );
+    }
+
+    if (payment.payment_method !== PaymentMethod.TRADE_IN) {
+      return;
+    }
+
+    const frozen = (
+      ['amount', 'cash_received', 'reference_number'] as const
+    ).filter((field) => dto[field] !== undefined);
+    if (frozen.length > 0) {
+      throw new BadRequestException(
+        `${frozen.join(', ')} cannot be updated on a TRADE_IN payment; ` +
+          'only notes is editable. Remove the payment and add a new one ' +
+          'to renegotiate the trade-in.',
       );
     }
   }

@@ -14,6 +14,7 @@ import { SaleType } from './enums/sale-type.enum';
 import { DiscountType } from './enums/discount-type.enum';
 import { Payment } from './entities/payment.entity';
 import { PaymentMethod } from './enums/payment-method.enum';
+import { UpdatePaymentDto } from './dto/update-payment.dto';
 import { Branch } from '../branches/entities/branch.entity';
 import { User } from '../users/entities/user.entity';
 import { ProductsService } from '../products/products.service';
@@ -2328,6 +2329,97 @@ describe('SalesService', () => {
       await expect(
         service.updatePayment('sale-1', 'missing', { amount: 300 }),
       ).rejects.toThrow(NotFoundException);
+    });
+
+    // ---- TRADE_IN freeze (Slice G, Q2 lock) ----
+    //
+    // TRADE_IN payments: only notes is editable. Any payment: trade_in_*
+    // fields are never patchable (UpdatePaymentDto doesn't declare them,
+    // so tests smuggle them in via a cast, as a raw JSON client would).
+
+    const seedTradeInPayment = () => ({
+      ...seedPayment({
+        payment_method: PaymentMethod.TRADE_IN,
+        amount: '60000.00',
+        cash_received: null,
+        reference_number: null,
+      }),
+      trade_in_product_id: 'prod-trade',
+      trade_in_imei: '356938035643809',
+      trade_in_buying_price: '60000.00',
+      trade_in_selling_price: null,
+      trade_in_notes: null,
+      trade_in_phone_purchase_id: null,
+    });
+
+    const arrangeTradeInUpdate = () => {
+      mockQueryBuilder.getOne.mockResolvedValueOnce({
+        ...seedDraftSale(),
+        total: '100000.00',
+      });
+      mockManager.findOne.mockResolvedValue(seedTradeInPayment());
+      mockQueryBuilder.getRawOne.mockResolvedValue({ sum: '60000' });
+      mockManager.save.mockImplementation((e) => Promise.resolve(e));
+    };
+
+    it('rejects amount changes on a TRADE_IN payment', async () => {
+      arrangeTradeInUpdate();
+
+      await expect(
+        service.updatePayment('sale-1', 'payment-1', { amount: 55000 }),
+      ).rejects.toThrow(/amount cannot be updated on a TRADE_IN payment/);
+      expect(mockManager.save).not.toHaveBeenCalled();
+    });
+
+    it('rejects cash_received changes on a TRADE_IN payment', async () => {
+      arrangeTradeInUpdate();
+
+      await expect(
+        service.updatePayment('sale-1', 'payment-1', { cash_received: 60000 }),
+      ).rejects.toThrow(
+        /cash_received cannot be updated on a TRADE_IN payment/,
+      );
+      expect(mockManager.save).not.toHaveBeenCalled();
+    });
+
+    it('rejects a smuggled trade_in_buying_price on a TRADE_IN payment', async () => {
+      arrangeTradeInUpdate();
+
+      await expect(
+        service.updatePayment('sale-1', 'payment-1', {
+          trade_in_buying_price: 55000,
+        } as UpdatePaymentDto),
+      ).rejects.toThrow(/trade_in_buying_price cannot be updated/);
+      expect(mockManager.save).not.toHaveBeenCalled();
+    });
+
+    it('allows notes changes on a TRADE_IN payment', async () => {
+      arrangeTradeInUpdate();
+
+      const result = await service.updatePayment('sale-1', 'payment-1', {
+        notes: 'Customer collected charger separately',
+      });
+
+      expect(result.notes).toBe('Customer collected charger separately');
+      expect(result.amount).toBe('60000.00'); // unchanged
+      expect(result.trade_in_buying_price).toBe('60000.00'); // unchanged
+      expect(mockManager.save).toHaveBeenCalled();
+    });
+
+    it('rejects a smuggled trade_in_* field on a non-TRADE_IN payment', async () => {
+      mockQueryBuilder.getOne.mockResolvedValueOnce({
+        ...seedDraftSale(),
+        total: '500.00',
+      });
+      mockManager.findOne.mockResolvedValue(seedPayment());
+
+      await expect(
+        service.updatePayment('sale-1', 'payment-1', {
+          notes: 'ok',
+          trade_in_imei: '356938035643809',
+        } as UpdatePaymentDto),
+      ).rejects.toThrow(/trade_in_imei cannot be updated/);
+      expect(mockManager.save).not.toHaveBeenCalled();
     });
   });
 
