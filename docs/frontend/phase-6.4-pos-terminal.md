@@ -1,6 +1,6 @@
 # Phase 6.4 — POS Terminal (Frontend) — Planning
 
-**Status:** planning. No code yet. Design decisions Q1–Q23 are answered (§8, "Decisions"). Two scheduling questions remain (§8, "Still open"); neither blocks P0.
+**Status:** planning complete — every decision is recorded in §8. Ready to build P0 once the Q13 backend PR is merged.
 
 **Target setup:** a laptop (1366×768 reference) with a USB/HID barcode scanner as the till. Tablet and phone layouts are supported as secondary.
 
@@ -9,7 +9,7 @@
 **Grounding notes (facts found while researching, not decisions):**
 
 - Line and payment `POST`/`PATCH`, `complete`, and `void` **return the full hydrated sale** (branch, cashier, lines, payments, totals). Line/payment `DELETE` and `DELETE /sales/:id` return **204**. `POST /sales` and `PATCH /sales/:id` return the **bare sale row** (no lines/payments). After a 204 or a bare-row response, re-fetch with `GET /sales/:id` if the cart needs refreshing.
-- `GET /sales/:id` loads `branch`, `cashier`, `lines`, `payments` — **not `customer`**. Only `customer_id` comes back.
+- `GET /sales/:id` loads `branch`, `cashier`, `lines`, `payments` — **not `customer`**; only `customer_id` comes back. The Q13 backend PR adds `customer` before P0, so every endpoint that returns the hydrated sale will include it.
 - Money fields are numeric **strings** (`"60000.00"`); request bodies take **numbers**.
 - `GET /products` returns a **plain array** (unpaginated, no text-search param). `GET /products/by-barcode/:barcode` is the scan lookup. `GET /sales` is **paginated** (`{ data, meta }`, filters `branchId`, `cashierId`, `status`, `from`, `to`, `page`, `limit≤200`).
 - `GET /product-units?imei=` is **admin/manager only** — a cashier cannot resolve an IMEI to a product today.
@@ -367,10 +367,10 @@ Q6, Q9, Q11, Q12 and Q17 were answered explicitly. The rest were not called out,
 | **Q22** | **Camera scanning** | **None.** The shop has a hardware barcode scanner; it types into the scan input like a keyboard. Camera scanning is dropped from the roadmap, not deferred |
 | **Q23** | **Primary till device** | **A laptop** with the barcode scanner. Desktop-first: the `≥ lg` layout at **1366×768** is the design target (it must fit without scrolling the totals/payments column); 1920×1080 is checked too. Tablet and phone layouts stay fully usable (Q6), as the secondary case |
 
-### Still open
+### Scheduling decisions
 
-- **Phone purchase intake screen** (`POST /phone-purchases`, buying a phone outright): in 6.4 or later? Currently listed as deferred in §10.
-- **When to land the Q13 backend change** (`customer` relation on `GET /sales/:id`): a small backend PR before P0, or as part of P2.
+- **Phone purchase intake screen** (`POST /phone-purchases`, buying a phone outright): **not in 6.4** (§10).
+- **Q13 backend change** (`customer` relation on `GET /sales/:id`): **landed now as its own small backend PR, before P0**, so the frontend never needs the extra `GET /customers/:id` workaround.
 
 ### Question record
 
@@ -479,7 +479,7 @@ Each slice is a vertical, demoable increment. "unit" = reducers/selectors/utils 
 | **P6 — Keyboard, discounts, polish + E2E** | Full §6 hotkey map with `Kbd` chips on pointer devices, `KeyboardHelpOverlay`, scan queue hardening, focus-return audit (keyboard) and no-auto-focus check (touch); stock warning (Q1); line discounts with `APPLY_DISCOUNT` granted to cashiers (Q11); Playwright smoke flows: cash sale, split tender, serialized + trade-in sale, void — each at a desktop viewport, with the cash sale and trade-in also at a 390 px mobile viewport. | P0–P5 | 10 unit, 10 component, 6 e2e |
 | **Total** | | | **~83 unit, ~90 component, ~6 e2e** |
 
-**Backend prerequisites (small, separate PRs):** Q13 (customer relation on `findOne`) before P2. Optional later: Q9(b) cashier IMEI lookup.
+**Backend prerequisites (small, separate PRs):** Q13 (customer relation on `findOne`) lands before P0. Optional later: Q9(b) cashier IMEI lookup.
 
 ---
 
@@ -492,7 +492,7 @@ Not in Phase 6.4:
 - **External-sourcing settlement** (friendly-shop payables, `Supplier.getSalesCount` UI) — **Phase 6.7**. Selling external-supplier lines is R1.1 per Q12.
 - **User management frontend** (create/edit users, roles, branch assignment, password change) — **Phase 6.8**.
 - **AWS deployment** — **Phase 6.9**.
-- **Phone purchase intake screen** (`POST /phone-purchases`, buying a phone outright, not as a trade-in) — backend exists; frontend not in 6.4 scope. **Flag:** confirm this is intended to wait.
+- **Phone purchase intake screen** (`POST /phone-purchases`, buying a phone outright, not as a trade-in) — backend exists; frontend deliberately not in 6.4 (confirmed).
 - **Customer management pages** (full CRUD list, soft delete/restore) — only inline search/create inside the terminal ships.
 - **Product-unit admin browser** (`/product-units` list/detail).
 - **Refunds / partial returns** (void is all-or-nothing; customer-return flow is a backend followup).
