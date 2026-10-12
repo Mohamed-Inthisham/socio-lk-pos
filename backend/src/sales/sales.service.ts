@@ -772,13 +772,46 @@ export class SalesService {
         );
       }
 
-      // 2. Validate method-specific rules against the proposed payment
+      // 2. Validate the (method, amount, cash_received, reference_number)
+      //    tuple. TRADE_IN gets its own branch inside this helper.
       this.assertPaymentFieldsConsistent(
         dto.payment_method,
         dto.amount,
         dto.cash_received ?? null,
         dto.reference_number ?? null,
       );
+
+      // 2a. Validate trade-in field shape. Non-TRADE_IN payments must
+      //     have no trade_in_* fields; TRADE_IN must have the required
+      //     trio.
+      this.assertTradeInFieldsPresenceMatchesMethod(dto.payment_method, dto);
+
+      // 2b. TRADE_IN-specific downstream validation.
+      if (dto.payment_method === PaymentMethod.TRADE_IN) {
+        // Customer required — we're buying a phone FROM someone.
+        if (sale.customer_id === null) {
+          throw new BadRequestException(
+            'TRADE_IN payment requires a customer on the sale; ' +
+              'set the sale.customer_id first',
+          );
+        }
+
+        // Amount must match buying_price (Q2 lock). Safe non-null
+        // access: assertTradeInFieldsPresenceMatchesMethod already
+        // guaranteed trade_in_buying_price is defined for TRADE_IN.
+        this.assertTradeInAmountMatchesBuyingPrice(
+          dto.amount,
+          dto.trade_in_buying_price!,
+        );
+
+        // Product + IMEI references (best-effort UX pre-check per Q4).
+        await this.assertTradeInPaymentReferencesValid(
+          manager,
+          dto.trade_in_product_id!,
+          dto.trade_in_imei!,
+          sale.branch_id,
+        );
+      }
 
       // 3. Assert amount does not overshoot remaining balance
       const remaining = await this.remainingBalance(
@@ -792,7 +825,9 @@ export class SalesService {
         );
       }
 
-      // 4. Insert
+      // 4. Insert. Trade-in fields populated only for TRADE_IN; all null
+      //    for other methods (enforced by CHK constraints too).
+      const isTradeIn = dto.payment_method === PaymentMethod.TRADE_IN;
       const payment = manager.create(Payment, {
         sale_id: saleId,
         payment_method: dto.payment_method,
@@ -803,6 +838,17 @@ export class SalesService {
             : this.roundToCents(dto.cash_received),
         reference_number: dto.reference_number ?? null,
         notes: dto.notes ?? null,
+        trade_in_product_id: isTradeIn ? dto.trade_in_product_id! : null,
+        trade_in_imei: isTradeIn ? dto.trade_in_imei! : null,
+        trade_in_buying_price: isTradeIn
+          ? this.roundToCents(dto.trade_in_buying_price!)
+          : null,
+        trade_in_selling_price:
+          isTradeIn && dto.trade_in_selling_price !== undefined
+            ? this.roundToCents(dto.trade_in_selling_price)
+            : null,
+        trade_in_notes: isTradeIn ? (dto.trade_in_notes ?? null) : null,
+        trade_in_phone_purchase_id: null, // populated at completeSale
       });
       const saved = await manager.save(payment);
 
@@ -1482,6 +1528,17 @@ export class SalesService {
    * this method surfaces clean 400s with actionable messages instead of
    * letting the DB throw check violations as 500s.
    */
+  /**
+   * Assert the (method, amount, cash_received, reference_number) tuple
+   * is internally consistent. CASH-specific rules (cash_received present
+   * and covering amount), TRADE_IN-specific rules (no cash_received, no
+   * reference_number), and non-CASH/non-TRADE_IN rules (no cash_received,
+   * reference_number required).
+   *
+   * TRADE_IN's own required fields (product_id, imei, buying_price) are
+   * validated separately by assertTradeInFieldsPresenceMatchesMethod
+   * because they aren't part of this helper's narrow tuple signature.
+   */
   private assertPaymentFieldsConsistent(
     method: PaymentMethod,
     amount: number,
@@ -1499,6 +1556,17 @@ export class SalesService {
           `cash_received ${cashReceived.toFixed(2)} must be >= amount ${amount.toFixed(2)}`,
         );
       }
+    } else if (method === PaymentMethod.TRADE_IN) {
+      if (cashReceived !== null) {
+        throw new BadRequestException(
+          'cash_received must not be set for TRADE_IN payments',
+        );
+      }
+      if (referenceNumber !== null) {
+        throw new BadRequestException(
+          'reference_number must not be set for TRADE_IN payments',
+        );
+      }
     } else {
       if (cashReceived !== null) {
         throw new BadRequestException(
@@ -1510,6 +1578,146 @@ export class SalesService {
           `reference_number is required for ${method} payments`,
         );
       }
+    }
+  }
+
+  /**
+   * Guard the presence-shape of trade-in fields on an AddPaymentDto
+   * against the payment method. Non-TRADE_IN payments MUST leave all
+   * trade_in_* fields absent (sending them is a client-side bug).
+   * TRADE_IN payments MUST include the required trio
+   * (product_id, imei, buying_price); optional fields (selling_price,
+   * notes) may be undefined.
+   *
+   * Pure shape check — no DB. Called AFTER assertPaymentFieldsConsistent
+   * so the (method, amount, cash, ref) tuple is already validated by
+   * the time we look at trade-in fields.
+   *
+   * The amount-matches-buying_price invariant (Q2) is checked by
+   * assertTradeInAmountMatchesBuyingPrice — separate helper because
+   * it needs the amount too and I want each helper to have one job.
+   */
+  private assertTradeInFieldsPresenceMatchesMethod(
+    method: PaymentMethod,
+    dto: AddPaymentDto,
+  ): void {
+    const trioPresent =
+      dto.trade_in_product_id !== undefined ||
+      dto.trade_in_imei !== undefined ||
+      dto.trade_in_buying_price !== undefined;
+    const auxPresent =
+      dto.trade_in_selling_price !== undefined ||
+      dto.trade_in_notes !== undefined;
+
+    if (method !== PaymentMethod.TRADE_IN) {
+      if (trioPresent || auxPresent) {
+        throw new BadRequestException(
+          `trade_in_* fields must not be set for ${method} payments`,
+        );
+      }
+      return;
+    }
+
+    // method === TRADE_IN — required trio must be present.
+    if (
+      dto.trade_in_product_id === undefined ||
+      dto.trade_in_imei === undefined ||
+      dto.trade_in_buying_price === undefined
+    ) {
+      throw new BadRequestException(
+        'TRADE_IN payments require trade_in_product_id, trade_in_imei, ' +
+          'and trade_in_buying_price',
+      );
+    }
+  }
+
+  /**
+   * Assert the payment amount equals the trade-in buying price to the
+   * cent (Q2 lock). Compared on integer cents to avoid float
+   * representation surprises, same pattern as completeSale's
+   * amount_paid === total check.
+   *
+   * Only called when method === TRADE_IN; the DTO validator guarantees
+   * both values are numbers with at most 2 decimal places by the time
+   * we get here.
+   */
+  private assertTradeInAmountMatchesBuyingPrice(
+    amount: number,
+    buyingPrice: number,
+  ): void {
+    const amountCents = Math.round(amount * 100);
+    const buyingCents = Math.round(buyingPrice * 100);
+    if (amountCents !== buyingCents) {
+      throw new BadRequestException(
+        `TRADE_IN payment amount ${amount.toFixed(2)} must equal ` +
+          `trade_in_buying_price ${buyingPrice.toFixed(2)}`,
+      );
+    }
+  }
+
+  /**
+   * Validate that a trade-in payment's product and IMEI references are
+   * currently valid. Runs against the caller's transaction manager so
+   * reads see the same consistent snapshot as the surrounding addPayment
+   * work.
+   *
+   * Product must exist, belong to the sale's branch, and be serialized.
+   * IMEI must not collide with any existing ProductUnit — 409 with the
+   * same existing_unit payload shape as PhonePurchasesService and
+   * ProductUnitsService.
+   *
+   * This is best-effort at addPayment time: a concurrent intake could
+   * insert the same IMEI between this check and completeSale's
+   * createForTradeIn. That race is the same one Slice E accepted for
+   * outgoing serialized lines, arbitrated at complete-time by the
+   * global unique index on product_units.imei.
+   *
+   * Duplicates the logic of PhonePurchasesService.assertProductReference
+   * and .assertImeiAvailable — see the docstring on createForTradeIn
+   * for the rationale (keeping those private on the phone-purchases
+   * class rather than exposing them). FOLLOWUP: unify into a shared
+   * serialized-inventory helper.
+   */
+  private async assertTradeInPaymentReferencesValid(
+    manager: EntityManager,
+    productId: string,
+    imei: string,
+    branchId: string,
+  ): Promise<void> {
+    // Product check
+    const product = await manager.findOne(Product, {
+      where: { id: productId },
+    });
+    if (!product) {
+      throw new BadRequestException(
+        `Trade-in product ${productId} not found or inactive`,
+      );
+    }
+    if (product.branch_id !== branchId) {
+      throw new BadRequestException(
+        `Trade-in product ${productId} does not belong to branch ${branchId}`,
+      );
+    }
+    if (!product.is_serialized) {
+      throw new BadRequestException(
+        `Trade-in product ${productId} is not a serialized SKU; ` +
+          `trade-ins require is_serialized = true`,
+      );
+    }
+
+    // IMEI availability (best-effort UX pre-check)
+    const existing = await manager.findOne(ProductUnit, {
+      where: { imei },
+    });
+    if (existing) {
+      throw new ConflictException({
+        message: 'IMEI already exists in inventory',
+        existing_unit: {
+          id: existing.id,
+          status: existing.status,
+          product_id: existing.product_id,
+        },
+      });
     }
   }
 

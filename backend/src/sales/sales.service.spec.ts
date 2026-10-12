@@ -1886,6 +1886,259 @@ describe('SalesService', () => {
         'pessimistic_write',
       );
     });
+    // ---- TRADE_IN branch (Slice G) ----
+    //
+    // TRADE_IN payments carry additional fields and additional validation.
+    // The DTO's trade_in_* fields are what addPayment checks; the actual
+    // PhonePurchase / ProductUnit / Stock materialization happens later
+    // at completeSale (via createForTradeIn) — none of that is exercised
+    // in this block.
+
+    // Common trade-in test setup: seed a DRAFT sale with a customer_id
+    // and total, prime remainingBalance to zero. Individual tests
+    // override sale fields as needed.
+    const primeTradeInSale = (overrides?: {
+      total?: string;
+      customer_id?: string | null;
+      branch_id?: string;
+    }) => {
+      mockQueryBuilder.getOne.mockResolvedValueOnce({
+        ...seedDraftSale(),
+        total: overrides?.total ?? '150000.00',
+        customer_id:
+          overrides?.customer_id === undefined
+            ? 'cust-1'
+            : overrides.customer_id,
+        branch_id: overrides?.branch_id ?? 'branch-1',
+      });
+      mockQueryBuilder.getRawOne.mockResolvedValue({ sum: '0' });
+    };
+
+    // Prime the two manager.findOne lookups inside
+    // assertTradeInPaymentReferencesValid: Product first, then IMEI
+    // check (ProductUnit).
+    const primeTradeInReferences = (overrides?: {
+      product?: unknown;
+      existingImei?: unknown;
+    }) => {
+      const defaultProduct = {
+        id: 'prod-trade',
+        branch_id: 'branch-1',
+        is_serialized: true,
+      };
+      mockManager.findOne
+        .mockResolvedValueOnce(
+          overrides?.product === undefined ? defaultProduct : overrides.product,
+        )
+        .mockResolvedValueOnce(
+          overrides?.existingImei === undefined ? null : overrides.existingImei,
+        );
+    };
+
+    const validTradeInDto = () => ({
+      payment_method: PaymentMethod.TRADE_IN,
+      amount: 60000,
+      trade_in_product_id: 'prod-trade',
+      trade_in_imei: '356938035643809',
+      trade_in_buying_price: 60000,
+      trade_in_selling_price: 75000,
+      trade_in_notes: 'Trade-in notes',
+    });
+
+    it('inserts a TRADE_IN payment with all trade-in fields populated', async () => {
+      primeTradeInSale();
+      primeTradeInReferences();
+      mockManager.create.mockImplementation((_e, data) => data);
+      mockManager.save.mockImplementation((e) =>
+        Promise.resolve({ id: 'pay-trade-1', ...e }),
+      );
+
+      const result = await service.addPayment('sale-1', validTradeInDto());
+
+      expect(mockManager.create).toHaveBeenCalledWith(
+        Payment,
+        expect.objectContaining({
+          sale_id: 'sale-1',
+          payment_method: PaymentMethod.TRADE_IN,
+          amount: '60000.00',
+          cash_received: null,
+          reference_number: null,
+          trade_in_product_id: 'prod-trade',
+          trade_in_imei: '356938035643809',
+          trade_in_buying_price: '60000.00',
+          trade_in_selling_price: '75000.00',
+          trade_in_notes: 'Trade-in notes',
+          // trade_in_phone_purchase_id stays null until completeSale
+          trade_in_phone_purchase_id: null,
+        }),
+      );
+      expect(result.id).toBe('pay-trade-1');
+    });
+
+    it('stores trade_in_selling_price and trade_in_notes as null when omitted', async () => {
+      primeTradeInSale();
+      primeTradeInReferences();
+      mockManager.create.mockImplementation((_e, data) => data);
+      mockManager.save.mockImplementation((e) =>
+        Promise.resolve({ id: 'pay-trade-2', ...e }),
+      );
+
+      const dto = validTradeInDto();
+      delete (dto as Partial<typeof dto>).trade_in_selling_price;
+      delete (dto as Partial<typeof dto>).trade_in_notes;
+
+      await service.addPayment('sale-1', dto);
+
+      expect(mockManager.create).toHaveBeenCalledWith(
+        Payment,
+        expect.objectContaining({
+          trade_in_selling_price: null,
+          trade_in_notes: null,
+        }),
+      );
+    });
+
+    it('rejects TRADE_IN when amount does not equal trade_in_buying_price (Q2 lock)', async () => {
+      primeTradeInSale();
+      // No primeTradeInReferences — validation should fail before we
+      // reach that step.
+
+      await expect(
+        service.addPayment('sale-1', {
+          ...validTradeInDto(),
+          amount: 60000,
+          trade_in_buying_price: 55000, // mismatch
+        }),
+      ).rejects.toThrow(/must equal trade_in_buying_price/);
+
+      // Reference validation should not have run
+      expect(mockManager.findOne).not.toHaveBeenCalled();
+    });
+
+    it('rejects TRADE_IN when the sale has no customer', async () => {
+      primeTradeInSale({ customer_id: null });
+
+      await expect(
+        service.addPayment('sale-1', validTradeInDto()),
+      ).rejects.toThrow(/requires a customer on the sale/);
+
+      // Reference validation should not have run
+      expect(mockManager.findOne).not.toHaveBeenCalled();
+    });
+
+    it('rejects TRADE_IN when required trade_in_product_id is missing', async () => {
+      primeTradeInSale();
+      const dto = validTradeInDto();
+      delete (dto as Partial<typeof dto>).trade_in_product_id;
+
+      await expect(service.addPayment('sale-1', dto)).rejects.toThrow(
+        /TRADE_IN payments require/,
+      );
+    });
+
+    it('rejects TRADE_IN when required trade_in_imei is missing', async () => {
+      primeTradeInSale();
+      const dto = validTradeInDto();
+      delete (dto as Partial<typeof dto>).trade_in_imei;
+
+      await expect(service.addPayment('sale-1', dto)).rejects.toThrow(
+        /TRADE_IN payments require/,
+      );
+    });
+
+    it('rejects TRADE_IN when required trade_in_buying_price is missing', async () => {
+      primeTradeInSale();
+      const dto = validTradeInDto();
+      delete (dto as Partial<typeof dto>).trade_in_buying_price;
+
+      await expect(service.addPayment('sale-1', dto)).rejects.toThrow(
+        /TRADE_IN payments require/,
+      );
+    });
+
+    it('rejects TRADE_IN when trade-in product does not exist', async () => {
+      primeTradeInSale();
+      mockManager.findOne.mockResolvedValueOnce(null); // product lookup fails
+
+      await expect(
+        service.addPayment('sale-1', validTradeInDto()),
+      ).rejects.toThrow(/not found or inactive/);
+    });
+
+    it('rejects TRADE_IN when trade-in product is not serialized', async () => {
+      primeTradeInSale();
+      // Only product lookup runs; the IMEI check is after the product
+      // serialized check which throws here. Queue only one findOne.
+      mockManager.findOne.mockResolvedValueOnce({
+        id: 'prod-trade',
+        branch_id: 'branch-1',
+        is_serialized: false,
+      });
+
+      await expect(
+        service.addPayment('sale-1', validTradeInDto()),
+      ).rejects.toThrow(/is not a serialized SKU/);
+    });
+
+    it('rejects TRADE_IN when trade-in product belongs to a different branch', async () => {
+      primeTradeInSale({ branch_id: 'branch-1' });
+      mockManager.findOne.mockResolvedValueOnce({
+        id: 'prod-trade',
+        branch_id: 'branch-99',
+        is_serialized: true,
+      });
+
+      await expect(
+        service.addPayment('sale-1', validTradeInDto()),
+      ).rejects.toThrow(/does not belong to branch/);
+    });
+
+    it('rejects TRADE_IN with 409 + existing_unit payload when IMEI collides', async () => {
+      primeTradeInSale();
+      mockManager.findOne
+        .mockResolvedValueOnce({
+          id: 'prod-trade',
+          branch_id: 'branch-1',
+          is_serialized: true,
+        })
+        .mockResolvedValueOnce({
+          id: 'unit-99',
+          status: 'SOLD',
+          product_id: 'prod-old',
+        });
+
+      try {
+        await service.addPayment('sale-1', validTradeInDto());
+        fail('Expected ConflictException');
+      } catch (err) {
+        expect(err).toBeInstanceOf(ConflictException);
+        const response = (err as ConflictException).getResponse() as {
+          existing_unit: { id: string; status: string; product_id: string };
+        };
+        expect(response.existing_unit).toEqual({
+          id: 'unit-99',
+          status: 'SOLD',
+          product_id: 'prod-old',
+        });
+      }
+    });
+
+    it('rejects non-TRADE_IN payments that carry trade-in fields', async () => {
+      mockQueryBuilder.getOne.mockResolvedValueOnce({
+        ...seedDraftSale(),
+        total: '500.00',
+      });
+      mockQueryBuilder.getRawOne.mockResolvedValue({ sum: '0' });
+
+      await expect(
+        service.addPayment('sale-1', {
+          payment_method: PaymentMethod.CASH,
+          amount: 500,
+          cash_received: 500,
+          trade_in_product_id: 'prod-trade', // <-- forbidden on CASH
+        }),
+      ).rejects.toThrow(/must not be set for CASH/);
+    });
   });
 
   describe('updatePayment', () => {
