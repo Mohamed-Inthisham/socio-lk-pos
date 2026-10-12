@@ -8,8 +8,8 @@
 
 **Grounding notes (facts found while researching, not decisions):**
 
-- Line and payment `POST`/`PATCH`, `complete`, and `void` **return the full hydrated sale** (branch, cashier, lines, payments, totals). Line/payment `DELETE` and `DELETE /sales/:id` return **204**. `POST /sales` and `PATCH /sales/:id` return the **bare sale row** (no lines/payments). After a 204 or a bare-row response, re-fetch with `GET /sales/:id` if the cart needs refreshing.
-- `GET /sales/:id` loads `branch`, `cashier`, `lines`, `payments` — **not `customer`**; only `customer_id` comes back. The Q13 backend PR adds `customer` before P0, so every endpoint that returns the hydrated sale will include it.
+- Line and payment `POST`/`PATCH`, `PATCH /sales/:id`, `complete`, and `void` **return the full hydrated sale** (branch, cashier, customer, lines, payments, totals). Line/payment `DELETE` and `DELETE /sales/:id` return **204** — re-fetch with `GET /sales/:id`. `POST /sales` returns the **bare new row** (it has no lines or payments yet anyway).
+- The hydrated sale includes **`customer`** (null when none; still present, with `deleted_at` set, if the customer was soft-deleted) once the Q13 backend PR (`feature/sales-customer-relation`) is merged. Before that PR, only `customer_id` came back.
 - Money fields are numeric **strings** (`"60000.00"`); request bodies take **numbers**.
 - `GET /products` returns a **plain array** (unpaginated, no text-search param). `GET /products/by-barcode/:barcode` is the scan lookup. `GET /sales` is **paginated** (`{ data, meta }`, filters `branchId`, `cashierId`, `status`, `from`, `to`, `page`, `limit≤200`).
 - `GET /product-units?imei=` is **admin/manager only** — a cashier cannot resolve an IMEI to a product today.
@@ -135,8 +135,7 @@ Zustand is **already used** (theme, layout, active branch). It is not proposed f
 
 ```js
 {
-  sale: null,            // full hydrated sale from the last server response, or null
-  customer: null,        // fetched separately (GET /customers/:id) — sale response has no customer relation
+  sale: null,            // full hydrated sale (incl. sale.customer) from the last server response, or null
   status: "idle",        // idle | creating | ready | mutating | completing | completed | error
   pendingOp: null,       // e.g. "addLine" — drives per-control spinners
   error: null,           // { message, existing_unit?, target?: { lineId | paymentId } }
@@ -149,13 +148,13 @@ Zustand is **already used** (theme, layout, active branch). It is not proposed f
 **Server ↔ client sync:**
 
 - No DRAFT exists until the first item is added (or a customer is attached). First mutation → `POST /sales { branch_id }` then the actual mutation. Avoids empty drafts on every page load.
-- After each mutation the client holds exactly what the server returned. Line/payment `DELETE` (204) is followed by `GET /sales/:id`. `PATCH /sales/:id` (customer attach) returns the bare row — merge its `customer_id`/`notes` into the held sale rather than replacing it.
+- After each mutation the client holds exactly what the server returned. Line/payment `DELETE` (204) is followed by `GET /sales/:id`. `PATCH /sales/:id` (customer attach/detach) returns the hydrated sale, including the new `customer`, and replaces the held sale like any other mutation.
 - If any call returns 400 "Only DRAFT sales are mutable" or 404, the client drops the draft and shows "This sale is no longer open" (another tab or user completed/discarded it).
 
 **Page reload mid-sale:**
 
 1. On terminal mount, read `draftSaleId` from `terminalSessionStore`.
-2. `GET /sales/:id`. If DRAFT and same branch → restore (and fetch customer if `customer_id`). If COMPLETED/VOIDED/404 → clear the pointer, start fresh.
+2. `GET /sales/:id`. If DRAFT and same branch → restore (the customer comes with the sale). If COMPLETED/VOIDED/404 → clear the pointer, start fresh.
 3. Pointer is cleared on complete, discard, and logout.
 
 Alternative (no local pointer) is in §8 Q8.
@@ -202,7 +201,7 @@ The sale id is **not** in the `/pos` URL (the draft is session state, not a shar
 - **Path B uses:** plain axios services, `createAsyncThunk` for shared reference data, `useState` + request-id ref for page lists. RTK Query, SWR, and TanStack Query are **not installed**.
 - Introducing RTK Query would mean two data patterns in one app; its cache-invalidation model also adds little here because line/payment mutations already return the full sale.
 
-**New service:** `services/salesService.js` (`createSale`, `getSale`, `listSales`, `updateSale`, `discardSale`, `addLine`, `updateLine`, `removeLine`, `addPayment`, `removePayment`, `completeSale`, `voidSale`), plus `customersService.js` (`searchCustomers`, `getCustomer`, `createCustomer`).
+**New service:** `services/salesService.js` (`createSale`, `getSale`, `listSales`, `updateSale`, `discardSale`, `addLine`, `updateLine`, `removeLine`, `addPayment`, `removePayment`, `completeSale`, `voidSale`), plus `customersService.js` (`searchCustomers`, `createCustomer`). No `getCustomer` is needed: the sale response carries the customer.
 
 **Thunks** in `terminalSlice` wrap service calls and normalize errors to `{ message, status, existing_unit? }`.
 
@@ -370,7 +369,7 @@ Q6, Q9, Q11, Q12 and Q17 were answered explicitly. The rest were not called out,
 ### Scheduling decisions
 
 - **Phone purchase intake screen** (`POST /phone-purchases`, buying a phone outright): **not in 6.4** (§10).
-- **Q13 backend change** (`customer` relation on `GET /sales/:id`): **landed now as its own small backend PR, before P0**, so the frontend never needs the extra `GET /customers/:id` workaround.
+- **Q13 backend change** (`customer` relation on `GET /sales/:id`): **landed now as its own small backend PR, before P0** (branch `feature/sales-customer-relation`), so the frontend never needs the extra `GET /customers/:id` workaround. That PR also fixes a bug the change exposed: `PATCH /sales/:id { customer_id }` would have written the previously loaded customer back.
 
 ### Question record
 
