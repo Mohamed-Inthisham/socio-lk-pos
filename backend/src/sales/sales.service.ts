@@ -33,6 +33,7 @@ import { SuppliersService } from '../suppliers/suppliers.service';
 import { StockService } from '../stock/stock.service';
 import { SaleNumberCountersService } from '../sale-number-counters/sale-number-counters.service';
 import { CustomersService } from '../customers/customers.service';
+import { PhonePurchasesService } from '../phone-purchases/phone-purchases.service';
 import {
   PaginatedResponse,
   paginate,
@@ -59,6 +60,7 @@ export class SalesService {
     private readonly saleNumberCountersService: SaleNumberCountersService,
     private readonly customersService: CustomersService,
     private readonly productUnitsService: ProductUnitsService,
+    private readonly phonePurchasesService: PhonePurchasesService,
   ) {}
 
   /**
@@ -1033,6 +1035,11 @@ export class SalesService {
    *      (external_supplier_id set) are NOT decremented from our stock —
    *      they were never our inventory. Insufficient stock throws 409
    *      and rolls the whole transaction back (see Slice F design pass).
+   *   3b. For each TRADE_IN payment: materialize PhonePurchase +
+   *      ProductUnit (IN_STOCK) + Stock increment via
+   *      PhonePurchasesService.createForTradeIn, then stamp
+   *      trade_in_phone_purchase_id on the payment. 400 if the sale's
+   *      customer was cleared after the trade-in was added.
    *   4. Issue sale_number via SaleNumberCountersService.generateNext,
    *      enlisted in this transaction. If we roll back after this,
    *      the counter is burned (gap in sequence) — accepted trade-off
@@ -1124,6 +1131,49 @@ export class SalesService {
             line.product_unit_id,
           );
         }
+      }
+
+      // 3b. Materialize trade-ins (Slice G). During DRAFT a TRADE_IN
+      //     payment only carries intake data; no PhonePurchase /
+      //     ProductUnit / Stock exists yet. Here each one becomes real
+      //     inventory via createForTradeIn (enlisted in this manager),
+      //     and the PhonePurchase id is stamped back onto the payment.
+      //     Runs after the outgoing loop so outgoing Stock/PU locks are
+      //     taken first. An IMEI collision (409) or product change
+      //     (400) rolls back the whole sale.
+      const tradeInPayments = await manager.find(Payment, {
+        where: { sale_id: saleId, payment_method: PaymentMethod.TRADE_IN },
+        order: { created_at: 'ASC' },
+      });
+      if (tradeInPayments.length > 0 && sale.customer_id === null) {
+        // addPayment requires a customer for TRADE_IN, but update() can
+        // still clear it afterwards. PhonePurchase needs a customer.
+        throw new BadRequestException(
+          'Cannot complete sale: TRADE_IN payments require a customer on ' +
+            'the sale; set sale.customer_id first',
+        );
+      }
+      for (const payment of tradeInPayments) {
+        // CHK_payments_trade_in_fields_consistent guarantees the trio is
+        // non-null on TRADE_IN rows.
+        const { phone_purchase } =
+          await this.phonePurchasesService.createForTradeIn(manager, {
+            customer_id: sale.customer_id!,
+            branch_id: sale.branch_id,
+            cashier_id: sale.cashier_id,
+            product_id: payment.trade_in_product_id!,
+            imei: payment.trade_in_imei!,
+            buying_price: payment.trade_in_buying_price!,
+            selling_price: payment.trade_in_selling_price,
+            notes: payment.trade_in_notes,
+          });
+        await manager.query(
+          `UPDATE payments
+           SET trade_in_phone_purchase_id = $1,
+               updated_at = now()
+           WHERE id = $2`,
+          [phone_purchase.id, payment.id],
+        );
       }
 
       // 4. Issue the invoice number. Enlisted in this transaction so

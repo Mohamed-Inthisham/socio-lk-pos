@@ -13,6 +13,7 @@ import { StockModule } from '../stock/stock.module';
 import { SaleNumberCountersModule } from '../sale-number-counters/sale-number-counters.module';
 import { CustomersModule } from '../customers/customers.module';
 import { ProductUnitsModule } from '../product-units/product-units.module';
+import { PhonePurchasesModule } from '../phone-purchases/phone-purchases.module';
 
 @Module({
   imports: [
@@ -23,6 +24,7 @@ import { ProductUnitsModule } from '../product-units/product-units.module';
     StockModule,
     SaleNumberCountersModule,
     ProductUnitsModule,
+    PhonePurchasesModule,
   ],
   providers: [SalesService],
   controllers: [SalesController],
