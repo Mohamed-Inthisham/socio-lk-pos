@@ -24,6 +24,7 @@ import { SaleNumberCountersService } from '../sale-number-counters/sale-number-c
 import { CustomersService } from '../customers/customers.service';
 import { ProductUnitsService } from '../product-units/product-units.service';
 import { ProductUnitStatus } from '../product-units/enums/product-unit-status.enum';
+import { ProductUnit } from '../product-units/entities/product-unit.entity';
 import { PhonePurchasesService } from '../phone-purchases/phone-purchases.service';
 
 describe('SalesService', () => {
@@ -99,6 +100,7 @@ describe('SalesService', () => {
   const mockStockService = {
     decrementForSale: jest.fn(),
     incrementForReversal: jest.fn(),
+    decrementForVoidedTradeIn: jest.fn(),
   };
 
   const mockSaleNumberCountersService = {
@@ -112,6 +114,7 @@ describe('SalesService', () => {
   const mockProductUnitsService = {
     markSoldForSale: jest.fn(),
     markAvailableForReversal: jest.fn(),
+    markReturnedForVoid: jest.fn(),
   };
 
   const mockPhonePurchasesService = {
@@ -2494,6 +2497,20 @@ describe('SalesService', () => {
       ).rejects.toThrow(NotFoundException);
     });
   });
+  // completeSale and voidSale each call manager.find twice: SaleLine
+  // (outgoing loop) then Payment (TRADE_IN loop). Dispatch on entity so
+  // each query gets its own fixture. Payments default to none.
+  const arrangeManagerFind = (
+    lines: unknown[],
+    tradeInPayments: unknown[] = [],
+  ) => {
+    mockManager.find.mockImplementation((entity: unknown) =>
+      Promise.resolve(
+        entity === SaleLine ? lines : entity === Payment ? tradeInPayments : [],
+      ),
+    );
+  };
+
   describe('completeSale', () => {
     // Helper: seed a DRAFT sale that's ready to complete — total matches
     // amount_paid, so the invariant check passes by default. Tests that
@@ -2527,27 +2544,9 @@ describe('SalesService', () => {
       ...overrides,
     });
 
-    // completeSale calls manager.find twice: SaleLine (outgoing loop)
-    // then Payment (TRADE_IN loop). Dispatch on entity so each query
-    // gets its own fixture. Payments default to none (no trade-ins).
-    const arrangeCompleteFind = (
-      lines: unknown[],
-      tradeInPayments: unknown[] = [],
-    ) => {
-      mockManager.find.mockImplementation((entity: unknown) =>
-        Promise.resolve(
-          entity === SaleLine
-            ? lines
-            : entity === Payment
-              ? tradeInPayments
-              : [],
-        ),
-      );
-    };
-
     it('completes a DRAFT sale: decrements stock, issues sale_number, marks COMPLETED', async () => {
       mockQueryBuilder.getOne.mockResolvedValueOnce(seedCompletableSale());
-      arrangeCompleteFind([
+      arrangeManagerFind([
         seedCompletableLine({ product_id: 'prod-1', quantity: 2 }),
         seedCompletableLine({
           id: 'line-2',
@@ -2596,7 +2595,7 @@ describe('SalesService', () => {
 
     it('skips stock decrement for lines sourced from an external supplier', async () => {
       mockQueryBuilder.getOne.mockResolvedValueOnce(seedCompletableSale());
-      arrangeCompleteFind([
+      arrangeManagerFind([
         // In-house line — should decrement
         seedCompletableLine({ product_id: 'prod-in-house', quantity: 1 }),
         // External-supplier line — should be skipped
@@ -2669,7 +2668,7 @@ describe('SalesService', () => {
 
     it('throws BadRequestException when the sale has no lines', async () => {
       mockQueryBuilder.getOne.mockResolvedValueOnce(seedCompletableSale());
-      arrangeCompleteFind([]);
+      arrangeManagerFind([]);
 
       await expect(service.completeSale('sale-1')).rejects.toThrow(
         BadRequestException,
@@ -2683,7 +2682,7 @@ describe('SalesService', () => {
       mockQueryBuilder.getOne.mockResolvedValueOnce(
         seedCompletableSale({ total: '500.00', amount_paid: '400.00' }),
       );
-      arrangeCompleteFind([seedCompletableLine()]);
+      arrangeManagerFind([seedCompletableLine()]);
 
       await expect(service.completeSale('sale-1')).rejects.toThrow(
         BadRequestException,
@@ -2698,7 +2697,7 @@ describe('SalesService', () => {
       mockQueryBuilder.getOne.mockResolvedValueOnce(
         seedCompletableSale({ total: '99.99', amount_paid: '99.99' }),
       );
-      arrangeCompleteFind([seedCompletableLine()]);
+      arrangeManagerFind([seedCompletableLine()]);
       mockStockService.decrementForSale.mockResolvedValue(undefined);
       mockSaleNumberCountersService.generateNext.mockResolvedValue(
         'INV-20260910-0003',
@@ -2709,7 +2708,7 @@ describe('SalesService', () => {
 
     it('propagates ConflictException from StockService (insufficient stock rolls back)', async () => {
       mockQueryBuilder.getOne.mockResolvedValueOnce(seedCompletableSale());
-      arrangeCompleteFind([
+      arrangeManagerFind([
         seedCompletableLine({ product_id: 'prod-1', quantity: 100 }),
       ]);
       mockStockService.decrementForSale.mockRejectedValue(
@@ -2730,7 +2729,7 @@ describe('SalesService', () => {
 
     it('locks the sale row for update', async () => {
       mockQueryBuilder.getOne.mockResolvedValueOnce(seedCompletableSale());
-      arrangeCompleteFind([seedCompletableLine()]);
+      arrangeManagerFind([seedCompletableLine()]);
       mockStockService.decrementForSale.mockResolvedValue(undefined);
       mockSaleNumberCountersService.generateNext.mockResolvedValue(
         'INV-20260910-0004',
@@ -2745,7 +2744,7 @@ describe('SalesService', () => {
 
     it('stops decrementing further lines if one throws (loop bail-out)', async () => {
       mockQueryBuilder.getOne.mockResolvedValueOnce(seedCompletableSale());
-      arrangeCompleteFind([
+      arrangeManagerFind([
         seedCompletableLine({ id: 'line-1', product_id: 'prod-1' }),
         seedCompletableLine({ id: 'line-2', product_id: 'prod-2' }),
         seedCompletableLine({ id: 'line-3', product_id: 'prod-3' }),
@@ -2776,7 +2775,7 @@ describe('SalesService', () => {
           branch_id: 'branch-1',
         }),
       );
-      arrangeCompleteFind([
+      arrangeManagerFind([
         {
           id: 'line-1',
           product_id: 'prod-1',
@@ -2814,7 +2813,7 @@ describe('SalesService', () => {
           branch_id: 'branch-1',
         }),
       );
-      arrangeCompleteFind([
+      arrangeManagerFind([
         {
           id: 'line-1',
           product_id: 'prod-1',
@@ -2843,7 +2842,7 @@ describe('SalesService', () => {
           branch_id: 'branch-1',
         }),
       );
-      arrangeCompleteFind([
+      arrangeManagerFind([
         {
           id: 'line-1',
           product_id: 'prod-1',
@@ -2872,7 +2871,7 @@ describe('SalesService', () => {
           branch_id: 'branch-1',
         }),
       );
-      arrangeCompleteFind([
+      arrangeManagerFind([
         {
           id: 'line-a',
           product_id: 'prod-A',
@@ -2941,7 +2940,7 @@ describe('SalesService', () => {
           branch_id: 'branch-1',
         }),
       );
-      arrangeCompleteFind([
+      arrangeManagerFind([
         {
           id: 'line-1',
           product_id: 'prod-1',
@@ -2979,7 +2978,7 @@ describe('SalesService', () => {
           branch_id: 'branch-1',
         }),
       );
-      arrangeCompleteFind([
+      arrangeManagerFind([
         {
           id: 'line-1',
           product_id: 'prod-1',
@@ -3050,7 +3049,7 @@ describe('SalesService', () => {
 
     it('materializes a TRADE_IN-only sale and stamps the phone purchase id', async () => {
       mockQueryBuilder.getOne.mockResolvedValueOnce(seedTradeInSale());
-      arrangeCompleteFind(
+      arrangeManagerFind(
         [seedCompletableLine({ quantity: 1 })],
         [seedTradeInRow()],
       );
@@ -3090,7 +3089,7 @@ describe('SalesService', () => {
       );
       // The Payment query filters to TRADE_IN at the DB, so the CASH row
       // never reaches the loop — the fixture mirrors that.
-      arrangeCompleteFind(
+      arrangeManagerFind(
         [seedCompletableLine({ quantity: 1 })],
         [
           seedTradeInRow({
@@ -3123,7 +3122,7 @@ describe('SalesService', () => {
       mockQueryBuilder.getOne.mockResolvedValueOnce(
         seedTradeInSale({ total: '100000.00', amount_paid: '100000.00' }),
       );
-      arrangeCompleteFind(
+      arrangeManagerFind(
         [seedCompletableLine({ quantity: 1 })],
         [
           seedTradeInRow(),
@@ -3168,7 +3167,7 @@ describe('SalesService', () => {
 
     it('propagates ConflictException from createForTradeIn (IMEI collision rolls back)', async () => {
       mockQueryBuilder.getOne.mockResolvedValueOnce(seedTradeInSale());
-      arrangeCompleteFind(
+      arrangeManagerFind(
         [seedCompletableLine({ quantity: 1 })],
         [seedTradeInRow()],
       );
@@ -3192,7 +3191,7 @@ describe('SalesService', () => {
       mockQueryBuilder.getOne.mockResolvedValueOnce(
         seedTradeInSale({ customer_id: null }),
       );
-      arrangeCompleteFind(
+      arrangeManagerFind(
         [seedCompletableLine({ quantity: 1 })],
         [seedTradeInRow()],
       );
@@ -3206,7 +3205,7 @@ describe('SalesService', () => {
 
     it('runs the trade-in loop after the outgoing loop and before issuing sale_number', async () => {
       mockQueryBuilder.getOne.mockResolvedValueOnce(seedTradeInSale());
-      arrangeCompleteFind(
+      arrangeManagerFind(
         [
           {
             ...seedCompletableLine({ quantity: 1 }),
@@ -3255,7 +3254,7 @@ describe('SalesService', () => {
 
     it('skips the trade-in loop when the sale has no TRADE_IN payments', async () => {
       mockQueryBuilder.getOne.mockResolvedValueOnce(seedCompletableSale());
-      arrangeCompleteFind([seedCompletableLine()]);
+      arrangeManagerFind([seedCompletableLine()]);
       mockSaleNumberCountersService.generateNext.mockResolvedValue(
         'INV-000014',
       );
@@ -3303,7 +3302,7 @@ describe('SalesService', () => {
 
     it('voids a COMPLETED sale: re-increments stock, marks payments reversed, flips to VOIDED', async () => {
       mockQueryBuilder.getOne.mockResolvedValueOnce(seedVoidableSale());
-      mockManager.find.mockResolvedValue([
+      arrangeManagerFind([
         seedVoidableLine({ product_id: 'prod-1', quantity: 2 }),
         seedVoidableLine({
           id: 'line-2',
@@ -3351,7 +3350,7 @@ describe('SalesService', () => {
 
     it('skips stock re-increment for lines sourced from an external supplier', async () => {
       mockQueryBuilder.getOne.mockResolvedValueOnce(seedVoidableSale());
-      mockManager.find.mockResolvedValue([
+      arrangeManagerFind([
         // In-house — should re-increment
         seedVoidableLine({ product_id: 'prod-in-house', quantity: 3 }),
         // External-supplier — should be skipped (was never our stock)
@@ -3384,7 +3383,7 @@ describe('SalesService', () => {
 
     it('trims whitespace from void_reason before persisting', async () => {
       mockQueryBuilder.getOne.mockResolvedValueOnce(seedVoidableSale());
-      mockManager.find.mockResolvedValue([seedVoidableLine()]);
+      arrangeManagerFind([seedVoidableLine()]);
       mockStockService.incrementForReversal.mockResolvedValue(undefined);
 
       await service.voidSale('sale-1', 'admin-1', {
@@ -3465,7 +3464,7 @@ describe('SalesService', () => {
 
     it('propagates errors from stock re-increment (data integrity failure rolls back)', async () => {
       mockQueryBuilder.getOne.mockResolvedValueOnce(seedVoidableSale());
-      mockManager.find.mockResolvedValue([seedVoidableLine()]);
+      arrangeManagerFind([seedVoidableLine()]);
       mockStockService.incrementForReversal.mockRejectedValue(
         new Error('Stock row missing for product prod-1 at branch branch-1'),
       );
@@ -3488,7 +3487,7 @@ describe('SalesService', () => {
 
     it('locks the sale row for update', async () => {
       mockQueryBuilder.getOne.mockResolvedValueOnce(seedVoidableSale());
-      mockManager.find.mockResolvedValue([seedVoidableLine()]);
+      arrangeManagerFind([seedVoidableLine()]);
       mockStockService.incrementForReversal.mockResolvedValue(undefined);
 
       await service.voidSale('sale-1', 'admin-1', validDto);
@@ -3500,7 +3499,7 @@ describe('SalesService', () => {
 
     it('stops re-incrementing further lines if one throws (loop bail-out)', async () => {
       mockQueryBuilder.getOne.mockResolvedValueOnce(seedVoidableSale());
-      mockManager.find.mockResolvedValue([
+      arrangeManagerFind([
         seedVoidableLine({ id: 'line-1', product_id: 'prod-1' }),
         seedVoidableLine({ id: 'line-2', product_id: 'prod-2' }),
         seedVoidableLine({ id: 'line-3', product_id: 'prod-3' }),
@@ -3519,7 +3518,7 @@ describe('SalesService', () => {
 
     it('stamps payments UPDATE before sales UPDATE (order matters for the transaction)', async () => {
       mockQueryBuilder.getOne.mockResolvedValueOnce(seedVoidableSale());
-      mockManager.find.mockResolvedValue([seedVoidableLine()]);
+      arrangeManagerFind([seedVoidableLine()]);
       mockStockService.incrementForReversal.mockResolvedValue(undefined);
 
       await service.voidSale('sale-1', 'admin-1', validDto);
@@ -3549,7 +3548,7 @@ describe('SalesService', () => {
           branch_id: 'branch-1',
         }),
       );
-      mockManager.find.mockResolvedValue([
+      arrangeManagerFind([
         {
           id: 'line-1',
           product_id: 'prod-1',
@@ -3581,7 +3580,7 @@ describe('SalesService', () => {
           branch_id: 'branch-1',
         }),
       );
-      mockManager.find.mockResolvedValue([
+      arrangeManagerFind([
         {
           id: 'line-1',
           product_id: 'prod-1',
@@ -3608,7 +3607,7 @@ describe('SalesService', () => {
           branch_id: 'branch-1',
         }),
       );
-      mockManager.find.mockResolvedValue([
+      arrangeManagerFind([
         {
           id: 'line-a',
           product_id: 'prod-A',
@@ -3652,7 +3651,7 @@ describe('SalesService', () => {
           branch_id: 'branch-1',
         }),
       );
-      mockManager.find.mockResolvedValue([
+      arrangeManagerFind([
         {
           id: 'line-1',
           product_id: 'prod-1',
@@ -3681,7 +3680,7 @@ describe('SalesService', () => {
           branch_id: 'branch-1',
         }),
       );
-      mockManager.find.mockResolvedValue([
+      arrangeManagerFind([
         {
           id: 'line-1',
           product_id: 'prod-1',
@@ -3708,6 +3707,295 @@ describe('SalesService', () => {
       });
 
       expect(callOrder).toEqual(['stock', 'pu']);
+    });
+
+    // ============================================================
+    // Slice G — trade-in reversal on voidSale
+    // ============================================================
+
+    // A COMPLETED sale's TRADE_IN payment, already stamped by completeSale.
+    const seedVoidableTradeIn = (overrides: Record<string, unknown> = {}) => ({
+      id: 'pay-ti-1',
+      sale_id: 'sale-1',
+      payment_method: PaymentMethod.TRADE_IN,
+      amount: '60000.00',
+      trade_in_product_id: 'prod-used',
+      trade_in_imei: '356938035643809',
+      trade_in_buying_price: '60000.00',
+      trade_in_phone_purchase_id: 'pp-1',
+      ...overrides,
+    });
+
+    // findOne(ProductUnit, { where: { phone_purchase_id } }) resolves to
+    // a unit named after its purchase; markReturnedForVoid echoes back a
+    // full unit with product/branch ids keyed off the unit id.
+    const arrangeTradeInUnits = (
+      units: Record<string, { product_id: string; branch_id: string }>,
+    ) => {
+      mockManager.findOne.mockImplementation(
+        (entity: unknown, opts: { where: { phone_purchase_id: string } }) =>
+          Promise.resolve(
+            entity === ProductUnit
+              ? { id: `unit-of-${opts.where.phone_purchase_id}` }
+              : null,
+          ),
+      );
+      mockProductUnitsService.markReturnedForVoid.mockImplementation(
+        (_m: unknown, unitId: string) =>
+          Promise.resolve({
+            id: unitId,
+            status: ProductUnitStatus.IN_STOCK,
+            ...units[unitId],
+          }),
+      );
+    };
+
+    it('reverses a single TRADE_IN: PU → RETURNED, stock decremented, payment reversed', async () => {
+      mockQueryBuilder.getOne.mockResolvedValueOnce(seedVoidableSale());
+      arrangeManagerFind([seedVoidableLine()], [seedVoidableTradeIn()]);
+      arrangeTradeInUnits({
+        'unit-of-pp-1': { product_id: 'prod-used', branch_id: 'branch-1' },
+      });
+
+      await service.voidSale('sale-1', 'admin-1', validDto);
+
+      expect(mockManager.find).toHaveBeenCalledWith(Payment, {
+        where: { sale_id: 'sale-1', payment_method: PaymentMethod.TRADE_IN },
+        order: { created_at: 'ASC' },
+      });
+      expect(mockManager.findOne).toHaveBeenCalledWith(ProductUnit, {
+        where: { phone_purchase_id: 'pp-1' },
+      });
+      expect(mockProductUnitsService.markReturnedForVoid).toHaveBeenCalledWith(
+        mockManager,
+        'unit-of-pp-1',
+      );
+      expect(mockStockService.decrementForVoidedTradeIn).toHaveBeenCalledWith(
+        mockManager,
+        'prod-used',
+        'branch-1',
+        1,
+      );
+      // The existing bulk UPDATE reverses the TRADE_IN payment too
+      expect(mockManager.query).toHaveBeenCalledWith(
+        expect.stringContaining('UPDATE payments'),
+        ['Customer returned defective phone', 'sale-1'],
+      );
+    });
+
+    it('reverses each of two TRADE_IN payments', async () => {
+      mockQueryBuilder.getOne.mockResolvedValueOnce(seedVoidableSale());
+      arrangeManagerFind(
+        [seedVoidableLine()],
+        [
+          seedVoidableTradeIn(),
+          seedVoidableTradeIn({
+            id: 'pay-ti-2',
+            trade_in_imei: '490154203237518',
+            trade_in_phone_purchase_id: 'pp-2',
+          }),
+        ],
+      );
+      arrangeTradeInUnits({
+        'unit-of-pp-1': { product_id: 'prod-used', branch_id: 'branch-1' },
+        'unit-of-pp-2': { product_id: 'prod-used-2', branch_id: 'branch-1' },
+      });
+
+      await service.voidSale('sale-1', 'admin-1', validDto);
+
+      expect(
+        mockProductUnitsService.markReturnedForVoid,
+      ).toHaveBeenNthCalledWith(1, mockManager, 'unit-of-pp-1');
+      expect(
+        mockProductUnitsService.markReturnedForVoid,
+      ).toHaveBeenNthCalledWith(2, mockManager, 'unit-of-pp-2');
+      expect(mockStockService.decrementForVoidedTradeIn).toHaveBeenCalledTimes(
+        2,
+      );
+      expect(
+        mockStockService.decrementForVoidedTradeIn,
+      ).toHaveBeenNthCalledWith(2, mockManager, 'prod-used-2', 'branch-1', 1);
+    });
+
+    it('propagates 409 when the trade-in phone was resold (Q7) and rolls back', async () => {
+      mockQueryBuilder.getOne.mockResolvedValueOnce(seedVoidableSale());
+      arrangeManagerFind([seedVoidableLine()], [seedVoidableTradeIn()]);
+      arrangeTradeInUnits({});
+      mockProductUnitsService.markReturnedForVoid.mockRejectedValue(
+        new ConflictException({
+          message:
+            "Cannot void this sale: trade-in phone (IMEI '356938035643809') " +
+            'has been resold in a subsequent sale.',
+          existing_unit: {
+            id: 'unit-of-pp-1',
+            status: ProductUnitStatus.SOLD,
+            product_id: 'prod-used',
+            branch_id: 'branch-1',
+          },
+        }),
+      );
+
+      await expect(
+        service.voidSale('sale-1', 'admin-1', validDto),
+      ).rejects.toThrow(ConflictException);
+
+      // Nothing after the failed flip ran
+      expect(mockStockService.decrementForVoidedTradeIn).not.toHaveBeenCalled();
+      expect(mockManager.query).not.toHaveBeenCalled();
+    });
+
+    it('handles a mixed sale: outgoing serialized line + TRADE_IN', async () => {
+      mockQueryBuilder.getOne.mockResolvedValueOnce(seedVoidableSale());
+      arrangeManagerFind(
+        [
+          {
+            ...seedVoidableLine({ product_id: 'prod-new', quantity: 1 }),
+            product_unit_id: 'unit-out',
+          },
+        ],
+        [seedVoidableTradeIn()],
+      );
+      arrangeTradeInUnits({
+        'unit-of-pp-1': { product_id: 'prod-used', branch_id: 'branch-1' },
+      });
+
+      await service.voidSale('sale-1', 'admin-1', validDto);
+
+      // Outgoing side restored
+      expect(mockStockService.incrementForReversal).toHaveBeenCalledWith(
+        mockManager,
+        'prod-new',
+        'branch-1',
+        1,
+      );
+      expect(
+        mockProductUnitsService.markAvailableForReversal,
+      ).toHaveBeenCalledWith(mockManager, 'unit-out');
+      // Incoming side reversed
+      expect(mockProductUnitsService.markReturnedForVoid).toHaveBeenCalledWith(
+        mockManager,
+        'unit-of-pp-1',
+      );
+      expect(mockStockService.decrementForVoidedTradeIn).toHaveBeenCalledWith(
+        mockManager,
+        'prod-used',
+        'branch-1',
+        1,
+      );
+    });
+
+    it('leaves the trade-in path untouched when the sale has no TRADE_IN payments', async () => {
+      mockQueryBuilder.getOne.mockResolvedValueOnce(seedVoidableSale());
+      arrangeManagerFind([seedVoidableLine()]);
+
+      await service.voidSale('sale-1', 'admin-1', validDto);
+
+      expect(mockManager.findOne).not.toHaveBeenCalled();
+      expect(
+        mockProductUnitsService.markReturnedForVoid,
+      ).not.toHaveBeenCalled();
+      expect(mockStockService.decrementForVoidedTradeIn).not.toHaveBeenCalled();
+      expect(mockManager.query).toHaveBeenCalledWith(
+        expect.stringContaining('UPDATE sales'),
+        expect.anything(),
+      );
+    });
+
+    it('runs the trade-in loop after outgoing reversal and before the payments UPDATE', async () => {
+      mockQueryBuilder.getOne.mockResolvedValueOnce(seedVoidableSale());
+      arrangeManagerFind(
+        [{ ...seedVoidableLine({ quantity: 1 }), product_unit_id: 'unit-out' }],
+        [seedVoidableTradeIn()],
+      );
+      arrangeTradeInUnits({
+        'unit-of-pp-1': { product_id: 'prod-used', branch_id: 'branch-1' },
+      });
+
+      const callOrder: string[] = [];
+      mockStockService.incrementForReversal.mockImplementation(() => {
+        callOrder.push('stock-in');
+        return Promise.resolve();
+      });
+      mockProductUnitsService.markAvailableForReversal.mockImplementation(
+        () => {
+          callOrder.push('pu-available');
+          return Promise.resolve();
+        },
+      );
+      mockProductUnitsService.markReturnedForVoid.mockImplementation(() => {
+        callOrder.push('pu-returned');
+        return Promise.resolve({
+          id: 'unit-of-pp-1',
+          product_id: 'prod-used',
+          branch_id: 'branch-1',
+        });
+      });
+      mockStockService.decrementForVoidedTradeIn.mockImplementation(() => {
+        callOrder.push('stock-out');
+        return Promise.resolve();
+      });
+      mockManager.query.mockImplementation((sql: string) => {
+        callOrder.push(sql.includes('UPDATE payments') ? 'payments' : 'sale');
+        return Promise.resolve();
+      });
+
+      await service.voidSale('sale-1', 'admin-1', validDto);
+
+      expect(callOrder).toEqual([
+        'stock-in',
+        'pu-available',
+        'pu-returned',
+        'stock-out',
+        'payments',
+        'sale',
+      ]);
+    });
+
+    it('decrements stock using product_id/branch_id from the returned PU, not the payment or sale', async () => {
+      // Sale is at branch-1 and the payment says prod-used, but the PU
+      // markReturnedForVoid hands back is the source of truth.
+      mockQueryBuilder.getOne.mockResolvedValueOnce(seedVoidableSale());
+      arrangeManagerFind([seedVoidableLine()], [seedVoidableTradeIn()]);
+      arrangeTradeInUnits({
+        'unit-of-pp-1': { product_id: 'prod-from-pu', branch_id: 'branch-pu' },
+      });
+
+      await service.voidSale('sale-1', 'admin-1', validDto);
+
+      expect(mockStockService.decrementForVoidedTradeIn).toHaveBeenCalledWith(
+        mockManager,
+        'prod-from-pu',
+        'branch-pu',
+        1,
+      );
+    });
+
+    it('throws a raw integrity error when no ProductUnit is linked to the phone purchase', async () => {
+      mockQueryBuilder.getOne.mockResolvedValueOnce(seedVoidableSale());
+      arrangeManagerFind([seedVoidableLine()], [seedVoidableTradeIn()]);
+      mockManager.findOne.mockResolvedValue(null);
+
+      await expect(
+        service.voidSale('sale-1', 'admin-1', validDto),
+      ).rejects.toThrow(/No ProductUnit linked to phone purchase pp-1/);
+      expect(
+        mockProductUnitsService.markReturnedForVoid,
+      ).not.toHaveBeenCalled();
+      expect(mockManager.query).not.toHaveBeenCalled();
+    });
+
+    it('throws a raw integrity error when a TRADE_IN payment was never stamped', async () => {
+      mockQueryBuilder.getOne.mockResolvedValueOnce(seedVoidableSale());
+      arrangeManagerFind(
+        [seedVoidableLine()],
+        [seedVoidableTradeIn({ trade_in_phone_purchase_id: null })],
+      );
+
+      await expect(
+        service.voidSale('sale-1', 'admin-1', validDto),
+      ).rejects.toThrow(/has no trade_in_phone_purchase_id/);
+      // Never queried with a null condition
+      expect(mockManager.findOne).not.toHaveBeenCalled();
     });
   });
 

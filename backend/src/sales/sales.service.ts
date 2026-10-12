@@ -1212,6 +1212,7 @@ export class SalesService {
    *   - voided_by: the user who authorized the void
    *   - void_reason: the reason the user provided
    *   - stock: re-incremented for every in-house line
+   *   - trade-ins: PU flipped to RETURNED, stock decremented
    *   - payments: reversed_at + reversal_reason stamped on every row
    *
    * completed_at is preserved (the sale WAS completed, that fact
@@ -1239,6 +1240,10 @@ export class SalesService {
    *      stock via StockService.incrementForReversal. External-supplier
    *      lines were never decremented from our stock, so nothing to
    *      reverse — symmetric to completeSale's skip.
+   *   5b. For each TRADE_IN payment: flip its ProductUnit IN_STOCK →
+   *      RETURNED via ProductUnitsService.markReturnedForVoid, then
+   *      decrement Stock via StockService.decrementForVoidedTradeIn.
+   *      409 if the trade-in phone was resold on a later sale (Q7).
    *   6. UPDATE payments SET reversed_at=now(), reversal_reason=<trimmed>
    *      for all payments on this sale. Single UPDATE statement rather
    *      than a loop — payments don't need per-row logic, and this
@@ -1330,6 +1335,49 @@ export class SalesService {
             line.product_unit_id,
           );
         }
+      }
+
+      // 5b. Reverse trade-in intake (Slice G). Symmetric to completeSale's
+      //     step 3b: each TRADE_IN payment's ProductUnit flips IN_STOCK →
+      //     RETURNED and its Stock is decremented. Same lock order as
+      //     intake (PU, then Stock). A SOLD PU means the trade-in phone
+      //     was resold on a later sale (Q7) — markReturnedForVoid throws
+      //     409 and the whole void rolls back. The PhonePurchase row
+      //     stays as history; the payment is reversed by step 6 below.
+      const tradeInPayments = await manager.find(Payment, {
+        where: { sale_id: saleId, payment_method: PaymentMethod.TRADE_IN },
+        order: { created_at: 'ASC' },
+      });
+      for (const payment of tradeInPayments) {
+        // Checked explicitly: TypeORM may drop a null where-condition,
+        // which would match an arbitrary unit.
+        if (payment.trade_in_phone_purchase_id === null) {
+          throw new Error(
+            `TRADE_IN payment ${payment.id} on COMPLETED sale ${saleId} ` +
+              `has no trade_in_phone_purchase_id. completeSale should ` +
+              `have stamped it — data integrity issue.`,
+          );
+        }
+        const linkedUnit = await manager.findOne(ProductUnit, {
+          where: { phone_purchase_id: payment.trade_in_phone_purchase_id },
+        });
+        if (!linkedUnit) {
+          throw new Error(
+            `No ProductUnit linked to phone purchase ` +
+              `${payment.trade_in_phone_purchase_id} (payment ${payment.id}). ` +
+              `Data integrity issue — createForTradeIn creates both together.`,
+          );
+        }
+        const unit = await this.productUnitsService.markReturnedForVoid(
+          manager,
+          linkedUnit.id,
+        );
+        await this.stockService.decrementForVoidedTradeIn(
+          manager,
+          unit.product_id,
+          unit.branch_id,
+          1,
+        );
       }
 
       // 6. Mark every payment on this sale as reversed. Single UPDATE
