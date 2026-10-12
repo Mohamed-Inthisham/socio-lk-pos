@@ -3,8 +3,11 @@ import {
   IsNumber,
   IsOptional,
   IsString,
+  Matches,
   MaxLength,
+  MinLength,
   Min,
+  IsUUID,
 } from 'class-validator';
 import { Transform } from 'class-transformer';
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
@@ -40,6 +43,16 @@ const trimStringField = ({ value }: { value: unknown }): unknown => {
  *
  * Server-owned fields not accepted from client:
  *   - id, sale_id (URL path parameter), created_at, updated_at
+ *   - trade_in_phone_purchase_id: populated by completeSale after the
+ *     PhonePurchase is materialized (Slice G).
+ *
+ * TRADE_IN payments carry five additional optional-at-DTO fields
+ * (trade_in_product_id, trade_in_imei, trade_in_buying_price,
+ * trade_in_selling_price, trade_in_notes). Service enforces the
+ * required trio when payment_method = TRADE_IN and rejects them
+ * outright for any other method. During DRAFT, trade-in data lives
+ * on the payment row; the PhonePurchase, ProductUnit, and Stock
+ * increment are materialized atomically at completeSale.
  */
 export class AddPaymentDto {
   @ApiProperty({
@@ -102,4 +115,91 @@ export class AddPaymentDto {
   @IsOptional()
   @IsString()
   notes?: string;
+
+  // ---- Trade-in fields (required when payment_method = TRADE_IN) ----
+  //
+  // Service enforces:
+  //   - all of product_id + imei + buying_price present ONLY when
+  //     payment_method = TRADE_IN
+  //   - amount === trade_in_buying_price to the cent
+  //   - trade_in_product_id refers to a serialized product at the sale's
+  //     branch
+  //   - trade_in_imei doesn't collide with an existing ProductUnit (409)
+  // DTO can't enforce cross-field "required iff TRADE_IN" cleanly, so
+  // we mark each nullable at the DTO layer and let the service reject
+  // wrong combinations with a clear message. IMEI regex + length mirror
+  // CreatePhonePurchaseDto for symmetry.
+
+  @ApiPropertyOptional({
+    example: '33333333-3333-3333-3333-333333333333',
+    description:
+      'TRADE_IN only. The used-phone product SKU being traded in. Must ' +
+      "exist, be active, be at the sale's branch, and have " +
+      'is_serialized = true. Rejected with 400 if payment_method is not ' +
+      'TRADE_IN.',
+    format: 'uuid',
+  })
+  @IsOptional()
+  @IsUUID()
+  trade_in_product_id?: string;
+
+  @ApiPropertyOptional({
+    example: '356938035643809',
+    description:
+      'TRADE_IN only. IMEI of the trade-in phone. Globally unique across ' +
+      'all existing ProductUnits (IN_STOCK / SOLD / RETURNED / ' +
+      'WRITTEN_OFF); collision returns 409 with the existing_unit payload ' +
+      'at addPayment (best-effort) and again at completeSale. Same 8-50 ' +
+      'char, letters+digits regex as CreatePhonePurchaseDto.',
+    minLength: 8,
+    maxLength: 50,
+  })
+  @IsOptional()
+  @Transform(({ value }) => (typeof value === 'string' ? value.trim() : value))
+  @IsString()
+  @MinLength(8)
+  @MaxLength(50)
+  @Matches(/^[A-Za-z0-9]+$/, {
+    message: 'trade_in_imei must contain only letters and digits',
+  })
+  trade_in_imei?: string;
+
+  @ApiPropertyOptional({
+    example: 60000.0,
+    description:
+      'TRADE_IN only. Amount we are paying the customer for this phone. ' +
+      'MUST equal `amount` to the cent (service checks; DB CHK backstops). ' +
+      'Must be >= 0.01 (see @Min on amount).',
+    minimum: 0.01,
+  })
+  @IsOptional()
+  @IsNumber({ maxDecimalPlaces: 2 })
+  @Min(0.01)
+  trade_in_buying_price?: number;
+
+  @ApiPropertyOptional({
+    example: 75000.0,
+    description:
+      'TRADE_IN only. Optional per-unit selling price override for the ' +
+      'materialized ProductUnit. If omitted, ProductUnit.selling_price ' +
+      'stays null and the next sale of this phone falls back to ' +
+      'Product.selling_price at ring-up time. Mirrors ' +
+      'CreatePhonePurchaseDto.selling_price semantics.',
+    minimum: 0,
+  })
+  @IsOptional()
+  @IsNumber({ maxDecimalPlaces: 2 })
+  @Min(0)
+  trade_in_selling_price?: number;
+
+  @ApiPropertyOptional({
+    example: 'Screen scratch top-right, battery health 89%, no box',
+    description:
+      'TRADE_IN only. Free-form cashier assessment notes at intake. ' +
+      'Empty string normalizes to null.',
+  })
+  @Transform(trimStringField)
+  @IsOptional()
+  @IsString()
+  trade_in_notes?: string;
 }

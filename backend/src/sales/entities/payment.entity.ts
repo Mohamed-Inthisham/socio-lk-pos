@@ -11,6 +11,8 @@ import {
 } from 'typeorm';
 import { Sale } from './sale.entity';
 import { PaymentMethod } from '../enums/payment-method.enum';
+import { Product } from '../../products/entities/product.entity';
+import { PhonePurchase } from '../../phone-purchases/entities/phone-purchase.entity';
 
 /**
  * A single tender on a Sale. Sales support multi-tender: one sale can
@@ -36,6 +38,13 @@ import { PaymentMethod } from '../enums/payment-method.enum';
  * REQUIRED at the service layer for all methods except CASH — a card
  * or KOKO payment without a reference is a reconciliation nightmare.
  *
+ * TRADE_IN payments carry six additional nullable columns (see the
+ * trade-in fields block below) — populated only when payment_method =
+ * TRADE_IN, all NULL otherwise. The related PhonePurchase materializes
+ * at completeSale; during DRAFT the trade-in data lives on the payment
+ * row alone. Voiding a sale with TRADE_IN reverses the incoming
+ * ProductUnit (IN_STOCK -> RETURNED) and Stock — see SalesService.voidSale.
+ *
  * No payment_status column. Payments are immediately final when recorded
  * in 6.3. Sale-level void handles reversal for the SOCIO.LK business.
  * If gateway integration later requires PENDING/CONFIRMED, add then.
@@ -43,7 +52,7 @@ import { PaymentMethod } from '../enums/payment-method.enum';
 @Entity('payments')
 @Check(
   'CHK_payments_method',
-  `payment_method IN ('CASH', 'CARD', 'BANK_TRANSFER', 'KOKO', 'MINTPAY')`,
+  `payment_method IN ('CASH', 'CARD', 'BANK_TRANSFER', 'KOKO', 'MINTPAY', 'TRADE_IN')`,
 )
 @Check('CHK_payments_amount_positive', `amount > 0`)
 @Check(
@@ -57,6 +66,22 @@ import { PaymentMethod } from '../enums/payment-method.enum';
 @Check(
   'CHK_payments_reversal_consistency',
   `(reversed_at IS NOT NULL) = (reversal_reason IS NOT NULL AND length(trim(reversal_reason)) > 0)`,
+)
+@Check(
+  'CHK_payments_trade_in_fields_consistent',
+  `(payment_method = 'TRADE_IN') = (trade_in_product_id IS NOT NULL AND trade_in_imei IS NOT NULL AND trade_in_buying_price IS NOT NULL)`,
+)
+@Check(
+  'CHK_payments_trade_in_fields_null_when_not_trade_in',
+  `payment_method = 'TRADE_IN' OR (trade_in_product_id IS NULL AND trade_in_imei IS NULL AND trade_in_buying_price IS NULL AND trade_in_selling_price IS NULL AND trade_in_notes IS NULL AND trade_in_phone_purchase_id IS NULL)`,
+)
+@Check(
+  'CHK_payments_trade_in_amount_matches',
+  `payment_method != 'TRADE_IN' OR amount = trade_in_buying_price`,
+)
+@Check(
+  'CHK_payments_trade_in_pp_reference',
+  `trade_in_phone_purchase_id IS NULL OR payment_method = 'TRADE_IN'`,
 )
 export class Payment {
   @PrimaryGeneratedColumn('uuid')
@@ -117,6 +142,72 @@ export class Payment {
 
   @Column({ type: 'text', nullable: true, name: 'reversal_reason' })
   reversal_reason!: string | null;
+
+  // ---- Trade-in fields (populated only when payment_method = TRADE_IN) ----
+  //
+  // These six columns hold trade-in intake data. During DRAFT, they carry
+  // the cashier's intent (which product, which IMEI, agreed value).
+  // At completeSale, phonePurchasesService.createForTradeIn materializes
+  // a PhonePurchase + ProductUnit (IN_STOCK) + Stock increment atomically
+  // and stamps the resulting PhonePurchase id onto
+  // trade_in_phone_purchase_id.
+  //
+  // On void: the ProductUnit flips IN_STOCK -> RETURNED and Stock is
+  // decremented. If the ProductUnit has since been SOLD on a subsequent
+  // sale, the void is blocked with 409 (Q7 lock).
+  //
+  // CHK constraints enforce:
+  //   - required trio (product_id, imei, buying_price) IFF method = TRADE_IN
+  //   - all six fields NULL when method != TRADE_IN
+  //   - amount = trade_in_buying_price when method = TRADE_IN
+  //   - trade_in_phone_purchase_id populated only when method = TRADE_IN
+
+  @Column({ type: 'uuid', nullable: true, name: 'trade_in_product_id' })
+  trade_in_product_id!: string | null;
+
+  @ManyToOne(() => Product, { onDelete: 'RESTRICT' })
+  @JoinColumn({ name: 'trade_in_product_id' })
+  trade_in_product?: Product;
+
+  @Column({
+    type: 'varchar',
+    length: 50,
+    nullable: true,
+    name: 'trade_in_imei',
+  })
+  trade_in_imei!: string | null;
+
+  @Column({
+    type: 'numeric',
+    precision: 12,
+    scale: 2,
+    nullable: true,
+    name: 'trade_in_buying_price',
+  })
+  trade_in_buying_price!: string | null;
+
+  @Column({
+    type: 'numeric',
+    precision: 12,
+    scale: 2,
+    nullable: true,
+    name: 'trade_in_selling_price',
+  })
+  trade_in_selling_price!: string | null;
+
+  @Column({ type: 'text', nullable: true, name: 'trade_in_notes' })
+  trade_in_notes!: string | null;
+
+  @Column({
+    type: 'uuid',
+    nullable: true,
+    name: 'trade_in_phone_purchase_id',
+  })
+  trade_in_phone_purchase_id!: string | null;
+
+  @ManyToOne(() => PhonePurchase, { onDelete: 'RESTRICT' })
+  @JoinColumn({ name: 'trade_in_phone_purchase_id' })
+  trade_in_phone_purchase?: PhonePurchase;
 
   @CreateDateColumn({ type: 'timestamptz', name: 'created_at' })
   created_at!: Date;

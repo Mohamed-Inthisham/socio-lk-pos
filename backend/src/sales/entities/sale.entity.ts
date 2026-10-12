@@ -13,6 +13,7 @@ import {
 } from 'typeorm';
 import { Branch } from '../../branches/entities/branch.entity';
 import { User } from '../../users/entities/user.entity';
+import { Customer } from '../../customers/entities/customer.entity';
 import { SaleType } from '../enums/sale-type.enum';
 import { SaleStatus } from '../enums/sale-status.enum';
 import { SaleLine } from './sale-line.entity';
@@ -87,11 +88,15 @@ export class Sale {
   @JoinColumn({ name: 'cashier_id' })
   cashier?: User;
 
-  // Nullable, no FK yet. Customer entity lands in Phase 6.3.5.
-  // Column added now so schema doesn't need migration then.
+  // FK wired in Phase 6.3.5 Slice B. Nullable — many retail sales
+  // are anonymous walk-ins where no customer is captured.
+  @Index('idx_sales_customer_id')
   @Column({ type: 'uuid', name: 'customer_id', nullable: true })
   customer_id!: string | null;
 
+  @ManyToOne(() => Customer, { onDelete: 'RESTRICT', nullable: true })
+  @JoinColumn({ name: 'customer_id' })
+  customer?: Customer;
   @Column({ type: 'numeric', precision: 12, scale: 2, default: 0 })
   subtotal!: string;
 

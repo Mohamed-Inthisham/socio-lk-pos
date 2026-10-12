@@ -333,6 +333,90 @@ export class StockService {
   }
 
   /**
+   * Decrement stock as part of voiding a sale that had a TRADE_IN
+   * payment. Enlists in the caller's EntityManager (typically
+   * SalesService.voidSale) so any downstream failure rolls it back
+   * with the rest of the void transaction. Never opens its own
+   * transaction.
+   *
+   * Semantically distinct from decrementForSale — this is not a sale,
+   * it's the REVERSAL of a trade-in intake. The mechanics are identical
+   * (lock the stock row, guard manage_stock, subtract quantity via
+   * SQL-side arithmetic), but the error surface and framing are
+   * different enough to warrant its own method rather than reusing
+   * decrementForSale with a "for-void" flag:
+   *
+   *   1. The sufficient-stock guard is defensive here, not business
+   *      logic. Every trade-in we're voiding was intook via createForTradeIn
+   *      inside the same-numbered sale's completeSale — the Stock row
+   *      was incremented in that transaction. Insufficient stock at
+   *      void time means either data corruption or a concurrent
+   *      decrement racing us that shouldn't be possible. We still
+   *      throw ConflictException (same shape as decrementForSale) so
+   *      the outer transaction rolls back cleanly; the error message
+   *      names the void context explicitly.
+   *
+   *   2. No productName needed — an insufficient-stock error here is
+   *      an integrity condition, not a cashier-facing UX message. The
+   *      caller reports the IMEI in its own error path if needed.
+   *
+   * See createForTradeIn (the forward direction) and markReturnedForVoid
+   * on ProductUnitsService (the paired PU state transition on void).
+   *
+   * A FOLLOWUP could unify these three siblings (decrementForSale,
+   * incrementForReversal, decrementForVoidedTradeIn) into a single
+   * adjustStock(direction, reason) primitive. Slice G keeps them
+   * separate to preserve semantic clarity at the call sites.
+   */
+  async decrementForVoidedTradeIn(
+    manager: EntityManager,
+    productId: string,
+    branchId: string,
+    qty: number,
+  ): Promise<void> {
+    const stock = await manager
+      .createQueryBuilder(Stock, 'stock')
+      .setLock('pessimistic_write')
+      .where('stock.product_id = :productId', { productId })
+      .andWhere('stock.branch_id = :branchId', { branchId })
+      .getOne();
+
+    if (!stock) {
+      // Data integrity failure. See docstring rationale (1).
+      throw new Error(
+        `Stock row missing for product ${productId} at branch ${branchId}. ` +
+          `This indicates a data integrity issue — a trade-in being voided ` +
+          `should have a stock row from its createForTradeIn increment.`,
+      );
+    }
+
+    // Untracked products don't move inventory. Symmetric to the sibling
+    // methods, though a trade-in phone should always be a serialized
+    // product (which always has manage_stock = true), so this branch is
+    // defensive.
+    if (!stock.manage_stock) {
+      return;
+    }
+
+    if (stock.quantity < qty) {
+      // Defensive; see docstring rationale (1).
+      throw new ConflictException(
+        `Insufficient stock for voided trade-in at product ${productId}, ` +
+          `branch ${branchId}: requested ${qty}, available ${stock.quantity}. ` +
+          `This indicates a data integrity issue — a trade-in intake should ` +
+          `have left this stock row incrementable-then-decrementable.`,
+      );
+    }
+
+    await manager
+      .createQueryBuilder()
+      .update(Stock)
+      .set({ quantity: () => `quantity - ${qty}` })
+      .where('id = :id', { id: stock.id })
+      .execute();
+  }
+
+  /**
    * Attach the computed low_stock_alert flag to a Stock row.
    * Rule: alert fires when tracking is enabled AND quantity is at or
    * below the minimum threshold.

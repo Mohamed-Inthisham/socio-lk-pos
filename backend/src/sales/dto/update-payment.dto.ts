@@ -45,6 +45,16 @@ const trimStringField = ({ value }: { value: unknown }): unknown => {
  *     leave a card sale un-reconcilable).
  *   - amount: bounded above by (Sale.total - SUM of OTHER payments).
  *     "Other" excludes the payment being updated.
+ *
+ * TRADE_IN payments are additionally frozen on this DTO: attempting to
+ * PATCH any trade-in field (trade_in_product_id, trade_in_imei,
+ * trade_in_buying_price, trade_in_selling_price, trade_in_notes, or
+ * trade_in_phone_purchase_id) on a TRADE_IN payment returns 400.
+ * Renegotiating a trade-in value means removing the payment and adding
+ * a new one — same "mode changes forbidden" pattern as Slice E's
+ * SalesService.updateLine. This DTO deliberately does NOT declare
+ * trade-in fields so IDE autocomplete does not suggest them; the
+ * service still rejects them if a client sneaks them into the raw JSON.
  */
 export class UpdatePaymentDto {
   @ApiPropertyOptional({

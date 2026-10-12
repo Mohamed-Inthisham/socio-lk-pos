@@ -3,12 +3,17 @@ import {
   NotFoundException,
   BadRequestException,
   ForbiddenException,
+  ConflictException,
 } from '@nestjs/common';
 import { InjectRepository, InjectDataSource } from '@nestjs/typeorm';
 import { DataSource, EntityManager, Repository } from 'typeorm';
 import { Sale } from './entities/sale.entity';
 import { SaleLine } from './entities/sale-line.entity';
 import { Payment } from './entities/payment.entity';
+import { ProductUnit } from '../product-units/entities/product-unit.entity';
+import { Product } from '../products/entities/product.entity';
+import { ProductUnitStatus } from '../product-units/enums/product-unit-status.enum';
+import { ProductUnitsService } from '../product-units/product-units.service';
 import { SaleStatus } from './enums/sale-status.enum';
 import { SaleType } from './enums/sale-type.enum';
 import { DiscountType } from './enums/discount-type.enum';
@@ -27,6 +32,8 @@ import { ProductsService } from '../products/products.service';
 import { SuppliersService } from '../suppliers/suppliers.service';
 import { StockService } from '../stock/stock.service';
 import { SaleNumberCountersService } from '../sale-number-counters/sale-number-counters.service';
+import { CustomersService } from '../customers/customers.service';
+import { PhonePurchasesService } from '../phone-purchases/phone-purchases.service';
 import {
   PaginatedResponse,
   paginate,
@@ -51,7 +58,45 @@ export class SalesService {
     private readonly suppliersService: SuppliersService,
     private readonly stockService: StockService,
     private readonly saleNumberCountersService: SaleNumberCountersService,
+    private readonly customersService: CustomersService,
+    private readonly productUnitsService: ProductUnitsService,
+    private readonly phonePurchasesService: PhonePurchasesService,
   ) {}
+
+  /**
+   * Resolves a customer_id from client input, ensuring it references
+   * an existing, non-deleted customer. Returns the customer_id unchanged
+   * on success (for symmetry with future normalization needs) or throws
+   * BadRequestException on invalid reference.
+   *
+   * Deliberately does NOT distinguish "nonexistent" from "soft-deleted"
+   * in the error — clients don't need to know why a customer_id is
+   * unusable, just that it is. Same 400 status for both matches the
+   * codebase convention for cross-entity payload references (see
+   * branch_id / product_id validation elsewhere).
+   *
+   * Throws NotFoundException? No — this is a payload validation on
+   * POST/PATCH, not a URL parameter lookup. 400 matches the semantic:
+   * the request payload references a nonexistent resource, so the
+   * request itself is malformed.
+   */
+  private async assertCustomerReference(customerId: string): Promise<void> {
+    try {
+      const customer = await this.customersService.findOne(customerId);
+      if (customer.deleted_at) {
+        throw new BadRequestException(
+          `customer_id ${customerId} refers to a deleted customer`,
+        );
+      }
+    } catch (err) {
+      if (err instanceof NotFoundException) {
+        throw new BadRequestException(
+          `customer_id ${customerId} does not exist`,
+        );
+      }
+      throw err;
+    }
+  }
 
   /**
    * Create a new DRAFT sale. Called by an authenticated user via the
@@ -100,6 +145,10 @@ export class SalesService {
       throw new ForbiddenException(
         'You can only create sales at your own branch',
       );
+    }
+
+    if (dto.customer_id) {
+      await this.assertCustomerReference(dto.customer_id);
     }
 
     const sale = this.salesRepository.create({
@@ -210,9 +259,15 @@ export class SalesService {
 
     // DTO layer trims strings and converts empty strings to null.
     // undefined = don't touch, null = clear, string = set.
-    if (dto.customer_id !== undefined) sale.customer_id = dto.customer_id;
+    // If customer_id is being SET (not cleared), validate it references
+    // an existing, non-deleted customer.
+    if (dto.customer_id !== undefined) {
+      if (dto.customer_id !== null) {
+        await this.assertCustomerReference(dto.customer_id);
+      }
+      sale.customer_id = dto.customer_id;
+    }
     if (dto.notes !== undefined) sale.notes = dto.notes;
-
     return this.salesRepository.save(sale);
   }
 
@@ -237,26 +292,48 @@ export class SalesService {
 
   /**
    * Add a new line to a DRAFT sale. Called via the sub-resource endpoint
-   * POST /sales/:id/lines (wired in Slice D3).
+   * POST /sales/:id/lines.
    *
-   * Workflow, all inside a single transaction with the sale row locked
-   * pessimistic_write:
-   *   1. Load + lock the parent sale, assert it's DRAFT
-   *   2. Resolve the product (must exist, be active, belong to same branch)
-   *   3. If external_supplier_id set, resolve the supplier (must exist + active)
-   *   4. Compute next line_number as max + 1 within this sale
-   *   5. Resolve discount_amount from the client's (type, value) input
-   *   6. Compute line_total from the reconciliation formula
-   *   7. Insert the line, snapshotting product identity + pricing
-   *   8. Recompute sale totals from the resulting line set
+   * Three line modes, dispatched on (product.is_serialized,
+   * dto.external_supplier_id):
    *
-   * Snapshot columns (sku, name, unit_price, cost_price) are frozen from
-   * the product at THIS moment. Later product edits do not retroactively
-   * change what the customer was charged.
+   *   IN_HOUSE_NON_SERIALIZED (default retail):
+   *     - imei_snapshot must be null (Slice E rule)
+   *     - unit_price / cost_price from Product
+   *     - stored: product_unit_id=null, external_supplier_id=null
+   *     - complete-time: stock decremented, no PU flip
    *
-   * Returns the freshly inserted line WITHOUT relations loaded — callers
-   * that need the full nested shape can re-fetch. Keeps the transaction
-   * short.
+   *   IN_HOUSE_SERIALIZED (used phone / IMEI'd retail):
+   *     - imei_snapshot required (looked up as IMEI)
+   *     - quantity must be 1
+   *     - resolves ProductUnit; Q3 failures produce distinct errors
+   *     - unit_price: PU.selling_price → Product.selling_price → 400
+   *     - cost_price: PU.buying_price always
+   *     - stored: product_unit_id set, imei_snapshot from PU (authoritative)
+   *     - complete-time: stock decremented, PU flipped IN_STOCK→SOLD
+   *
+   *   EXTERNAL (friendly-shop sourced, serialized or not):
+   *     - supplier validated (existing behavior)
+   *     - if product.is_serialized: imei_snapshot required (free text),
+   *       quantity must be 1, IN_STOCK collision check (Q7)
+   *     - if non-serialized: imei_snapshot must be null
+   *     - unit_price / cost_price from Product
+   *     - stored: product_unit_id=null, external_supplier_id set
+   *     - complete-time: no stock touch, no PU flip
+   *
+   * Workflow (all inside a single transaction with sale row locked
+   * pessimistic_write):
+   *   1. Load + lock the sale, assert it's DRAFT
+   *   2. Resolve product (exists, active, same branch as sale)
+   *   3. Dispatch to per-mode validation + resolution — determines the
+   *      four snapshot values (product_unit_id, imei_snapshot,
+   *      unit_price, cost_price)
+   *   4. Assign line_number as max + 1
+   *   5. Resolve discount_amount from client (type, value)
+   *   6. Compute line_total per the CHK formula
+   *   7. Insert; recompute sale totals
+   *
+   * Returns the freshly inserted line WITHOUT relations loaded.
    */
   async addLine(
     saleId: string,
@@ -292,8 +369,18 @@ export class SalesService {
         );
       }
 
-      // 3. Resolve external supplier if provided
+      // 3. Per-mode resolution. These four values are the snapshot the
+      //    insert step commits. Only the serialized-in-house branch
+      //    overrides unit_price / cost_price / imei_snapshot from Product
+      //    defaults; other modes fall through to the Product-based values.
+      const clientImei = dto.imei_snapshot ?? null;
+      let productUnitId: string | null = null;
+      let imeiSnapshot: string | null = clientImei;
+      let unitPrice: string = product.selling_price;
+      let costPrice: string = product.buying_price;
+
       if (dto.external_supplier_id) {
+        // EXTERNAL branch — resolve supplier (existing behavior)
         const supplier = await this.suppliersService.findOne(
           dto.external_supplier_id,
         );
@@ -302,10 +389,60 @@ export class SalesService {
             `Supplier "${supplier.name}" is not active`,
           );
         }
+
+        if (product.is_serialized) {
+          // EXTERNAL + serialized: IMEI required as free text,
+          // quantity=1, IN_STOCK collision check per Q7.
+          if (clientImei === null) {
+            throw new BadRequestException(
+              `imei_snapshot is required for serialized product "${product.name}"`,
+            );
+          }
+          if (dto.quantity !== 1) {
+            throw new BadRequestException(
+              `quantity must be 1 for serialized product "${product.name}"`,
+            );
+          }
+          await this.assertExternalSerializedImeiNotInStock(
+            manager,
+            clientImei,
+          );
+          // imeiSnapshot already set to clientImei above; leave product-
+          // based prices in place (settlement with supplier in Phase 6.7
+          // uses these to compute margin owed).
+        } else {
+          // EXTERNAL + non-serialized: no IMEI allowed.
+          this.assertNoImeiOnNonSerializedLine(clientImei, product.name);
+        }
+      } else if (product.is_serialized) {
+        // IN_HOUSE_SERIALIZED — resolve PU, all four Q3 checks, price fallback.
+        if (clientImei === null) {
+          throw new BadRequestException(
+            `imei_snapshot is required for serialized product "${product.name}"`,
+          );
+        }
+        if (dto.quantity !== 1) {
+          throw new BadRequestException(
+            `quantity must be 1 for serialized product "${product.name}"`,
+          );
+        }
+        const resolved = await this.resolveInHouseSerializedLine(
+          manager,
+          sale.branch_id,
+          product,
+          clientImei,
+        );
+        productUnitId = resolved.productUnitId;
+        imeiSnapshot = resolved.imeiSnapshot;
+        unitPrice = resolved.unitPrice;
+        costPrice = resolved.costPrice;
+      } else {
+        // IN_HOUSE_NON_SERIALIZED — no IMEI allowed.
+        this.assertNoImeiOnNonSerializedLine(clientImei, product.name);
       }
 
       // 4. Assign line_number as max + 1 within this sale. The sale row
-      // is locked, so concurrent adds on the same sale serialize here.
+      //    is locked, so concurrent adds on the same sale serialize here.
       const maxRow = await manager
         .createQueryBuilder(SaleLine, 'line')
         .select('COALESCE(MAX(line.line_number), 0)', 'max')
@@ -313,11 +450,11 @@ export class SalesService {
         .getRawOne<{ max: string }>();
       const nextLineNumber = Number(maxRow?.max ?? 0) + 1;
 
-      // 5. Resolve discount amount from client input
+      // 5. Resolve discount amount from client input (uses per-mode unit_price)
       const discountType = dto.discount_type ?? null;
       const discountValue = dto.discount_value ?? null;
       const discountAmount = this.resolveDiscountAmount(
-        product.selling_price,
+        unitPrice,
         dto.quantity,
         discountType,
         discountValue,
@@ -325,20 +462,20 @@ export class SalesService {
 
       // 6. Compute line_total (must match CHK_sale_lines_line_total exactly)
       const lineTotal = this.computeLineTotal(
-        product.selling_price,
+        unitPrice,
         dto.quantity,
         discountAmount,
       );
 
-      // 7. Insert the line
+      // 7. Insert the line with per-mode snapshot values
       const line = manager.create(SaleLine, {
         sale_id: saleId,
         line_number: nextLineNumber,
         product_id: product.id,
         product_sku_snapshot: product.sku,
         product_name_snapshot: product.name,
-        unit_price: product.selling_price,
-        cost_price_snapshot: product.buying_price,
+        unit_price: unitPrice,
+        cost_price_snapshot: costPrice,
         quantity: dto.quantity,
         discount_type: discountType,
         discount_value:
@@ -348,7 +485,8 @@ export class SalesService {
         discount_amount: discountAmount,
         line_total: lineTotal,
         external_supplier_id: dto.external_supplier_id ?? null,
-        imei_snapshot: dto.imei_snapshot ?? null,
+        imei_snapshot: imeiSnapshot,
+        product_unit_id: productUnitId,
       });
       const saved = await manager.save(line);
 
@@ -361,26 +499,39 @@ export class SalesService {
 
   /**
    * Update an existing line on a DRAFT sale. Called via
-   * PATCH /sales/:saleId/lines/:lineId (wired in Slice D3).
+   * PATCH /sales/:saleId/lines/:lineId.
    *
-   * Updatable fields: quantity, discount (both type+value together),
-   * external_supplier_id, imei_snapshot. Snapshot fields (sku, name,
-   * unit_price, cost_price) and line_number are frozen — see
-   * UpdateSaleLineDto for the reasoning.
+   * Mode-aware (Slice E Q8): what's mutable depends on the line's mode,
+   * determined by the STORED product's is_serialized and the STORED
+   * external_supplier_id — NOT what the DTO tries to change. Mode
+   * changes are forbidden; to switch modes, removeLine + addLine.
    *
-   * PATCH semantics: undefined = don't touch, null = clear (for
-   * nullable fields), value = set.
+   *   Non-serialized (either sourcing):
+   *     - quantity, discount, external_supplier_id: mutable
+   *     - imei_snapshot: must be null (rejected if set)
    *
-   * Discount is a two-field unit: both discount_type and discount_value
-   * must be updated together (both to null to clear, or both to values).
-   * Sending only one raises 400. This is enforced against the MERGED
-   * state (existing + DTO) so a caller changing only the type of an
-   * already-discounted line without touching the value would fail here —
-   * intended, because "change type but keep value" is almost always a
-   * mistake (percent 500 means something very different from amount 500).
+   *   Serialized in-house:
+   *     - discount: mutable
+   *     - quantity: frozen at 1 (rejected if != 1)
+   *     - external_supplier_id: frozen (rejected if included at all —
+   *       mode change would need PU un-link)
+   *     - imei_snapshot: frozen (rejected if included at all — changing
+   *       IMEI = changing physical phone = removeLine + addLine)
    *
-   * Runs inside a transaction with the parent sale row locked. Recomputes
-   * sale totals from source at the end.
+   *   Serialized external:
+   *     - discount, imei_snapshot: mutable (imei_snapshot re-runs the
+   *       IN_STOCK collision check from Q7)
+   *     - quantity: frozen at 1
+   *     - external_supplier_id: frozen (mode change to in-house would
+   *       need PU resolution)
+   *
+   * PATCH semantics preserved: undefined = don't touch, null = clear
+   * (nullable fields), value = set. Frozen-field rejections fire only
+   * when the field is INCLUDED in the DTO — silent "don't touch" is
+   * always allowed.
+   *
+   * Runs inside a transaction with the parent sale row locked
+   * pessimistic_write. Recomputes sale totals from source at the end.
    */
   async updateLine(
     saleId: string,
@@ -388,7 +539,7 @@ export class SalesService {
     dto: UpdateSaleLineDto,
   ): Promise<SaleLine> {
     return this.dataSource.transaction(async (manager) => {
-      // Load + lock the sale (same pattern as addLine)
+      // Load + lock the sale
       const sale = await manager
         .createQueryBuilder(Sale, 'sale')
         .setLock('pessimistic_write')
@@ -411,20 +562,80 @@ export class SalesService {
         throw new NotFoundException('Sale line not found');
       }
 
-      // Validate external supplier if being changed to a non-null value
-      if (dto.external_supplier_id) {
-        const supplier = await this.suppliersService.findOne(
-          dto.external_supplier_id,
-        );
-        if (!supplier.is_active) {
+      // Determine mode from STORED state. Load the product to check
+      // is_serialized (not carried on SaleLine — snapshot has sku/name
+      // but not is_serialized).
+      const product = await this.productsService.findOne(line.product_id);
+      const isSerialized = product.is_serialized;
+      const isExternal = line.external_supplier_id !== null;
+
+      // Mode-specific guards. Each guard checks only fields the client
+      // actually included (undefined = don't touch, silently allowed).
+
+      if (isSerialized) {
+        // Serialized: quantity locked at 1, external_supplier_id frozen.
+        if (dto.quantity !== undefined && dto.quantity !== 1) {
           throw new BadRequestException(
-            `Supplier "${supplier.name}" is not active`,
+            `quantity must be 1 for serialized product "${product.name}"`,
           );
+        }
+        if (dto.external_supplier_id !== undefined) {
+          throw new BadRequestException(
+            `Cannot change external_supplier_id on a serialized line. ` +
+              `Remove the line and add a new one to change sourcing.`,
+          );
+        }
+
+        if (isExternal) {
+          // External serialized: imei_snapshot editable with collision check.
+          if (dto.imei_snapshot !== undefined && dto.imei_snapshot !== null) {
+            await this.assertExternalSerializedImeiNotInStock(
+              manager,
+              dto.imei_snapshot,
+            );
+          }
+          // Nulling imei_snapshot on external serialized is nonsensical
+          // (it's the only IMEI record for the line) but the DB CHECK
+          // constraint doesn't forbid it — leave to service:
+          if (dto.imei_snapshot === null) {
+            throw new BadRequestException(
+              `imei_snapshot is required for serialized external-sourced line`,
+            );
+          }
+        } else {
+          // In-house serialized: imei_snapshot frozen entirely.
+          if (dto.imei_snapshot !== undefined) {
+            throw new BadRequestException(
+              `Cannot change imei_snapshot on a serialized in-house line. ` +
+                `Remove the line and add a new one to change the IMEI.`,
+            );
+          }
+        }
+      } else {
+        // Non-serialized (either sourcing): imei_snapshot must be null.
+        if (dto.imei_snapshot !== undefined && dto.imei_snapshot !== null) {
+          throw new BadRequestException(
+            `Product "${product.name}" is not serialized; ` +
+              `imei_snapshot must not be set`,
+          );
+        }
+        // Non-serialized allows external_supplier_id toggle (existing
+        // behavior). Validate supplier if setting to a non-null value.
+        if (dto.external_supplier_id) {
+          const supplier = await this.suppliersService.findOne(
+            dto.external_supplier_id,
+          );
+          if (!supplier.is_active) {
+            throw new BadRequestException(
+              `Supplier "${supplier.name}" is not active`,
+            );
+          }
         }
       }
 
-      // Merge DTO onto current line state to get the "effective" values.
-      // For each field: undefined means keep existing, otherwise apply.
+      // Merge DTO onto current line state to get the "effective" values
+      // for discount recompute. Same logic as before — mode guards above
+      // already blocked the invalid touches.
       const nextQuantity = dto.quantity ?? line.quantity;
 
       const discountTypeTouched = dto.discount_type !== undefined;
@@ -438,17 +649,12 @@ export class SalesService {
           ? null
           : Number(line.discount_value);
 
-      // If exactly one of the discount fields was touched, that's an
-      // inconsistent update. Both together, or neither, are the only
-      // valid options.
       if (discountTypeTouched !== discountValueTouched) {
         throw new BadRequestException(
           'discount_type and discount_value must be updated together',
         );
       }
 
-      // Recompute discount_amount + line_total against the merged state.
-      // unit_price never changes on update, so use line.unit_price.
       const nextDiscountAmount = this.resolveDiscountAmount(
         line.unit_price,
         nextQuantity,
@@ -568,13 +774,46 @@ export class SalesService {
         );
       }
 
-      // 2. Validate method-specific rules against the proposed payment
+      // 2. Validate the (method, amount, cash_received, reference_number)
+      //    tuple. TRADE_IN gets its own branch inside this helper.
       this.assertPaymentFieldsConsistent(
         dto.payment_method,
         dto.amount,
         dto.cash_received ?? null,
         dto.reference_number ?? null,
       );
+
+      // 2a. Validate trade-in field shape. Non-TRADE_IN payments must
+      //     have no trade_in_* fields; TRADE_IN must have the required
+      //     trio.
+      this.assertTradeInFieldsPresenceMatchesMethod(dto.payment_method, dto);
+
+      // 2b. TRADE_IN-specific downstream validation.
+      if (dto.payment_method === PaymentMethod.TRADE_IN) {
+        // Customer required — we're buying a phone FROM someone.
+        if (sale.customer_id === null) {
+          throw new BadRequestException(
+            'TRADE_IN payment requires a customer on the sale; ' +
+              'set the sale.customer_id first',
+          );
+        }
+
+        // Amount must match buying_price (Q2 lock). Safe non-null
+        // access: assertTradeInFieldsPresenceMatchesMethod already
+        // guaranteed trade_in_buying_price is defined for TRADE_IN.
+        this.assertTradeInAmountMatchesBuyingPrice(
+          dto.amount,
+          dto.trade_in_buying_price!,
+        );
+
+        // Product + IMEI references (best-effort UX pre-check per Q4).
+        await this.assertTradeInPaymentReferencesValid(
+          manager,
+          dto.trade_in_product_id!,
+          dto.trade_in_imei!,
+          sale.branch_id,
+        );
+      }
 
       // 3. Assert amount does not overshoot remaining balance
       const remaining = await this.remainingBalance(
@@ -588,7 +827,9 @@ export class SalesService {
         );
       }
 
-      // 4. Insert
+      // 4. Insert. Trade-in fields populated only for TRADE_IN; all null
+      //    for other methods (enforced by CHK constraints too).
+      const isTradeIn = dto.payment_method === PaymentMethod.TRADE_IN;
       const payment = manager.create(Payment, {
         sale_id: saleId,
         payment_method: dto.payment_method,
@@ -599,6 +840,17 @@ export class SalesService {
             : this.roundToCents(dto.cash_received),
         reference_number: dto.reference_number ?? null,
         notes: dto.notes ?? null,
+        trade_in_product_id: isTradeIn ? dto.trade_in_product_id! : null,
+        trade_in_imei: isTradeIn ? dto.trade_in_imei! : null,
+        trade_in_buying_price: isTradeIn
+          ? this.roundToCents(dto.trade_in_buying_price!)
+          : null,
+        trade_in_selling_price:
+          isTradeIn && dto.trade_in_selling_price !== undefined
+            ? this.roundToCents(dto.trade_in_selling_price)
+            : null,
+        trade_in_notes: isTradeIn ? (dto.trade_in_notes ?? null) : null,
+        trade_in_phone_purchase_id: null, // populated at completeSale
       });
       const saved = await manager.save(payment);
 
@@ -615,6 +867,8 @@ export class SalesService {
    *
    * Updatable: amount, cash_received, reference_number, notes.
    * Frozen: payment_method, sale_id (see UpdatePaymentDto for reasoning).
+   * TRADE_IN payments: only notes is updatable; see
+   * assertNoTradeInFreezesViolated.
    *
    * PATCH semantics: undefined = don't touch, null = clear (nullable
    * fields), value = set.
@@ -651,6 +905,10 @@ export class SalesService {
       if (!payment || payment.sale_id !== saleId) {
         throw new NotFoundException('Payment not found');
       }
+
+      // TRADE_IN payments are frozen except for notes; trade_in_* fields
+      // are never patchable on any payment (Q2 lock).
+      this.assertNoTradeInFreezesViolated(payment, dto);
 
       // Merge DTO onto current payment state
       const nextAmount = dto.amount ?? Number(payment.amount);
@@ -777,6 +1035,11 @@ export class SalesService {
    *      (external_supplier_id set) are NOT decremented from our stock —
    *      they were never our inventory. Insufficient stock throws 409
    *      and rolls the whole transaction back (see Slice F design pass).
+   *   3b. For each TRADE_IN payment: materialize PhonePurchase +
+   *      ProductUnit (IN_STOCK) + Stock increment via
+   *      PhonePurchasesService.createForTradeIn, then stamp
+   *      trade_in_phone_purchase_id on the payment. 400 if the sale's
+   *      customer was cleared after the trade-in was added.
    *   4. Issue sale_number via SaleNumberCountersService.generateNext,
    *      enlisted in this transaction. If we roll back after this,
    *      the counter is burned (gap in sequence) — accepted trade-off
@@ -835,20 +1098,81 @@ export class SalesService {
         );
       }
 
-      // 3. Decrement stock for each in-house line. External-supplier
-      // lines (sourced from friendly shops) don't touch our inventory —
-      // the settlement flow in Phase 6.7 tracks those separately.
-      // Any insufficient-stock throw here rolls back the whole transaction.
+      // 3. Per-line state transitions for the sale being COMPLETED.
+      //    Two orthogonal decisions per line (Slice E derived-from-Q4):
+      //      Stock decrement: gated on `external_supplier_id === null`.
+      //        External-supplier lines don't touch our inventory —
+      //        settlement in Phase 6.7 tracks those separately.
+      //      PU flip: gated on `product_unit_id !== null`.
+      //        Set only on serialized in-house lines. External-sourced
+      //        serialized has product_unit_id=null (imei_snapshot is
+      //        free text); non-serialized always has it null.
+      //
+      //    Lock ordering per Q4: Stock row (coarser, per product+branch)
+      //    before ProductUnit row (finer, per single unit). Any throw
+      //    inside either call rolls back the whole transaction.
+      //
+      //    Non-IN_STOCK PU here fires the cross-DRAFT race conflict
+      //    (Q5) — two DRAFTs held the same IMEI, another sale completed
+      //    first, this one loses with 409 + existing_unit payload.
       for (const line of lines) {
-        if (line.external_supplier_id !== null) {
-          continue;
+        if (line.external_supplier_id === null) {
+          await this.stockService.decrementForSale(
+            manager,
+            line.product_id,
+            sale.branch_id,
+            line.quantity,
+            line.product_name_snapshot,
+          );
         }
-        await this.stockService.decrementForSale(
-          manager,
-          line.product_id,
-          sale.branch_id,
-          line.quantity,
-          line.product_name_snapshot,
+        if (line.product_unit_id !== null) {
+          await this.productUnitsService.markSoldForSale(
+            manager,
+            line.product_unit_id,
+          );
+        }
+      }
+
+      // 3b. Materialize trade-ins (Slice G). During DRAFT a TRADE_IN
+      //     payment only carries intake data; no PhonePurchase /
+      //     ProductUnit / Stock exists yet. Here each one becomes real
+      //     inventory via createForTradeIn (enlisted in this manager),
+      //     and the PhonePurchase id is stamped back onto the payment.
+      //     Runs after the outgoing loop so outgoing Stock/PU locks are
+      //     taken first. An IMEI collision (409) or product change
+      //     (400) rolls back the whole sale.
+      const tradeInPayments = await manager.find(Payment, {
+        where: { sale_id: saleId, payment_method: PaymentMethod.TRADE_IN },
+        order: { created_at: 'ASC' },
+      });
+      if (tradeInPayments.length > 0 && sale.customer_id === null) {
+        // addPayment requires a customer for TRADE_IN, but update() can
+        // still clear it afterwards. PhonePurchase needs a customer.
+        throw new BadRequestException(
+          'Cannot complete sale: TRADE_IN payments require a customer on ' +
+            'the sale; set sale.customer_id first',
+        );
+      }
+      for (const payment of tradeInPayments) {
+        // CHK_payments_trade_in_fields_consistent guarantees the trio is
+        // non-null on TRADE_IN rows.
+        const { phone_purchase } =
+          await this.phonePurchasesService.createForTradeIn(manager, {
+            customer_id: sale.customer_id!,
+            branch_id: sale.branch_id,
+            cashier_id: sale.cashier_id,
+            product_id: payment.trade_in_product_id!,
+            imei: payment.trade_in_imei!,
+            buying_price: payment.trade_in_buying_price!,
+            selling_price: payment.trade_in_selling_price,
+            notes: payment.trade_in_notes,
+          });
+        await manager.query(
+          `UPDATE payments
+           SET trade_in_phone_purchase_id = $1,
+               updated_at = now()
+           WHERE id = $2`,
+          [phone_purchase.id, payment.id],
         );
       }
 
@@ -888,6 +1212,7 @@ export class SalesService {
    *   - voided_by: the user who authorized the void
    *   - void_reason: the reason the user provided
    *   - stock: re-incremented for every in-house line
+   *   - trade-ins: PU flipped to RETURNED, stock decremented
    *   - payments: reversed_at + reversal_reason stamped on every row
    *
    * completed_at is preserved (the sale WAS completed, that fact
@@ -915,6 +1240,10 @@ export class SalesService {
    *      stock via StockService.incrementForReversal. External-supplier
    *      lines were never decremented from our stock, so nothing to
    *      reverse — symmetric to completeSale's skip.
+   *   5b. For each TRADE_IN payment: flip its ProductUnit IN_STOCK →
+   *      RETURNED via ProductUnitsService.markReturnedForVoid, then
+   *      decrement Stock via StockService.decrementForVoidedTradeIn.
+   *      409 if the trade-in phone was resold on a later sale (Q7).
    *   6. UPDATE payments SET reversed_at=now(), reversal_reason=<trimmed>
    *      for all payments on this sale. Single UPDATE statement rather
    *      than a loop — payments don't need per-row logic, and this
@@ -977,19 +1306,77 @@ export class SalesService {
       // Any COMPLETED sale has at least one line — enforced by
       // completeSale's own guard — so we don't check length here.
 
-      // 5. Re-increment stock for each in-house line. Sequential (not
-      //    Promise.all) so pessimistic_write locks on stock rows
-      //    serialize cleanly per (product, branch), matching the
-      //    completeSale pattern.
+      // 5. Per-line state REVERSALS for the sale being VOIDED. Symmetric
+      //    to completeSale's step 3, in the same lock order (Stock first,
+      //    then PU). Same two orthogonal gates:
+      //      Stock re-increment: gated on `external_supplier_id === null`.
+      //      PU flip SOLD → IN_STOCK: gated on `product_unit_id !== null`.
+      //
+      //    Sequential (not Promise.all) so pessimistic_write locks
+      //    serialize cleanly per (product, branch) and per PU, matching
+      //    the completeSale pattern.
+      //
+      //    Non-SOLD PU here is a 500 integrity error — a COMPLETED
+      //    sale's serialized in-house lines MUST have their PUs in
+      //    SOLD status (completeSale flipped them). Any other status
+      //    means the state machine was bypassed.
       for (const line of lines) {
-        if (line.external_supplier_id !== null) {
-          continue;
+        if (line.external_supplier_id === null) {
+          await this.stockService.incrementForReversal(
+            manager,
+            line.product_id,
+            sale.branch_id,
+            line.quantity,
+          );
         }
-        await this.stockService.incrementForReversal(
+        if (line.product_unit_id !== null) {
+          await this.productUnitsService.markAvailableForReversal(
+            manager,
+            line.product_unit_id,
+          );
+        }
+      }
+
+      // 5b. Reverse trade-in intake (Slice G). Symmetric to completeSale's
+      //     step 3b: each TRADE_IN payment's ProductUnit flips IN_STOCK →
+      //     RETURNED and its Stock is decremented. Same lock order as
+      //     intake (PU, then Stock). A SOLD PU means the trade-in phone
+      //     was resold on a later sale (Q7) — markReturnedForVoid throws
+      //     409 and the whole void rolls back. The PhonePurchase row
+      //     stays as history; the payment is reversed by step 6 below.
+      const tradeInPayments = await manager.find(Payment, {
+        where: { sale_id: saleId, payment_method: PaymentMethod.TRADE_IN },
+        order: { created_at: 'ASC' },
+      });
+      for (const payment of tradeInPayments) {
+        // Checked explicitly: TypeORM may drop a null where-condition,
+        // which would match an arbitrary unit.
+        if (payment.trade_in_phone_purchase_id === null) {
+          throw new Error(
+            `TRADE_IN payment ${payment.id} on COMPLETED sale ${saleId} ` +
+              `has no trade_in_phone_purchase_id. completeSale should ` +
+              `have stamped it — data integrity issue.`,
+          );
+        }
+        const linkedUnit = await manager.findOne(ProductUnit, {
+          where: { phone_purchase_id: payment.trade_in_phone_purchase_id },
+        });
+        if (!linkedUnit) {
+          throw new Error(
+            `No ProductUnit linked to phone purchase ` +
+              `${payment.trade_in_phone_purchase_id} (payment ${payment.id}). ` +
+              `Data integrity issue — createForTradeIn creates both together.`,
+          );
+        }
+        const unit = await this.productUnitsService.markReturnedForVoid(
           manager,
-          line.product_id,
-          sale.branch_id,
-          line.quantity,
+          linkedUnit.id,
+        );
+        await this.stockService.decrementForVoidedTradeIn(
+          manager,
+          unit.product_id,
+          unit.branch_id,
+          1,
         );
       }
 
@@ -1245,6 +1632,17 @@ export class SalesService {
    * this method surfaces clean 400s with actionable messages instead of
    * letting the DB throw check violations as 500s.
    */
+  /**
+   * Assert the (method, amount, cash_received, reference_number) tuple
+   * is internally consistent. CASH-specific rules (cash_received present
+   * and covering amount), TRADE_IN-specific rules (no cash_received, no
+   * reference_number), and non-CASH/non-TRADE_IN rules (no cash_received,
+   * reference_number required).
+   *
+   * TRADE_IN's own required fields (product_id, imei, buying_price) are
+   * validated separately by assertTradeInFieldsPresenceMatchesMethod
+   * because they aren't part of this helper's narrow tuple signature.
+   */
   private assertPaymentFieldsConsistent(
     method: PaymentMethod,
     amount: number,
@@ -1262,6 +1660,17 @@ export class SalesService {
           `cash_received ${cashReceived.toFixed(2)} must be >= amount ${amount.toFixed(2)}`,
         );
       }
+    } else if (method === PaymentMethod.TRADE_IN) {
+      if (cashReceived !== null) {
+        throw new BadRequestException(
+          'cash_received must not be set for TRADE_IN payments',
+        );
+      }
+      if (referenceNumber !== null) {
+        throw new BadRequestException(
+          'reference_number must not be set for TRADE_IN payments',
+        );
+      }
     } else {
       if (cashReceived !== null) {
         throw new BadRequestException(
@@ -1273,6 +1682,198 @@ export class SalesService {
           `reference_number is required for ${method} payments`,
         );
       }
+    }
+  }
+
+  /**
+   * Guard the presence-shape of trade-in fields on an AddPaymentDto
+   * against the payment method. Non-TRADE_IN payments MUST leave all
+   * trade_in_* fields absent (sending them is a client-side bug).
+   * TRADE_IN payments MUST include the required trio
+   * (product_id, imei, buying_price); optional fields (selling_price,
+   * notes) may be undefined.
+   *
+   * Pure shape check — no DB. Called AFTER assertPaymentFieldsConsistent
+   * so the (method, amount, cash, ref) tuple is already validated by
+   * the time we look at trade-in fields.
+   *
+   * The amount-matches-buying_price invariant (Q2) is checked by
+   * assertTradeInAmountMatchesBuyingPrice — separate helper because
+   * it needs the amount too and I want each helper to have one job.
+   */
+  private assertTradeInFieldsPresenceMatchesMethod(
+    method: PaymentMethod,
+    dto: AddPaymentDto,
+  ): void {
+    const trioPresent =
+      dto.trade_in_product_id !== undefined ||
+      dto.trade_in_imei !== undefined ||
+      dto.trade_in_buying_price !== undefined;
+    const auxPresent =
+      dto.trade_in_selling_price !== undefined ||
+      dto.trade_in_notes !== undefined;
+
+    if (method !== PaymentMethod.TRADE_IN) {
+      if (trioPresent || auxPresent) {
+        throw new BadRequestException(
+          `trade_in_* fields must not be set for ${method} payments`,
+        );
+      }
+      return;
+    }
+
+    // method === TRADE_IN — required trio must be present.
+    if (
+      dto.trade_in_product_id === undefined ||
+      dto.trade_in_imei === undefined ||
+      dto.trade_in_buying_price === undefined
+    ) {
+      throw new BadRequestException(
+        'TRADE_IN payments require trade_in_product_id, trade_in_imei, ' +
+          'and trade_in_buying_price',
+      );
+    }
+  }
+
+  /**
+   * Assert the payment amount equals the trade-in buying price to the
+   * cent (Q2 lock). Compared on integer cents to avoid float
+   * representation surprises, same pattern as completeSale's
+   * amount_paid === total check.
+   *
+   * Only called when method === TRADE_IN; the DTO validator guarantees
+   * both values are numbers with at most 2 decimal places by the time
+   * we get here.
+   */
+  private assertTradeInAmountMatchesBuyingPrice(
+    amount: number,
+    buyingPrice: number,
+  ): void {
+    const amountCents = Math.round(amount * 100);
+    const buyingCents = Math.round(buyingPrice * 100);
+    if (amountCents !== buyingCents) {
+      throw new BadRequestException(
+        `TRADE_IN payment amount ${amount.toFixed(2)} must equal ` +
+          `trade_in_buying_price ${buyingPrice.toFixed(2)}`,
+      );
+    }
+  }
+
+  /**
+   * Enforce the updatePayment freeze rules for trade-ins (Q2 lock).
+   *
+   * - Any payment: trade_in_* fields are never patchable. UpdatePaymentDto
+   *   doesn't declare them, so detection uses Object.hasOwn on the raw
+   *   DTO (catches explicit nulls too). On non-TRADE_IN payments this
+   *   also prevents the DB CHK_payments_trade_in_fields_null_when_not_trade_in
+   *   from surfacing as a 500.
+   * - TRADE_IN payments: amount, cash_received, and reference_number are
+   *   frozen too. Only notes is editable. Renegotiating a trade-in means
+   *   removing the payment and adding a new one.
+   *
+   * Declared fields use `!== undefined` rather than Object.hasOwn because
+   * class-transformer may materialize absent optional properties as
+   * own-undefined.
+   */
+  private assertNoTradeInFreezesViolated(
+    payment: Payment,
+    dto: UpdatePaymentDto,
+  ): void {
+    const tradeInFields = [
+      'trade_in_product_id',
+      'trade_in_imei',
+      'trade_in_buying_price',
+      'trade_in_selling_price',
+      'trade_in_notes',
+      'trade_in_phone_purchase_id',
+    ];
+    const smuggled = tradeInFields.filter((field) => Object.hasOwn(dto, field));
+    if (smuggled.length > 0) {
+      throw new BadRequestException(
+        `${smuggled.join(', ')} cannot be updated; trade-in fields are ` +
+          'frozen. Remove the payment and add a new one instead.',
+      );
+    }
+
+    if (payment.payment_method !== PaymentMethod.TRADE_IN) {
+      return;
+    }
+
+    const frozen = (
+      ['amount', 'cash_received', 'reference_number'] as const
+    ).filter((field) => dto[field] !== undefined);
+    if (frozen.length > 0) {
+      throw new BadRequestException(
+        `${frozen.join(', ')} cannot be updated on a TRADE_IN payment; ` +
+          'only notes is editable. Remove the payment and add a new one ' +
+          'to renegotiate the trade-in.',
+      );
+    }
+  }
+
+  /**
+   * Validate that a trade-in payment's product and IMEI references are
+   * currently valid. Runs against the caller's transaction manager so
+   * reads see the same consistent snapshot as the surrounding addPayment
+   * work.
+   *
+   * Product must exist, belong to the sale's branch, and be serialized.
+   * IMEI must not collide with any existing ProductUnit — 409 with the
+   * same existing_unit payload shape as PhonePurchasesService and
+   * ProductUnitsService.
+   *
+   * This is best-effort at addPayment time: a concurrent intake could
+   * insert the same IMEI between this check and completeSale's
+   * createForTradeIn. That race is the same one Slice E accepted for
+   * outgoing serialized lines, arbitrated at complete-time by the
+   * global unique index on product_units.imei.
+   *
+   * Duplicates the logic of PhonePurchasesService.assertProductReference
+   * and .assertImeiAvailable — see the docstring on createForTradeIn
+   * for the rationale (keeping those private on the phone-purchases
+   * class rather than exposing them). FOLLOWUP: unify into a shared
+   * serialized-inventory helper.
+   */
+  private async assertTradeInPaymentReferencesValid(
+    manager: EntityManager,
+    productId: string,
+    imei: string,
+    branchId: string,
+  ): Promise<void> {
+    // Product check
+    const product = await manager.findOne(Product, {
+      where: { id: productId },
+    });
+    if (!product) {
+      throw new BadRequestException(
+        `Trade-in product ${productId} not found or inactive`,
+      );
+    }
+    if (product.branch_id !== branchId) {
+      throw new BadRequestException(
+        `Trade-in product ${productId} does not belong to branch ${branchId}`,
+      );
+    }
+    if (!product.is_serialized) {
+      throw new BadRequestException(
+        `Trade-in product ${productId} is not a serialized SKU; ` +
+          `trade-ins require is_serialized = true`,
+      );
+    }
+
+    // IMEI availability (best-effort UX pre-check)
+    const existing = await manager.findOne(ProductUnit, {
+      where: { imei },
+    });
+    if (existing) {
+      throw new ConflictException({
+        message: 'IMEI already exists in inventory',
+        existing_unit: {
+          id: existing.id,
+          status: existing.status,
+          product_id: existing.product_id,
+        },
+      });
     }
   }
 
@@ -1302,5 +1903,168 @@ export class SalesService {
       .getRawOne<{ sum: string }>();
     const paidSoFar = Number(result?.sum ?? 0) - excludeAmount;
     return Number(saleTotal) - paidSoFar;
+  }
+
+  /**
+   * Guard for serialized in-house lines: assert the client didn't send
+   * imei_snapshot on a non-serialized product line, and (for
+   * external-sourced non-serialized) same rule.
+   *
+   * The three legal shapes (see Slice E Q1 CHECK constraint reasoning):
+   *   Non-serialized (external or in-house): imei_snapshot MUST be null.
+   *   Serialized in-house: imei_snapshot required (looked up as IMEI).
+   *   Serialized external: imei_snapshot required (stored as free text).
+   *
+   * This method covers only the non-serialized rejection. The serialized
+   * "required" checks live inside the mode-specific resolve helpers so
+   * their error messages can be mode-specific.
+   */
+  private assertNoImeiOnNonSerializedLine(
+    imeiSnapshot: string | null,
+    productName: string,
+  ): void {
+    if (imeiSnapshot !== null) {
+      throw new BadRequestException(
+        `Product "${productName}" is not serialized; imei_snapshot must not be set`,
+      );
+    }
+  }
+
+  /**
+   * Guard for external-sourced serialized lines: reject if the free-text
+   * imei_snapshot happens to match a ProductUnit currently in IN_STOCK.
+   *
+   * Rationale (Slice E Q7): catches the specific inventory-drift failure
+   * mode where a UI bug or misclick sets external_supplier_id on a line
+   * that should be in-house. Without this check, the sale completes,
+   * skips stock decrement AND skips PU flip — physical phone leaves the
+   * shop but both stock and PU status say we still have it.
+   *
+   * Only IN_STOCK is diagnostic. SOLD/RETURNED/WRITTEN_OFF matches are
+   * historical coincidences (or genuine IMEI-uniqueness violations
+   * outside our control) and not something to block a sale on.
+   *
+   * Runs inside the caller's transaction, so the collision check and the
+   * subsequent insert both see the same snapshot.
+   */
+  private async assertExternalSerializedImeiNotInStock(
+    manager: EntityManager,
+    imei: string,
+  ): Promise<void> {
+    const conflicting = await manager
+      .createQueryBuilder(ProductUnit, 'unit')
+      .where('unit.imei = :imei', { imei })
+      .andWhere('unit.status = :status', {
+        status: ProductUnitStatus.IN_STOCK,
+      })
+      .getOne();
+
+    if (conflicting) {
+      throw new ConflictException({
+        message:
+          `IMEI '${imei}' is currently in your stock (status: IN_STOCK). ` +
+          `If you meant to sell your own inventory, remove external_supplier_id.`,
+        existing_unit: {
+          id: conflicting.id,
+          product_id: conflicting.product_id,
+          branch_id: conflicting.branch_id,
+        },
+      });
+    }
+  }
+
+  /**
+   * Resolve the ProductUnit for a serialized in-house sale line and
+   * return the four snapshot values addLine needs: product_unit_id,
+   * imei_snapshot (from the PU, not the client — PU is source of truth),
+   * unit_price (PU.selling_price → Product.selling_price → 400), and
+   * cost_price (always PU.buying_price, no fallback).
+   *
+   * Four failure modes per Slice E Q3:
+   *   1. IMEI not found          → BadRequest 400 (payload-referenced entity)
+   *   2. Product mismatch        → BadRequest 400 (payload integrity)
+   *   3. Branch mismatch         → BadRequest 400 (payload integrity, NOT
+   *                                Forbidden — the cashier is at their
+   *                                own branch; the IMEI just isn't there)
+   *   4. Non-IN_STOCK status     → Conflict 409 with existing_unit payload
+   *                                (mirrors Slice D IMEI collision shape)
+   *
+   * Price fallback per Slice E Q6:
+   *   PU.selling_price → Product.selling_price → 400 "no selling price set"
+   *   Handles both used-phone (per-unit price required, Product has 0)
+   *   and new-serialized-phone (Product list price is authoritative, PU
+   *   price left null) cases correctly.
+   *
+   * cost_price is ALWAYS PU.buying_price. No fallback — used phones cost
+   * varies per unit; averaging via Product.buying_price would corrupt
+   * margin reports.
+   *
+   * Query is by imei alone (no product/branch/status filter) so we can
+   * distinguish failure modes for actionable error messages. Runs inside
+   * caller's transaction; no lock — the complete-time markSoldForSale
+   * lock is the sole gate (Slice E Q5).
+   */
+  private async resolveInHouseSerializedLine(
+    manager: EntityManager,
+    saleBranchId: string,
+    product: Product,
+    imei: string,
+  ): Promise<{
+    productUnitId: string;
+    imeiSnapshot: string;
+    unitPrice: string;
+    costPrice: string;
+  }> {
+    const unit = await manager.findOne(ProductUnit, {
+      where: { imei },
+    });
+
+    // 1. Not found
+    if (!unit) {
+      throw new BadRequestException(`IMEI '${imei}' is not in stock`);
+    }
+
+    // 2. Product mismatch — payload integrity
+    if (unit.product_id !== product.id) {
+      throw new BadRequestException(
+        `IMEI '${imei}' does not belong to product "${product.name}"`,
+      );
+    }
+
+    // 3. Branch mismatch — payload integrity, not a cross-branch
+    //    authorization issue (the cashier IS at their own branch).
+    if (unit.branch_id !== saleBranchId) {
+      throw new BadRequestException(
+        `IMEI '${imei}' is not available at this branch`,
+      );
+    }
+
+    // 4. Non-IN_STOCK — state conflict, structured payload
+    if (unit.status !== ProductUnitStatus.IN_STOCK) {
+      throw new ConflictException({
+        message: `IMEI '${imei}' is not available (status: ${unit.status})`,
+        existing_unit: {
+          id: unit.id,
+          status: unit.status,
+          product_id: unit.product_id,
+          branch_id: unit.branch_id,
+        },
+      });
+    }
+
+    // Price resolution: PU.selling_price → Product.selling_price → 400
+    const unitPrice = unit.selling_price ?? product.selling_price ?? null;
+    if (unitPrice === null) {
+      throw new BadRequestException(
+        `Cannot price IMEI '${imei}' — no selling price set on unit or product`,
+      );
+    }
+
+    return {
+      productUnitId: unit.id,
+      imeiSnapshot: unit.imei, // PU is source of truth
+      unitPrice,
+      costPrice: unit.buying_price,
+    };
   }
 }

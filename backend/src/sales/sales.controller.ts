@@ -282,7 +282,15 @@ export class SalesController {
       'BANK_TRANSFER, KOKO, and MINTPAY all require reference_number ' +
       'for reconciliation. amount cannot exceed the remaining balance. ' +
       'Returns the updated sale with all lines, payments, and recomputed ' +
-      'amount_paid and change_due.',
+      'amount_paid and change_due.\n\n' +
+      'TRADE_IN: the customer pays (part of) the sale with a used phone. ' +
+      'Requires a customer on the sale, plus trade_in_product_id (a ' +
+      "serialized product at the sale's branch), trade_in_imei, and " +
+      'trade_in_buying_price, which must equal amount. trade_in_selling_price ' +
+      'and trade_in_notes are optional. cash_received and reference_number ' +
+      'must be omitted. Nothing is added to inventory yet — the ' +
+      'PhonePurchase, ProductUnit, and stock increment are created when the ' +
+      'sale completes. trade_in_* fields are rejected on every other method.',
   })
   @ApiParam({ name: 'saleId', description: 'Sale UUID', format: 'uuid' })
   @ApiResponse({
@@ -294,10 +302,19 @@ export class SalesController {
     description:
       'Validation failed, sale not DRAFT, amount exceeds remaining balance, ' +
       'CASH cash_received missing or < amount, non-CASH cash_received set, ' +
-      'or non-CASH reference_number missing',
+      'non-CASH reference_number missing, or a TRADE_IN rule failed ' +
+      '(missing required trade-in field, amount != trade_in_buying_price, ' +
+      'no customer on the sale, bad trade-in product, trade_in_* on a ' +
+      'non-TRADE_IN payment)',
   })
   @ApiResponse({ status: 401, description: 'Not authenticated' })
   @ApiResponse({ status: 404, description: 'Sale not found' })
+  @ApiResponse({
+    status: 409,
+    description:
+      'TRADE_IN only: trade_in_imei already exists in inventory. Response ' +
+      'body includes existing_unit { id, status, product_id }.',
+  })
   async addPayment(
     @Param('saleId', ParseUUIDPipe) saleId: string,
     @Body() dto: AddPaymentDto,
@@ -315,7 +332,11 @@ export class SalesController {
       'reference_number, notes. payment_method is FROZEN — to change ' +
       'method (e.g. CASH to CARD), remove and re-add the payment for a ' +
       'clean audit trail. Cross-field rules revalidated against the ' +
-      'merged state. Returns the updated sale.',
+      'merged state. Returns the updated sale.\n\n' +
+      'TRADE_IN payments are frozen except for notes — amount, ' +
+      'cash_received, and reference_number are rejected with 400. To ' +
+      'renegotiate a trade-in value, remove the payment and add a new one. ' +
+      'trade_in_* fields are not patchable on any payment.',
   })
   @ApiParam({ name: 'saleId', description: 'Sale UUID', format: 'uuid' })
   @ApiParam({ name: 'paymentId', description: 'Payment UUID', format: 'uuid' })
@@ -328,7 +349,8 @@ export class SalesController {
     description:
       'Validation failed, sale not DRAFT, merged amount exceeds remaining ' +
       'balance (excluding this payment), CASH cash_received < amount, or ' +
-      'attempted to clear reference_number on a non-CASH payment',
+      'attempted to clear reference_number on a non-CASH payment, or ' +
+      'attempted to change a frozen field on a TRADE_IN payment',
   })
   @ApiResponse({ status: 401, description: 'Not authenticated' })
   @ApiResponse({ status: 404, description: 'Sale or payment not found' })
@@ -384,11 +406,14 @@ export class SalesController {
       'Transitions a DRAFT sale into COMPLETED in a single atomic ' +
       'transaction. Decrements stock for every in-house line ' +
       '(external-supplier lines belong to friendly shops and are ' +
-      'settled separately in Phase 6.7). Issues the invoice number ' +
-      'via the branch/date counter. Sets status=COMPLETED and ' +
-      'completed_at=now(). If any step fails — insufficient stock, ' +
-      'underpayment, missing lines — the whole transaction rolls back ' +
-      'and nothing changes.\n\n' +
+      'settled separately in Phase 6.7). Flips serialized in-house units ' +
+      'to SOLD. For each TRADE_IN payment, creates the PhonePurchase and ' +
+      'an IN_STOCK ProductUnit, increments stock for the trade-in product, ' +
+      'and stamps trade_in_phone_purchase_id on the payment. Issues the ' +
+      'invoice number via the branch/date counter. Sets status=COMPLETED ' +
+      'and completed_at=now(). If any step fails — insufficient stock, ' +
+      'IMEI conflict, underpayment, missing lines — the whole transaction ' +
+      'rolls back and nothing changes.\n\n' +
       'Preconditions: sale is DRAFT, has at least one line, and ' +
       'amount_paid equals total exactly. Overpayment is already ' +
       'blocked by the payment endpoint; this endpoint blocks ' +
@@ -406,8 +431,8 @@ export class SalesController {
   @ApiResponse({
     status: 400,
     description:
-      'Sale is not in DRAFT status, has no lines, or amount_paid does ' +
-      'not equal total',
+      'Sale is not in DRAFT status, has no lines, amount_paid does ' +
+      'not equal total, or the sale has TRADE_IN payments but no customer',
   })
   @ApiResponse({ status: 401, description: 'Not authenticated' })
   @ApiResponse({
@@ -417,8 +442,10 @@ export class SalesController {
   @ApiResponse({
     status: 409,
     description:
-      'Insufficient stock for one or more lines. Response body includes ' +
-      'the product name and current available quantity.',
+      'Insufficient stock for one or more lines (body includes the product ' +
+      'name and available quantity); a serialized unit on a line is no ' +
+      'longer IN_STOCK; or a trade-in IMEI already exists in inventory. ' +
+      'The IMEI cases include an existing_unit payload.',
   })
   async completeSale(@Param('id', ParseUUIDPipe) id: string) {
     await this.salesService.completeSale(id);
@@ -436,7 +463,10 @@ export class SalesController {
       'Transitions a COMPLETED sale into VOIDED in a single atomic ' +
       'transaction. Re-increments stock for every in-house line ' +
       '(external-supplier lines were never our inventory, so nothing to ' +
-      'reverse). Stamps reversed_at and reversal_reason on every payment ' +
+      'reverse) and flips serialized in-house units back to IN_STOCK. For ' +
+      'each TRADE_IN payment, flips the traded-in unit to RETURNED and ' +
+      'decrements its stock; the PhonePurchase stays as history. Stamps ' +
+      'reversed_at and reversal_reason on every payment ' +
       'on this sale. Sets status=VOIDED, voided_at=now(), voided_by=<caller>, ' +
       'and void_reason=<trimmed reason>. If any step fails, the whole ' +
       'transaction rolls back and nothing changes.\n\n' +
@@ -473,6 +503,12 @@ export class SalesController {
     description: 'Cashier attempted to void a sale (admin or manager only)',
   })
   @ApiResponse({ status: 404, description: 'Sale not found' })
+  @ApiResponse({
+    status: 409,
+    description:
+      'A traded-in phone from this sale has since been sold on another ' +
+      'sale. Void that later sale first. Body includes existing_unit.',
+  })
   async voidSale(
     @Param('id', ParseUUIDPipe) id: string,
     @Body() dto: VoidSaleDto,

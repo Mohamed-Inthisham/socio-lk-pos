@@ -11,14 +11,20 @@ import { ProductsModule } from '../products/products.module';
 import { SuppliersModule } from '../suppliers/suppliers.module';
 import { StockModule } from '../stock/stock.module';
 import { SaleNumberCountersModule } from '../sale-number-counters/sale-number-counters.module';
+import { CustomersModule } from '../customers/customers.module';
+import { ProductUnitsModule } from '../product-units/product-units.module';
+import { PhonePurchasesModule } from '../phone-purchases/phone-purchases.module';
 
 @Module({
   imports: [
     TypeOrmModule.forFeature([Sale, SaleLine, Payment, Branch, User]),
     ProductsModule,
+    CustomersModule,
     SuppliersModule,
     StockModule,
     SaleNumberCountersModule,
+    ProductUnitsModule,
+    PhonePurchasesModule,
   ],
   providers: [SalesService],
   controllers: [SalesController],

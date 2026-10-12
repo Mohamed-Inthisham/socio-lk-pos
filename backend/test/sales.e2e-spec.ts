@@ -1,7 +1,7 @@
 import { INestApplication } from '@nestjs/common';
 import request from 'supertest';
 import * as bcrypt from 'bcrypt';
-import { DataSource } from 'typeorm';
+import { DataSource, In } from 'typeorm';
 import { createTestApp, truncateAllTables } from './setup';
 import { User } from '../src/users/entities/user.entity';
 import { UserRole } from '../src/users/enums/user-role.enum';
@@ -20,6 +20,10 @@ import { DiscountType } from '../src/sales/enums/discount-type.enum';
 import { Payment } from '../src/sales/entities/payment.entity';
 import { PaymentMethod } from '../src/sales/enums/payment-method.enum';
 import { Stock } from '../src/stock/entities/stock.entity';
+import { Customer } from '../src/customers/entities/customer.entity';
+import { ProductUnit } from '../src/product-units/entities/product-unit.entity';
+import { ProductUnitStatus } from '../src/product-units/enums/product-unit-status.enum';
+import { PhonePurchase } from '../src/phone-purchases/entities/phone-purchase.entity';
 
 describe('Sales (e2e)', () => {
   let app: INestApplication;
@@ -97,6 +101,21 @@ describe('Sales (e2e)', () => {
     return { user, password };
   }
 
+  async function seedCustomer(
+    overrides: Partial<Customer> = {},
+  ): Promise<Customer> {
+    const repo = dataSource.getRepository(Customer);
+    return repo.save(
+      repo.create({
+        name: 'Kamal Perera',
+        phone: '0771234567',
+        nic: null,
+        notes: null,
+        ...overrides,
+      }),
+    );
+  }
+
   async function seedSale(overrides: Partial<Sale>): Promise<Sale> {
     const repo = dataSource.getRepository(Sale);
     return repo.save(
@@ -126,6 +145,7 @@ describe('Sales (e2e)', () => {
       selling_price?: string;
       buying_price?: string;
       is_active?: boolean;
+      is_serialized?: boolean;
     } = {},
   ): Promise<Product> {
     const brandRepo = dataSource.getRepository(Brand);
@@ -163,6 +183,7 @@ describe('Sales (e2e)', () => {
         buying_price: overrides.buying_price ?? '80000.00',
         selling_price: overrides.selling_price ?? '100000.00',
         is_active: overrides.is_active ?? true,
+        is_serialized: overrides.is_serialized ?? false,
       }),
     );
   }
@@ -198,11 +219,95 @@ describe('Sales (e2e)', () => {
     }
   }
 
+  /**
+   * Seed a PhonePurchase parent row for a ProductUnit. Slice D's schema
+   * requires customer_id, branch_id, cashier_id, total_amount — all
+   * NOT NULL. Used only by seedProductUnit; not directly by tests.
+   */
+  async function seedPhonePurchase(
+    branchId: string,
+    cashierId: string,
+    customerId: string,
+    totalAmount = '100000.00',
+  ): Promise<PhonePurchase> {
+    const repo = dataSource.getRepository(PhonePurchase);
+    return repo.save(
+      repo.create({
+        customer_id: customerId,
+        branch_id: branchId,
+        cashier_id: cashierId,
+        total_amount: totalAmount,
+        notes: null,
+      }),
+    );
+  }
+
+  /**
+   * Seed a ProductUnit row against an existing serialized product.
+   * Requires a PhonePurchase parent (Slice D FK), so this helper also
+   * lazily seeds a Customer + PhonePurchase for the unit.
+   *
+   * `imei` should be unique across a test — the global unique index on
+   * product_units.imei will otherwise reject the insert.
+   *
+   * `status` defaults to IN_STOCK. Tests exercising cross-DRAFT races or
+   * error paths override with SOLD / RETURNED / WRITTEN_OFF.
+   *
+   * `selling_price` defaults to null (per Slice D's "price-later"
+   * Cashier Option C) so tests can distinguish the PU→Product fallback
+   * path from the PU-price-used path by passing an explicit value.
+   */
+
+  async function seedProductUnit(
+    productId: string,
+    branchId: string,
+    cashierId: string,
+    imei: string,
+    overrides: {
+      status?: ProductUnitStatus;
+      buying_price?: string;
+      selling_price?: string | null;
+      customerId?: string;
+    } = {},
+  ): Promise<ProductUnit> {
+    // Lazily seed a customer + phone-purchase for FK integrity
+    const customerId =
+      overrides.customerId ??
+      (
+        await seedCustomer({
+          name: `PU seed customer ${imei.slice(-4)}`,
+          phone: `077${imei.slice(-7)}`,
+        })
+      ).id;
+    const phonePurchase = await seedPhonePurchase(
+      branchId,
+      cashierId,
+      customerId,
+      overrides.buying_price ?? '80000.00',
+    );
+
+    const repo = dataSource.getRepository(ProductUnit);
+    return repo.save(
+      repo.create({
+        product_id: productId,
+        branch_id: branchId,
+        imei,
+        status: overrides.status ?? ProductUnitStatus.IN_STOCK,
+        buying_price: overrides.buying_price ?? '80000.00',
+        selling_price:
+          overrides.selling_price === undefined
+            ? null
+            : overrides.selling_price,
+        phone_purchase_id: phonePurchase.id,
+      }),
+    );
+  }
+
   async function loginAndGetCookies(
     email: string,
     password: string,
   ): Promise<string[]> {
-    await new Promise((r) => setTimeout(r, 110));
+    await new Promise((r) => setTimeout(r, 500));
     const response = await request(app.getHttpServer())
       .post('/api/v1/auth/login')
       .send({ email, password })
@@ -258,25 +363,25 @@ describe('Sales (e2e)', () => {
 
     it('accepts optional notes and customer_id', async () => {
       const branch = await seedBranch();
+      const customer = await seedCustomer();
       const { user, password } = await seedUser(
         UserRole.CASHIER,
         'c@t.com',
         branch.id,
       );
       const cookies = await loginAndGetCookies(user.email, password);
-      const customerId = '11111111-1111-4111-8111-111111111111';
 
       const response = await request(app.getHttpServer())
         .post('/api/v1/sales')
         .set('Cookie', cookies)
         .send({
           branch_id: branch.id,
-          customer_id: customerId,
+          customer_id: customer.id,
           notes: '  SMS receipt  ',
         })
         .expect(201);
 
-      expect(response.body.customer_id).toBe(customerId);
+      expect(response.body.customer_id).toBe(customer.id);
       expect(response.body.notes).toBe('SMS receipt');
     });
 
@@ -358,6 +463,48 @@ describe('Sales (e2e)', () => {
         .post('/api/v1/sales')
         .set('Cookie', cookies)
         .send({ branch_id: 'not-a-uuid' })
+        .expect(400);
+    });
+
+    // ---- customer_id validation (Phase 6.3.5 Slice B) ----
+
+    it('returns 400 when customer_id refers to a nonexistent customer', async () => {
+      const branch = await seedBranch();
+      const { user, password } = await seedUser(
+        UserRole.CASHIER,
+        'c@t.com',
+        branch.id,
+      );
+      const cookies = await loginAndGetCookies(user.email, password);
+
+      await request(app.getHttpServer())
+        .post('/api/v1/sales')
+        .set('Cookie', cookies)
+        .send({
+          branch_id: branch.id,
+          customer_id: '00000000-0000-4000-8000-000000000000',
+        })
+        .expect(400);
+    });
+
+    it('returns 400 when customer_id refers to a soft-deleted customer', async () => {
+      const branch = await seedBranch();
+      const customer = await seedCustomer();
+      await dataSource.getRepository(Customer).softRemove(customer);
+      const { user, password } = await seedUser(
+        UserRole.CASHIER,
+        'c@t.com',
+        branch.id,
+      );
+      const cookies = await loginAndGetCookies(user.email, password);
+
+      await request(app.getHttpServer())
+        .post('/api/v1/sales')
+        .set('Cookie', cookies)
+        .send({
+          branch_id: branch.id,
+          customer_id: customer.id,
+        })
         .expect(400);
     });
 
@@ -620,21 +767,79 @@ describe('Sales (e2e)', () => {
 
     it('updates customer_id', async () => {
       const branch = await seedBranch();
+      const customer = await seedCustomer();
       const { user, password } = await seedUser(UserRole.ADMIN, 'a@t.com');
       const sale = await seedSale({
         branch_id: branch.id,
         cashier_id: user.id,
       });
       const cookies = await loginAndGetCookies(user.email, password);
-      const customerId = '33333333-3333-4333-8333-333333333333';
 
       const response = await request(app.getHttpServer())
         .patch(`/api/v1/sales/${sale.id}`)
         .set('Cookie', cookies)
-        .send({ customer_id: customerId })
+        .send({ customer_id: customer.id })
         .expect(200);
 
-      expect(response.body.customer_id).toBe(customerId);
+      expect(response.body.customer_id).toBe(customer.id);
+    });
+
+    // ---- customer_id validation (Phase 6.3.5 Slice B) ----
+
+    it('returns 400 when customer_id refers to a nonexistent customer', async () => {
+      const branch = await seedBranch();
+      const { user, password } = await seedUser(UserRole.ADMIN, 'a@t.com');
+      const sale = await seedSale({
+        branch_id: branch.id,
+        cashier_id: user.id,
+      });
+      const cookies = await loginAndGetCookies(user.email, password);
+
+      await request(app.getHttpServer())
+        .patch(`/api/v1/sales/${sale.id}`)
+        .set('Cookie', cookies)
+        .send({ customer_id: '00000000-0000-4000-8000-000000000000' })
+        .expect(400);
+    });
+
+    it('returns 400 when customer_id refers to a soft-deleted customer', async () => {
+      const branch = await seedBranch();
+      const customer = await seedCustomer();
+      await dataSource.getRepository(Customer).softRemove(customer);
+      const { user, password } = await seedUser(UserRole.ADMIN, 'a@t.com');
+      const sale = await seedSale({
+        branch_id: branch.id,
+        cashier_id: user.id,
+      });
+      const cookies = await loginAndGetCookies(user.email, password);
+
+      await request(app.getHttpServer())
+        .patch(`/api/v1/sales/${sale.id}`)
+        .set('Cookie', cookies)
+        .send({ customer_id: customer.id })
+        .expect(400);
+    });
+
+    it('allows clearing customer_id (null) without a valid reference', async () => {
+      const branch = await seedBranch();
+      const customer = await seedCustomer();
+      const { user, password } = await seedUser(UserRole.ADMIN, 'a@t.com');
+      const sale = await seedSale({
+        branch_id: branch.id,
+        cashier_id: user.id,
+        customer_id: customer.id,
+      });
+      // Soft-delete the customer AFTER assigning — should still allow null clear
+      await dataSource.getRepository(Customer).softRemove(customer);
+      const cookies = await loginAndGetCookies(user.email, password);
+
+      const response = await request(app.getHttpServer())
+        .patch(`/api/v1/sales/${sale.id}`)
+        .set('Cookie', cookies)
+        .send({ customer_id: null })
+        .expect(200);
+
+      expect(response.body.customer_id).toBeNull();
     });
 
     it('returns 400 when updating a COMPLETED sale', async () => {
@@ -2524,6 +2729,1989 @@ describe('Sales (e2e)', () => {
         expect(p.reversed_at).toBeTruthy();
         expect(p.reversal_reason).toBe(validReason);
       }
+    });
+  });
+
+  // ============================================================
+  // Slice E — Serialized product line handling
+  // POST /sales/:id/lines with is_serialized products
+  // ============================================================
+  describe('POST /api/v1/sales/:saleId/lines — Slice E serialized', () => {
+    // ---- Non-serialized: reject imei_snapshot ----
+
+    it('returns 400 when imei_snapshot is set on a non-serialized in-house line', async () => {
+      const branch = await seedBranch();
+      const { user, password } = await seedUser(UserRole.ADMIN, 'a@t.com');
+      const sale = await seedSale({
+        branch_id: branch.id,
+        cashier_id: user.id,
+      });
+      const product = await seedProduct(branch.id, { is_serialized: false });
+      const cookies = await loginAndGetCookies(user.email, password);
+
+      const response = await request(app.getHttpServer())
+        .post(`/api/v1/sales/${sale.id}/lines`)
+        .set('Cookie', cookies)
+        .send({
+          product_id: product.id,
+          quantity: 1,
+          imei_snapshot: '354789102345678',
+        })
+        .expect(400);
+
+      expect(response.body.message).toMatch(
+        /is not serialized; imei_snapshot must not be set/,
+      );
+    });
+
+    // ---- Serialized in-house: happy path + all four Q3 failure modes ----
+
+    it('adds a serialized in-house line: stores product_unit_id, snapshots imei from PU, uses PU price', async () => {
+      const branch = await seedBranch();
+      const { user, password } = await seedUser(UserRole.ADMIN, 'a@t.com');
+      const cookies = await loginAndGetCookies(user.email, password);
+      const sale = await seedSale({
+        branch_id: branch.id,
+        cashier_id: user.id,
+      });
+      const product = await seedProduct(branch.id, {
+        name: 'iPhone 15 (used)',
+        is_serialized: true,
+        selling_price: '250000.00',
+        buying_price: '200000.00',
+      });
+      const unit = await seedProductUnit(
+        product.id,
+        branch.id,
+        user.id,
+        '354789102345678',
+        {
+          selling_price: '260000.00', // PU price overrides Product
+          buying_price: '210000.00', // PU cost is authoritative
+        },
+      );
+
+      const response = await request(app.getHttpServer())
+        .post(`/api/v1/sales/${sale.id}/lines`)
+        .set('Cookie', cookies)
+        .send({
+          product_id: product.id,
+          quantity: 1,
+          imei_snapshot: '354789102345678',
+        })
+        .expect(201);
+
+      expect(response.body.lines).toHaveLength(1);
+      expect(response.body.lines[0]).toMatchObject({
+        product_id: product.id,
+        product_unit_id: unit.id,
+        imei_snapshot: '354789102345678',
+        unit_price: '260000.00', // PU price used, not Product's 250000
+        cost_price_snapshot: '210000.00', // PU cost always
+        quantity: 1,
+      });
+
+      // DB directly reflects the link
+      const lineRepo = dataSource.getRepository(SaleLine);
+      const persisted = await lineRepo.findOne({
+        where: { id: response.body.lines[0].id },
+      });
+      expect(persisted?.product_unit_id).toBe(unit.id);
+      expect(persisted?.imei_snapshot).toBe('354789102345678');
+    });
+
+    it('falls back to Product.selling_price when PU.selling_price is null', async () => {
+      const branch = await seedBranch();
+      const { user, password } = await seedUser(UserRole.ADMIN, 'a@t.com');
+      const cookies = await loginAndGetCookies(user.email, password);
+      const sale = await seedSale({
+        branch_id: branch.id,
+        cashier_id: user.id,
+      });
+      const product = await seedProduct(branch.id, {
+        is_serialized: true,
+        selling_price: '250000.00',
+      });
+      await seedProductUnit(product.id, branch.id, user.id, '354789102999888', {
+        selling_price: null, // no per-unit price — falls back to Product
+      });
+
+      const response = await request(app.getHttpServer())
+        .post(`/api/v1/sales/${sale.id}/lines`)
+        .set('Cookie', cookies)
+        .send({
+          product_id: product.id,
+          quantity: 1,
+          imei_snapshot: '354789102999888',
+        })
+        .expect(201);
+
+      expect(response.body.lines[0].unit_price).toBe('250000.00'); // Product fallback
+    });
+    // Note: the "PU.selling_price null AND Product.selling_price null → 400"
+    // branch cannot be reached via legitimate data because products.selling_price
+    // is NOT NULL in the schema. The service-side guard is defense-in-depth for
+    // a future migration that makes Product.selling_price nullable. Unit-tested;
+    // no e2e equivalent possible today.
+
+    it('returns 400 when imei_snapshot is missing on serialized in-house line', async () => {
+      const branch = await seedBranch();
+      const { user, password } = await seedUser(UserRole.ADMIN, 'a@t.com');
+      const cookies = await loginAndGetCookies(user.email, password);
+      const sale = await seedSale({
+        branch_id: branch.id,
+        cashier_id: user.id,
+      });
+      const product = await seedProduct(branch.id, { is_serialized: true });
+
+      const response = await request(app.getHttpServer())
+        .post(`/api/v1/sales/${sale.id}/lines`)
+        .set('Cookie', cookies)
+        .send({ product_id: product.id, quantity: 1 })
+        .expect(400);
+
+      expect(response.body.message).toMatch(/imei_snapshot is required/);
+    });
+
+    it('returns 400 when quantity != 1 on a serialized in-house line', async () => {
+      const branch = await seedBranch();
+      const { user, password } = await seedUser(UserRole.ADMIN, 'a@t.com');
+      const cookies = await loginAndGetCookies(user.email, password);
+      const sale = await seedSale({
+        branch_id: branch.id,
+        cashier_id: user.id,
+      });
+      const product = await seedProduct(branch.id, { is_serialized: true });
+      await seedProductUnit(product.id, branch.id, user.id, '354789102222222');
+
+      await request(app.getHttpServer())
+        .post(`/api/v1/sales/${sale.id}/lines`)
+        .set('Cookie', cookies)
+        .send({
+          product_id: product.id,
+          quantity: 2,
+          imei_snapshot: '354789102222222',
+        })
+        .expect(400);
+    });
+
+    it('returns 400 when IMEI is not in stock (Q3 case 1)', async () => {
+      const branch = await seedBranch();
+      const { user, password } = await seedUser(UserRole.ADMIN, 'a@t.com');
+      const cookies = await loginAndGetCookies(user.email, password);
+      const sale = await seedSale({
+        branch_id: branch.id,
+        cashier_id: user.id,
+      });
+      const product = await seedProduct(branch.id, { is_serialized: true });
+      // Deliberately no seedProductUnit — the IMEI doesn't exist
+
+      const response = await request(app.getHttpServer())
+        .post(`/api/v1/sales/${sale.id}/lines`)
+        .set('Cookie', cookies)
+        .send({
+          product_id: product.id,
+          quantity: 1,
+          imei_snapshot: '354789102333333',
+        })
+        .expect(400);
+
+      expect(response.body.message).toMatch(/is not in stock/);
+    });
+
+    it('returns 400 when IMEI belongs to a different product (Q3 case 2)', async () => {
+      const branch = await seedBranch();
+      const { user, password } = await seedUser(UserRole.ADMIN, 'a@t.com');
+      const cookies = await loginAndGetCookies(user.email, password);
+      const sale = await seedSale({
+        branch_id: branch.id,
+        cashier_id: user.id,
+      });
+      const productA = await seedProduct(branch.id, {
+        name: 'Product A',
+        is_serialized: true,
+      });
+      const productB = await seedProduct(branch.id, {
+        name: 'Product B',
+        is_serialized: true,
+      });
+      await seedProductUnit(productB.id, branch.id, user.id, '354789102444444');
+
+      // Client sends productA + IMEI belonging to productB
+      const response = await request(app.getHttpServer())
+        .post(`/api/v1/sales/${sale.id}/lines`)
+        .set('Cookie', cookies)
+        .send({
+          product_id: productA.id,
+          quantity: 1,
+          imei_snapshot: '354789102444444',
+        })
+        .expect(400);
+
+      expect(response.body.message).toMatch(/does not belong to product/);
+    });
+
+    it('returns 400 when IMEI is at a different branch (Q3 case 3 via product mismatch)', async () => {
+      const branchA = await seedBranch({ name: 'Branch A' });
+      const branchB = await seedBranch({ name: 'Branch B' });
+      const { user, password } = await seedUser(UserRole.ADMIN, 'a@t.com');
+      const cookies = await loginAndGetCookies(user.email, password);
+      const sale = await seedSale({
+        branch_id: branchA.id,
+        cashier_id: user.id,
+      });
+      const product = await seedProduct(branchA.id, { is_serialized: true });
+      // PU is at branchB, but sale is at branchA
+      // Note: the PU must reference a product at its own branch, so we seed a
+      // parallel product at branchB with the target IMEI
+      const productAtB = await seedProduct(branchB.id, {
+        is_serialized: true,
+      });
+      await seedProductUnit(
+        productAtB.id,
+        branchB.id,
+        user.id,
+        '354789102555555',
+      );
+
+      // But client tries to reference this IMEI on saleA (branchA) with the branchA product
+      const response = await request(app.getHttpServer())
+        .post(`/api/v1/sales/${sale.id}/lines`)
+        .set('Cookie', cookies)
+        .send({
+          product_id: product.id,
+          quantity: 1,
+          imei_snapshot: '354789102555555',
+        })
+        .expect(400);
+
+      // This will hit "product mismatch" first (Q3 order: not-found →
+      // product → branch → status). The message will be about product
+      // mismatch, not branch. That's the correct behavior — we test
+      // pure branch mismatch by aligning the product.
+      expect(response.body.message).toMatch(/does not belong to product/);
+    });
+
+    it('returns 409 with existing_unit payload when IMEI is SOLD (Q3 case 4)', async () => {
+      const branch = await seedBranch();
+      const { user, password } = await seedUser(UserRole.ADMIN, 'a@t.com');
+      const cookies = await loginAndGetCookies(user.email, password);
+      const sale = await seedSale({
+        branch_id: branch.id,
+        cashier_id: user.id,
+      });
+      const product = await seedProduct(branch.id, { is_serialized: true });
+      const unit = await seedProductUnit(
+        product.id,
+        branch.id,
+        user.id,
+        '354789102666666',
+        { status: ProductUnitStatus.SOLD },
+      );
+
+      const response = await request(app.getHttpServer())
+        .post(`/api/v1/sales/${sale.id}/lines`)
+        .set('Cookie', cookies)
+        .send({
+          product_id: product.id,
+          quantity: 1,
+          imei_snapshot: '354789102666666',
+        })
+        .expect(409);
+
+      expect(response.body.message).toMatch(/SOLD/);
+      expect(response.body.existing_unit).toMatchObject({
+        id: unit.id,
+        status: ProductUnitStatus.SOLD,
+        product_id: product.id,
+        branch_id: branch.id,
+      });
+    });
+
+    it('returns 409 when IMEI is RETURNED', async () => {
+      const branch = await seedBranch();
+      const { user, password } = await seedUser(UserRole.ADMIN, 'a@t.com');
+      const cookies = await loginAndGetCookies(user.email, password);
+      const sale = await seedSale({
+        branch_id: branch.id,
+        cashier_id: user.id,
+      });
+      const product = await seedProduct(branch.id, { is_serialized: true });
+      await seedProductUnit(product.id, branch.id, user.id, '354789102777777', {
+        status: ProductUnitStatus.RETURNED,
+      });
+
+      const response = await request(app.getHttpServer())
+        .post(`/api/v1/sales/${sale.id}/lines`)
+        .set('Cookie', cookies)
+        .send({
+          product_id: product.id,
+          quantity: 1,
+          imei_snapshot: '354789102777777',
+        })
+        .expect(409);
+
+      expect(response.body.message).toMatch(/RETURNED/);
+    });
+
+    // ---- External-sourced serialized ----
+
+    it('adds an external-sourced serialized line: no PU lookup, uses Product prices, verbatim imei', async () => {
+      const branch = await seedBranch();
+      const { user, password } = await seedUser(UserRole.ADMIN, 'a@t.com');
+      const cookies = await loginAndGetCookies(user.email, password);
+      const sale = await seedSale({
+        branch_id: branch.id,
+        cashier_id: user.id,
+      });
+      const product = await seedProduct(branch.id, {
+        is_serialized: true,
+        selling_price: '250000.00',
+        buying_price: '220000.00',
+      });
+      const supplier = await dataSource.getRepository(Supplier).save({
+        name: 'Friendly Shop',
+        is_active: true,
+      } as Supplier);
+
+      const response = await request(app.getHttpServer())
+        .post(`/api/v1/sales/${sale.id}/lines`)
+        .set('Cookie', cookies)
+        .send({
+          product_id: product.id,
+          quantity: 1,
+          external_supplier_id: supplier.id,
+          imei_snapshot: '999888777666555',
+        })
+        .expect(201);
+
+      expect(response.body.lines[0]).toMatchObject({
+        product_unit_id: null, // no PU link
+        imei_snapshot: '999888777666555', // free text verbatim
+        external_supplier_id: supplier.id,
+        unit_price: '250000.00', // Product price
+        cost_price_snapshot: '220000.00', // Product cost
+      });
+    });
+
+    it('returns 409 when external imei_snapshot matches an IN_STOCK PU (Q7)', async () => {
+      const branch = await seedBranch();
+      const { user, password } = await seedUser(UserRole.ADMIN, 'a@t.com');
+      const cookies = await loginAndGetCookies(user.email, password);
+      const sale = await seedSale({
+        branch_id: branch.id,
+        cashier_id: user.id,
+      });
+      const inHouseProduct = await seedProduct(branch.id, {
+        name: 'In-house iPhone',
+        is_serialized: true,
+      });
+      const existingUnit = await seedProductUnit(
+        inHouseProduct.id,
+        branch.id,
+        user.id,
+        '354789102888888',
+        { status: ProductUnitStatus.IN_STOCK },
+      );
+
+      // Now try to sell an "external" phone with the SAME IMEI
+      const externalProduct = await seedProduct(branch.id, {
+        name: 'External iPhone',
+        is_serialized: true,
+      });
+      const supplier = await dataSource.getRepository(Supplier).save({
+        name: 'Friendly Shop',
+        is_active: true,
+      } as Supplier);
+
+      const response = await request(app.getHttpServer())
+        .post(`/api/v1/sales/${sale.id}/lines`)
+        .set('Cookie', cookies)
+        .send({
+          product_id: externalProduct.id,
+          quantity: 1,
+          external_supplier_id: supplier.id,
+          imei_snapshot: '354789102888888',
+        })
+        .expect(409);
+
+      expect(response.body.message).toMatch(/currently in your stock/);
+      expect(response.body.existing_unit).toMatchObject({
+        id: existingUnit.id,
+        product_id: inHouseProduct.id,
+        branch_id: branch.id,
+      });
+    });
+
+    it('allows external imei_snapshot matching a SOLD PU (historical, not diagnostic)', async () => {
+      const branch = await seedBranch();
+      const { user, password } = await seedUser(UserRole.ADMIN, 'a@t.com');
+      const cookies = await loginAndGetCookies(user.email, password);
+      const sale = await seedSale({
+        branch_id: branch.id,
+        cashier_id: user.id,
+      });
+      const inHouseProduct = await seedProduct(branch.id, {
+        is_serialized: true,
+      });
+      // SOLD PU — collision check filters by status=IN_STOCK, so this is fine
+      await seedProductUnit(
+        inHouseProduct.id,
+        branch.id,
+        user.id,
+        '354789102999000',
+        { status: ProductUnitStatus.SOLD },
+      );
+
+      const externalProduct = await seedProduct(branch.id, {
+        is_serialized: true,
+      });
+      const supplier = await dataSource.getRepository(Supplier).save({
+        name: 'Friendly Shop 2',
+        is_active: true,
+      } as Supplier);
+
+      await request(app.getHttpServer())
+        .post(`/api/v1/sales/${sale.id}/lines`)
+        .set('Cookie', cookies)
+        .send({
+          product_id: externalProduct.id,
+          quantity: 1,
+          external_supplier_id: supplier.id,
+          imei_snapshot: '354789102999000',
+        })
+        .expect(201);
+    });
+  });
+
+  // ============================================================
+  // Slice E — Mode-aware updateLine
+  // PATCH /sales/:saleId/lines/:lineId
+  // ============================================================
+  describe('PATCH /api/v1/sales/:saleId/lines/:lineId — Slice E serialized', () => {
+    it('rejects setting imei_snapshot on a non-serialized line', async () => {
+      const branch = await seedBranch();
+      const { user, password } = await seedUser(UserRole.ADMIN, 'a@t.com');
+      const cookies = await loginAndGetCookies(user.email, password);
+      const sale = await seedSale({
+        branch_id: branch.id,
+        cashier_id: user.id,
+      });
+      const product = await seedProduct(branch.id, { is_serialized: false });
+
+      const created = await request(app.getHttpServer())
+        .post(`/api/v1/sales/${sale.id}/lines`)
+        .set('Cookie', cookies)
+        .send({ product_id: product.id, quantity: 2 })
+        .expect(201);
+      const lineId = created.body.lines[0].id;
+
+      await request(app.getHttpServer())
+        .patch(`/api/v1/sales/${sale.id}/lines/${lineId}`)
+        .set('Cookie', cookies)
+        .send({ imei_snapshot: '354789102345678' })
+        .expect(400);
+    });
+
+    it('rejects quantity != 1 on a serialized in-house line', async () => {
+      const branch = await seedBranch();
+      const { user, password } = await seedUser(UserRole.ADMIN, 'a@t.com');
+      const cookies = await loginAndGetCookies(user.email, password);
+      const sale = await seedSale({
+        branch_id: branch.id,
+        cashier_id: user.id,
+      });
+      const product = await seedProduct(branch.id, {
+        is_serialized: true,
+        selling_price: '250000.00',
+      });
+      await seedProductUnit(product.id, branch.id, user.id, '354789101010101');
+
+      const created = await request(app.getHttpServer())
+        .post(`/api/v1/sales/${sale.id}/lines`)
+        .set('Cookie', cookies)
+        .send({
+          product_id: product.id,
+          quantity: 1,
+          imei_snapshot: '354789101010101',
+        })
+        .expect(201);
+      const lineId = created.body.lines[0].id;
+
+      await request(app.getHttpServer())
+        .patch(`/api/v1/sales/${sale.id}/lines/${lineId}`)
+        .set('Cookie', cookies)
+        .send({ quantity: 3 })
+        .expect(400);
+    });
+
+    it('rejects imei_snapshot change on a serialized in-house line', async () => {
+      const branch = await seedBranch();
+      const { user, password } = await seedUser(UserRole.ADMIN, 'a@t.com');
+      const cookies = await loginAndGetCookies(user.email, password);
+      const sale = await seedSale({
+        branch_id: branch.id,
+        cashier_id: user.id,
+      });
+      const product = await seedProduct(branch.id, {
+        is_serialized: true,
+        selling_price: '250000.00',
+      });
+      await seedProductUnit(product.id, branch.id, user.id, '354789101010102');
+
+      const created = await request(app.getHttpServer())
+        .post(`/api/v1/sales/${sale.id}/lines`)
+        .set('Cookie', cookies)
+        .send({
+          product_id: product.id,
+          quantity: 1,
+          imei_snapshot: '354789101010102',
+        })
+        .expect(201);
+      const lineId = created.body.lines[0].id;
+
+      await request(app.getHttpServer())
+        .patch(`/api/v1/sales/${sale.id}/lines/${lineId}`)
+        .set('Cookie', cookies)
+        .send({ imei_snapshot: '999999999999999' })
+        .expect(400);
+    });
+
+    it('allows discount edit on a serialized in-house line', async () => {
+      const branch = await seedBranch();
+      const { user, password } = await seedUser(UserRole.ADMIN, 'a@t.com');
+      const cookies = await loginAndGetCookies(user.email, password);
+      const sale = await seedSale({
+        branch_id: branch.id,
+        cashier_id: user.id,
+      });
+      const product = await seedProduct(branch.id, {
+        is_serialized: true,
+        selling_price: '250000.00',
+      });
+      await seedProductUnit(product.id, branch.id, user.id, '354789101010103');
+
+      const created = await request(app.getHttpServer())
+        .post(`/api/v1/sales/${sale.id}/lines`)
+        .set('Cookie', cookies)
+        .send({
+          product_id: product.id,
+          quantity: 1,
+          imei_snapshot: '354789101010103',
+        })
+        .expect(201);
+      const lineId = created.body.lines[0].id;
+
+      const response = await request(app.getHttpServer())
+        .patch(`/api/v1/sales/${sale.id}/lines/${lineId}`)
+        .set('Cookie', cookies)
+        .send({
+          discount_type: DiscountType.AMOUNT,
+          discount_value: 5000,
+        })
+        .expect(200);
+
+      expect(response.body.lines[0].discount_amount).toBe('5000.00');
+      expect(response.body.lines[0].line_total).toBe('245000.00');
+    });
+
+    it('allows imei_snapshot edit on a serialized external line (no collision)', async () => {
+      const branch = await seedBranch();
+      const { user, password } = await seedUser(UserRole.ADMIN, 'a@t.com');
+      const cookies = await loginAndGetCookies(user.email, password);
+      const sale = await seedSale({
+        branch_id: branch.id,
+        cashier_id: user.id,
+      });
+      const product = await seedProduct(branch.id, {
+        is_serialized: true,
+        selling_price: '250000.00',
+      });
+      const supplier = await dataSource.getRepository(Supplier).save({
+        name: 'Friendly Shop',
+        is_active: true,
+      } as Supplier);
+
+      const created = await request(app.getHttpServer())
+        .post(`/api/v1/sales/${sale.id}/lines`)
+        .set('Cookie', cookies)
+        .send({
+          product_id: product.id,
+          quantity: 1,
+          external_supplier_id: supplier.id,
+          imei_snapshot: '111222333444555',
+        })
+        .expect(201);
+      const lineId = created.body.lines[0].id;
+
+      const response = await request(app.getHttpServer())
+        .patch(`/api/v1/sales/${sale.id}/lines/${lineId}`)
+        .set('Cookie', cookies)
+        .send({ imei_snapshot: '999888777666555' })
+        .expect(200);
+
+      expect(response.body.lines[0].imei_snapshot).toBe('999888777666555');
+    });
+
+    it('rejects imei_snapshot edit on external line if new IMEI matches IN_STOCK PU (Q7)', async () => {
+      const branch = await seedBranch();
+      const { user, password } = await seedUser(UserRole.ADMIN, 'a@t.com');
+      const cookies = await loginAndGetCookies(user.email, password);
+      const sale = await seedSale({
+        branch_id: branch.id,
+        cashier_id: user.id,
+      });
+      const externalProduct = await seedProduct(branch.id, {
+        name: 'External',
+        is_serialized: true,
+      });
+      const inHouseProduct = await seedProduct(branch.id, {
+        name: 'In-house',
+        is_serialized: true,
+      });
+      const supplier = await dataSource.getRepository(Supplier).save({
+        name: 'Friendly Shop',
+        is_active: true,
+      } as Supplier);
+
+      // Existing IN_STOCK PU
+      await seedProductUnit(
+        inHouseProduct.id,
+        branch.id,
+        user.id,
+        '354789104040404',
+        { status: ProductUnitStatus.IN_STOCK },
+      );
+
+      // External line with a different IMEI
+      const created = await request(app.getHttpServer())
+        .post(`/api/v1/sales/${sale.id}/lines`)
+        .set('Cookie', cookies)
+        .send({
+          product_id: externalProduct.id,
+          quantity: 1,
+          external_supplier_id: supplier.id,
+          imei_snapshot: '111222333444555',
+        })
+        .expect(201);
+      const lineId = created.body.lines[0].id;
+
+      // Try to edit the IMEI to one that matches an IN_STOCK PU
+      await request(app.getHttpServer())
+        .patch(`/api/v1/sales/${sale.id}/lines/${lineId}`)
+        .set('Cookie', cookies)
+        .send({ imei_snapshot: '354789104040404' })
+        .expect(409);
+    });
+  });
+
+  // ============================================================
+  // Slice E — Complete/void with serialized lines + atomicity
+  // POST /sales/:id/complete and /void
+  // ============================================================
+  describe('POST /api/v1/sales/:id/complete + /void — Slice E serialized', () => {
+    /**
+     * Helper: seed a serialized in-house product + PU + a sale with one
+     * serialized line + a matching payment, ready to complete.
+     * Returns everything the tests need for DB assertions.
+     */
+    async function seedReadyToCompleteSerialized(
+      branchId: string,
+      cashierId: string,
+      cookies: string[],
+      opts: {
+        imei?: string;
+        puSellingPrice?: string;
+        puBuyingPrice?: string;
+        stockQty?: number;
+      } = {},
+    ) {
+      const imei = opts.imei ?? '350000000000001';
+      const puPrice = opts.puSellingPrice ?? '250000.00';
+      const product = await seedProduct(branchId, {
+        name: 'Serialized Phone',
+        is_serialized: true,
+        selling_price: '260000.00', // Product default (used only for fallback)
+        buying_price: '220000.00',
+      });
+      // Seed stock at a specific quantity so we can verify decrement
+      await setStockQuantity(product.id, branchId, opts.stockQty ?? 5);
+      const unit = await seedProductUnit(
+        product.id,
+        branchId,
+        cashierId,
+        imei,
+        {
+          selling_price: puPrice,
+          buying_price: opts.puBuyingPrice ?? '210000.00',
+        },
+      );
+      const sale = await seedSale({
+        branch_id: branchId,
+        cashier_id: cashierId,
+      });
+      await request(app.getHttpServer())
+        .post(`/api/v1/sales/${sale.id}/lines`)
+        .set('Cookie', cookies)
+        .send({ product_id: product.id, quantity: 1, imei_snapshot: imei })
+        .expect(201);
+      await request(app.getHttpServer())
+        .post(`/api/v1/sales/${sale.id}/payments`)
+        .set('Cookie', cookies)
+        .send({
+          payment_method: PaymentMethod.CASH,
+          amount: Number(puPrice),
+          cash_received: Number(puPrice),
+        })
+        .expect(201);
+      return { sale, product, unit };
+    }
+
+    // ---- Complete: serialized happy path + PU state ----
+
+    it('completes a serialized in-house sale: PU flipped to SOLD, stock decremented', async () => {
+      const branch = await seedBranch();
+      const { user, password } = await seedUser(UserRole.ADMIN, 'a@t.com');
+      const cookies = await loginAndGetCookies(user.email, password);
+      const { sale, product, unit } = await seedReadyToCompleteSerialized(
+        branch.id,
+        user.id,
+        cookies,
+        { stockQty: 5 },
+      );
+
+      await request(app.getHttpServer())
+        .post(`/api/v1/sales/${sale.id}/complete`)
+        .set('Cookie', cookies)
+        .expect(200);
+
+      // PU flipped to SOLD in DB
+      const puRepo = dataSource.getRepository(ProductUnit);
+      const puAfter = await puRepo.findOne({ where: { id: unit.id } });
+      expect(puAfter?.status).toBe(ProductUnitStatus.SOLD);
+
+      // Stock decremented from 5 to 4
+      const stockRepo = dataSource.getRepository(Stock);
+      const stockAfter = await stockRepo.findOne({
+        where: { product_id: product.id, branch_id: branch.id },
+      });
+      expect(stockAfter?.quantity).toBe(4);
+    });
+
+    it('completes a mixed sale: PU flip only for serialized in-house line', async () => {
+      const branch = await seedBranch();
+      const { user, password } = await seedUser(UserRole.ADMIN, 'a@t.com');
+      const cookies = await loginAndGetCookies(user.email, password);
+
+      // Line 1: serialized in-house
+      const serializedProduct = await seedProduct(branch.id, {
+        name: 'Serialized',
+        is_serialized: true,
+        selling_price: '250000.00',
+      });
+      await setStockQuantity(serializedProduct.id, branch.id, 3);
+      const serializedUnit = await seedProductUnit(
+        serializedProduct.id,
+        branch.id,
+        user.id,
+        '350000000000010',
+        { selling_price: '250000.00' },
+      );
+
+      // Line 2: non-serialized in-house
+      const chargerProduct = await seedProduct(branch.id, {
+        name: 'Charger',
+        selling_price: '2000.00',
+      });
+      await setStockQuantity(chargerProduct.id, branch.id, 10);
+
+      // Line 3: external-sourced serialized (no PU, no stock touch)
+      const supplier = await dataSource.getRepository(Supplier).save({
+        name: 'Friendly Shop',
+        is_active: true,
+      } as Supplier);
+      const externalProduct = await seedProduct(branch.id, {
+        name: 'External',
+        is_serialized: true,
+        selling_price: '180000.00',
+      });
+
+      const sale = await seedSale({
+        branch_id: branch.id,
+        cashier_id: user.id,
+      });
+
+      await request(app.getHttpServer())
+        .post(`/api/v1/sales/${sale.id}/lines`)
+        .set('Cookie', cookies)
+        .send({
+          product_id: serializedProduct.id,
+          quantity: 1,
+          imei_snapshot: '350000000000010',
+        })
+        .expect(201);
+      await request(app.getHttpServer())
+        .post(`/api/v1/sales/${sale.id}/lines`)
+        .set('Cookie', cookies)
+        .send({ product_id: chargerProduct.id, quantity: 2 })
+        .expect(201);
+      await request(app.getHttpServer())
+        .post(`/api/v1/sales/${sale.id}/lines`)
+        .set('Cookie', cookies)
+        .send({
+          product_id: externalProduct.id,
+          quantity: 1,
+          external_supplier_id: supplier.id,
+          imei_snapshot: '999888777666555',
+        })
+        .expect(201);
+
+      // Total: 250000 + 4000 + 180000 = 434000
+      await request(app.getHttpServer())
+        .post(`/api/v1/sales/${sale.id}/payments`)
+        .set('Cookie', cookies)
+        .send({
+          payment_method: PaymentMethod.CASH,
+          amount: 434000,
+          cash_received: 434000,
+        })
+        .expect(201);
+
+      await request(app.getHttpServer())
+        .post(`/api/v1/sales/${sale.id}/complete`)
+        .set('Cookie', cookies)
+        .expect(200);
+
+      // Serialized in-house: PU flipped, stock decremented
+      const puRepo = dataSource.getRepository(ProductUnit);
+      const stockRepo = dataSource.getRepository(Stock);
+      const serializedPUAfter = await puRepo.findOne({
+        where: { id: serializedUnit.id },
+      });
+      expect(serializedPUAfter?.status).toBe(ProductUnitStatus.SOLD);
+      const serializedStockAfter = await stockRepo.findOne({
+        where: {
+          product_id: serializedProduct.id,
+          branch_id: branch.id,
+        },
+      });
+      expect(serializedStockAfter?.quantity).toBe(2); // 3 - 1
+
+      // Non-serialized in-house: stock decremented (no PU to check)
+      const chargerStockAfter = await stockRepo.findOne({
+        where: { product_id: chargerProduct.id, branch_id: branch.id },
+      });
+      expect(chargerStockAfter?.quantity).toBe(8); // 10 - 2
+    });
+
+    // ---- Complete: cross-DRAFT race (crown jewel) ----
+
+    it('CROWN JEWEL: cross-DRAFT race — second complete gets 409, whole transaction rolls back', async () => {
+      const branch = await seedBranch();
+      const { user, password } = await seedUser(UserRole.ADMIN, 'a@t.com');
+      const cookies = await loginAndGetCookies(user.email, password);
+
+      const product = await seedProduct(branch.id, {
+        name: 'Contested Phone',
+        is_serialized: true,
+        selling_price: '250000.00',
+      });
+      await setStockQuantity(product.id, branch.id, 5); // enough for both attempts
+      const unit = await seedProductUnit(
+        product.id,
+        branch.id,
+        user.id,
+        '355555555555555',
+        { selling_price: '250000.00' },
+      );
+
+      // Two DRAFTs, both referencing the same IMEI (allowed per Q5)
+      const saleA = await seedSale({
+        branch_id: branch.id,
+        cashier_id: user.id,
+      });
+      const saleB = await seedSale({
+        branch_id: branch.id,
+        cashier_id: user.id,
+      });
+
+      for (const sid of [saleA.id, saleB.id]) {
+        await request(app.getHttpServer())
+          .post(`/api/v1/sales/${sid}/lines`)
+          .set('Cookie', cookies)
+          .send({
+            product_id: product.id,
+            quantity: 1,
+            imei_snapshot: '355555555555555',
+          })
+          .expect(201);
+        await request(app.getHttpServer())
+          .post(`/api/v1/sales/${sid}/payments`)
+          .set('Cookie', cookies)
+          .send({
+            payment_method: PaymentMethod.CASH,
+            amount: 250000,
+            cash_received: 250000,
+          })
+          .expect(201);
+      }
+
+      // Sale A completes first
+      await request(app.getHttpServer())
+        .post(`/api/v1/sales/${saleA.id}/complete`)
+        .set('Cookie', cookies)
+        .expect(200);
+
+      // Snapshot state before Sale B's failed complete attempt
+      const stockRepo = dataSource.getRepository(Stock);
+      const puRepo = dataSource.getRepository(ProductUnit);
+      const saleRepo = dataSource.getRepository(Sale);
+
+      const stockBefore = await stockRepo.findOne({
+        where: { product_id: product.id, branch_id: branch.id },
+      });
+      const puBefore = await puRepo.findOne({ where: { id: unit.id } });
+      const saleBBefore = await saleRepo.findOne({
+        where: { id: saleB.id },
+      });
+
+      expect(stockBefore?.quantity).toBe(4); // A's complete decremented from 5
+      expect(puBefore?.status).toBe(ProductUnitStatus.SOLD); // A's complete flipped it
+      expect(saleBBefore?.status).toBe(SaleStatus.DRAFT); // B still DRAFT
+
+      // Sale B attempts to complete — MUST fail with 409, and the failure
+      // MUST leave ZERO partial state. The atomicity crown-jewel.
+      const response = await request(app.getHttpServer())
+        .post(`/api/v1/sales/${saleB.id}/complete`)
+        .set('Cookie', cookies)
+        .expect(409);
+
+      expect(response.body.message).toMatch(/status is SOLD/);
+      expect(response.body.existing_unit).toMatchObject({
+        id: unit.id,
+        status: ProductUnitStatus.SOLD,
+      });
+
+      // Verify NOTHING changed from Sale B's failed attempt:
+      const stockAfter = await stockRepo.findOne({
+        where: { product_id: product.id, branch_id: branch.id },
+      });
+      const puAfter = await puRepo.findOne({ where: { id: unit.id } });
+      const saleBAfter = await saleRepo.findOne({
+        where: { id: saleB.id },
+      });
+
+      // Stock unchanged from A's decrement — B's decrement was rolled back
+      // by the PU flip failure. This is the atomicity proof: if PU flip
+      // fails, the whole transaction (including Stock decrement) rolls back.
+      expect(stockAfter?.quantity).toBe(4);
+      // PU unchanged
+      expect(puAfter?.status).toBe(ProductUnitStatus.SOLD);
+      // Sale B still DRAFT — no partial flip, no sale_number issued
+      expect(saleBAfter?.status).toBe(SaleStatus.DRAFT);
+      expect(saleBAfter?.sale_number).toBeNull();
+      expect(saleBAfter?.completed_at).toBeNull();
+    });
+
+    // ---- Void: PU restored ----
+
+    it('voids a serialized in-house sale: PU flipped back to IN_STOCK, stock restored', async () => {
+      const branch = await seedBranch();
+      const { user, password } = await seedUser(UserRole.ADMIN, 'a@t.com');
+      const cookies = await loginAndGetCookies(user.email, password);
+      const { sale, product, unit } = await seedReadyToCompleteSerialized(
+        branch.id,
+        user.id,
+        cookies,
+        { stockQty: 3 },
+      );
+
+      // Complete first
+      await request(app.getHttpServer())
+        .post(`/api/v1/sales/${sale.id}/complete`)
+        .set('Cookie', cookies)
+        .expect(200);
+
+      // Snapshot post-complete state
+      const puRepo = dataSource.getRepository(ProductUnit);
+      const stockRepo = dataSource.getRepository(Stock);
+      let puState = await puRepo.findOne({ where: { id: unit.id } });
+      let stockState = await stockRepo.findOne({
+        where: { product_id: product.id, branch_id: branch.id },
+      });
+      expect(puState?.status).toBe(ProductUnitStatus.SOLD);
+      expect(stockState?.quantity).toBe(2); // 3 - 1
+
+      // Void
+      await request(app.getHttpServer())
+        .post(`/api/v1/sales/${sale.id}/void`)
+        .set('Cookie', cookies)
+        .send({ void_reason: 'Customer changed mind' })
+        .expect(200);
+
+      // PU back to IN_STOCK; stock restored
+      puState = await puRepo.findOne({ where: { id: unit.id } });
+      stockState = await stockRepo.findOne({
+        where: { product_id: product.id, branch_id: branch.id },
+      });
+      expect(puState?.status).toBe(ProductUnitStatus.IN_STOCK);
+      expect(stockState?.quantity).toBe(3); // back to original
+    });
+
+    it('voids a mixed sale: only serialized in-house PU is flipped back', async () => {
+      const branch = await seedBranch();
+      const { user, password } = await seedUser(UserRole.ADMIN, 'a@t.com');
+      const cookies = await loginAndGetCookies(user.email, password);
+
+      // Serialized in-house + non-serialized + external serialized
+      const serializedProduct = await seedProduct(branch.id, {
+        name: 'Serialized',
+        is_serialized: true,
+        selling_price: '250000.00',
+      });
+      await setStockQuantity(serializedProduct.id, branch.id, 5);
+      const serializedUnit = await seedProductUnit(
+        serializedProduct.id,
+        branch.id,
+        user.id,
+        '350000000000020',
+        { selling_price: '250000.00' },
+      );
+
+      const chargerProduct = await seedProduct(branch.id, {
+        name: 'Charger',
+        selling_price: '2000.00',
+      });
+      await setStockQuantity(chargerProduct.id, branch.id, 10);
+
+      const supplier = await dataSource.getRepository(Supplier).save({
+        name: 'Friendly Shop',
+        is_active: true,
+      } as Supplier);
+      const externalProduct = await seedProduct(branch.id, {
+        name: 'External',
+        is_serialized: true,
+        selling_price: '180000.00',
+      });
+
+      const sale = await seedSale({
+        branch_id: branch.id,
+        cashier_id: user.id,
+      });
+
+      await request(app.getHttpServer())
+        .post(`/api/v1/sales/${sale.id}/lines`)
+        .set('Cookie', cookies)
+        .send({
+          product_id: serializedProduct.id,
+          quantity: 1,
+          imei_snapshot: '350000000000020',
+        })
+        .expect(201);
+      await request(app.getHttpServer())
+        .post(`/api/v1/sales/${sale.id}/lines`)
+        .set('Cookie', cookies)
+        .send({ product_id: chargerProduct.id, quantity: 2 })
+        .expect(201);
+      await request(app.getHttpServer())
+        .post(`/api/v1/sales/${sale.id}/lines`)
+        .set('Cookie', cookies)
+        .send({
+          product_id: externalProduct.id,
+          quantity: 1,
+          external_supplier_id: supplier.id,
+          imei_snapshot: '999888777666666',
+        })
+        .expect(201);
+      await request(app.getHttpServer())
+        .post(`/api/v1/sales/${sale.id}/payments`)
+        .set('Cookie', cookies)
+        .send({
+          payment_method: PaymentMethod.CASH,
+          amount: 434000,
+          cash_received: 434000,
+        })
+        .expect(201);
+      await request(app.getHttpServer())
+        .post(`/api/v1/sales/${sale.id}/complete`)
+        .set('Cookie', cookies)
+        .expect(200);
+
+      // Void
+      await request(app.getHttpServer())
+        .post(`/api/v1/sales/${sale.id}/void`)
+        .set('Cookie', cookies)
+        .send({ void_reason: 'Full refund requested' })
+        .expect(200);
+
+      // Serialized in-house PU flipped back to IN_STOCK
+      const puRepo = dataSource.getRepository(ProductUnit);
+      const stockRepo = dataSource.getRepository(Stock);
+      const puAfter = await puRepo.findOne({
+        where: { id: serializedUnit.id },
+      });
+      expect(puAfter?.status).toBe(ProductUnitStatus.IN_STOCK);
+
+      // Serialized in-house stock: back to 5
+      const serializedStock = await stockRepo.findOne({
+        where: {
+          product_id: serializedProduct.id,
+          branch_id: branch.id,
+        },
+      });
+      expect(serializedStock?.quantity).toBe(5);
+
+      // Non-serialized stock: back to 10
+      const chargerStock = await stockRepo.findOne({
+        where: { product_id: chargerProduct.id, branch_id: branch.id },
+      });
+      expect(chargerStock?.quantity).toBe(10);
+    });
+
+    // ---- Void-then-resell: the key void-back semantics from Q5 ----
+
+    it('void-then-resell: after void, same PU can be sold on a new sale', async () => {
+      const branch = await seedBranch();
+      const { user, password } = await seedUser(UserRole.ADMIN, 'a@t.com');
+      const cookies = await loginAndGetCookies(user.email, password);
+      const product = await seedProduct(branch.id, {
+        name: 'Resellable',
+        is_serialized: true,
+        selling_price: '200000.00',
+      });
+      await setStockQuantity(product.id, branch.id, 3);
+      const unit = await seedProductUnit(
+        product.id,
+        branch.id,
+        user.id,
+        '350000000000030',
+        { selling_price: '200000.00' },
+      );
+
+      // First sale: complete then void
+      const saleA = await seedSale({
+        branch_id: branch.id,
+        cashier_id: user.id,
+      });
+      await request(app.getHttpServer())
+        .post(`/api/v1/sales/${saleA.id}/lines`)
+        .set('Cookie', cookies)
+        .send({
+          product_id: product.id,
+          quantity: 1,
+          imei_snapshot: '350000000000030',
+        })
+        .expect(201);
+      await request(app.getHttpServer())
+        .post(`/api/v1/sales/${saleA.id}/payments`)
+        .set('Cookie', cookies)
+        .send({
+          payment_method: PaymentMethod.CASH,
+          amount: 200000,
+          cash_received: 200000,
+        })
+        .expect(201);
+      await request(app.getHttpServer())
+        .post(`/api/v1/sales/${saleA.id}/complete`)
+        .set('Cookie', cookies)
+        .expect(200);
+      await request(app.getHttpServer())
+        .post(`/api/v1/sales/${saleA.id}/void`)
+        .set('Cookie', cookies)
+        .send({ void_reason: 'Customer changed mind' })
+        .expect(200);
+
+      // PU is back to IN_STOCK
+      const puRepo = dataSource.getRepository(ProductUnit);
+      const puAfterVoid = await puRepo.findOne({ where: { id: unit.id } });
+      expect(puAfterVoid?.status).toBe(ProductUnitStatus.IN_STOCK);
+
+      // New sale can add the same IMEI
+      const saleB = await seedSale({
+        branch_id: branch.id,
+        cashier_id: user.id,
+      });
+      await request(app.getHttpServer())
+        .post(`/api/v1/sales/${saleB.id}/lines`)
+        .set('Cookie', cookies)
+        .send({
+          product_id: product.id,
+          quantity: 1,
+          imei_snapshot: '350000000000030',
+        })
+        .expect(201);
+      await request(app.getHttpServer())
+        .post(`/api/v1/sales/${saleB.id}/payments`)
+        .set('Cookie', cookies)
+        .send({
+          payment_method: PaymentMethod.CASH,
+          amount: 200000,
+          cash_received: 200000,
+        })
+        .expect(201);
+      await request(app.getHttpServer())
+        .post(`/api/v1/sales/${saleB.id}/complete`)
+        .set('Cookie', cookies)
+        .expect(200);
+
+      // PU is SOLD again
+      const puAfterResell = await puRepo.findOne({ where: { id: unit.id } });
+      expect(puAfterResell?.status).toBe(ProductUnitStatus.SOLD);
+
+      // Two sale_line rows now reference this PU historically — both valid
+      const saleLineRepo = dataSource.getRepository(SaleLine);
+      const linesReferencingUnit = await saleLineRepo.find({
+        where: { product_unit_id: unit.id },
+      });
+      expect(linesReferencingUnit).toHaveLength(2);
+    });
+  });
+
+  // ============================================================
+  // Slice G — TRADE_IN payments
+  // ============================================================
+
+  describe('TRADE_IN payments — Slice G', () => {
+    const IMEI_A = '356938035643809';
+    const IMEI_B = '490154203237518';
+
+    /**
+     * Shared fixture: admin + cookies, a customer (TRADE_IN requires one),
+     * a non-serialized "new phone" with stock for the outgoing line, and
+     * a serialized "used phone" SKU (stock 0) that trade-ins intake into.
+     */
+    async function setupTradeIn(opts: { newStockQty?: number } = {}) {
+      const branch = await seedBranch();
+      const { user, password } = await seedUser(UserRole.ADMIN, 'a@t.com');
+      const cookies = await loginAndGetCookies(user.email, password);
+      const customer = await seedCustomer({
+        name: 'Trade-in Customer',
+        phone: '0779990001',
+      });
+      const newProduct = await seedProduct(branch.id, {
+        name: 'New Phone',
+        selling_price: '100000.00',
+      });
+      await setStockQuantity(newProduct.id, branch.id, opts.newStockQty ?? 5);
+      const usedProduct = await seedProduct(branch.id, {
+        name: 'Used iPhone 12',
+        is_serialized: true,
+        selling_price: '90000.00',
+        buying_price: '60000.00',
+      });
+      await setStockQuantity(usedProduct.id, branch.id, 0);
+      return { branch, user, cookies, customer, newProduct, usedProduct };
+    }
+    type TradeInCtx = Awaited<ReturnType<typeof setupTradeIn>>;
+
+    /** DRAFT sale with a customer and one New Phone line (total 100000). */
+    async function draftWithLine(ctx: TradeInCtx): Promise<Sale> {
+      const sale = await seedSale({
+        branch_id: ctx.branch.id,
+        cashier_id: ctx.user.id,
+        customer_id: ctx.customer.id,
+      });
+      await request(app.getHttpServer())
+        .post(`/api/v1/sales/${sale.id}/lines`)
+        .set('Cookie', ctx.cookies)
+        .send({ product_id: ctx.newProduct.id, quantity: 1 })
+        .expect(201);
+      return sale;
+    }
+
+    function tradeInBody(
+      ctx: TradeInCtx,
+      imei: string,
+      amount: number,
+      extra: Record<string, unknown> = {},
+    ) {
+      return {
+        payment_method: PaymentMethod.TRADE_IN,
+        amount,
+        trade_in_product_id: ctx.usedProduct.id,
+        trade_in_imei: imei,
+        trade_in_buying_price: amount,
+        trade_in_selling_price: 75000,
+        trade_in_notes: 'Screen scratch, battery 89%',
+        ...extra,
+      };
+    }
+
+    function addTradeIn(
+      ctx: TradeInCtx,
+      saleId: string,
+      imei: string,
+      amount: number,
+      expected = 201,
+      extra: Record<string, unknown> = {},
+    ) {
+      return request(app.getHttpServer())
+        .post(`/api/v1/sales/${saleId}/payments`)
+        .set('Cookie', ctx.cookies)
+        .send(tradeInBody(ctx, imei, amount, extra))
+        .expect(expected);
+    }
+
+    function addCash(
+      ctx: TradeInCtx,
+      saleId: string,
+      amount: number,
+      cashReceived = amount,
+    ) {
+      return request(app.getHttpServer())
+        .post(`/api/v1/sales/${saleId}/payments`)
+        .set('Cookie', ctx.cookies)
+        .send({
+          payment_method: PaymentMethod.CASH,
+          amount,
+          cash_received: cashReceived,
+        })
+        .expect(201);
+    }
+
+    function completeReq(ctx: TradeInCtx, saleId: string, expected = 200) {
+      return request(app.getHttpServer())
+        .post(`/api/v1/sales/${saleId}/complete`)
+        .set('Cookie', ctx.cookies)
+        .expect(expected);
+    }
+
+    function voidReq(ctx: TradeInCtx, saleId: string, expected = 200) {
+      return request(app.getHttpServer())
+        .post(`/api/v1/sales/${saleId}/void`)
+        .set('Cookie', ctx.cookies)
+        .send({ void_reason: 'Customer changed mind' })
+        .expect(expected);
+    }
+
+    /**
+     * Sell a previously traded-in phone on a fresh sale and complete it.
+     * PU selling_price is 75000 (from tradeInBody), so the line is 75000.
+     */
+    async function resellTradeIn(ctx: TradeInCtx, imei: string): Promise<Sale> {
+      const sale = await seedSale({
+        branch_id: ctx.branch.id,
+        cashier_id: ctx.user.id,
+      });
+      await request(app.getHttpServer())
+        .post(`/api/v1/sales/${sale.id}/lines`)
+        .set('Cookie', ctx.cookies)
+        .send({
+          product_id: ctx.usedProduct.id,
+          quantity: 1,
+          imei_snapshot: imei,
+        })
+        .expect(201);
+      await addCash(ctx, sale.id, 75000);
+      await completeReq(ctx, sale.id);
+      return sale;
+    }
+
+    async function stockQty(productId: string, branchId: string) {
+      const stock = await dataSource
+        .getRepository(Stock)
+        .findOne({ where: { product_id: productId, branch_id: branchId } });
+      return stock?.quantity;
+    }
+
+    function unitByImei(imei: string) {
+      return dataSource.getRepository(ProductUnit).findOne({ where: { imei } });
+    }
+
+    function purchasesFor(customerId: string) {
+      return dataSource
+        .getRepository(PhonePurchase)
+        .find({ where: { customer_id: customerId } });
+    }
+
+    function paymentsOf(saleId: string) {
+      return dataSource
+        .getRepository(Payment)
+        .find({ where: { sale_id: saleId }, order: { created_at: 'ASC' } });
+    }
+
+    // ---- POST /payments — TRADE_IN ----
+
+    describe('POST /api/v1/sales/:saleId/payments — TRADE_IN', () => {
+      it('records a TRADE_IN payment with all trade-in fields (no inventory yet)', async () => {
+        const ctx = await setupTradeIn();
+        const sale = await draftWithLine(ctx);
+
+        const response = await addTradeIn(ctx, sale.id, IMEI_A, 60000);
+
+        expect(response.body.amount_paid).toBe('60000.00');
+        expect(response.body.payments).toHaveLength(1);
+        expect(response.body.payments[0]).toMatchObject({
+          payment_method: PaymentMethod.TRADE_IN,
+          amount: '60000.00',
+          cash_received: null,
+          reference_number: null,
+          trade_in_product_id: ctx.usedProduct.id,
+          trade_in_imei: IMEI_A,
+          trade_in_buying_price: '60000.00',
+          trade_in_selling_price: '75000.00',
+          trade_in_notes: 'Screen scratch, battery 89%',
+          trade_in_phone_purchase_id: null,
+        });
+        // DRAFT: nothing materialized
+        expect(await unitByImei(IMEI_A)).toBeNull();
+        expect(await purchasesFor(ctx.customer.id)).toHaveLength(0);
+        expect(await stockQty(ctx.usedProduct.id, ctx.branch.id)).toBe(0);
+      });
+
+      it('returns 400 when a required trade-in field is missing', async () => {
+        const ctx = await setupTradeIn();
+        const sale = await draftWithLine(ctx);
+
+        const response = await addTradeIn(ctx, sale.id, IMEI_A, 60000, 400, {
+          trade_in_imei: undefined,
+        });
+        expect(response.body.message).toMatch(/TRADE_IN payments require/);
+      });
+
+      it('returns 400 when amount does not equal trade_in_buying_price', async () => {
+        const ctx = await setupTradeIn();
+        const sale = await draftWithLine(ctx);
+
+        const response = await addTradeIn(ctx, sale.id, IMEI_A, 60000, 400, {
+          trade_in_buying_price: 55000,
+        });
+        expect(response.body.message).toMatch(
+          /must equal trade_in_buying_price/,
+        );
+      });
+
+      it('returns 409 with existing_unit when the IMEI is already in inventory', async () => {
+        const ctx = await setupTradeIn();
+        const existing = await seedProductUnit(
+          ctx.usedProduct.id,
+          ctx.branch.id,
+          ctx.user.id,
+          IMEI_A,
+        );
+        const sale = await draftWithLine(ctx);
+
+        const response = await addTradeIn(ctx, sale.id, IMEI_A, 60000, 409);
+        expect(response.body.existing_unit).toMatchObject({
+          id: existing.id,
+          status: ProductUnitStatus.IN_STOCK,
+        });
+        expect(await paymentsOf(sale.id)).toHaveLength(0);
+      });
+
+      it('returns 401 when unauthenticated', async () => {
+        const ctx = await setupTradeIn();
+        const sale = await draftWithLine(ctx);
+
+        await request(app.getHttpServer())
+          .post(`/api/v1/sales/${sale.id}/payments`)
+          .send(tradeInBody(ctx, IMEI_A, 60000))
+          .expect(401);
+      });
+
+      it('returns 400 when the sale is COMPLETED', async () => {
+        const ctx = await setupTradeIn();
+        const sale = await draftWithLine(ctx);
+        await addCash(ctx, sale.id, 100000);
+        await completeReq(ctx, sale.id);
+
+        const response = await addTradeIn(ctx, sale.id, IMEI_A, 60000, 400);
+        expect(response.body.message).toMatch(/COMPLETED/);
+        expect(await paymentsOf(sale.id)).toHaveLength(1); // just the CASH
+      });
+
+      it('GET /sales/:id shows the trade-in fields on the payment', async () => {
+        const ctx = await setupTradeIn();
+        const sale = await draftWithLine(ctx);
+        await addTradeIn(ctx, sale.id, IMEI_A, 60000);
+
+        const response = await request(app.getHttpServer())
+          .get(`/api/v1/sales/${sale.id}`)
+          .set('Cookie', ctx.cookies)
+          .expect(200);
+
+        expect(response.body.payments).toHaveLength(1);
+        expect(response.body.payments[0]).toMatchObject({
+          payment_method: PaymentMethod.TRADE_IN,
+          trade_in_product_id: ctx.usedProduct.id,
+          trade_in_imei: IMEI_A,
+          trade_in_buying_price: '60000.00',
+          trade_in_selling_price: '75000.00',
+          trade_in_phone_purchase_id: null,
+        });
+      });
+
+      it('accepts a second TRADE_IN with a different IMEI on the same sale', async () => {
+        const ctx = await setupTradeIn();
+        const sale = await draftWithLine(ctx);
+        await addTradeIn(ctx, sale.id, IMEI_A, 60000);
+
+        const response = await addTradeIn(ctx, sale.id, IMEI_B, 40000);
+
+        expect(response.body.payments).toHaveLength(2);
+        expect(response.body.amount_paid).toBe('100000.00');
+        expect(
+          response.body.payments.map(
+            (p: { trade_in_imei: string }) => p.trade_in_imei,
+          ),
+        ).toEqual([IMEI_A, IMEI_B]);
+      });
+    });
+
+    // ---- PATCH /payments/:paymentId — TRADE_IN freeze ----
+
+    describe('PATCH /api/v1/sales/:saleId/payments/:paymentId — TRADE_IN', () => {
+      it('returns 400 when patching amount on a TRADE_IN payment', async () => {
+        const ctx = await setupTradeIn();
+        const sale = await draftWithLine(ctx);
+        const added = await addTradeIn(ctx, sale.id, IMEI_A, 60000);
+        const paymentId = added.body.payments[0].id as string;
+
+        const response = await request(app.getHttpServer())
+          .patch(`/api/v1/sales/${sale.id}/payments/${paymentId}`)
+          .set('Cookie', ctx.cookies)
+          .send({ amount: 55000 })
+          .expect(400);
+
+        expect(response.body.message).toMatch(
+          /amount cannot be updated on a TRADE_IN payment/,
+        );
+        const [payment] = await paymentsOf(sale.id);
+        expect(payment.amount).toBe('60000.00');
+      });
+
+      it('allows patching notes on a TRADE_IN payment', async () => {
+        const ctx = await setupTradeIn();
+        const sale = await draftWithLine(ctx);
+        const added = await addTradeIn(ctx, sale.id, IMEI_A, 60000);
+        const paymentId = added.body.payments[0].id as string;
+
+        const response = await request(app.getHttpServer())
+          .patch(`/api/v1/sales/${sale.id}/payments/${paymentId}`)
+          .set('Cookie', ctx.cookies)
+          .send({ notes: 'Customer kept the case' })
+          .expect(200);
+
+        expect(response.body.payments[0]).toMatchObject({
+          notes: 'Customer kept the case',
+          amount: '60000.00',
+          trade_in_buying_price: '60000.00',
+        });
+      });
+
+      it('still allows patching amount on a non-TRADE_IN payment (regression)', async () => {
+        const ctx = await setupTradeIn();
+        const sale = await draftWithLine(ctx);
+        const added = await addCash(ctx, sale.id, 50000);
+        const paymentId = added.body.payments[0].id as string;
+
+        const response = await request(app.getHttpServer())
+          .patch(`/api/v1/sales/${sale.id}/payments/${paymentId}`)
+          .set('Cookie', ctx.cookies)
+          .send({ amount: 40000 })
+          .expect(200);
+
+        expect(response.body.payments[0].amount).toBe('40000.00');
+        expect(response.body.amount_paid).toBe('40000.00');
+      });
+    });
+
+    // ---- POST /complete — trade-in materialization ----
+
+    describe('POST /api/v1/sales/:id/complete — TRADE_IN', () => {
+      it('materializes the trade-in: PhonePurchase created, PU IN_STOCK, stock incremented, payment stamped', async () => {
+        const ctx = await setupTradeIn();
+        const sale = await draftWithLine(ctx);
+        await addTradeIn(ctx, sale.id, IMEI_A, 60000);
+        await addCash(ctx, sale.id, 40000);
+
+        const response = await completeReq(ctx, sale.id);
+        expect(response.body.status).toBe(SaleStatus.COMPLETED);
+
+        const purchases = await purchasesFor(ctx.customer.id);
+        expect(purchases).toHaveLength(1);
+        expect(purchases[0]).toMatchObject({
+          branch_id: ctx.branch.id,
+          cashier_id: ctx.user.id,
+          total_amount: '60000.00',
+          notes: 'Screen scratch, battery 89%',
+        });
+
+        const unit = await unitByImei(IMEI_A);
+        expect(unit).toMatchObject({
+          product_id: ctx.usedProduct.id,
+          branch_id: ctx.branch.id,
+          status: ProductUnitStatus.IN_STOCK,
+          buying_price: '60000.00',
+          selling_price: '75000.00',
+          phone_purchase_id: purchases[0].id,
+        });
+
+        // Incoming +1 on the used SKU, outgoing -1 on the new phone
+        expect(await stockQty(ctx.usedProduct.id, ctx.branch.id)).toBe(1);
+        expect(await stockQty(ctx.newProduct.id, ctx.branch.id)).toBe(4);
+
+        const tradeIn = (await paymentsOf(sale.id)).find(
+          (p) => p.payment_method === PaymentMethod.TRADE_IN,
+        );
+        expect(tradeIn?.trade_in_phone_purchase_id).toBe(purchases[0].id);
+      });
+
+      it('returns 409 and rolls back fully when the IMEI was intaken elsewhere after addPayment', async () => {
+        const ctx = await setupTradeIn();
+        const sale = await draftWithLine(ctx);
+        await addTradeIn(ctx, sale.id, IMEI_A, 60000);
+        await addCash(ctx, sale.id, 40000);
+
+        // Same IMEI intaken via another path (e.g. direct phone purchase)
+        // between addPayment and complete.
+        const other = await seedProductUnit(
+          ctx.usedProduct.id,
+          ctx.branch.id,
+          ctx.user.id,
+          IMEI_A,
+        );
+
+        const response = await completeReq(ctx, sale.id, 409);
+        expect(response.body.existing_unit).toMatchObject({ id: other.id });
+
+        // Outgoing decrement rolled back along with everything else
+        expect(await stockQty(ctx.newProduct.id, ctx.branch.id)).toBe(5);
+        expect(await stockQty(ctx.usedProduct.id, ctx.branch.id)).toBe(0);
+        expect(await purchasesFor(ctx.customer.id)).toHaveLength(0);
+        expect(
+          await dataSource
+            .getRepository(ProductUnit)
+            .count({ where: { imei: IMEI_A } }),
+        ).toBe(1); // only the "other" unit
+
+        const refreshed = await request(app.getHttpServer())
+          .get(`/api/v1/sales/${sale.id}`)
+          .set('Cookie', ctx.cookies)
+          .expect(200);
+        expect(refreshed.body.status).toBe(SaleStatus.DRAFT);
+        expect(refreshed.body.sale_number).toBeNull();
+        const tradeIn = refreshed.body.payments.find(
+          (p: { payment_method: string }) =>
+            p.payment_method === PaymentMethod.TRADE_IN,
+        );
+        expect(tradeIn.trade_in_phone_purchase_id).toBeNull();
+      });
+
+      it('returns 409 on insufficient outgoing stock and creates no trade-in inventory', async () => {
+        const ctx = await setupTradeIn({ newStockQty: 0 });
+        const sale = await draftWithLine(ctx);
+        await addTradeIn(ctx, sale.id, IMEI_A, 60000);
+        await addCash(ctx, sale.id, 40000);
+
+        const response = await completeReq(ctx, sale.id, 409);
+        expect(response.body.message).toMatch(/Insufficient stock/);
+
+        expect(await purchasesFor(ctx.customer.id)).toHaveLength(0);
+        expect(await unitByImei(IMEI_A)).toBeNull();
+        expect(await stockQty(ctx.usedProduct.id, ctx.branch.id)).toBe(0);
+        const saleAfter = await dataSource
+          .getRepository(Sale)
+          .findOne({ where: { id: sale.id } });
+        expect(saleAfter?.status).toBe(SaleStatus.DRAFT);
+      });
+
+      it('completes a TRADE_IN + CASH split with change due', async () => {
+        const ctx = await setupTradeIn();
+        const sale = await draftWithLine(ctx);
+        await addTradeIn(ctx, sale.id, IMEI_A, 60000);
+        // Customer hands over 50000 cash for the 40000 balance
+        await addCash(ctx, sale.id, 40000, 50000);
+
+        const response = await completeReq(ctx, sale.id);
+
+        expect(response.body.status).toBe(SaleStatus.COMPLETED);
+        expect(response.body.sale_number).toEqual(expect.any(String));
+        expect(response.body.amount_paid).toBe('100000.00');
+        expect(response.body.change_due).toBe('10000.00');
+        expect(await purchasesFor(ctx.customer.id)).toHaveLength(1);
+      });
+
+      it('completes a sale paid entirely by trade-in (zero cash)', async () => {
+        const ctx = await setupTradeIn();
+        const sale = await draftWithLine(ctx);
+        await addTradeIn(ctx, sale.id, IMEI_A, 100000);
+
+        const response = await completeReq(ctx, sale.id);
+
+        expect(response.body.status).toBe(SaleStatus.COMPLETED);
+        expect(response.body.amount_paid).toBe('100000.00');
+        expect(response.body.change_due).toBe('0.00');
+        expect(response.body.payments).toHaveLength(1);
+        expect((await unitByImei(IMEI_A))?.status).toBe(
+          ProductUnitStatus.IN_STOCK,
+        );
+      });
+    });
+
+    // ---- POST /void — trade-in reversal ----
+
+    describe('POST /api/v1/sales/:id/void — TRADE_IN', () => {
+      it('voids a sale with a TRADE_IN: PU RETURNED, used stock decremented, payments reversed', async () => {
+        const ctx = await setupTradeIn();
+        const sale = await draftWithLine(ctx);
+        await addTradeIn(ctx, sale.id, IMEI_A, 60000);
+        await addCash(ctx, sale.id, 40000);
+        await completeReq(ctx, sale.id);
+        expect(await stockQty(ctx.usedProduct.id, ctx.branch.id)).toBe(1);
+
+        const response = await voidReq(ctx, sale.id);
+        expect(response.body.status).toBe(SaleStatus.VOIDED);
+
+        expect((await unitByImei(IMEI_A))?.status).toBe(
+          ProductUnitStatus.RETURNED,
+        );
+        expect(await stockQty(ctx.usedProduct.id, ctx.branch.id)).toBe(0);
+        expect(await stockQty(ctx.newProduct.id, ctx.branch.id)).toBe(5);
+        // PhonePurchase stays as history
+        expect(await purchasesFor(ctx.customer.id)).toHaveLength(1);
+        for (const p of await paymentsOf(sale.id)) {
+          expect(p.reversed_at).not.toBeNull();
+        }
+      });
+
+      it('returns 409 when the trade-in phone was resold, leaving both sales untouched', async () => {
+        const ctx = await setupTradeIn();
+        const saleA = await draftWithLine(ctx);
+        await addTradeIn(ctx, saleA.id, IMEI_A, 60000);
+        await addCash(ctx, saleA.id, 40000);
+        await completeReq(ctx, saleA.id);
+        const saleB = await resellTradeIn(ctx, IMEI_A);
+
+        const response = await voidReq(ctx, saleA.id, 409);
+        expect(response.body.message).toMatch(/resold in a subsequent sale/);
+        expect(response.body.existing_unit).toMatchObject({
+          status: ProductUnitStatus.SOLD,
+        });
+
+        const saleRepo = dataSource.getRepository(Sale);
+        expect(
+          (await saleRepo.findOne({ where: { id: saleA.id } }))?.status,
+        ).toBe(SaleStatus.COMPLETED);
+        expect(
+          (await saleRepo.findOne({ where: { id: saleB.id } }))?.status,
+        ).toBe(SaleStatus.COMPLETED);
+        expect((await unitByImei(IMEI_A))?.status).toBe(ProductUnitStatus.SOLD);
+      });
+
+      it('reverses both directions on a sale with a serialized outgoing line and a TRADE_IN', async () => {
+        const ctx = await setupTradeIn();
+        const serialized = await seedProduct(ctx.branch.id, {
+          name: 'Serialized New Phone',
+          is_serialized: true,
+          selling_price: '100000.00',
+        });
+        await setStockQuantity(serialized.id, ctx.branch.id, 2);
+        const outgoing = await seedProductUnit(
+          serialized.id,
+          ctx.branch.id,
+          ctx.user.id,
+          '350000000000777',
+          { selling_price: '100000.00' },
+        );
+        const sale = await seedSale({
+          branch_id: ctx.branch.id,
+          cashier_id: ctx.user.id,
+          customer_id: ctx.customer.id,
+        });
+        await request(app.getHttpServer())
+          .post(`/api/v1/sales/${sale.id}/lines`)
+          .set('Cookie', ctx.cookies)
+          .send({
+            product_id: serialized.id,
+            quantity: 1,
+            imei_snapshot: '350000000000777',
+          })
+          .expect(201);
+        await addTradeIn(ctx, sale.id, IMEI_A, 60000);
+        await addCash(ctx, sale.id, 40000);
+        await completeReq(ctx, sale.id);
+
+        await voidReq(ctx, sale.id);
+
+        // Outgoing: SOLD → IN_STOCK, stock restored
+        const outgoingAfter = await dataSource
+          .getRepository(ProductUnit)
+          .findOne({ where: { id: outgoing.id } });
+        expect(outgoingAfter?.status).toBe(ProductUnitStatus.IN_STOCK);
+        expect(await stockQty(serialized.id, ctx.branch.id)).toBe(2);
+        // Incoming: IN_STOCK → RETURNED, stock back to 0
+        expect((await unitByImei(IMEI_A))?.status).toBe(
+          ProductUnitStatus.RETURNED,
+        );
+        expect(await stockQty(ctx.usedProduct.id, ctx.branch.id)).toBe(0);
+      });
+
+      it('reverses both trade-ins on a sale with two TRADE_IN payments', async () => {
+        const ctx = await setupTradeIn();
+        const sale = await draftWithLine(ctx);
+        await addTradeIn(ctx, sale.id, IMEI_A, 60000);
+        await addTradeIn(ctx, sale.id, IMEI_B, 40000);
+        await completeReq(ctx, sale.id);
+        expect(await stockQty(ctx.usedProduct.id, ctx.branch.id)).toBe(2);
+
+        await voidReq(ctx, sale.id);
+
+        expect((await unitByImei(IMEI_A))?.status).toBe(
+          ProductUnitStatus.RETURNED,
+        );
+        expect((await unitByImei(IMEI_B))?.status).toBe(
+          ProductUnitStatus.RETURNED,
+        );
+        expect(await stockQty(ctx.usedProduct.id, ctx.branch.id)).toBe(0);
+      });
+
+      it('voids a sale with no TRADE_IN exactly as before (regression)', async () => {
+        const ctx = await setupTradeIn();
+        const sale = await draftWithLine(ctx);
+        await addCash(ctx, sale.id, 100000);
+        await completeReq(ctx, sale.id);
+        expect(await stockQty(ctx.newProduct.id, ctx.branch.id)).toBe(4);
+
+        const response = await voidReq(ctx, sale.id);
+
+        expect(response.body.status).toBe(SaleStatus.VOIDED);
+        expect(await stockQty(ctx.newProduct.id, ctx.branch.id)).toBe(5);
+        expect(await stockQty(ctx.usedProduct.id, ctx.branch.id)).toBe(0);
+        expect(
+          await dataSource
+            .getRepository(ProductUnit)
+            .count({ where: { status: ProductUnitStatus.RETURNED } }),
+        ).toBe(0);
+      });
+    });
+
+    // ---- Crown jewels: trade-in atomicity ----
+
+    describe('TRADE_IN atomicity — crown jewels', () => {
+      /**
+       * Full-row snapshot of everything a complete/void could touch:
+       * the sales, their payments, every PU with the given IMEI, stock
+       * for both fixture products, and all PhonePurchases. Comparing
+       * before/after with toEqual catches any partial write, including
+       * a same-status re-write that bumps updated_at.
+       */
+      async function snapshot(
+        ctx: TradeInCtx,
+        saleIds: string[],
+        imei: string,
+      ) {
+        return {
+          sales: await dataSource
+            .getRepository(Sale)
+            .find({ where: { id: In(saleIds) }, order: { id: 'ASC' } }),
+          payments: await dataSource
+            .getRepository(Payment)
+            .find({ where: { sale_id: In(saleIds) }, order: { id: 'ASC' } }),
+          units: await dataSource
+            .getRepository(ProductUnit)
+            .find({ where: { imei }, order: { id: 'ASC' } }),
+          stock: await dataSource.getRepository(Stock).find({
+            where: {
+              product_id: In([ctx.newProduct.id, ctx.usedProduct.id]),
+              branch_id: ctx.branch.id,
+            },
+            order: { product_id: 'ASC' },
+          }),
+          purchases: await dataSource
+            .getRepository(PhonePurchase)
+            .find({ order: { id: 'ASC' } }),
+        };
+      }
+
+      it('CROWN JEWEL: two DRAFTs trading in the same IMEI — second complete gets 409 and leaves zero partial state', async () => {
+        const ctx = await setupTradeIn();
+
+        // Both DRAFTs accept the same trade-in IMEI: nothing is
+        // materialized until complete, so addPayment's pre-check passes
+        // for both.
+        const saleA = await draftWithLine(ctx);
+        await addTradeIn(ctx, saleA.id, IMEI_A, 60000);
+        await addCash(ctx, saleA.id, 40000);
+        const saleB = await draftWithLine(ctx);
+        await addTradeIn(ctx, saleB.id, IMEI_A, 60000);
+        await addCash(ctx, saleB.id, 40000);
+
+        // Sale A wins
+        await completeReq(ctx, saleA.id);
+        const winner = await unitByImei(IMEI_A);
+        expect(winner?.status).toBe(ProductUnitStatus.IN_STOCK);
+
+        const before = await snapshot(ctx, [saleA.id, saleB.id], IMEI_A);
+        expect(before.purchases).toHaveLength(1);
+        expect(before.units).toHaveLength(1);
+        expect(before.stock.map((s) => s.quantity).sort()).toEqual([1, 4]);
+
+        // Sale B loses. Its outgoing decrement runs BEFORE the trade-in
+        // loop, so the 409 must roll that back too.
+        const response = await completeReq(ctx, saleB.id, 409);
+        expect(response.body.message).toMatch(/IMEI already exists/);
+        expect(response.body.existing_unit).toMatchObject({
+          id: winner!.id,
+          status: ProductUnitStatus.IN_STOCK,
+          product_id: ctx.usedProduct.id,
+        });
+
+        const after = await snapshot(ctx, [saleA.id, saleB.id], IMEI_A);
+        expect(after).toEqual(before);
+
+        // Spelled out for the reader: B is untouched DRAFT, unstamped
+        const saleBAfter = after.sales.find((s) => s.id === saleB.id);
+        expect(saleBAfter?.status).toBe(SaleStatus.DRAFT);
+        expect(saleBAfter?.sale_number).toBeNull();
+        expect(saleBAfter?.completed_at).toBeNull();
+        const saleBTradeIn = after.payments.find(
+          (p) =>
+            p.sale_id === saleB.id &&
+            p.payment_method === PaymentMethod.TRADE_IN,
+        );
+        expect(saleBTradeIn?.trade_in_phone_purchase_id).toBeNull();
+      });
+
+      it('CROWN JEWEL: void blocked by resale — 409, Sale-A stays COMPLETED, Sale-B and the PU untouched', async () => {
+        const ctx = await setupTradeIn();
+
+        // Sale A intakes IMEI_A as a trade-in
+        const saleA = await draftWithLine(ctx);
+        await addTradeIn(ctx, saleA.id, IMEI_A, 60000);
+        await addCash(ctx, saleA.id, 40000);
+        await completeReq(ctx, saleA.id);
+
+        // Sale B sells that same phone to someone else
+        const saleB = await resellTradeIn(ctx, IMEI_A);
+
+        const before = await snapshot(ctx, [saleA.id, saleB.id], IMEI_A);
+        expect(before.units).toHaveLength(1);
+        expect(before.units[0].status).toBe(ProductUnitStatus.SOLD);
+        // used: +1 (A intake) -1 (B sale) = 0; new: 5 - 1 (A) = 4
+        expect(before.stock.map((s) => s.quantity).sort()).toEqual([0, 4]);
+
+        // Void A. Its outgoing reversal (new phone stock +1) runs BEFORE
+        // the trade-in loop, so the 409 must roll that back too.
+        const response = await voidReq(ctx, saleA.id, 409);
+        expect(response.body.message).toMatch(/resold in a subsequent sale/);
+        expect(response.body.existing_unit).toMatchObject({
+          id: before.units[0].id,
+          status: ProductUnitStatus.SOLD,
+        });
+
+        const after = await snapshot(ctx, [saleA.id, saleB.id], IMEI_A);
+        expect(after).toEqual(before);
+
+        // Spelled out for the reader
+        const saleAAfter = after.sales.find((s) => s.id === saleA.id);
+        expect(saleAAfter?.status).toBe(SaleStatus.COMPLETED);
+        expect(saleAAfter?.voided_at).toBeNull();
+        expect(after.units[0].status).toBe(ProductUnitStatus.SOLD);
+        for (const p of after.payments) {
+          expect(p.reversed_at).toBeNull();
+        }
+      });
     });
   });
 });

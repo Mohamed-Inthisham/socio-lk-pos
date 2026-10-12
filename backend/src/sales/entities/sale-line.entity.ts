@@ -13,6 +13,7 @@ import {
 import { Sale } from './sale.entity';
 import { Product } from '../../products/entities/product.entity';
 import { Supplier } from '../../suppliers/entities/supplier.entity';
+import { ProductUnit } from '../../product-units/entities/product-unit.entity';
 import { DiscountType } from '../enums/discount-type.enum';
 
 /**
@@ -79,6 +80,10 @@ import { DiscountType } from '../enums/discount-type.enum';
 @Check(
   'CHK_sale_lines_line_total',
   `line_total = ROUND(unit_price * quantity - discount_amount, 2)`,
+)
+@Check(
+  'CHK_sale_lines_product_unit_snapshot',
+  `product_unit_id IS NULL OR imei_snapshot IS NOT NULL`,
 )
 export class SaleLine {
   @PrimaryGeneratedColumn('uuid')
@@ -177,6 +182,33 @@ export class SaleLine {
     name: 'imei_snapshot',
   })
   imei_snapshot!: string | null;
+
+  /**
+   * Link to the specific ProductUnit sold on this line, for serialized
+   * in-house lines only. NULL for non-serialized lines and for
+   * serialized lines sourced from a friendly shop (external_supplier_id
+   * set) — those have imei_snapshot as free text with no ProductUnit
+   * record to reference.
+   *
+   * When set, imei_snapshot MUST also be set — enforced by
+   * CHK_sale_lines_product_unit_snapshot at the DB. The full three-way
+   * legality (which combinations of product_unit_id, imei_snapshot, and
+   * external_supplier_id are valid) is enforced at the service layer.
+   *
+   * FK is ON DELETE RESTRICT: ProductUnits are state-machined, never
+   * hard-deleted. A PU that has ever appeared on a sale line cannot be
+   * deleted from under it.
+   */
+  @Index('idx_sale_lines_product_unit_id')
+  @Column({ type: 'uuid', nullable: true, name: 'product_unit_id' })
+  product_unit_id!: string | null;
+
+  @ManyToOne(() => ProductUnit, (unit) => unit.sale_lines, {
+    onDelete: 'RESTRICT',
+    nullable: true,
+  })
+  @JoinColumn({ name: 'product_unit_id' })
+  product_unit?: ProductUnit;
 
   // ---- Timestamps ----
 

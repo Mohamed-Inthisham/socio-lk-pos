@@ -281,6 +281,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - 📗 `docs/backend/sales.md` — Sales Backend design, lifecycle, transactional flows (complete/void), endpoint reference, RBAC matrix, migration notes, test coverage, followups
 - 📇 `docs/backend/README.md` updated to index the new topic doc
 
+#### Customers (Phase 6.3.5, Slice A)
+- 👥 `Customer` entity: name, phone (required, normalized to `0XXXXXXXXX`), optional NIC (partial unique index when non-null), notes, soft delete
+- 🔁 409 with `existing_customer_id` on NIC clash so the frontend can offer the existing record
+- 🚪 6 endpoints: list (search + `include_deleted`), get, create, update, soft-delete, reactivate. Delete/reactivate are admin + manager only
+
+#### Sale ↔ Customer (Phase 6.3.5, Slice B)
+- 🔗 FK from `sales.customer_id` to `customers` (`ON DELETE RESTRICT`)
+- ✅ `create`/`update` reject nonexistent and soft-deleted customers with 400; clearing to null always allowed
+
+#### ProductUnit + PhonePurchase (Phase 6.3.5, Slices C–D)
+- 📱 `ProductUnit` — one row per physical phone: globally unique IMEI, status (`IN_STOCK`/`SOLD`/`RETURNED`/`WRITTEN_OFF`), per-unit buying/selling price. Status is the tombstone (no soft delete)
+- 🧾 `PhonePurchase` — intake record when the shop buys a used phone from a customer
+- ⚛️ `POST /phone-purchases` atomically creates the PhonePurchase + IN_STOCK unit + stock increment; IMEI collision → 409 with `existing_unit`
+- 🔍 `GET /phone-purchases` (any role), `GET /product-units` (admin + manager) with filters and nested hydration
+
+#### Serialized Sale Lines (Phase 6.3.5, Slice E)
+- 🔢 `sale_lines.product_unit_id` FK; `addLine` resolves serialized in-house IMEIs to an IN_STOCK unit (quantity 1, price from unit with product fallback)
+- 🔒 Mode-aware `updateLine` — mode changes forbidden, remove + re-add instead
+- 🔄 `completeSale` flips units to SOLD, `voidSale` flips them back to IN_STOCK; cross-DRAFT race on the same IMEI → 409 and full rollback
+
+#### Trade-ins (Phase 6.3.5, Slice G)
+- 💱 `TRADE_IN` payment method — customer pays with a used phone. Six `trade_in_*` columns on `payments`, four CHKs, partial unique index on the PhonePurchase reference
+- 📝 DRAFT stores intake data only; `amount` must equal `trade_in_buying_price`; sale must have a customer
+- ❄️ `updatePayment` freezes TRADE_IN payments except `notes`; `trade_in_*` never patchable
+- ⚛️ `completeSale` materializes each trade-in (PhonePurchase + IN_STOCK unit + stock increment via `PhonePurchasesService.createForTradeIn`) and stamps the payment; IMEI conflict → 409 and full rollback
+- ↩️ `voidSale` flips trade-in units to RETURNED and decrements stock (`ProductUnitsService.markReturnedForVoid`, `StockService.decrementForVoidedTradeIn`); 409 if the phone was resold on a later sale
+
+#### Used Phones Testing (Phase 6.3.5)
+- 🧪 314 new tests (196 unit + 118 e2e) bringing the backend suite to **897 total** (541 unit + 356 e2e) — all green
+- 💎 Crown-jewel atomicity e2e tests for intake rollback, cross-DRAFT serialized race, trade-in IMEI race, and void blocked by resale. The Slice G ones compare full-row before/after snapshots
+
+#### Used Phones Documentation (Phase 6.3.5)
+- 📗 `docs/backend/used-phones.md` — phase status, ProductUnit lifecycle, trade-in design, endpoints, migrations, test coverage
+- 📖 Swagger descriptions for payment, complete, and void endpoints cover TRADE_IN behavior and the new 409s
+- 🗒️ `FOLLOWUPS.md` introduced; stock/PU lock-ordering deadlock bumped to high priority
+
 ### Changed
 - Migrated `LoginForm` from local state to Redux state management
 - Updated `App.jsx` with React Router setup and protected routes
@@ -301,7 +337,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Real dashboard layout with sidebar navigation
 - ✅ ~~Product management module~~ (Phase 6.2 Path B — done)
 - POS terminal frontend (Phase 6.4 — consumes Sales backend)
-- Used-phones module: Customer, PhonePurchase, ProductUnit (Phase 6.3.5)
+- ✅ ~~Used-phones module: Customer, PhonePurchase, ProductUnit, trade-ins~~ (Phase 6.3.5 — done)
 - Parked sales, thermal receipts + SMS (Phase 6.5, 6.6)
 - External-sourcing settlement (Phase 6.7 — uses Supplier.getSalesCount)
 - Customer management
