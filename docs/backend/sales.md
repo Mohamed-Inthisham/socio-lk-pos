@@ -209,6 +209,8 @@ On update, "other" **excludes the payment being updated** — otherwise, updatin
 
 Change is only meaningful on CASH: `change_due = SUM(cash_received - amount) WHERE method = 'CASH'`. Non-CASH payments don't produce change.
 
+> **Phase 6.3.5 addition:** `TRADE_IN` is a sixth payment method — the customer pays with a used phone. It has its own invariants, is frozen except for `notes` on update, and is materialized into inventory by `completeSale` and reversed by `voidSale`. See [used-phones.md § Trade-ins](./used-phones.md#trade-ins-slice-g).
+
 ### `completeSale` is a single atomic transaction
 
 Inside one Postgres transaction with the sale row `pessimistic_write`-locked:
@@ -420,12 +422,12 @@ Tracked open items from Phase 6.3:
 - **Extend `ProductType` enum for real-business coverage**. DB CHK exists at `1785308050748-CreateProductsTable.ts`; needs enum edit + migration to drop/recreate the CHK.
 - **Concurrent-sale hardening**. Row-level locks on stock decrement are in place; wider stress-testing deferred to multi-cashier launch.
 - **Audit log write teardown noise in e2e**. Fire-and-forget audit writes log errors when the Jest teardown closes the DB pool mid-write. Cosmetic; got louder with each `@Auditable` endpoint added in F and G.
-- **Per-phone IMEI tracking**. `imei_snapshot` is free-text in 6.3; will be validated against `ProductUnit` for serialized products in Phase 6.3.5.
+- ~~**Per-phone IMEI tracking**~~ — done in Phase 6.3.5 Slice E. Serialized in-house lines resolve `imei_snapshot` to a `ProductUnit`; see [used-phones.md](./used-phones.md).
 - **SaleNumberCounter real-DB concurrency test**. Currently mocked; add a real concurrent test if a race bug ever surfaces.
 
 ## Future Work
 
-- **Phase 6.3.5 — Used Phones**: `Customer`, `PhonePurchase`, `ProductUnit` entities. Per-unit tracking for phones brought forward from R2.
+- ~~**Phase 6.3.5 — Used Phones**~~ — complete. Customers, per-IMEI `ProductUnit`, `PhonePurchase` intake, serialized sale lines, and the `TRADE_IN` payment method. See [used-phones.md](./used-phones.md).
 - **Phase 6.4 — POS Terminal frontend**: the visual cart, tender flow, and completion UX consuming everything in this doc.
 - **Phase 6.5 — Parked sales**: multi-cart-in-flight per cashier.
 - **Phase 6.6 — Receipts**: thermal print + SMS.

@@ -12,6 +12,8 @@ Non-blocking issues and tech debt to address opportunistically. When you fix one
 
 - **IMEI collision race between pre-check and INSERT (PhonePurchase).** `PhonePurchasesService.create` pre-checks for IMEI collision but the actual INSERT could still race a concurrent creation, surfacing as a raw Postgres `23505` → 500. Fix: catch `23505` in the insert and translate to a structured 409 matching the pre-check's payload shape. _[Slice D]_
 
+- **Customer can be cleared from a DRAFT that has TRADE_IN payments.** `addPayment` requires `sale.customer_id` for TRADE_IN, but `PATCH /sales/:id` with `customer_id: null` still succeeds afterwards. `completeSale` catches it with a 400 before calling `createForTradeIn` (PhonePurchase needs a customer), so there is no data risk — but the error surfaces late. Fix: in `SalesService.update`, reject clearing `customer_id` when the sale has any TRADE_IN payment. _[Slice G]_
+
 - **`AuditLogInterceptor` pre-fetch runs before `ParseUUIDPipe`.** Malformed UUIDs on `PATCH`/`DELETE` routes surface as 500 (interceptor tries to fetch by malformed id) instead of 400 (pipe should reject first). Cosmetic. _[Phase 6.3]_
 
 ## Test-environment friction

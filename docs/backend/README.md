@@ -14,4 +14,5 @@ Reference docs for the SOCIO.LK POS backend (NestJS + PostgreSQL + TypeORM).
 - [API Documentation](./api-documentation.md) — Swagger setup and conventions
 - [Products Backend](./products.md) — Branches, brands, categories, products, stock, SKU/barcode counter
 - [Sales Backend](./sales.md) — Suppliers, sales lifecycle, lines, payments, complete/void transactions
+- [Used Phones Backend](./used-phones.md) — Customers, per-IMEI ProductUnits, phone purchase intake, serialized sale lines, trade-ins (Phase 6.3.5)
 - [Testing](./testing.md) — Test DB, unit and e2e patterns
