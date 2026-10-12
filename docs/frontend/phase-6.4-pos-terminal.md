@@ -1,6 +1,6 @@
 # Phase 6.4 — POS Terminal (Frontend) — Planning
 
-**Status:** planning. No code yet. Section 8 lists the open decisions; build starts after they are answered.
+**Status:** planning. No code yet. Design decisions Q1–Q21 were answered on 2026-10-12 (§8, "Decisions"). Two new questions raised by those answers (Q22, Q23) and the phone-purchase intake scope question (§10) are still open.
 
 **Backend contract:** [docs/backend/sales.md](../backend/sales.md), [docs/backend/used-phones.md](../backend/used-phones.md), Swagger at `/api/docs` (dev). All endpoints below are under `/api/v1` and use the httpOnly-cookie session.
 
@@ -21,16 +21,18 @@
 
 ## 1. Scope
 
-Minimum-viable R1 cashier flow. "R1" = ships in Phase 6.4. "R1.1" = flagged for deferral; see §8 for the ones that need your call.
+Minimum-viable R1 cashier flow. "R1" = ships in Phase 6.4. "R1.1" = deferred to the next increment.
+
+**Every screen below must work at phone, tablet and desktop widths with a modern look (Q6).** Desktop with keyboard + scanner is the reference layout; on touch devices every keyboard action has a visible control (§6, "Touch and small screens").
 
 | # | Screen / interaction | Purpose | Description | Release |
 |---|---------------------|---------|-------------|:-------:|
 | 1 | **Login** | Authenticate | Reuse `LoginPage` as-is. After login, cashiers land on `/pos` instead of `/dashboard` (role-based redirect). | R1 |
 | 2 | **Terminal shell** | Frame for the whole flow | Full-height layout: scan bar on top, cart on the left, totals + payments panel on the right, status strip (branch, cashier, network) at the bottom. Hosts the global hotkey handler and the draft-sale lifecycle (create on first item, resume on reload). | R1 |
-| 3 | **Product search / scan input** | Get items into the cart | A single always-focused input. Enter on a value runs an exact barcode lookup first, then falls back to a name/SKU search over the branch catalog with a keyboard-navigable result list. | R1 |
-| 4 | **Serialized item IMEI prompt** | Sell a specific phone | When the chosen product has `is_serialized = true`, a small dialog asks for the IMEI (scan or type) before calling `addLine` with `quantity: 1`. Handles 400 (IMEI not found / wrong product) and 409 (unit not IN_STOCK, with `existing_unit`). | R1 |
+| 3 | **Product search / scan input** | Get items into the cart | A single always-focused input. Enter on a value runs an exact barcode lookup first, then falls back to a name/SKU search over the branch catalog with a keyboard-navigable result list. Phones carry both a product label and an IMEI (Q9): if a lookup misses and the value is IMEI-shaped (15 digits), the bar says "That looks like an IMEI — scan the product label first". | R1 |
+| 4 | **Serialized item IMEI prompt** | Sell a specific phone | When the chosen product has `is_serialized = true`, a small dialog asks for the IMEI (scan the phone's IMEI label, or type) before calling `addLine` with `quantity: 1`. Handles 400 (IMEI not found / wrong product) and 409 (unit not IN_STOCK, with `existing_unit`). | R1 |
 | 5 | **Cart view** | Show and edit lines | Rows show name, IMEI (if any), qty, unit price, discount, line total. Qty edit (non-serialized only) and line remove; every edit replaces the cart from the server response. | R1 |
-| 6 | **Line discount** | Price adjustment | Per-line `{ type: AMOUNT|PERCENT, value }` via `PATCH .../lines/:lineId`. Permission question in §8 (Q11). | R1 (pending Q11) |
+| 6 | **Line discount** | Price adjustment | Per-line `{ type: AMOUNT|PERCENT, value }` via `PATCH .../lines/:lineId`. All roles may discount for now (Q11): `APPLY_DISCOUNT` is added to the cashier role. | R1 |
 | 7 | **Customer attach** | Link the sale to a customer | Search `GET /customers?search=` by name/phone/NIC; pick one, or create inline (`POST /customers` with name, phone, optional NIC), then `PATCH /sales/:id { customer_id }`. Detach sets `null` — blocked while a TRADE_IN payment exists. | R1 |
 | 8 | **Payment entry — CASH** | Take cash | Amount defaults to remaining balance; cashier types cash received; change is shown live. Sends `{ payment_method: CASH, amount, cash_received }`. | R1 |
 | 9 | **Payment entry — CARD / BANK_TRANSFER / KOKO / MINTPAY** | Take reference-based tenders | Same dialog, method switch hides cash-received and shows a required reference number (auth code / slip ref / provider txn id). | R1 |
@@ -41,8 +43,8 @@ Minimum-viable R1 cashier flow. "R1" = ships in Phase 6.4. "R1.1" = flagged for 
 | 14 | **Recent sales list** | Look up today's sales | Paginated `GET /sales` scoped to this branch (and today by default); shows sale number, time, cashier, total, status. Row opens a read-only detail. | R1 |
 | 15 | **Sale detail (read-only)** | Inspect a completed/voided sale | Lines, payments (with reversal stamps), totals, trade-in info. Host for the Void action. | R1 |
 | 16 | **Void sale flow** | Reverse a completed sale | Admin/manager only (`VOID_SALE`). Reason required (≥ 3 chars). Cashiers see the button disabled with a tooltip ("visible but disabled" pattern). 409 when a trade-in was resold — message tells the operator to void the later sale first. | R1 |
-| 17 | **Keyboard help overlay** | Discoverability | `?` / F1 opens a cheat sheet of the shortcuts in §6. | R1 |
-| 18 | **External-supplier (friendly-shop) lines** | Sell stock sourced from another shop | `addLine` with `external_supplier_id` (+ free-text IMEI for serialized). | **R1.1 candidate** — Q12 |
+| 17 | **Keyboard help overlay** | Discoverability | `?` / F1 opens a cheat sheet of the shortcuts in §6. Hidden on touch-only devices. | R1 |
+| 18 | **External-supplier (friendly-shop) lines** | Sell stock sourced from another shop | `addLine` with `external_supplier_id` (+ free-text IMEI for serialized). | **R1.1** (Q12) |
 | 19 | **Sale-level notes** | Free-text on the sale | `PATCH /sales/:id { notes }`. | **R1.1 candidate** |
 | 20 | **Payment edit** | Fix an amount without remove + re-add | `PATCH .../payments/:id`. | **R1.1** |
 | 21 | **Recent sales filters beyond "today"** | Historic lookup | Date range, status, cashier filters on the list. | **R1.1** |
@@ -215,7 +217,7 @@ The sale id is **not** in the `/pos` URL (the draft is session state, not a shar
 
 ## 6. Keyboard-heavy UX
 
-**Approach: vanilla — one `useHotkeys`-style hook (~40 lines) registered at `TerminalLayout`, plus native focus management. No library.** Headless UI already traps focus inside dialogs and restores it on close; the remaining need is a global keydown map and "return focus to the scan input". Alternative in Q17.
+**Approach (Q17, decided): vanilla — one `useHotkeys`-style hook (~40 lines) registered at `TerminalLayout`, plus native focus management. No library.** Headless UI already traps focus inside dialogs and restores it on close; the remaining need is a global keydown map and "return focus to the scan input". The shop has no existing POS, so there is no muscle memory to match: the map below is the design, refined after cashiers use it.
 
 **Global rules:**
 
@@ -254,13 +256,36 @@ The sale id is **not** in the `/pos` URL (the draft is session state, not a shar
 | Recent sales | ↑/↓, Enter | Open sale; Esc back to terminal |
 | Sale detail | V | Void (admin/manager) |
 
-Final bindings get a usability pass with an actual cashier — see Q17.
+Final bindings get a usability pass with an actual cashier after P1.
+
+### Touch and small screens (Q6)
+
+Keyboard shortcuts are an accelerator, never the only way to do something.
+
+- **Every hotkey action has a visible button.** The shortcut shows as a `Kbd` chip on the button only on devices with a fine pointer and hover (`@media (hover: hover) and (pointer: fine)`).
+- **Scanners on tablets/phones:** Bluetooth scanners in HID mode type into the focused input exactly as on desktop. Camera scanning is a separate decision (Q22).
+- **No auto-focus loop on touch devices.** Re-focusing the scan input after every action would keep popping the on-screen keyboard. On touch-only devices the scan input focuses only when tapped or after a scan submit.
+- **Touch targets** are at least 44×44 px; the quantity stepper uses buttons, not `+`/`-` keys.
+- **Dialogs become bottom sheets** below `md` (the existing `Drawer` primitive or a full-height `Dialog` variant), with the primary action pinned at the bottom above the safe-area inset.
+- **Destructive actions** use the same confirm dialogs; swipe-to-delete is not used, because it is too easy to trigger by accident at a till.
+
+**Layout per breakpoint (Tailwind defaults):**
+
+| Width | Layout |
+|-------|--------|
+| `< md` (phone) | Single column: scan bar (sticky top) → customer chip → cart as stacked cards → sticky bottom bar with total, remaining balance, and a **Pay** button. Payments, totals breakdown and complete open as bottom sheets. |
+| `md`–`lg` (tablet) | Cart full width; totals + payments panel as a collapsible right drawer, opened by the bottom bar. |
+| `≥ lg` (desktop) | Two columns: cart left (~60%), totals + payments + actions right (~40%), status strip at the bottom. Reference layout for screenshots. |
 
 ---
 
 ## 7. Component architecture
 
-**Shared primitives stay in `components/common/`** (Button, InputField, Select, Table, Dialog, ConfirmDialog, Tooltip, Drawer). New primitives added there only if generic: `MoneyText` (LKR formatting + `tabular-nums`), `Kbd` (shortcut badge), `Toast` (if Q5 = yes), `StatusBanner`.
+**Shared primitives stay in `components/common/`** (Button, InputField, Select, Table, Dialog, ConfirmDialog, Tooltip, Drawer). New primitives added there only if generic: `MoneyText` (LKR formatting + `tabular-nums`), `Kbd` (shortcut chip, hidden on touch), `Toast` (Q5), `StatusBanner`, `ResponsiveDialog` (renders `Dialog` at `≥ md`, a bottom sheet below it; every terminal dialog uses this), `useMediaQuery` hook.
+
+**Visual direction (Q6):** modern and clean within Path B's existing tokens — card surfaces with soft borders and rounded corners, generous spacing, large `tabular-nums` totals, the cyan/sky accent reserved for the primary action (Pay / Complete), dark mode supported via the existing `themeStore`. No new UI library. Screenshots at 390 px, 768 px and 1366 px are reviewed at the end of P0.
+
+**Responsive rendering:** the cart renders as a table at `≥ md` (`CartTable`) and as stacked cards below it (`CartCardList`), sharing one row-model selector, so both show the same data and actions.
 
 **Feature components in `components/pos/`**, pages in `pages/Pos*`, shell in `components/layout/TerminalLayout`.
 
@@ -271,9 +296,11 @@ components/pos/
   ScanBar/                               # scan input + search results popover + scan queue
   ImeiPromptDialog/
   Cart/
-    CartTable/                           # rows, selection, keyboard nav
+    CartTable/                           # ≥ md: rows, selection, keyboard nav
     CartLineRow/
+    CartCardList/                        # < md: stacked cards with steppers
     LineDiscountDialog/
+  MobileActionBar/                       # < lg: sticky total + remaining + Pay
   CustomerPanel/
     CustomerAttachDialog/                # search + pick
     CustomerCreateForm/                  # inline create (react-hook-form + zod)
@@ -295,7 +322,7 @@ pages/PosTerminal/  pages/PosRecentSales/  pages/PosSaleDetail/
 services/salesService.js  services/customersService.js
 store/slices/terminalSlice.js  store/slices/posCatalogSlice.js
 store/zustand/terminalSessionStore.js
-hooks/useHotkeys.js  hooks/useTerminalBranch.js
+hooks/useHotkeys.js  hooks/useTerminalBranch.js  hooks/useMediaQuery.js
 schemas/paymentSchema.js  schemas/customerSchema.js  schemas/voidSchema.js
 utils/money.js                           # formatLKR, toCents, fromCents
 ```
@@ -308,7 +335,47 @@ utils/money.js                           # formatLKR, toCents, fromCents
 
 ## 8. Open design questions
 
-Each needs a human decision. The recommended default is what gets built if you say "go with defaults".
+### Decisions (answered 2026-10-12)
+
+Q6, Q9, Q11, Q12 and Q17 were answered explicitly. The rest were not called out, so their recommended defaults are taken as accepted. Say so if any of them should change.
+
+| Q | Topic | Decision |
+|---|-------|----------|
+| Q1 | Out of stock on add | Default — warn on the line, don't block |
+| Q2 | Trade-in entry | Default — TRADE_IN tab in the payment dialog, sectioned; F6 opens it |
+| Q3 | Post-sale summary | Default — in-terminal "Sale complete" panel |
+| Q4 | Offline | Default — none; banner + mutations disabled |
+| Q5 | Errors | Default — inline + persistent 409 banner + new Toast primitive |
+| **Q6** | **Design** | **Modern design, mobile responsive.** No mockups; built within Path B tokens. Responsive rules in §6 "Touch and small screens" and §7 |
+| Q7 | Layout | Default — full-screen `TerminalLayout` |
+| Q8 | Reload | Default — persisted draft id, server query as fallback |
+| **Q9** | **IMEI scanning** | **Phones carry both a product label and an IMEI.** Product-first flow (a) works for R1; IMEI-shaped scans get a hint. Cashier IMEI lookup (b) stays a backend follow-up |
+| Q10 | Admin branch | Default — header branch selector |
+| **Q11** | **Discounts** | **All roles may discount for now.** Add `APPLY_DISCOUNT` to the cashier role; revisit when shop policy firms up. No backend change (it already allows all roles) |
+| **Q12** | **Friendly-shop lines** | **R1.1** |
+| Q13 | Customer on sale | Default — backend adds `customer` relation to `findOne` |
+| Q14 | Test tooling | Default — Vitest + RTL from P0, Playwright in P6 |
+| Q15 | Void reason | Default — presets + optional detail |
+| Q16 | Recent sales | Default — today, this branch, all cashiers |
+| **Q17** | **Hotkeys** | **No existing POS to match.** Vanilla hook with the §6 map; refine after cashier use |
+| Q18 | Abandoned drafts | Default — confirm and discard |
+| Q19 | Customer detach with trade-in | Default — frontend blocks it |
+| Q20 | Language | Default — English only |
+| Q21 | Cashier landing | Default — `/pos` |
+
+### Still open
+
+**Q22. Camera barcode scanning on phones/tablets.** Raised by Q6. A phone or tablet without a Bluetooth scanner has no fast way to read a barcode or IMEI label.
+- (a) None in 6.4: manual entry, plus Bluetooth scanners (HID mode works on Android/iOS). (b) The browser `BarcodeDetector` API — no dependency, but Chromium-only (no iOS Safari). (c) A library such as `@zxing/browser`, which works cross-browser at the cost of extra bundle size; it needs HTTPS and camera permission.
+- **Recommended: (a) for 6.4, (c) as R1.1** once the target devices are known (Q23).
+
+**Q23. Primary till device.** "Mobile responsive" can mean "usable on a phone" or "the phone is the till". The answer sets which layout gets polished first and how much touch work goes into P0–P5.
+- (a) Desktop/laptop + USB scanner is the till; tablet/phone is secondary (a manager checking sales, a quick sale on the floor). (b) A tablet is the till. (c) A phone is the till.
+- **Recommended: (a)** — build desktop-first, but every flow must be completable on a 390 px phone.
+
+### Question record
+
+The original questions as asked, kept for the reasoning. The table above is authoritative.
 
 **Q1. Product out of stock when added.** `addLine` doesn't check stock; complete fails with 409.
 - (a) Allow; fail at complete with a clear message naming the line. (b) Fetch stock on add (`GET /stock?productId&branchId`) and warn but allow. (c) Block at add time client-side.
@@ -332,7 +399,7 @@ Each needs a human decision. The recommended default is what gets built if you s
 
 **Q6. Visual design system.** There is no design file in the repo; Path B established Tailwind tokens and common components.
 - (a) Dev improvises within Path B's look. (b) You provide mockups/wireframes first. (c) Adopt a component library.
-- **Default: (a)**, with a screenshot review at the end of slice 1. **Needs your input:** is there a mockup, a reference POS you like, or a target screen size (e.g. 1366×768 laptop, 15" touch monitor)?
+- **Decided:** modern design, mobile responsive, no mockups — (a) plus the responsive rules in §6/§7.
 
 **Q7. Terminal layout — full-screen or inside the app shell?**
 - (a) Own `TerminalLayout` without sidebar/header. (b) Inside `AppLayout` (sidebar visible). (c) Inside `AppLayout` with the sidebar auto-collapsed.
@@ -344,7 +411,7 @@ Each needs a human decision. The recommended default is what gets built if you s
 
 **Q9. Scanning an IMEI directly.** Cashiers can't resolve IMEI → product (`/product-units` is admin/manager only).
 - (a) Product-first only: scan/search product, then IMEI prompt (works today). (b) Add a cashier-accessible backend lookup (e.g. `GET /product-units/by-imei/:imei` returning product + status) so scanning a phone's IMEI sticker adds it directly. (c) Open `/product-units` read to cashiers.
-- **Default: (a) for R1**, (b) as a small backend follow-up if cashiers find the two-step flow slow. **Needs your input:** do the used phones carry a product barcode label, or only the IMEI?
+- **Decided:** phones carry both labels → (a) for R1, (b) as a backend follow-up if the two-step flow proves slow.
 
 **Q10. Admin at the terminal.** Admins have no `branch_id`.
 - (a) Use the header `activeBranchStore` selection; block with a picker if unset. (b) Admins cannot use the terminal. (c) Ask on every terminal open.
@@ -352,11 +419,11 @@ Each needs a human decision. The recommended default is what gets built if you s
 
 **Q11. Discount permission.** Frontend `APPLY_DISCOUNT` is admin + manager only; the **backend lets any role set line discounts**.
 - (a) Follow the frontend permission — cashiers see the discount control disabled (backend gap logged in FOLLOWUPS). (b) Let cashiers discount (change `rolePermissions`). (c) Cashier discount up to a cap, above that needs a manager.
-- **Default: (a)**, plus a backend follow-up to enforce it. **Needs your input:** what's the real shop policy?
+- **Decided:** (b) for now — all roles may discount.
 
 **Q12. External-supplier (friendly-shop) lines in R1?** Backend supports them; settlement is 6.7.
 - (a) R1: supplier picker on add. (b) R1.1. (c) With 6.7.
-- **Default: (b) R1.1.** **Needs your input:** how often do sales today involve friendly-shop stock? If daily, move to R1.
+- **Decided:** (b) R1.1.
 
 **Q13. Customer on the sale response.** `GET /sales/:id` has no `customer` relation.
 - (a) Frontend fetches `GET /customers/:id` when `customer_id` changes. (b) Backend adds `customer` to `findOne` relations (one-line change + test).
@@ -376,7 +443,7 @@ Each needs a human decision. The recommended default is what gets built if you s
 
 **Q17. Hotkey implementation and bindings.**
 - (a) Vanilla hook (no dependency). (b) `react-hotkeys-hook`. (c) `tinykeys`.
-- **Default: (a).** **Needs your input:** confirm the §6 F-key map, or tell me the keys the shop's current POS uses so muscle memory carries over.
+- **Decided:** (a); no existing POS, so the §6 map stands.
 
 **Q18. Abandoned drafts.** Starting a new sale or logging out with a non-empty draft.
 - (a) Prompt: "Discard current sale?" → `DELETE`. (b) Leave it as an orphan DRAFT. (c) Block until completed or discarded.
@@ -388,7 +455,7 @@ Each needs a human decision. The recommended default is what gets built if you s
 
 **Q20. Language.**
 - (a) English only. (b) English + Sinhala. (c) English + Sinhala + Tamil.
-- **Default: (a)** for 6.4; strings kept in components (no i18n library yet). **Needs your input** if cashiers need Sinhala/Tamil labels.
+- **Default: (a)** for 6.4; strings kept in components (no i18n library yet).
 
 **Q21. Cashier landing page.**
 - (a) Cashiers land on `/pos` after login. (b) Everyone lands on `/dashboard`.
@@ -398,20 +465,20 @@ Each needs a human decision. The recommended default is what gets built if you s
 
 ## 9. Build order (slices)
 
-Each slice is a vertical, demoable increment. Test counts assume Q14 = (a) (Vitest + RTL); "unit" = reducers/selectors/utils, "component" = RTL.
+Each slice is a vertical, demoable increment. "unit" = reducers/selectors/utils (Vitest), "component" = React Testing Library. **Every slice ships its screens responsive** (Q6): its component tests cover the desktop and the `< md` rendering, and the slice demo includes a phone-width check. Responsiveness is not a polish pass at the end.
 
 | Slice | Ships | Depends on | Tests (rough) |
 |-------|-------|-----------|:-------------:|
-| **P0 — Foundations + first runnable cart** | `mapBackendUser` keeps `branch_id`/`branch`; Vitest + RTL setup; `salesService`, `terminalSlice`, `posCatalogSlice`, `utils/money`; `TerminalLayout`, `BranchContextGuard`, `/pos` route + Sidebar link; `ScanBar` (barcode + name search) adding **non-serialized** lines; `CartTable` with qty edit + remove; `TotalsPanel`; discard draft. **Runnable:** log in as cashier, scan items, see totals, discard. | Q6, Q7, Q10 answered | 25 unit, 15 component |
-| **P1 — Payments + complete** | `PaymentDialog` with CASH + reference methods; `PaymentsPanel` with remove; `CompleteSaleDialog`; `SaleCompletePanel`; 409 banner on complete (insufficient stock); reload recovery (Q8); network banner; Toast (if Q5 = b). **First real end-to-end sale.** | P0 | 20 unit, 15 component |
+| **P0 — Foundations + first runnable cart** | `mapBackendUser` keeps `branch_id`/`branch`; Vitest + RTL setup; `salesService`, `terminalSlice`, `posCatalogSlice`, `utils/money`; `TerminalLayout` with the three breakpoint layouts, `ResponsiveDialog`, `useMediaQuery`, `MobileActionBar`; `BranchContextGuard`, `/pos` route + Sidebar link; `ScanBar` (barcode + name search, IMEI-shaped hint) adding **non-serialized** lines; `CartTable` + `CartCardList` with qty edit + remove; `TotalsPanel`; discard draft. **Runnable:** log in as cashier, scan items, see totals, discard — on desktop and on a phone. Ends with the 390/768/1366 screenshot review. | — | 25 unit, 20 component |
+| **P1 — Payments + complete** | `PaymentDialog` (bottom sheet on phone) with CASH + reference methods; `PaymentsPanel` with remove; `CompleteSaleDialog`; `SaleCompletePanel`; 409 banner on complete (insufficient stock); reload recovery (Q8); network banner; `Toast`. **First real end-to-end sale.** | P0 | 20 unit, 16 component |
 | **P2 — Customers** | `CustomerAttachDialog` (search, pick, detach), `CustomerCreateForm` (inline create, NIC 409 → offer existing); customer shown in terminal; `customersService`. | P0 (Q13 backend tweak optional) | 8 unit, 12 component |
 | **P3 — Serialized lines** | Serialized products route through `ImeiPromptDialog`; IMEI shown on cart rows; serialized rows lock qty; 400/409 handling with `existing_unit` message; complete-time 409 for cross-DRAFT race highlights the line. | P0, P1 | 6 unit, 10 component |
 | **P4 — Trade-in** | TRADE_IN in `PaymentDialog` (product picker over serialized catalog, IMEI, buying = amount, optional selling/notes); requires customer (links to P2 dialog); detach-customer block (Q19); TRADE_IN rows show "frozen" (remove only); trade-in IMEI 409 at add and complete. | P1, P2, P3 | 8 unit, 12 component |
 | **P5 — Recent sales + void** | `/pos/sales` list (paginated, today/branch), `/pos/sales/:id` detail; `VoidSaleDialog` (Q15) gated by `VOID_SALE`; resold-trade-in 409 message. | P1 | 6 unit, 12 component |
-| **P6 — Keyboard + polish + E2E** | Full §6 hotkey map, `KeyboardHelpOverlay`, scan queue hardening, focus-return audit, stock warning (Q1), discounts (per Q11); Playwright smoke flows: cash sale, split tender, serialized + trade-in sale, void (if Q14 = b). | P0–P5 | 10 unit, 10 component, 4 e2e |
-| **Total** | | | **~83 unit, ~86 component, ~4 e2e** |
+| **P6 — Keyboard, discounts, polish + E2E** | Full §6 hotkey map with `Kbd` chips on pointer devices, `KeyboardHelpOverlay`, scan queue hardening, focus-return audit (keyboard) and no-auto-focus check (touch); stock warning (Q1); line discounts with `APPLY_DISCOUNT` granted to cashiers (Q11); Playwright smoke flows: cash sale, split tender, serialized + trade-in sale, void — each at a desktop viewport, with the cash sale and trade-in also at a 390 px mobile viewport. | P0–P5 | 10 unit, 10 component, 6 e2e |
+| **Total** | | | **~83 unit, ~90 component, ~6 e2e** |
 
-**Backend prerequisites (small, separate PRs if accepted):** Q13 (customer relation on `findOne`), optionally Q9(b) (cashier IMEI lookup), Q11 backend discount enforcement.
+**Backend prerequisites (small, separate PRs):** Q13 (customer relation on `findOne`) before P2. Optional later: Q9(b) cashier IMEI lookup.
 
 ---
 
@@ -429,5 +496,6 @@ Not in Phase 6.4:
 - **Product-unit admin browser** (`/product-units` list/detail).
 - **Refunds / partial returns** (void is all-or-nothing; customer-return flow is a backend followup).
 - **Payment edit** (`PATCH` payments), sale-level notes, recent-sales filters beyond today — R1.1.
+- **Camera barcode/IMEI scanning** on phones and tablets — R1.1 candidate, pending Q22/Q23.
 - **Offline mode**, multi-language UI, cash drawer integration, card-terminal integration, customer-facing display.
 - **Multi-branch scoping** of reads (R9).
