@@ -27,9 +27,12 @@ import UserMenu from "../UserMenu";
  * Read right-to-left, it's "me → my preferences → my current branch
  * context" — user identity closest to the avatar, viewing context next.
  * BranchSelector is hidden below sm; on mobile the header stays compact.
+ *
+ * autoSelectBranch: forwarded to BranchSelector. False only on the POS
+ * "pick a branch" screen, where the admin must choose explicitly.
  */
 
-const AppHeader = () => {
+const AppHeader = ({ autoSelectBranch = true }) => {
   return (
     <header
       className="
@@ -50,7 +53,7 @@ const AppHeader = () => {
 
       {/* Right side: branch context + theme toggle + user menu */}
       <div className="flex items-center gap-2">
-        <BranchSelector />
+        <BranchSelector autoSelect={autoSelectBranch} />
         <ThemeToggle />
         <UserMenu />
       </div>

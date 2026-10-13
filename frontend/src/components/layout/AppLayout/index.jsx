@@ -34,13 +34,19 @@ import SidebarDrawer from "../SidebarDrawer";
  * background — this container handles it, so pages just render their
  * content. Existing pages will be refactored to drop their wrappers in
  * a follow-up commit.
+ *
+ * CHILDREN / autoSelectBranch:
+ * Normally used as a route element and renders <Outlet />. BranchContextGuard
+ * also renders it directly (with children) for the POS "pick a branch"
+ * screen, passing autoSelectBranch={false} so the header selector waits for
+ * an explicit choice.
  */
 
-const AppLayout = () => {
+const AppLayout = ({ children, autoSelectBranch = true }) => {
   return (
     <div className="h-screen flex flex-col bg-slate-50 dark:bg-slate-950">
       {/* Header spans full width at top */}
-      <AppHeader />
+      <AppHeader autoSelectBranch={autoSelectBranch} />
 
       {/* Row below the header: sidebar + main content */}
       <div className="flex flex-1 min-h-0">
@@ -54,7 +60,7 @@ const AppLayout = () => {
 
         {/* Main content area — page renders here via Outlet */}
         <main className="flex-1 min-w-0 overflow-y-auto overflow-x-hidden">
-          <Outlet />
+          {children ?? <Outlet />}
         </main>
       </div>
     </div>
