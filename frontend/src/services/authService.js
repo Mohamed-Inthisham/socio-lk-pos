@@ -15,12 +15,17 @@ import api from "./api";
  * Backend returns user with `full_name`.
  * Frontend components use `name`.
  * We map at the boundary so the rest of the app is untouched.
+ *
+ * branch_id / branch: UUID + nested branch for staff, null for admins.
+ * Normalised to null (never undefined) so callers can rely on the shape.
  */
 const mapBackendUser = (backendUser) => ({
   id: backendUser.id,
   email: backendUser.email,
   name: backendUser.full_name,
   role: backendUser.role,
+  branch_id: backendUser.branch_id ?? null,
+  branch: backendUser.branch ?? null,
   avatar: null,
 });
 
