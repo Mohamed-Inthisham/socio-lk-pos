@@ -12,6 +12,9 @@ import ManageCategories from "./pages/ManageCategories";
 import RoleProtectedRoute from "./components/auth/RoleProtectedRoute";
 import ProtectedRoute from "./components/auth/ProtectedRoute";
 import AppLayout from "./components/layout/AppLayout";
+import TerminalLayout from "./components/layout/TerminalLayout";
+import BranchContextGuard from "./components/pos/BranchContextGuard";
+import PosTerminal from "./pages/PosTerminal";
 import { restoreSession } from "./store/slices/authSlice";
 import { fetchBranches } from "./store/slices/branchesSlice";
 
@@ -127,6 +130,25 @@ function App() {
 
         <Route path="/brands" element={<ManageBrands />} />
         <Route path="/categories" element={<ManageCategories />} />
+      </Route>
+
+      {/*
+        POS terminal — full-screen TerminalLayout instead of AppLayout.
+        BranchContextGuard sits outside the layout so the terminal never
+        renders without a resolved branch (admins pick one first).
+      */}
+      <Route
+        element={
+          <ProtectedRoute>
+            <RoleProtectedRoute allowedRoles={["admin", "manager", "cashier"]}>
+              <BranchContextGuard>
+                <TerminalLayout />
+              </BranchContextGuard>
+            </RoleProtectedRoute>
+          </ProtectedRoute>
+        }
+      >
+        <Route path="/pos" element={<PosTerminal />} />
       </Route>
 
       {/* 404 fallback */}

@@ -4,20 +4,24 @@ import { useNavigate, useLocation } from "react-router-dom";
 import InputField from "../../common/InputField";
 import Button from "../../common/Button";
 import { loginUser, clearError } from "../../../store/slices/authSlice";
+import { ROLES } from "../../../constants/rolePermissions";
 
 const LoginForm = () => {
   const dispatch = useDispatch();
   const navigate = useNavigate();
   const location = useLocation();
-  const { loading, error, isAuthenticated } = useSelector(
+  const { loading, error, isAuthenticated, user } = useSelector(
     (state) => state.auth,
   );
 
   const [formData, setFormData] = useState({ email: "", password: "" });
   const [errors, setErrors] = useState({});
 
-  // Get the page user was trying to access before login
-  const from = location.state?.from?.pathname || "/dashboard";
+  // Get the page user was trying to access before login.
+  // Otherwise cashiers land on the POS terminal, everyone else on the dashboard.
+  const from =
+    location.state?.from?.pathname ||
+    (user?.role === ROLES.CASHIER ? "/pos" : "/dashboard");
 
   // Redirect to intended page after successful login
   useEffect(() => {

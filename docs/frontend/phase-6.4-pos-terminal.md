@@ -218,7 +218,7 @@ The sale id is **not** in the `/pos` URL (the draft is session state, not a shar
 
 ## 6. Keyboard-heavy UX
 
-**Approach (Q17, decided): vanilla — one `useHotkeys`-style hook (~40 lines) registered at `TerminalLayout`, plus native focus management. No library.** Headless UI already traps focus inside dialogs and restores it on close; the remaining need is a global keydown map and "return focus to the scan input". The shop has no existing POS, so there is no muscle memory to match: the map below is the design, refined after cashiers use it.
+**Approach (Q17, decided — revised 2026-10-13): `react-hotkeys-hook` for the key bindings, registered at `TerminalLayout`, plus native focus management.** Installed in P0; bindings land with the scan bar and dialogs that use them. Headless UI already traps focus inside dialogs and restores it on close; the remaining need is a global keydown map and "return focus to the scan input". The shop has no existing POS, so there is no muscle memory to match: the map below is the design, refined after cashiers use it.
 
 **Global rules:**
 
@@ -284,7 +284,7 @@ Keyboard shortcuts are an accelerator, never the only way to do something.
 
 **Shared primitives stay in `components/common/`** (Button, InputField, Select, Table, Dialog, ConfirmDialog, Tooltip, Drawer). New primitives added there only if generic: `MoneyText` (LKR formatting + `tabular-nums`), `Kbd` (shortcut chip, hidden on touch), `Toast` (Q5), `StatusBanner`, `ResponsiveDialog` (renders `Dialog` at `≥ md`, a bottom sheet below it; every terminal dialog uses this), `useMediaQuery` hook.
 
-**Visual direction (Q6):** modern and clean within Path B's existing tokens — card surfaces with soft borders and rounded corners, generous spacing, large `tabular-nums` totals, the cyan/sky accent reserved for the primary action (Pay / Complete), dark mode supported via the existing `themeStore`. No new UI library. The design target is a 1366×768 laptop (Q23): the desktop layout must fit there with the totals/payments column fully visible. Screenshots at 1366 px (primary), 768 px and 390 px are reviewed at the end of P0.
+**Visual direction (Q6):** modern and clean within Path B's existing tokens — card surfaces with soft borders and rounded corners, generous spacing, large `tabular-nums` totals, the cyan/sky accent reserved for the primary action (Pay / Complete), dark mode supported via the existing `themeStore`. No new UI library. The design target is a 1366×768 laptop (Q23): the desktop layout must fit there with the totals/payments column fully visible. Screenshots at 1366×768 (floor), 1920×1080 (ideal) and 390 px (smoke check) are reviewed at the end of P0; the full 390/768/1366 responsive review moves to P1 with the cart.
 
 **Responsive rendering:** the cart renders as a table at `≥ md` (`CartTable`) and as stacked cards below it (`CartCardList`), sharing one row-model selector, so both show the same data and actions.
 
@@ -323,7 +323,7 @@ pages/PosTerminal/  pages/PosRecentSales/  pages/PosSaleDetail/
 services/salesService.js  services/customersService.js
 store/slices/terminalSlice.js  store/slices/posCatalogSlice.js
 store/zustand/terminalSessionStore.js
-hooks/useHotkeys.js  hooks/useTerminalBranch.js  hooks/useMediaQuery.js
+hooks/useTerminalBranch.js  hooks/useMediaQuery.js     # hotkeys: useHotkeys from react-hotkeys-hook (Q17)
 schemas/paymentSchema.js  schemas/customerSchema.js  schemas/voidSchema.js
 utils/money.js                           # formatLKR, toCents, fromCents
 ```
@@ -358,7 +358,7 @@ Q6, Q9, Q11, Q12 and Q17 were answered explicitly. The rest were not called out,
 | Q14 | Test tooling | Default — Vitest + RTL from P0, Playwright in P6 |
 | Q15 | Void reason | Default — presets + optional detail |
 | Q16 | Recent sales | Default — today, this branch, all cashiers |
-| **Q17** | **Hotkeys** | **No existing POS to match.** Vanilla hook with the §6 map; refine after cashier use |
+| **Q17** | **Hotkeys** | **No existing POS to match.** `react-hotkeys-hook` with the §6 map; refine after cashier use (revised 2026-10-13 from the vanilla hook) |
 | Q18 | Abandoned drafts | Default — confirm and discard |
 | Q19 | Customer detach with trade-in | Default — frontend blocks it |
 | Q20 | Language | Default — English only |
@@ -443,7 +443,7 @@ The original questions as asked, kept for the reasoning. The table above is auth
 
 **Q17. Hotkey implementation and bindings.**
 - (a) Vanilla hook (no dependency). (b) `react-hotkeys-hook`. (c) `tinykeys`.
-- **Decided:** (a); no existing POS, so the §6 map stands.
+- **Decided:** (b) `react-hotkeys-hook` (revised 2026-10-13; originally (a)); no existing POS, so the §6 map stands.
 
 **Q18. Abandoned drafts.** Starting a new sale or logging out with a non-empty draft.
 - (a) Prompt: "Discard current sale?" → `DELETE`. (b) Leave it as an orphan DRAFT. (c) Block until completed or discarded.
@@ -469,8 +469,8 @@ Each slice is a vertical, demoable increment. "unit" = reducers/selectors/utils 
 
 | Slice | Ships | Depends on | Tests (rough) |
 |-------|-------|-----------|:-------------:|
-| **P0 — Foundations + first runnable cart** | `mapBackendUser` keeps `branch_id`/`branch`; Vitest + RTL setup; `salesService`, `terminalSlice`, `posCatalogSlice`, `utils/money`; `TerminalLayout` with the three breakpoint layouts, `ResponsiveDialog`, `useMediaQuery`, `MobileActionBar`; `BranchContextGuard`, `/pos` route + Sidebar link; `ScanBar` (barcode + name search, IMEI-shaped hint) adding **non-serialized** lines; `CartTable` + `CartCardList` with qty edit + remove; `TotalsPanel`; discard draft. **Runnable:** log in as cashier, scan items, see totals, discard — on desktop and on a phone. Ends with the 390/768/1366 screenshot review. | — | 25 unit, 20 component |
-| **P1 — Payments + complete** | `PaymentDialog` (bottom sheet on phone) with CASH + reference methods; `PaymentsPanel` with remove; `CompleteSaleDialog`; `SaleCompletePanel`; 409 banner on complete (insufficient stock); reload recovery (Q8); network banner; `Toast`. **First real end-to-end sale.** | P0 | 20 unit, 16 component |
+| **P0 — Foundations + terminal shell** (narrowed 2026-10-13) | Vitest + RTL setup; `mapBackendUser` keeps `branch_id`/`branch`; `react-hotkeys-hook` installed (Q17); full-screen `TerminalLayout` shell (top bar, status strip, `<Outlet/>`); `BranchContextGuard` + `useTerminalBranch`; `/pos` route + Sidebar link; cashier login redirect to `/pos` (Q21); empty `PosTerminal` page. **Runnable:** log in as cashier → land on an empty terminal; admin picks a branch first. Ends with screenshots at 1366×768 (floor), 1920×1080 (ideal) and 390 px (smoke check only). | — | 14 unit, 18 component |
+| **P1 — First runnable cart, payments + complete** | Moved from P0: `salesService`, `terminalSlice`, `posCatalogSlice`, `utils/money`; `TerminalLayout` breakpoint layouts, `ResponsiveDialog`, `useMediaQuery`, `MobileActionBar`; `ScanBar` (barcode + name search, IMEI-shaped hint) adding **non-serialized** lines; `CartTable` + `CartCardList` with qty edit + remove; `TotalsPanel`; discard draft. Then: `PaymentDialog` (bottom sheet on phone) with CASH + reference methods; `PaymentsPanel` with remove; `CompleteSaleDialog`; `SaleCompletePanel`; 409 banner on complete (insufficient stock); reload recovery (Q8); network banner; `Toast`. **First real end-to-end sale.** | P0 | ~31 unit, ~22 component |
 | **P2 — Customers** | `CustomerAttachDialog` (search, pick, detach), `CustomerCreateForm` (inline create, NIC 409 → offer existing); customer shown in terminal; `customersService`. | P0 (Q13 backend tweak optional) | 8 unit, 12 component |
 | **P3 — Serialized lines** | Serialized products route through `ImeiPromptDialog`; IMEI shown on cart rows; serialized rows lock qty; 400/409 handling with `existing_unit` message; complete-time 409 for cross-DRAFT race highlights the line. | P0, P1 | 6 unit, 10 component |
 | **P4 — Trade-in** | TRADE_IN in `PaymentDialog` (product picker over serialized catalog, IMEI, buying = amount, optional selling/notes); requires customer (links to P2 dialog); detach-customer block (Q19); TRADE_IN rows show "frozen" (remove only); trade-in IMEI 409 at add and complete. | P1, P2, P3 | 8 unit, 12 component |

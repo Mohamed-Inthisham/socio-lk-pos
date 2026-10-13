@@ -10,6 +10,7 @@ import { useSelector } from "react-redux";
 import { Store, ChevronDown, Check } from "lucide-react";
 import { selectActiveBranches } from "../../../store/slices/branchesSlice";
 import useActiveBranchStore from "../../../store/zustand/activeBranchStore";
+import BranchChip from "../BranchChip";
 
 /**
  * BranchSelector Component
@@ -48,11 +49,15 @@ import useActiveBranchStore from "../../../store/zustand/activeBranchStore";
  *   3. Stay null (no branches loaded yet, or none exist).
  * Only sets the store if it's currently null — never overwrites a user pick.
  *
+ * `autoSelect={false}` skips step 2. The POS terminal's "pick a branch"
+ * screen uses it: opening a till must be an explicit admin choice, not
+ * whichever branch happens to be first.
+ *
  * NULL activeBranchId is a valid transitional state and must not crash the
  * render. This shows as a disabled placeholder button until defaulting resolves.
  */
 
-const BranchSelector = () => {
+const BranchSelector = ({ autoSelect = true }) => {
   const user = useSelector((state) => state.auth.user);
   const activeBranches = useSelector(selectActiveBranches);
   const activeBranchId = useActiveBranchStore((s) => s.activeBranchId);
@@ -76,10 +81,10 @@ const BranchSelector = () => {
     // Admin with no pinned branch — fall back to the first active branch.
     // Staff without branch_id shouldn't exist (DB constraint), but if the
     // fetch hasn't populated `branches` yet we just wait until it does.
-    if (activeBranches.length > 0) {
+    if (autoSelect && activeBranches.length > 0) {
       setActiveBranch(activeBranches[0].id);
     }
-  }, [user, activeBranchId, activeBranches, setActiveBranch]);
+  }, [user, activeBranchId, activeBranches, setActiveBranch, autoSelect]);
 
   if (!user) return null;
 
@@ -90,24 +95,10 @@ const BranchSelector = () => {
   if (!isAdmin) {
     const staffBranchName = user.branch?.name || "—";
     return (
-      <div
-        className="
-          flex items-center gap-1 sm:gap-2
-          h-10 px-2 sm:px-3 rounded-full
-          bg-slate-100 dark:bg-slate-800
-          text-sm font-medium text-slate-700 dark:text-slate-200
-        "
+      <BranchChip
+        name={staffBranchName}
         title={`You're assigned to ${staffBranchName}`}
-      >
-        <Store
-          size={14}
-          className="text-slate-500 dark:text-slate-400 flex-shrink-0"
-          aria-hidden="true"
-        />
-        <span className="max-w-[5rem] sm:max-w-[8rem] truncate">
-          {staffBranchName}
-        </span>
-      </div>
+      />
     );
   }
 

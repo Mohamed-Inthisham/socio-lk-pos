@@ -8,6 +8,7 @@ import {
   ChevronsLeft,
   ChevronsRight,
   ChevronDown,
+  ScanBarcode,
 } from "lucide-react";
 import Tooltip from "../../common/Tooltip";
 import useLayoutStore from "../../../store/zustand/layoutStore";
@@ -61,6 +62,11 @@ const NAV_ITEMS = [
     to: "/dashboard",
     label: "Dashboard",
     icon: LayoutDashboard,
+  },
+  {
+    to: "/pos",
+    label: "POS terminal",
+    icon: ScanBarcode,
   },
   {
     label: "Products",
