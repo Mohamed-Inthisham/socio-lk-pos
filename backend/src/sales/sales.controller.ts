@@ -66,10 +66,14 @@ export class SalesController {
   @Get(':id')
   @Roles(UserRole.ADMIN, UserRole.MANAGER, UserRole.CASHIER)
   @ApiOperation({
-    summary: 'Get a sale by ID (with nested branch + cashier)',
+    summary:
+      'Get a sale by ID (with nested branch, cashier, customer, lines, payments)',
     description:
-      'Returns the sale with its branch and cashier eagerly loaded. ' +
-      'Lines and payments will be included from Slices D and E onward.',
+      'Returns the sale with branch, cashier, customer (null when none is ' +
+      'attached), lines ordered by line_number, and payments ordered by ' +
+      'created_at. A soft-deleted customer or cashier is still included, ' +
+      'with deleted_at set, so historical sales keep naming them. Every ' +
+      'endpoint that returns the hydrated sale uses this same shape.',
   })
   @ApiParam({ name: 'id', description: 'Sale UUID', format: 'uuid' })
   @ApiResponse({ status: 200, description: 'Sale found' })

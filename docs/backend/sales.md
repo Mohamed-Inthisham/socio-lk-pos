@@ -327,7 +327,7 @@ All endpoints are prefixed with `/api/v1` and require authentication via the `ac
 | Method | Path | Role | Purpose |
 |--------|------|------|---------|
 | GET | `/sales` | any | List sales (paginated, filterable by branch/cashier/status/date range) |
-| GET | `/sales/:id` | any | Get one sale with nested branch, cashier, lines, payments |
+| GET | `/sales/:id` | any | Get one sale with nested branch, cashier, customer (soft-deleted included), lines, payments |
 | POST | `/sales` | any | Create a DRAFT sale (empty cart) |
 | PATCH | `/sales/:id` | any | Update DRAFT sale (notes, customer_id only) |
 | DELETE | `/sales/:id` | any | Discard a DRAFT sale (hard delete; cascade removes lines + payments) |

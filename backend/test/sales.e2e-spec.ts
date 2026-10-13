@@ -703,6 +703,77 @@ describe('Sales (e2e)', () => {
       });
       expect(response.body.branch).toMatchObject({ id: branch.id });
       expect(response.body.cashier).toMatchObject({ id: user.id });
+      expect(response.body.customer).toBeNull();
+    });
+
+    it('returns the nested customer when the sale has one', async () => {
+      const branch = await seedBranch();
+      const { user, password } = await seedUser(UserRole.ADMIN, 'a@t.com');
+      const customer = await seedCustomer();
+      const sale = await seedSale({
+        branch_id: branch.id,
+        cashier_id: user.id,
+        customer_id: customer.id,
+      });
+      const cookies = await loginAndGetCookies(user.email, password);
+
+      const response = await request(app.getHttpServer())
+        .get(`/api/v1/sales/${sale.id}`)
+        .set('Cookie', cookies)
+        .expect(200);
+
+      expect(response.body.customer_id).toBe(customer.id);
+      expect(response.body.customer).toMatchObject({
+        id: customer.id,
+        name: 'Kamal Perera',
+        phone: '0771234567',
+      });
+    });
+
+    it('still returns the customer after the customer is soft-deleted', async () => {
+      const branch = await seedBranch();
+      const { user, password } = await seedUser(UserRole.ADMIN, 'a@t.com');
+      const customer = await seedCustomer();
+      const sale = await seedSale({
+        branch_id: branch.id,
+        cashier_id: user.id,
+        customer_id: customer.id,
+      });
+      await dataSource.getRepository(Customer).softDelete(customer.id);
+      const cookies = await loginAndGetCookies(user.email, password);
+
+      const response = await request(app.getHttpServer())
+        .get(`/api/v1/sales/${sale.id}`)
+        .set('Cookie', cookies)
+        .expect(200);
+
+      expect(response.body.customer).toMatchObject({ id: customer.id });
+      expect(response.body.customer.deleted_at).not.toBeNull();
+    });
+
+    it('includes the customer in mutation responses that return the sale', async () => {
+      const branch = await seedBranch();
+      const { user, password } = await seedUser(UserRole.ADMIN, 'a@t.com');
+      const customer = await seedCustomer();
+      const sale = await seedSale({
+        branch_id: branch.id,
+        cashier_id: user.id,
+        customer_id: customer.id,
+        total: '500.00',
+      });
+      const cookies = await loginAndGetCookies(user.email, password);
+
+      const response = await request(app.getHttpServer())
+        .post(`/api/v1/sales/${sale.id}/payments`)
+        .set('Cookie', cookies)
+        .send({
+          payment_method: PaymentMethod.CASH,
+          amount: 500,
+          cash_received: 500,
+        })
+        .expect(201);
+
+      expect(response.body.customer).toMatchObject({ id: customer.id });
     });
 
     it('returns 404 for a non-existent sale', async () => {
@@ -782,6 +853,40 @@ describe('Sales (e2e)', () => {
         .expect(200);
 
       expect(response.body.customer_id).toBe(customer.id);
+      expect(response.body.customer).toMatchObject({ id: customer.id });
+      // Persisted, not just echoed
+      const saved = await dataSource
+        .getRepository(Sale)
+        .findOne({ where: { id: sale.id } });
+      expect(saved?.customer_id).toBe(customer.id);
+    });
+
+    it('replaces an existing customer_id with a different customer', async () => {
+      const branch = await seedBranch();
+      const first = await seedCustomer();
+      const second = await seedCustomer({
+        name: 'Nimal Silva',
+        phone: '0779876543',
+      });
+      const { user, password } = await seedUser(UserRole.ADMIN, 'a@t.com');
+      const sale = await seedSale({
+        branch_id: branch.id,
+        cashier_id: user.id,
+        customer_id: first.id,
+      });
+      const cookies = await loginAndGetCookies(user.email, password);
+
+      const response = await request(app.getHttpServer())
+        .patch(`/api/v1/sales/${sale.id}`)
+        .set('Cookie', cookies)
+        .send({ customer_id: second.id })
+        .expect(200);
+
+      expect(response.body.customer).toMatchObject({ id: second.id });
+      const saved = await dataSource
+        .getRepository(Sale)
+        .findOne({ where: { id: sale.id } });
+      expect(saved?.customer_id).toBe(second.id);
     });
 
     // ---- customer_id validation (Phase 6.3.5 Slice B) ----

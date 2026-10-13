@@ -496,11 +496,12 @@ describe('SalesService', () => {
   });
 
   describe('findOne', () => {
-    it('returns the sale with nested branch, cashier, lines, and payments', async () => {
+    it('returns the sale with nested branch, cashier, customer, lines, and payments (including soft-deleted relations)', async () => {
       const sale = {
         id: 's1',
         branch: {},
         cashier: {},
+        customer: {},
         lines: [],
         payments: [],
       };
@@ -510,7 +511,8 @@ describe('SalesService', () => {
 
       expect(mockSalesRepo.findOne).toHaveBeenCalledWith({
         where: { id: 's1' },
-        relations: ['branch', 'cashier', 'lines', 'payments'],
+        relations: ['branch', 'cashier', 'customer', 'lines', 'payments'],
+        withDeleted: true,
         order: {
           lines: { line_number: 'ASC' },
           payments: { created_at: 'ASC' },
@@ -549,6 +551,35 @@ describe('SalesService', () => {
 
       expect(result.customer_id).toBe('cust-99');
       expect(result.notes).toBe('New notes');
+    });
+
+    it('drops the loaded customer relation before saving a new customer_id', async () => {
+      // Regression: findOne loads `customer`; if it is still on the entity
+      // at save(), TypeORM writes the old relation over the new FK.
+      const sale = {
+        id: 's1',
+        status: SaleStatus.DRAFT,
+        customer_id: null,
+        customer: null,
+        notes: null,
+      };
+      mockSalesRepo.findOne.mockResolvedValue(sale);
+      mockCustomersService.findOne.mockResolvedValue({
+        id: 'cust-99',
+        deleted_at: null,
+      });
+      mockSalesRepo.save.mockImplementation((e) => Promise.resolve(e));
+
+      await service.update('s1', { customer_id: 'cust-99' });
+
+      const saved = mockSalesRepo.save.mock.calls[0][0] as Record<
+        string,
+        unknown
+      >;
+      expect(saved.customer_id).toBe('cust-99');
+      expect('customer' in saved).toBe(false);
+      // Re-read after save so the response has the fresh relation
+      expect(mockSalesRepo.findOne).toHaveBeenCalledTimes(2);
     });
 
     it('clears customer_id when null is passed', async () => {
