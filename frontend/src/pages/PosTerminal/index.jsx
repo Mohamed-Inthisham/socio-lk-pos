@@ -1,7 +1,8 @@
 import { useEffect, useState } from "react";
 import { useDispatch, useSelector } from "react-redux";
-import { AlertTriangle, FilePlus2, ShoppingCart } from "lucide-react";
+import { AlertTriangle, FilePlus2 } from "lucide-react";
 import Button from "../../components/common/Button";
+import CartLines from "../../components/pos/CartLines";
 import NewSaleDialog from "../../components/pos/NewSaleDialog";
 import ScanBar from "../../components/pos/ScanBar";
 import useTerminalBranch from "../../hooks/useTerminalBranch";
@@ -96,6 +97,8 @@ const PosTerminal = () => {
   }
 
   const started = formatStarted(sale?.created_at);
+  // Units, not lines — stays visible while the search dropdown covers the cart.
+  const itemCount = lines.reduce((sum, line) => sum + line.quantity, 0);
 
   return (
     <div className="h-full overflow-y-auto lg:overflow-hidden">
@@ -119,18 +122,7 @@ const PosTerminal = () => {
           <ScanBar branchId={branchId} disabled={status !== "ready"} />
 
           <Card className="flex-1 min-h-[16rem] flex flex-col overflow-hidden">
-            <div className="flex-1 flex items-center justify-center p-6 text-center">
-              <div>
-                <ShoppingCart
-                  size={28}
-                  aria-hidden="true"
-                  className="mx-auto mb-2 text-slate-300 dark:text-slate-600"
-                />
-                <p className="text-sm text-slate-500 dark:text-slate-400">
-                  Cart is empty
-                </p>
-              </div>
-            </div>
+            <CartLines />
           </Card>
         </section>
 
@@ -143,7 +135,8 @@ const PosTerminal = () => {
                   Current sale
                 </p>
                 <p className="mt-0.5 text-sm text-slate-700 dark:text-slate-200" data-testid="sale-meta">
-                  Draft{started ? ` · started ${started}` : ""}
+                  Draft · {itemCount} {itemCount === 1 ? "item" : "items"}
+                  {started ? ` · started ${started}` : ""}
                 </p>
               </div>
               <Button
@@ -163,7 +156,7 @@ const PosTerminal = () => {
         open={confirmNewSale}
         onClose={() => setConfirmNewSale(false)}
         onConfirm={startNewSale}
-        itemCount={lines.length}
+        itemCount={itemCount}
       />
     </div>
   );

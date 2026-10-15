@@ -210,20 +210,26 @@ const ScanBar = ({ branchId, disabled = false, inputRef }) => {
           id={listId}
           role="listbox"
           aria-label="Matching products"
+          // Raised surface (lighter than the cart card in dark mode, ring +
+          // heavy shadow) so the cart rows it covers don't read as missing.
           className="
-            absolute z-20 left-0 right-0 mt-1.5 max-h-80 overflow-y-auto py-1
-            rounded-xl border border-slate-200 dark:border-slate-700
-            bg-white dark:bg-slate-900 shadow-xl shadow-slate-900/10 dark:shadow-black/40
+            absolute z-20 left-0 right-0 mt-1.5 max-h-80 overflow-y-auto pb-1
+            rounded-xl border border-slate-300 dark:border-slate-600
+            ring-1 ring-cyan-500/20
+            bg-white dark:bg-slate-800
+            shadow-2xl shadow-slate-900/20 dark:shadow-black/70
           "
         >
-          {resultsCurrent && results.length === 0 && (
-            <li className="px-4 py-3 text-sm text-slate-500 dark:text-slate-400">
-              No products match &ldquo;{query}&rdquo;
-            </li>
-          )}
-          {!resultsCurrent && (
-            <li className="px-4 py-3 text-sm text-slate-500 dark:text-slate-400">Searching…</li>
-          )}
+          <li
+            role="presentation"
+            className="sticky top-0 px-4 pt-2 pb-1.5 text-[11px] font-semibold uppercase tracking-wider text-slate-500 dark:text-slate-400 bg-white dark:bg-slate-800 border-b border-slate-100 dark:border-slate-700"
+          >
+            {!resultsCurrent
+              ? "Searching…"
+              : results.length === 0
+                ? `No products match “${query}”`
+                : `${results.length} ${results.length === 1 ? "match" : "matches"} for “${query}”`}
+          </li>
           {resultsCurrent &&
             results.map((product, index) => (
               <li
@@ -236,7 +242,7 @@ const ScanBar = ({ branchId, disabled = false, inputRef }) => {
                 onClick={() => addProduct(product)}
                 className={`
                   flex items-center gap-3 px-4 py-2.5 cursor-pointer
-                  ${index === active ? "bg-cyan-50 dark:bg-cyan-900/30" : ""}
+                  ${index === active ? "bg-cyan-50 dark:bg-cyan-900/40" : ""}
                 `}
               >
                 <div className="flex-1 min-w-0">
