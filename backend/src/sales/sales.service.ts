@@ -6,7 +6,12 @@ import {
   ConflictException,
 } from '@nestjs/common';
 import { InjectRepository, InjectDataSource } from '@nestjs/typeorm';
-import { DataSource, EntityManager, Repository } from 'typeorm';
+import {
+  DataSource,
+  EntityManager,
+  QueryFailedError,
+  Repository,
+} from 'typeorm';
 import { Sale } from './entities/sale.entity';
 import { SaleLine } from './entities/sale-line.entity';
 import { Payment } from './entities/payment.entity';
@@ -38,6 +43,7 @@ import {
   PaginatedResponse,
   paginate,
 } from '../common/dto/paginated-response.dto';
+import { toCents } from '../common/utils/money';
 
 @Injectable()
 export class SalesService {
@@ -714,8 +720,9 @@ export class SalesService {
 
       const saved = await manager.save(line);
 
-      // Recompute sale totals
-      await this.recomputeSaleTotals(manager, saleId);
+      // Recompute sale totals. Reducing quantity or raising the discount
+      // can drop the total below amount_paid.
+      await this.recomputeSaleTotalsOrRejectShrink(manager, saleId);
 
       return saved;
     });
@@ -760,7 +767,7 @@ export class SalesService {
 
       await manager.remove(line);
 
-      await this.recomputeSaleTotals(manager, saleId);
+      await this.recomputeSaleTotalsOrRejectShrink(manager, saleId);
     });
   }
 
@@ -842,14 +849,14 @@ export class SalesService {
       }
 
       // 3. Assert amount does not overshoot remaining balance
-      const remaining = await this.remainingBalance(
+      const remainingCents = await this.remainingBalanceCents(
         manager,
         saleId,
         sale.total,
       );
-      if (dto.amount > remaining) {
+      if (toCents(dto.amount) > remainingCents) {
         throw new BadRequestException(
-          `Payment amount ${dto.amount.toFixed(2)} exceeds remaining balance ${remaining.toFixed(2)}`,
+          `Payment amount ${dto.amount.toFixed(2)} exceeds remaining balance ${(remainingCents / 100).toFixed(2)}`,
         );
       }
 
@@ -960,15 +967,15 @@ export class SalesService {
       // Bound nextAmount above by remaining balance excluding THIS payment.
       // We pass the current payment's amount as "excludeAmount" so it's
       // subtracted from the "already paid" total before computing remaining.
-      const remaining = await this.remainingBalance(
+      const remainingCents = await this.remainingBalanceCents(
         manager,
         saleId,
         sale.total,
-        Number(payment.amount),
+        payment.amount,
       );
-      if (nextAmount > remaining) {
+      if (toCents(nextAmount) > remainingCents) {
         throw new BadRequestException(
-          `Payment amount ${nextAmount.toFixed(2)} exceeds remaining balance ${remaining.toFixed(2)}`,
+          `Payment amount ${nextAmount.toFixed(2)} exceeds remaining balance ${(remainingCents / 100).toFixed(2)}`,
         );
       }
 
@@ -1520,9 +1527,13 @@ export class SalesService {
     const lineSubtotal = Number(unitPrice) * quantity;
 
     if (discountType === DiscountType.AMOUNT) {
-      if (value > lineSubtotal) {
+      // Compared in cents: the float product can land just under the
+      // true subtotal (100.10 * 3 = 300.29999...), which would reject a
+      // discount equal to the full line.
+      const lineSubtotalCents = toCents(unitPrice) * quantity;
+      if (toCents(value) > lineSubtotalCents) {
         throw new BadRequestException(
-          `Discount amount ${value.toFixed(2)} exceeds line subtotal ${lineSubtotal.toFixed(2)}`,
+          `Discount amount ${value.toFixed(2)} exceeds line subtotal ${(lineSubtotalCents / 100).toFixed(2)}`,
         );
       }
       return this.roundToCents(value);
@@ -1592,6 +1603,37 @@ export class SalesService {
       [saleId],
     );
   }
+
+  /**
+   * recomputeSaleTotals for mutations that can SHRINK the total
+   * (updateLine, removeLine). If the new total drops below amount_paid,
+   * the recompute UPDATE itself violates CHK_sales_amount_paid_bounded —
+   * Postgres checks CHECK constraints per statement and they can't be
+   * deferred, so a guard after the recompute would never run. Map that
+   * one violation to a 400; anything else propagates unchanged. The
+   * caller's transaction rolls back either way.
+   */
+  private async recomputeSaleTotalsOrRejectShrink(
+    manager: EntityManager,
+    saleId: string,
+  ): Promise<void> {
+    try {
+      await this.recomputeSaleTotals(manager, saleId);
+    } catch (err) {
+      if (
+        err instanceof QueryFailedError &&
+        (err.driverError as { constraint?: string }).constraint ===
+          'CHK_sales_amount_paid_bounded'
+      ) {
+        throw new BadRequestException(
+          'Cannot reduce the sale total below the amount already paid. ' +
+            'Remove or reduce payments first.',
+        );
+      }
+      throw err;
+    }
+  }
+
   /**
    * Recompute Sale.amount_paid and Sale.change_due from the actual
    * payments rows and write them back to the Sale in one round trip.
@@ -1912,23 +1954,23 @@ export class SalesService {
    * Without this, updating a Rs. 500 payment to Rs. 500 would fail
    * because SUM would already include the 500 being replaced.
    *
-   * Returns a Number (not string) because the caller compares it against
-   * the DTO's `amount: number`. Sale.total comes back as a string from
-   * TypeORM (Postgres numeric), so we Number() it here.
+   * Returns integer cents. Callers compare it against toCents(amount);
+   * doing the subtraction in floats rejects exact-remainder payments
+   * (100.30 - 50.10 = 50.199999... < 50.20).
    */
-  private async remainingBalance(
+  private async remainingBalanceCents(
     manager: EntityManager,
     saleId: string,
     saleTotal: string,
-    excludeAmount = 0,
+    excludeAmount: string | number = 0,
   ): Promise<number> {
     const result = await manager
       .createQueryBuilder(Payment, 'payment')
       .select('COALESCE(SUM(payment.amount), 0)', 'sum')
       .where('payment.sale_id = :saleId', { saleId })
       .getRawOne<{ sum: string }>();
-    const paidSoFar = Number(result?.sum ?? 0) - excludeAmount;
-    return Number(saleTotal) - paidSoFar;
+    const paidSoFarCents = toCents(result?.sum ?? 0) - toCents(excludeAmount);
+    return toCents(saleTotal) - paidSoFarCents;
   }
 
   /**

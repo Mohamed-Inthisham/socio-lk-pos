@@ -30,6 +30,8 @@ Non-blocking issues and tech debt to address opportunistically. When you fix one
 
 - **Customer can be cleared from a DRAFT that has TRADE_IN payments.** `addPayment` requires `sale.customer_id` for TRADE_IN, but `PATCH /sales/:id` with `customer_id: null` still succeeds afterwards. `completeSale` catches it with a 400 before calling `createForTradeIn` (PhonePurchase needs a customer), so there is no data risk — but the error surfaces late. Fix: in `SalesService.update`, reject clearing `customer_id` when the sale has any TRADE_IN payment. _[Slice G]_ **Resolved** — shipped in #22 (also covers customer reassignment).
 
+- **PERCENT discounts don't always round half-up.** `SalesService.resolveDiscountAmount` (`backend/src/sales/sales.service.ts:1548`) computes `roundToCents((lineSubtotal * value) / 100)` in floats. The `+ Number.EPSILON` nudge in `roundToCents` (`:1486`) only rescues values below ~1, so exact half-cent results often round down: 50% of 4.35 should be 2.18 (half-up) but stores 2.17. No DB constraint is violated and the error is ≤1 cent in the customer's favour. Fix: compute in integer cents (`toCents(unitPrice) * quantity * pct`, half-up on the exact value). That changes stored `discount_amount` for some existing inputs, so this behaviour change needs its own review. Found in the sales money audit alongside the payment-remainder fix. _[Phase 6.3 Slice D]_
+
 - **`AuditLogInterceptor` pre-fetch runs before `ParseUUIDPipe`.** Malformed UUIDs on `PATCH`/`DELETE` routes surface as 500 (interceptor tries to fetch by malformed id) instead of 400 (pipe should reject first). Cosmetic. _[Phase 6.3]_
 
 ## Test-environment friction

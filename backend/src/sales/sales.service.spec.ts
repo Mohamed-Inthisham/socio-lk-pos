@@ -1,5 +1,6 @@
 import { Test, TestingModule } from '@nestjs/testing';
 import { getRepositoryToken, getDataSourceToken } from '@nestjs/typeorm';
+import { QueryFailedError } from 'typeorm';
 import {
   NotFoundException,
   BadRequestException,
@@ -1060,6 +1061,59 @@ describe('SalesService', () => {
       ).rejects.toThrow(BadRequestException);
     });
 
+    // F2: 100.10 * 3 = 300.29999... in floats, which used to reject a
+    // discount equal to the full line subtotal.
+    it('accepts an AMOUNT discount equal to the full subtotal (100.10 x 3)', async () => {
+      mockQueryBuilder.getOne.mockResolvedValue(seedDraftSale());
+      mockQueryBuilder.getRawOne.mockResolvedValue({ max: '0' });
+      mockProductsService.findOne.mockResolvedValue(
+        seedProduct({ selling_price: '100.10' }),
+      );
+      mockManager.create.mockImplementation((_e, data) => data);
+      mockManager.save.mockImplementation((e) => Promise.resolve(e));
+
+      await service.addLine(
+        'sale-1',
+        {
+          product_id: 'prod-1',
+          quantity: 3,
+          discount_type: DiscountType.AMOUNT,
+          discount_value: 300.3,
+        },
+        'cashier-1',
+      );
+
+      expect(mockManager.create).toHaveBeenCalledWith(
+        SaleLine,
+        expect.objectContaining({
+          discount_amount: '300.30',
+          line_total: '0.00',
+        }),
+      );
+    });
+
+    it('rejects an AMOUNT discount one cent over the subtotal (100.10 x 3)', async () => {
+      mockQueryBuilder.getOne.mockResolvedValue(seedDraftSale());
+      mockQueryBuilder.getRawOne.mockResolvedValue({ max: '0' });
+      mockProductsService.findOne.mockResolvedValue(
+        seedProduct({ selling_price: '100.10' }),
+      );
+
+      await expect(
+        service.addLine(
+          'sale-1',
+          {
+            product_id: 'prod-1',
+            quantity: 3,
+            discount_type: DiscountType.AMOUNT,
+            discount_value: 300.31,
+          },
+          'cashier-1',
+        ),
+      ).rejects.toThrow('Discount amount 300.31 exceeds line subtotal 300.30');
+      expect(mockManager.save).not.toHaveBeenCalled();
+    });
+
     it('throws BadRequestException when only discount_type is provided', async () => {
       mockQueryBuilder.getOne.mockResolvedValue(seedDraftSale());
       mockQueryBuilder.getRawOne.mockResolvedValue({ max: '0' });
@@ -1695,6 +1749,84 @@ describe('SalesService', () => {
     });
   });
 
+  // B2: when a line mutation drops sale.total below amount_paid, the
+  // recompute UPDATE violates CHK_sales_amount_paid_bounded. The service
+  // maps exactly that violation to a 400.
+  describe('shrink below amount_paid', () => {
+    const SHRINK_MESSAGE =
+      'Cannot reduce the sale total below the amount already paid. ' +
+      'Remove or reduce payments first.';
+
+    const checkViolation = (constraint: string) =>
+      new QueryFailedError(
+        'UPDATE sales SET ...',
+        ['sale-1'],
+        Object.assign(new Error(`violates check constraint "${constraint}"`), {
+          code: '23514',
+          constraint,
+        }),
+      );
+
+    beforeEach(() => {
+      mockQueryBuilder.getOne.mockResolvedValue(seedDraftSale());
+      mockManager.save.mockImplementation((e) => Promise.resolve(e));
+    });
+
+    it('updateLine: reducing quantity → 400 with the shrink message', async () => {
+      mockManager.findOne.mockResolvedValue(seedLine({ quantity: 2 }));
+      mockManager.query.mockRejectedValueOnce(
+        checkViolation('CHK_sales_amount_paid_bounded'),
+      );
+
+      await expect(
+        service.updateLine('sale-1', 'line-1', { quantity: 1 }),
+      ).rejects.toThrow(new BadRequestException(SHRINK_MESSAGE));
+    });
+
+    it('updateLine: raising the discount → 400 with the shrink message', async () => {
+      mockManager.findOne.mockResolvedValue(seedLine());
+      mockManager.query.mockRejectedValueOnce(
+        checkViolation('CHK_sales_amount_paid_bounded'),
+      );
+
+      await expect(
+        service.updateLine('sale-1', 'line-1', {
+          discount_type: DiscountType.AMOUNT,
+          discount_value: 150,
+        }),
+      ).rejects.toThrow(new BadRequestException(SHRINK_MESSAGE));
+    });
+
+    it('removeLine → 400 with the shrink message', async () => {
+      mockManager.findOne.mockResolvedValue(seedLine());
+      mockManager.query.mockRejectedValueOnce(
+        checkViolation('CHK_sales_amount_paid_bounded'),
+      );
+
+      await expect(service.removeLine('sale-1', 'line-1')).rejects.toThrow(
+        new BadRequestException(SHRINK_MESSAGE),
+      );
+    });
+
+    it('propagates a QueryFailedError on a different constraint unchanged', async () => {
+      const other = checkViolation('CHK_sales_totals_nonneg');
+      mockManager.findOne.mockResolvedValue(seedLine());
+      mockManager.query.mockRejectedValueOnce(other);
+
+      await expect(service.removeLine('sale-1', 'line-1')).rejects.toBe(other);
+    });
+
+    it('propagates a non-QueryFailedError unchanged', async () => {
+      const boom = new Error('connection reset');
+      mockManager.findOne.mockResolvedValue(seedLine({ quantity: 2 }));
+      mockManager.query.mockRejectedValueOnce(boom);
+
+      await expect(
+        service.updateLine('sale-1', 'line-1', { quantity: 1 }),
+      ).rejects.toBe(boom);
+    });
+  });
+
   describe('removeLine', () => {
     it('removes the line and recomputes totals', async () => {
       const line = seedLine();
@@ -1955,6 +2087,53 @@ describe('SalesService', () => {
       });
 
       expect(mockManager.create).toHaveBeenCalled();
+    });
+
+    // B1 repros: total - paid is not exact in floats (100.30 - 50.10 =
+    // 50.199999...), so the exact remainder used to be rejected.
+    it.each([
+      ['100.30', '50.10', 50.2],
+      ['2000.00', '1765.20', 234.8],
+      ['150.60', '50.20', 100.4],
+    ])(
+      'allows the exact remainder when total %s, paid %s, paying %s',
+      async (total, paid, amount) => {
+        mockQueryBuilder.getOne.mockResolvedValueOnce({
+          ...seedDraftSale(),
+          total,
+        });
+        mockQueryBuilder.getRawOne.mockResolvedValue({ sum: paid });
+        mockManager.create.mockImplementation((_e, data) => data);
+        mockManager.save.mockImplementation((e) => Promise.resolve(e));
+
+        await service.addPayment('sale-1', {
+          payment_method: PaymentMethod.CASH,
+          amount,
+          cash_received: amount,
+        });
+
+        expect(mockManager.create).toHaveBeenCalledWith(
+          Payment,
+          expect.objectContaining({ amount: amount.toFixed(2) }),
+        );
+      },
+    );
+
+    it('still rejects one cent over the remainder, formatting 2 decimals', async () => {
+      mockQueryBuilder.getOne.mockResolvedValueOnce({
+        ...seedDraftSale(),
+        total: '100.30',
+      });
+      mockQueryBuilder.getRawOne.mockResolvedValue({ sum: '50.10' });
+
+      await expect(
+        service.addPayment('sale-1', {
+          payment_method: PaymentMethod.CASH,
+          amount: 50.21,
+          cash_received: 50.21,
+        }),
+      ).rejects.toThrow('Payment amount 50.21 exceeds remaining balance 50.20');
+      expect(mockManager.save).not.toHaveBeenCalled();
     });
 
     it('throws NotFoundException when the sale does not exist', async () => {
@@ -2320,6 +2499,46 @@ describe('SalesService', () => {
           cash_received: 700,
         }),
       ).rejects.toThrow(BadRequestException);
+    });
+
+    it('allows updating to the exact remainder (B1: no float drift)', async () => {
+      mockQueryBuilder.getOne.mockResolvedValueOnce({
+        ...seedDraftSale(),
+        total: '100.30',
+      });
+      mockManager.findOne.mockResolvedValue(
+        seedPayment({ amount: '10.00', cash_received: '10.00' }),
+      );
+      // SUM = 10.00 (this) + 50.10 (other). In floats the remainder is
+      // 100.30 - (60.10 - 10.00) = 50.199999..., rejecting 50.20.
+      mockQueryBuilder.getRawOne.mockResolvedValue({ sum: '60.10' });
+      mockManager.save.mockImplementation((e) => Promise.resolve(e));
+
+      const result = await service.updatePayment('sale-1', 'payment-1', {
+        amount: 50.2,
+        cash_received: 50.2,
+      });
+
+      expect(result.amount).toBe('50.20');
+    });
+
+    it('still rejects updating to one cent over the remainder', async () => {
+      mockQueryBuilder.getOne.mockResolvedValueOnce({
+        ...seedDraftSale(),
+        total: '100.30',
+      });
+      mockManager.findOne.mockResolvedValue(
+        seedPayment({ amount: '10.00', cash_received: '10.00' }),
+      );
+      mockQueryBuilder.getRawOne.mockResolvedValue({ sum: '60.10' });
+
+      await expect(
+        service.updatePayment('sale-1', 'payment-1', {
+          amount: 50.21,
+          cash_received: 50.21,
+        }),
+      ).rejects.toThrow('Payment amount 50.21 exceeds remaining balance 50.20');
+      expect(mockManager.save).not.toHaveBeenCalled();
     });
 
     it('updates reference_number on a CARD payment', async () => {

@@ -97,7 +97,7 @@ Every money column — `unit_price`, `subtotal`, `discount_amount`, `line_total`
 
 #### Why
 
-Same reasoning as the [Products doc](./products.md#prices-as-numeric102-in-db-strings-in-code). Applying JavaScript's IEEE-754 floats to money is a rounding-bug factory. Strings force arithmetic through decimal-safe helpers or Postgres itself. All money-comparison operations (e.g., "does amount_paid equal total?") convert to cents-integer via `Math.round(Number(x) * 100)` before comparing, dodging float representation edge cases.
+Same reasoning as the [Products doc](./products.md#prices-as-numeric102-in-db-strings-in-code). Applying JavaScript's IEEE-754 floats to money is a rounding-bug factory. Strings force arithmetic through decimal-safe helpers or Postgres itself. All money comparisons and subtractions (e.g., "does amount_paid equal total?", "is this payment within the remaining balance?") convert to integer cents via `toCents` (`common/utils/money.ts`, `Math.round(Number(x) * 100)`) first, dodging float representation edge cases: in floats `100.30 - 50.10` is `50.199999…`, which used to reject an exact-remainder payment of `50.20`.
 
 ### Half-up rounding to two decimals
 
@@ -110,6 +110,8 @@ All computed money values are rounded with:
 #### Why the `+ Number.EPSILON`
 
 Without it, a computed value like `1.005` (which is actually stored as `1.00499999...` in IEEE-754) rounds DOWN to `1.00` instead of the intended half-up `1.01`. `Number.EPSILON` is `2.22e-16` — vanishingly small next to any real LKR value, so it never affects legitimate math, but nudges float-representation edge cases the right way.
+
+Known limit: the nudge only rescues values below ~1. Larger half-cent results can still round down (50% of 4.35 stores 2.17, not 2.18) — tracked in [FOLLOWUPS.md](../../FOLLOWUPS.md) under "PERCENT discounts don't always round half-up".
 
 ### Line-level discounts only; no sale-level discount
 
@@ -206,6 +208,8 @@ Changing method (e.g., CASH to CARD) requires the cash-received field to disappe
 A sale can have N payments. Each `Payment.amount` is bounded above by `Sale.total - SUM(other payments)`.
 
 On update, "other" **excludes the payment being updated** — otherwise, updating a Rs. 500 payment to Rs. 500 would fail its own check because the sum would already include the value being replaced.
+
+The bound also holds in the other direction: a line edit or remove that would drop `total` below `amount_paid` returns 400 "Cannot reduce the sale total below the amount already paid. Remove or reduce payments first." The totals recompute is a single `UPDATE`, and `CHK_sales_amount_paid_bounded` fires inside it (Postgres CHECKs can't be deferred), so the service maps that specific constraint violation to the 400 rather than pre-checking. The transaction rolls back and the sale is unchanged.
 
 Change is only meaningful on CASH: `change_due = SUM(cash_received - amount) WHERE method = 'CASH'`. Non-CASH payments don't produce change.
 

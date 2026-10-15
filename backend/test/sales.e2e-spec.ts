@@ -4867,4 +4867,241 @@ describe('Sales (e2e)', () => {
       });
     });
   });
+
+  describe('Money in cents + shrink-below-paid guard', () => {
+    async function setup(saleOverrides: Partial<Sale> = {}) {
+      const branch = await seedBranch();
+      const { user, password } = await seedUser(UserRole.ADMIN, 'a@t.com');
+      const sale = await seedSale({
+        branch_id: branch.id,
+        cashier_id: user.id,
+        ...saleOverrides,
+      });
+      const cookies = await loginAndGetCookies(user.email, password);
+      return { branch, sale, cookies };
+    }
+
+    // B1: total - paid in floats is 50.199999..., which rejected 50.20.
+    it.each([
+      ['100.30', 50.1, 50.2],
+      ['2000.00', 1765.2, 234.8],
+      ['150.60', 50.2, 100.4],
+    ])(
+      'total %s: CARD %s then CASH exact remainder %s succeeds',
+      async (total, first, remainder) => {
+        const { sale, cookies } = await setup({ total });
+
+        await request(app.getHttpServer())
+          .post(`/api/v1/sales/${sale.id}/payments`)
+          .set('Cookie', cookies)
+          .send({
+            payment_method: PaymentMethod.CARD,
+            amount: first,
+            reference_number: 'AUTH-1',
+          })
+          .expect(201);
+
+        const response = await request(app.getHttpServer())
+          .post(`/api/v1/sales/${sale.id}/payments`)
+          .set('Cookie', cookies)
+          .send({
+            payment_method: PaymentMethod.CASH,
+            amount: remainder,
+            cash_received: remainder,
+          })
+          .expect(201);
+
+        expect(response.body.amount_paid).toBe(total);
+      },
+    );
+
+    it('still rejects a payment one cent over the remainder', async () => {
+      const { sale, cookies } = await setup({ total: '100.30' });
+
+      await request(app.getHttpServer())
+        .post(`/api/v1/sales/${sale.id}/payments`)
+        .set('Cookie', cookies)
+        .send({
+          payment_method: PaymentMethod.CARD,
+          amount: 50.1,
+          reference_number: 'AUTH-1',
+        })
+        .expect(201);
+
+      const response = await request(app.getHttpServer())
+        .post(`/api/v1/sales/${sale.id}/payments`)
+        .set('Cookie', cookies)
+        .send({
+          payment_method: PaymentMethod.CASH,
+          amount: 50.21,
+          cash_received: 50.21,
+        })
+        .expect(400);
+
+      expect(response.body.message).toBe(
+        'Payment amount 50.21 exceeds remaining balance 50.20',
+      );
+    });
+
+    it('PATCH payment to the exact remainder succeeds; one cent over is rejected', async () => {
+      const { sale, cookies } = await setup({ total: '100.30' });
+
+      await request(app.getHttpServer())
+        .post(`/api/v1/sales/${sale.id}/payments`)
+        .set('Cookie', cookies)
+        .send({
+          payment_method: PaymentMethod.CARD,
+          amount: 50.1,
+          reference_number: 'AUTH-1',
+        })
+        .expect(201);
+      const created = await request(app.getHttpServer())
+        .post(`/api/v1/sales/${sale.id}/payments`)
+        .set('Cookie', cookies)
+        .send({
+          payment_method: PaymentMethod.CASH,
+          amount: 10,
+          cash_received: 10,
+        })
+        .expect(201);
+      const cashId = created.body.payments[1].id;
+
+      const over = await request(app.getHttpServer())
+        .patch(`/api/v1/sales/${sale.id}/payments/${cashId}`)
+        .set('Cookie', cookies)
+        .send({ amount: 50.21, cash_received: 50.21 })
+        .expect(400);
+      expect(over.body.message).toBe(
+        'Payment amount 50.21 exceeds remaining balance 50.20',
+      );
+
+      const response = await request(app.getHttpServer())
+        .patch(`/api/v1/sales/${sale.id}/payments/${cashId}`)
+        .set('Cookie', cookies)
+        .send({ amount: 50.2, cash_received: 50.2 })
+        .expect(200);
+
+      expect(response.body.amount_paid).toBe('100.30');
+    });
+
+    // F2: 100.10 * 3 is 300.29999... in floats.
+    it('accepts an AMOUNT discount equal to the full subtotal (100.10 x 3); rejects 300.31', async () => {
+      const { branch, sale, cookies } = await setup();
+      const product = await seedProduct(branch.id, {
+        selling_price: '100.10',
+      });
+
+      const over = await request(app.getHttpServer())
+        .post(`/api/v1/sales/${sale.id}/lines`)
+        .set('Cookie', cookies)
+        .send({
+          product_id: product.id,
+          quantity: 3,
+          discount_type: DiscountType.AMOUNT,
+          discount_value: 300.31,
+        })
+        .expect(400);
+      expect(over.body.message).toBe(
+        'Discount amount 300.31 exceeds line subtotal 300.30',
+      );
+
+      const response = await request(app.getHttpServer())
+        .post(`/api/v1/sales/${sale.id}/lines`)
+        .set('Cookie', cookies)
+        .send({
+          product_id: product.id,
+          quantity: 3,
+          discount_type: DiscountType.AMOUNT,
+          discount_value: 300.3,
+        })
+        .expect(201);
+
+      expect(response.body.lines[0]).toMatchObject({
+        discount_amount: '300.30',
+        line_total: '0.00',
+      });
+      expect(response.body.total).toBe('0.00');
+    });
+
+    describe('shrinking the total below amount_paid', () => {
+      const SHRINK_MESSAGE =
+        'Cannot reduce the sale total below the amount already paid. ' +
+        'Remove or reduce payments first.';
+
+      // Sale with one line (100.00 x 2 = 200.00), fully paid by CARD.
+      async function setupPaidSale() {
+        const { branch, sale, cookies } = await setup();
+        const product = await seedProduct(branch.id, {
+          selling_price: '100.00',
+        });
+        const created = await request(app.getHttpServer())
+          .post(`/api/v1/sales/${sale.id}/lines`)
+          .set('Cookie', cookies)
+          .send({ product_id: product.id, quantity: 2 })
+          .expect(201);
+        await request(app.getHttpServer())
+          .post(`/api/v1/sales/${sale.id}/payments`)
+          .set('Cookie', cookies)
+          .send({
+            payment_method: PaymentMethod.CARD,
+            amount: 200,
+            reference_number: 'AUTH-1',
+          })
+          .expect(201);
+        return { sale, cookies, lineId: created.body.lines[0].id as string };
+      }
+
+      async function expectSaleUnchanged(saleId: string, lineId: string) {
+        const line = await dataSource
+          .getRepository(SaleLine)
+          .findOneOrFail({ where: { id: lineId } });
+        expect(line.quantity).toBe(2);
+        expect(line.discount_amount).toBe('0.00');
+        expect(line.line_total).toBe('200.00');
+        const sale = await dataSource
+          .getRepository(Sale)
+          .findOneOrFail({ where: { id: saleId } });
+        expect(sale.total).toBe('200.00');
+        expect(sale.amount_paid).toBe('200.00');
+      }
+
+      it('PATCH line reducing quantity → 400, sale unchanged', async () => {
+        const { sale, cookies, lineId } = await setupPaidSale();
+
+        const response = await request(app.getHttpServer())
+          .patch(`/api/v1/sales/${sale.id}/lines/${lineId}`)
+          .set('Cookie', cookies)
+          .send({ quantity: 1 })
+          .expect(400);
+
+        expect(response.body.message).toBe(SHRINK_MESSAGE);
+        await expectSaleUnchanged(sale.id, lineId);
+      });
+
+      it('PATCH line raising the discount → 400, sale unchanged', async () => {
+        const { sale, cookies, lineId } = await setupPaidSale();
+
+        const response = await request(app.getHttpServer())
+          .patch(`/api/v1/sales/${sale.id}/lines/${lineId}`)
+          .set('Cookie', cookies)
+          .send({ discount_type: DiscountType.AMOUNT, discount_value: 50 })
+          .expect(400);
+
+        expect(response.body.message).toBe(SHRINK_MESSAGE);
+        await expectSaleUnchanged(sale.id, lineId);
+      });
+
+      it('DELETE line → 400, line and sale unchanged', async () => {
+        const { sale, cookies, lineId } = await setupPaidSale();
+
+        const response = await request(app.getHttpServer())
+          .delete(`/api/v1/sales/${sale.id}/lines/${lineId}`)
+          .set('Cookie', cookies)
+          .expect(400);
+
+        expect(response.body.message).toBe(SHRINK_MESSAGE);
+        await expectSaleUnchanged(sale.id, lineId);
+      });
+    });
+  });
 });
