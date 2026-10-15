@@ -269,6 +269,19 @@ export class SalesService {
     // If customer_id is being SET (not cleared), validate it references
     // an existing, non-deleted customer.
     if (dto.customer_id !== undefined) {
+      // A TRADE_IN payment's intake belongs to the sale's customer, so the
+      // customer is locked once one exists. complete() rejects a detach
+      // anyway; refusing here surfaces the error at the edit, not at commit.
+      // Re-sending the current customer is a no-op and stays allowed.
+      if (
+        dto.customer_id !== sale.customer_id &&
+        sale.payments?.some((p) => p.payment_method === PaymentMethod.TRADE_IN)
+      ) {
+        throw new BadRequestException(
+          'Cannot change or detach the customer on a sale with a trade-in ' +
+            'payment. Remove the TRADE_IN payment(s) first.',
+        );
+      }
       if (dto.customer_id !== null) {
         await this.assertCustomerReference(dto.customer_id);
       }
