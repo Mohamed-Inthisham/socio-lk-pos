@@ -3,6 +3,7 @@ import { useDispatch, useSelector } from "react-redux";
 import { AlertTriangle, FilePlus2, ShoppingCart } from "lucide-react";
 import Button from "../../components/common/Button";
 import NewSaleDialog from "../../components/pos/NewSaleDialog";
+import ScanBar from "../../components/pos/ScanBar";
 import useTerminalBranch from "../../hooks/useTerminalBranch";
 import {
   discardDraftSale,
@@ -114,6 +115,8 @@ const PosTerminal = () => {
               <Button size="sm" variant="accent" label="Start a new sale" onClick={openSale} />
             </div>
           )}
+
+          <ScanBar branchId={branchId} disabled={status !== "ready"} />
 
           <Card className="flex-1 min-h-[16rem] flex flex-col overflow-hidden">
             <div className="flex-1 flex items-center justify-center p-6 text-center">

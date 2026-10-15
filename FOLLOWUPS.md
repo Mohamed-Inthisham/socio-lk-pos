@@ -84,4 +84,25 @@ Non-blocking issues and tech debt to address opportunistically. When you fix one
 - **Login response DTO vs `/auth/me` response shape drift.** _[Path B]_
 - **`ProductsList` loads only the first 200 products.** `GET /products` is now paginated (`limit` ≤ 200). The admin list requests one max-size page and still filters in memory (name/SKU/barcode); the header says "first N of M products" when the catalog is bigger. Fix: add a pager (or "Load more") and switch the text box to the server-side `search` param. Server `search` matches name only, so SKU/barcode matching would need extending it. _[products text search]_
 - **Staff may keep a stale `activeBranchId` from before the `mapBackendUser` fix.** `BranchSelector` only defaults the persisted `activeBranchStore` when it is null. Before the fix, `user.branch_id` was always undefined, so staff were defaulted to `activeBranches[0]` instead of their own branch, and that value survives refreshes. A single logout clears it (`logoutUser` calls `activeBranchStore.clear()`), so after deploy it self-heals on each staff member's next logout. Nothing reads `activeBranchId` for staff today, and the POS `BranchContextGuard` reads `user.branch_id` directly, so there is no functional impact while the shop has one branch. Fix if it ever matters: have `BranchSelector` overwrite the store for staff whenever it differs from `user.branch_id`. **Low severity.** _[Phase 6.4 P0]_
-- **Admin can switch branch from the global header while a POS DRAFT is open.** The terminal header shows the branch read-only, but an admin can exit to any app page, change the header `BranchSelector`, and return. The DRAFT still belongs to the old branch; the server rejects the mismatch, but the UX is confusing. Fix (P1 or later, once drafts exist in the terminal): while the terminal holds a DRAFT, warn on or disable the global header `BranchSelector` until the sale is completed or discarded. Not P0 scope. _[Phase 6.4 P0]_
+- **Admin can switch branch from the global header while a POS DRAFT is open.** The terminal header shows the branch read-only, but an admin can exit to any app page, change the header `BranchSelector`, and return. The DRAFT still belongs to the old branch; the server rejects the mismatch, but the UX is confusing. Fix (P1 or later, once drafts exist in the terminal): while the terminal holds a DRAFT, warn on or disable the global header `BranchSelector` until the sale is completed or discarded. Not P0 scope. _[Phase 6.4 P0]_- **ScanBar: alphanumeric manufacturer barcodes are treated as a name search.** `ScanBar` sends a value to `GET /products/by-barcode` only when it is barcode-shaped (`isBarcodeLike`: 8–20 digits, or an `SLP-` prefix). A manufacturer Code 128 barcode with letters (e.g. `A2849LL/A`) goes to the debounced name search instead, finds nothing, and Enter does nothing. Fix: when Enter is pressed in text mode and the current query has no results, try an exact by-barcode lookup before giving up. Only a 404 means "not found"; the name search stays as it is. About a 10-minute change in `components/pos/ScanBar/index.jsx` plus one test (letters-and-digits value, empty search → by-barcode called → line added). _[Phase 6.4 P1]_
+
+  ```js
+  // ScanBar handleKeyDown, Enter branch
+  if (isBarcodeLike(query)) {
+    submitBarcode(query);
+  } else if (resultsCurrent && results[active]) {
+    addProduct(results[active]);
+  } else if (resultsCurrent && results.length === 0) {
+    // Name search came back empty: maybe it's a barcode with letters.
+    submitBarcode(query); // by-barcode → addProduct, or "No product found"
+  } else if (textMode) {
+    // Search still in flight: run it now; on an empty result,
+    // fall through to submitBarcode(query) the same way.
+    clearTimeout(debounceRef.current);
+    dispatch(searchProducts({ query, branchId })).then((action) => {
+      if (searchProducts.fulfilled.match(action) && action.payload.length === 0) {
+        submitBarcode(query);
+      }
+    });
+  }
+  ```

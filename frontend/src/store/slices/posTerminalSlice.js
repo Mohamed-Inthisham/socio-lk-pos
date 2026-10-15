@@ -11,6 +11,10 @@ import {
   removeSaleLine,
   updateSaleLine,
 } from "../../services/salesService";
+import {
+  getProductByBarcode,
+  listProducts,
+} from "../../services/productsService";
 import useTerminalSessionStore from "../zustand/terminalSessionStore";
 
 /**
@@ -35,6 +39,13 @@ import useTerminalSessionStore from "../zustand/terminalSessionStore";
  * success replaces it with the server's sale, failure removes it. Qty edits
  * and removals are not optimistic — the row is marked busy until the
  * server answers.
+ *
+ * SCANNING:
+ * scanBarcode resolves an exact barcode (GET /products/by-barcode) and
+ * searchProducts runs the debounced name search (GET /products?search=,
+ * scoped to the branch, 20 results). Neither preloads the catalog
+ * (hybrid loading, planning doc §5). The ScanBar decides what to do with
+ * the resolved product: addLine, or the IMEI prompt for serialized items.
  *
  * ORDERING:
  * Line mutations run one at a time through `enqueue`, so fast consecutive
@@ -202,6 +213,53 @@ export const removeLine = createAsyncThunk(
 );
 
 // ---------------------------------------------------------------------------
+// Thunks — scanning
+// ---------------------------------------------------------------------------
+
+// A 15-digit miss is most likely a phone's IMEI sticker (Q9: phones carry
+// both labels; cashiers can't resolve IMEI → product yet).
+const IMEI_SHAPE = /^\d{15}$/;
+
+/** arg: { barcode } → resolves with the product */
+export const scanBarcode = createAsyncThunk(
+  "posTerminal/scanBarcode",
+  async ({ barcode }, { rejectWithValue }) => {
+    try {
+      return await getProductByBarcode(barcode);
+    } catch (error) {
+      if (error?.response?.status === 404) {
+        return rejectWithValue({
+          message: IMEI_SHAPE.test(barcode)
+            ? "That looks like an IMEI — scan the product label first."
+            : `No product found for "${barcode}".`,
+          status: 404,
+        });
+      }
+      return rejectWithValue(toError(error, "Barcode lookup failed"));
+    }
+  },
+);
+
+export const SEARCH_LIMIT = 20;
+
+/** arg: { query, branchId } → resolves with up to 20 products */
+export const searchProducts = createAsyncThunk(
+  "posTerminal/searchProducts",
+  async ({ query, branchId }, { rejectWithValue }) => {
+    try {
+      const page = await listProducts({
+        search: query,
+        branchId,
+        limit: SEARCH_LIMIT,
+      });
+      return page.data;
+    } catch (error) {
+      return rejectWithValue(toError(error, "Search failed"));
+    }
+  },
+);
+
+// ---------------------------------------------------------------------------
 // Slice
 // ---------------------------------------------------------------------------
 
@@ -218,6 +276,14 @@ const initialState = {
   busyLineIds: [],
   // Last cart mutation error: { message, status, existing_unit } | null
   lineError: null,
+  // Scan bar: idle | searching (name search) | loading (barcode lookup)
+  scanState: "idle",
+  scanResults: [],
+  // The query scanResults belong to (Enter must not pick stale results)
+  scanQuery: null,
+  scanError: null,
+  // Latest search request — older responses are dropped
+  searchRequestId: null,
 };
 
 const markBusy = (state, lineId) => {
@@ -243,6 +309,13 @@ const posTerminalSlice = createSlice({
     clearPosTerminal: () => initialState,
     clearLineError: (state) => {
       state.lineError = null;
+    },
+    clearScan: (state) => {
+      state.scanState = "idle";
+      state.scanResults = [];
+      state.scanQuery = null;
+      state.scanError = null;
+      state.searchRequestId = null;
     },
   },
   extraReducers: (builder) => {
@@ -334,17 +407,54 @@ const posTerminalSlice = createSlice({
       .addCase(removeLine.rejected, (state, action) => {
         unmarkBusy(state, action.meta.arg.lineId);
         applyRejection(state, action.payload, "Couldn't remove the item");
+      })
+
+      // Scanning
+      .addCase(scanBarcode.pending, (state) => {
+        state.scanState = "loading";
+        state.scanError = null;
+        state.scanResults = [];
+        state.searchRequestId = null;
+      })
+      .addCase(scanBarcode.fulfilled, (state) => {
+        state.scanState = "idle";
+      })
+      .addCase(scanBarcode.rejected, (state, action) => {
+        state.scanState = "idle";
+        state.scanError = action.payload || { message: "Barcode lookup failed" };
+      })
+      .addCase(searchProducts.pending, (state, action) => {
+        state.scanState = "searching";
+        state.scanError = null;
+        state.searchRequestId = action.meta.requestId;
+      })
+      .addCase(searchProducts.fulfilled, (state, action) => {
+        if (action.meta.requestId !== state.searchRequestId) return;
+        state.scanState = "idle";
+        state.scanResults = action.payload;
+        state.scanQuery = action.meta.arg.query;
+      })
+      .addCase(searchProducts.rejected, (state, action) => {
+        if (action.meta.requestId !== state.searchRequestId) return;
+        state.scanState = "idle";
+        state.scanResults = [];
+        state.scanError = action.payload || { message: "Search failed" };
       });
   },
 });
 
-export const { clearPosTerminal, clearLineError } = posTerminalSlice.actions;
+export const { clearPosTerminal, clearLineError, clearScan } =
+  posTerminalSlice.actions;
 
 // Selectors
 export const selectDraftSale = (state) => state.posTerminal.draftSale;
 export const selectPosStatus = (state) => state.posTerminal.status;
 export const selectPosError = (state) => state.posTerminal.error;
 export const selectLineError = (state) => state.posTerminal.lineError;
+export const selectScanState = (state) => state.posTerminal.scanState;
+export const selectScanResults = (state) => state.posTerminal.scanResults;
+export const selectScanQuery = (state) => state.posTerminal.scanQuery;
+export const selectScanError = (state) => state.posTerminal.scanError;
 const selectPendingLines = (state) => state.posTerminal.pendingLines;
 const selectBusyLineIds = (state) => state.posTerminal.busyLineIds;
 

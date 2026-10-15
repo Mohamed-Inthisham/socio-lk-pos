@@ -52,3 +52,25 @@ export const renderWithProviders = (
     </Provider>,
   ),
 });
+
+/** posTerminal slice with an open draft (pass overrides, e.g. { draftSale }). */
+export const posTerminalState = (overrides = {}) => {
+  const base = posTerminalReducer(undefined, { type: "@@INIT" });
+  const draftSale = overrides.draftSale ?? {
+    id: "sale-1",
+    status: "DRAFT",
+    branch_id: "branch-main",
+    lines: [],
+    payments: [],
+    subtotal: "0.00",
+    discount_total: "0.00",
+    total: "0.00",
+  };
+  return {
+    ...base,
+    status: "ready",
+    draftSaleId: draftSale.id,
+    draftSale,
+    ...overrides,
+  };
+};
