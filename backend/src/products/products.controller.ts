@@ -8,7 +8,6 @@ import {
   Body,
   Query,
   ParseUUIDPipe,
-  ParseBoolPipe,
   HttpCode,
   HttpStatus,
 } from '@nestjs/common';
@@ -18,11 +17,11 @@ import {
   ApiResponse,
   ApiCookieAuth,
   ApiParam,
-  ApiQuery,
 } from '@nestjs/swagger';
 import { ProductsService } from './products.service';
 import { CreateProductDto } from './dto/create-product.dto';
 import { UpdateProductDto } from './dto/update-product.dto';
+import { ListProductsQueryDto } from './dto/list-products-query.dto';
 import { Roles } from '../auth/decorators/roles.decorator';
 import { UserRole } from '../users/enums/user-role.enum';
 import { Auditable } from '../audit-log/decorators/auditable.decorator';
@@ -37,53 +36,29 @@ export class ProductsController {
   @Get()
   @Roles(UserRole.ADMIN, UserRole.MANAGER, UserRole.CASHIER)
   @ApiOperation({
-    summary: 'List products (with nested brand/category/branch)',
+    summary: 'List products (paginated, searchable, filterable)',
     description:
-      'Returns all active products by default, sorted by created_at DESC ' +
-      '(newest first). Supports filtering by brand, category, branch, and ' +
-      'product type. Every product includes nested brand, category, and ' +
-      'branch objects for one-shot rendering.',
-  })
-  @ApiQuery({
-    name: 'includeInactive',
-    required: false,
-    type: Boolean,
-    description: 'Include deactivated products (admin UI toggle)',
-  })
-  @ApiQuery({ name: 'brandId', required: false, type: String, format: 'uuid' })
-  @ApiQuery({
-    name: 'categoryId',
-    required: false,
-    type: String,
-    format: 'uuid',
-  })
-  @ApiQuery({ name: 'branchId', required: false, type: String, format: 'uuid' })
-  @ApiQuery({
-    name: 'productType',
-    required: false,
-    type: String,
-    description: 'PHONE, ACCESSORY, WATCH, or SPEAKER',
+      'Returns active products by default, sorted by created_at DESC, id ' +
+      'DESC (newest first, stable across pages). Filters, combined with ' +
+      'AND: search (case-insensitive substring match on name; trimmed, ' +
+      'empty ignored, 2–100 chars), includeInactive, brandId, categoryId, ' +
+      'branchId, productType. Pagination: page (default 1), limit ' +
+      '(default 50, max 200). Every product includes nested brand, ' +
+      'category, and branch objects for one-shot rendering.',
   })
   @ApiResponse({
     status: 200,
-    description: 'List of products with nested relations',
+    description:
+      'Paginated list of products. Shape: { data: Product[], meta: { total, page, limit, totalPages, hasNext, hasPrev } }',
+  })
+  @ApiResponse({
+    status: 400,
+    description:
+      'Invalid query parameter (e.g. search shorter than 2 characters)',
   })
   @ApiResponse({ status: 401, description: 'Not authenticated' })
-  async findAll(
-    @Query('includeInactive', new ParseBoolPipe({ optional: true }))
-    includeInactive?: boolean,
-    @Query('brandId') brandId?: string,
-    @Query('categoryId') categoryId?: string,
-    @Query('branchId') branchId?: string,
-    @Query('productType') productType?: string,
-  ) {
-    return this.productsService.findAll({
-      includeInactive,
-      brandId,
-      categoryId,
-      branchId,
-      productType,
-    });
+  async findAll(@Query() query: ListProductsQueryDto) {
+    return this.productsService.findAll(query);
   }
 
   @Get('by-barcode/:barcode')

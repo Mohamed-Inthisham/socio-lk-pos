@@ -37,11 +37,12 @@ import {
  *   → filter the in-memory list without a refetch
  *
  * Rationale: the backend supports the structural filters (see Swagger),
- * so we let it do the DB work. Text search has no backend param, and
- * client-side filtering gives instant feedback on typing.
+ * so we let it do the DB work. Client-side filtering gives instant
+ * feedback on typing and also matches SKU/barcode.
  *
- * When the catalog reaches ~10k products (well past R1), we add a
- * server-side search param and delete the client-side filter.
+ * GET /products is paginated ({ data, meta }) and has a server-side
+ * `search` (name only). This page still loads one max-size page and
+ * filters in memory; moving to a pager + server search is a FOLLOWUP.
  */
 
 // LKR currency formatter — reused per row, memoized as module-level constant.
@@ -57,6 +58,9 @@ const formatPrice = (priceStr) => {
   if (!Number.isFinite(n)) return priceStr;
   return currencyFormatter.format(n);
 };
+
+// GET /products caps limit at 200 (shared PaginationQueryDto).
+const MAX_PAGE_SIZE = 200;
 
 const PRODUCT_TYPES = [
   { value: "", label: "All types" },
@@ -83,6 +87,7 @@ const ProductsList = () => {
 
   // Products list — local state, not Redux (view-specific data)
   const [products, setProducts] = useState([]);
+  const [total, setTotal] = useState(0);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
   // Tracks the latest fetch request so out-of-order responses don't overwrite state
@@ -111,11 +116,14 @@ const ProductsList = () => {
     setLoading(true);
     setError(null);
 
-    listProducts(nextFilters)
-      .then((data) => {
+    // One max-size page. No pager yet (see FOLLOWUPS) — the header says so
+    // when the catalog is larger than this.
+    listProducts({ ...nextFilters, limit: MAX_PAGE_SIZE })
+      .then(({ data, meta }) => {
         // Ignore if a newer request has been fired since
         if (requestId !== fetchRequestIdRef.current) return;
         setProducts(data);
+        setTotal(meta.total);
       })
       .catch((err) => {
         if (requestId !== fetchRequestIdRef.current) return;
@@ -302,7 +310,10 @@ const ProductsList = () => {
               <p className="text-sm text-slate-500 dark:text-slate-400">
                 {loading
                   ? "Loading..."
-                  : `${visibleProducts.length} of ${products.length} shown`}
+                  : `${visibleProducts.length} of ${products.length} shown` +
+                    (total > products.length
+                      ? ` (first ${products.length} of ${total} products)`
+                      : "")}
               </p>
             </div>
           </div>

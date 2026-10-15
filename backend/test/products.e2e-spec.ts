@@ -310,10 +310,18 @@ describe('Products (e2e)', () => {
         .set('Cookie', cashCookies)
         .expect(200);
 
-      expect(response.body).toHaveLength(1);
-      expect(response.body[0].brand.name).toBe('Apple');
-      expect(response.body[0].category.name).toBe('Phones');
-      expect(response.body[0].branch.name).toBe('Main Shop');
+      expect(response.body.data).toHaveLength(1);
+      expect(response.body.data[0].brand.name).toBe('Apple');
+      expect(response.body.data[0].category.name).toBe('Phones');
+      expect(response.body.data[0].branch.name).toBe('Main Shop');
+      expect(response.body.meta).toEqual({
+        total: 1,
+        page: 1,
+        limit: 50,
+        totalPages: 1,
+        hasNext: false,
+        hasPrev: false,
+      });
     });
 
     it('filters by brandId', async () => {
@@ -359,8 +367,134 @@ describe('Products (e2e)', () => {
         .set('Cookie', cookies)
         .expect(200);
 
-      expect(response.body).toHaveLength(1);
-      expect(response.body[0].name).toBe('iPhone');
+      expect(response.body.data).toHaveLength(1);
+      expect(response.body.data[0].name).toBe('iPhone');
+    });
+  });
+
+  describe('GET /api/v1/products — search and pagination', () => {
+    let cookies: string[];
+    let refs: Awaited<ReturnType<typeof seedReferences>>;
+
+    beforeEach(async () => {
+      const { user, password } = await seedUser(UserRole.ADMIN, 'admin@t.com');
+      refs = await seedReferences();
+      cookies = await loginAndGetCookies(user.email, password);
+    });
+
+    async function createProduct(name: string, branchId = refs.branch.id) {
+      await request(app.getHttpServer())
+        .post('/api/v1/products')
+        .set('Cookie', cookies)
+        .send({
+          product_type: ProductType.PHONE,
+          name,
+          brand_id: refs.brand.id,
+          category_id: refs.category.id,
+          branch_id: branchId,
+          buying_price: '100',
+          selling_price: '200',
+        })
+        .expect(201);
+    }
+
+    function list(query: string) {
+      return request(app.getHttpServer())
+        .get(`/api/v1/products${query}`)
+        .set('Cookie', cookies);
+    }
+
+    const names = (body: { data: { name: string }[] }) =>
+      body.data.map((p) => p.name).sort();
+
+    it('matches a partial name, case-insensitively', async () => {
+      await createProduct('iPhone 15 Pro');
+      await createProduct('IPHONE 13 Mini');
+      await createProduct('Galaxy S24');
+
+      const response = await list('?search=PhOnE').expect(200);
+
+      expect(names(response.body)).toEqual(['IPHONE 13 Mini', 'iPhone 15 Pro']);
+      expect(response.body.meta.total).toBe(2);
+    });
+
+    it('combines search with branchId using AND', async () => {
+      const cityShop = await dataSource
+        .getRepository(Branch)
+        .save({ name: 'City Shop', is_active: true } as Branch);
+      await createProduct('iPhone 15 Main');
+      await createProduct('iPhone 15 City', cityShop.id);
+      await createProduct('Galaxy S24 City', cityShop.id);
+
+      const response = await list(
+        `?search=iphone&branchId=${cityShop.id}`,
+      ).expect(200);
+
+      expect(names(response.body)).toEqual(['iPhone 15 City']);
+    });
+
+    it('rejects a search shorter than 2 characters after trimming', async () => {
+      await createProduct('iPhone 15');
+
+      const response = await list('?search=%20i%20').expect(400);
+
+      expect(JSON.stringify(response.body.message)).toMatch(/search/);
+    });
+
+    it('treats empty or whitespace-only search as no filter', async () => {
+      await createProduct('iPhone 15');
+      await createProduct('Galaxy S24');
+
+      const empty = await list('?search=').expect(200);
+      const blank = await list('?search=%20%20%20').expect(200);
+
+      expect(empty.body.meta.total).toBe(2);
+      expect(blank.body.meta.total).toBe(2);
+    });
+
+    it('returns an empty page when nothing matches', async () => {
+      await createProduct('iPhone 15');
+
+      const response = await list('?search=nokia').expect(200);
+
+      expect(response.body.data).toEqual([]);
+      expect(response.body.meta).toMatchObject({ total: 0, totalPages: 0 });
+    });
+
+    it('treats LIKE wildcards in search literally', async () => {
+      await createProduct('Charger 50% off');
+      await createProduct('Charger 500W');
+
+      const response = await list('?search=50%25').expect(200);
+
+      expect(names(response.body)).toEqual(['Charger 50% off']);
+    });
+
+    it('paginates with page and limit', async () => {
+      await createProduct('Phone A');
+      await createProduct('Phone B');
+      await createProduct('Phone C');
+
+      const response = await list('?page=2&limit=2').expect(200);
+
+      expect(response.body.data).toHaveLength(1);
+      expect(response.body.meta).toEqual({
+        total: 3,
+        page: 2,
+        limit: 2,
+        totalPages: 2,
+        hasNext: false,
+        hasPrev: true,
+      });
+    });
+
+    it('rejects a limit above 200', async () => {
+      await list('?limit=201').expect(400);
+    });
+
+    it('still validates includeInactive as a boolean', async () => {
+      await list('?includeInactive=true').expect(200);
+      await list('?includeInactive=yes').expect(400);
     });
   });
 
