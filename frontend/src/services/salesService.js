@@ -7,11 +7,11 @@ import api from "./api";
  * docs/backend/sales.md.
  *
  * RESPONSE SHAPES:
- * - Line POST/PATCH return the full hydrated sale (branch, cashier,
- *   customer, lines, payments, totals).
+ * - Line and payment POST/PATCH return the full hydrated sale (branch,
+ *   cashier, customer, lines, payments, totals).
  * - POST /sales returns the bare new row (no lines/payments yet).
- * - Line DELETE and DELETE /sales/:id return 204 — callers re-fetch with
- *   getSale when they need the updated sale.
+ * - Line DELETE, payment DELETE and DELETE /sales/:id return 204 —
+ *   callers re-fetch with getSale when they need the updated sale.
  *
  * Money fields come back as numeric strings ("60000.00"); request bodies
  * take numbers.
@@ -102,4 +102,34 @@ export const updateSaleLine = async (saleId, lineId, payload) => {
  */
 export const removeSaleLine = async (saleId, lineId) => {
   await api.delete(`/sales/${saleId}/lines/${lineId}`);
+};
+
+/**
+ * Record a payment on a DRAFT sale.
+ *
+ * - CASH: `{ payment_method, amount, cash_received }` — cash_received ≥ amount
+ *   (the excess is change).
+ * - CARD / BANK_TRANSFER / KOKO / MINTPAY: `{ payment_method, amount,
+ *   reference_number }` — reference required, cash_received forbidden.
+ *
+ * `amount` may not exceed the remaining balance (400), for every method.
+ *
+ * @param {string} saleId
+ * @param {Object} payload - AddPaymentDto shape
+ * @returns {Promise<Object>} Hydrated sale
+ */
+export const addSalePayment = async (saleId, payload) => {
+  const response = await api.post(`/sales/${saleId}/payments`, payload);
+  return response.data;
+};
+
+/**
+ * Remove a payment from a DRAFT sale.
+ *
+ * @param {string} saleId
+ * @param {string} paymentId
+ * @returns {Promise<void>} 204 — re-fetch with getSale
+ */
+export const removeSalePayment = async (saleId, paymentId) => {
+  await api.delete(`/sales/${saleId}/payments/${paymentId}`);
 };

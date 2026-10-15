@@ -6,6 +6,8 @@ import {
   cableProduct,
   customer,
   tradeInPayment,
+  cashPayment,
+  cardPayment,
 } from "../../test/posFixtures";
 import useTerminalSessionStore from "../zustand/terminalSessionStore";
 import * as salesService from "../../services/salesService";
@@ -13,15 +15,22 @@ import * as stockService from "../../services/stockService";
 import * as customersService from "../../services/customersService";
 import {
   addLine,
+  addPayment,
   attachCustomer,
   createAndAttachCustomer,
   detachCustomer,
   discardDraftSale,
   ensureDraftSale,
   removeLine,
+  removePayment,
   selectAttachedCustomer,
+  selectBalanceDue,
   selectCartLines,
+  selectCartSyncing,
   selectHasTradeInPayment,
+  selectIsFullyPaid,
+  selectPaidTotal,
+  selectPayments,
   selectStockWarnings,
   updateLineQty,
 } from "./posTerminalSlice";
@@ -421,5 +430,199 @@ describe("posTerminal customer", () => {
     patch.resolve(draftSale({ lines: [saleLine()], customer_id: "cust-1", customer: customer() }));
     await attaching;
     expect(selectAttachedCustomer(store.getState())).toEqual(customer());
+  });
+});
+
+describe("posTerminal payments", () => {
+  const cartSale = (overrides = {}) =>
+    draftSale({ lines: [saleLine()], subtotal: "1500.00", total: "1500.00", ...overrides });
+
+  it("shows a pending payment at once, then settles on the server sale", async () => {
+    const { store, ready } = readyStore(cartSale());
+    await ready;
+    const request = deferred();
+    salesService.addSalePayment.mockReturnValue(request.promise);
+    const body = { payment_method: "CASH", amount: 1500, cash_received: 2000 };
+
+    const paying = store.dispatch(addPayment(body));
+
+    expect(selectPayments(store.getState())).toEqual([
+      expect.objectContaining({
+        pending: true,
+        payment_method: "CASH",
+        amount: "1500.00",
+        cash_received: "2000.00",
+      }),
+    ]);
+    expect(selectCartSyncing(store.getState())).toBe(true);
+    // Totals stay server-only while the payment is in flight
+    expect(selectPaidTotal(store.getState())).toBe("0.00");
+
+    request.resolve(cartSale({ amount_paid: "1500.00", change_due: "500.00", payments: [cashPayment()] }));
+    await paying;
+
+    expect(salesService.addSalePayment).toHaveBeenCalledWith("sale-1", body);
+    expect(selectPayments(store.getState())).toEqual([
+      expect.objectContaining({ id: "pay-cash", pending: false }),
+    ]);
+    expect(selectPaidTotal(store.getState())).toBe("1500.00");
+    expect(selectBalanceDue(store.getState())).toBe("0.00");
+    expect(selectCartSyncing(store.getState())).toBe(false);
+  });
+
+  it("drops the pending row and keeps the error on the slice when the payment fails", async () => {
+    const { store, ready } = readyStore(cartSale());
+    await ready;
+    salesService.addSalePayment.mockRejectedValue(
+      httpError(400, "reference_number is required for CARD payments"),
+    );
+
+    const result = await store.dispatch(addPayment({ payment_method: "CARD", amount: 500 }));
+
+    expect(result.payload.message).toBe("reference_number is required for CARD payments");
+    expect(selectPayments(store.getState())).toEqual([]);
+    expect(store.getState().posTerminal.paymentError.message).toBe(
+      "reference_number is required for CARD payments",
+    );
+    expect(store.getState().posTerminal.lineError).toBeNull();
+    expect(store.getState().posTerminal.draftSale).toEqual(cartSale());
+  });
+
+  it("marks the sale gone when a payment lands on a completed sale", async () => {
+    const { store, ready } = readyStore(cartSale());
+    await ready;
+    salesService.addSalePayment.mockRejectedValue(
+      httpError(400, "Cannot add a payment to a COMPLETED sale. Only DRAFT sales are mutable."),
+    );
+
+    await store.dispatch(addPayment({ payment_method: "CASH", amount: 1500, cash_received: 1500 }));
+
+    expect(store.getState().posTerminal.status).toBe("gone");
+    expect(useTerminalSessionStore.getState().draftSaleId).toBeNull();
+  });
+
+  it("hides a removed payment at once, then re-fetches the sale", async () => {
+    const paid = cartSale({ amount_paid: "1000.00", payments: [cardPayment()] });
+    const { store, ready } = readyStore(paid);
+    await ready;
+    const request = deferred();
+    salesService.removeSalePayment.mockReturnValue(request.promise);
+    salesService.getSale.mockResolvedValue(cartSale());
+
+    const removing = store.dispatch(removePayment({ paymentId: "pay-card" }));
+
+    expect(selectPayments(store.getState())).toEqual([]);
+    expect(selectPaidTotal(store.getState())).toBe("1000.00"); // server figure until it answers
+
+    request.resolve();
+    await removing;
+
+    expect(salesService.removeSalePayment).toHaveBeenCalledWith("sale-1", "pay-card");
+    expect(salesService.getSale).toHaveBeenCalledWith("sale-1");
+    expect(selectPayments(store.getState())).toEqual([]);
+    expect(selectBalanceDue(store.getState())).toBe("1500.00");
+  });
+
+  it("restores the payment and reports the error when the removal fails", async () => {
+    const paid = cartSale({ amount_paid: "1000.00", payments: [cardPayment()] });
+    const { store, ready } = readyStore(paid);
+    await ready;
+    salesService.removeSalePayment.mockRejectedValue(new Error("Network Error"));
+
+    await store.dispatch(removePayment({ paymentId: "pay-card" }));
+
+    expect(selectPayments(store.getState())).toEqual([
+      expect.objectContaining({ id: "pay-card", pending: false }),
+    ]);
+    expect(store.getState().posTerminal.paymentError.message).toBe("Network Error");
+  });
+
+  it("waits for an in-flight line edit before sending a payment", async () => {
+    const { store, ready } = readyStore(cartSale());
+    await ready;
+    const lineEdit = deferred();
+    salesService.updateSaleLine.mockReturnValue(lineEdit.promise);
+    const twoCables = cartSale({
+      lines: [saleLine({ quantity: 2, line_total: "3000.00" })],
+      subtotal: "3000.00",
+      total: "3000.00",
+    });
+    salesService.addSalePayment.mockResolvedValue({
+      ...twoCables,
+      amount_paid: "3000.00",
+      payments: [cashPayment({ amount: "3000.00", cash_received: "3000.00" })],
+    });
+
+    const editing = store.dispatch(updateLineQty({ lineId: "line-1", quantity: 2 }));
+    const paying = store.dispatch(
+      addPayment({ payment_method: "CASH", amount: 3000, cash_received: 3000 }),
+    );
+    // Let every pending microtask run: an unqueued call would have fired by now
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(salesService.updateSaleLine).toHaveBeenCalledTimes(1);
+    expect(salesService.addSalePayment).not.toHaveBeenCalled();
+
+    lineEdit.resolve(twoCables);
+    await editing;
+    await paying;
+
+    expect(salesService.addSalePayment).toHaveBeenCalledTimes(1);
+    expect(selectPaidTotal(store.getState())).toBe("3000.00");
+    expect(selectIsFullyPaid(store.getState())).toBe(true);
+  });
+
+  it("keeps a payment hidden when an older line response still lists it", async () => {
+    const paid = cartSale({ amount_paid: "1000.00", payments: [cardPayment()] });
+    const { store, ready } = readyStore(paid);
+    await ready;
+    const lineEdit = deferred();
+    const deletion = deferred();
+    salesService.updateSaleLine.mockReturnValue(lineEdit.promise);
+    salesService.removeSalePayment.mockReturnValue(deletion.promise);
+    salesService.getSale.mockResolvedValue(cartSale({ lines: [saleLine({ quantity: 2 })] }));
+
+    const editing = store.dispatch(updateLineQty({ lineId: "line-1", quantity: 2 }));
+    const removing = store.dispatch(removePayment({ paymentId: "pay-card" }));
+    lineEdit.resolve({ ...paid, lines: [saleLine({ quantity: 2 })] }); // still has pay-card
+    await editing;
+
+    expect(selectPayments(store.getState())).toEqual([]);
+
+    deletion.resolve();
+    await removing;
+    expect(selectPayments(store.getState())).toEqual([]);
+  });
+});
+
+describe("posTerminal payment selectors", () => {
+  const stateWith = (draftSale) => ({
+    posTerminal: { draftSale, pendingPayments: [], removingPaymentIds: [] },
+  });
+
+  it("subtracts in cents, so decimal partial payments leave an exact balance", () => {
+    const state = stateWith(
+      draftSale({ lines: [saleLine()], total: "100.30", amount_paid: "50.10" }),
+    );
+
+    expect(selectPaidTotal(state)).toBe("50.10");
+    expect(selectBalanceDue(state)).toBe("50.20");
+    expect(selectIsFullyPaid(state)).toBe(false);
+  });
+
+  it.each([
+    ["is fully paid when the balance is zero", { lines: [saleLine()], total: "1500.00", amount_paid: "1500.00" }, true],
+    ["is not fully paid with an empty cart", { lines: [], total: "0.00", amount_paid: "0.00" }, false],
+    ["is not fully paid with a balance left", { lines: [saleLine()], total: "1500.00", amount_paid: "0.00" }, false],
+  ])("%s", (_, sale, expected) => {
+    expect(selectIsFullyPaid(stateWith(draftSale(sale)))).toBe(expected);
+  });
+
+  it("reports zero paid and zero balance before a sale is loaded", () => {
+    const state = stateWith(null);
+
+    expect(selectPaidTotal(state)).toBe("0.00");
+    expect(selectBalanceDue(state)).toBe("0.00");
+    expect(selectPayments(state)).toEqual([]);
   });
 });
