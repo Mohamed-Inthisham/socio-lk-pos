@@ -458,6 +458,11 @@ export const selectScanError = (state) => state.posTerminal.scanError;
 const selectPendingLines = (state) => state.posTerminal.pendingLines;
 const selectBusyLineIds = (state) => state.posTerminal.busyLineIds;
 
+/** True while a line mutation is in flight — server totals are about to change. */
+export const selectCartSyncing = (state) =>
+  state.posTerminal.pendingLines.length > 0 ||
+  state.posTerminal.busyLineIds.length > 0;
+
 /** Server lines (flagged busy while mutating) followed by pending rows. */
 export const selectCartLines = createSelector(
   [selectDraftSale, selectPendingLines, selectBusyLineIds],

@@ -5,6 +5,7 @@ import Button from "../../components/common/Button";
 import CartLines from "../../components/pos/CartLines";
 import NewSaleDialog from "../../components/pos/NewSaleDialog";
 import ScanBar from "../../components/pos/ScanBar";
+import TotalsPanel from "../../components/pos/TotalsPanel";
 import useTerminalBranch from "../../hooks/useTerminalBranch";
 import {
   discardDraftSale,
@@ -149,6 +150,8 @@ const PosTerminal = () => {
               />
             </div>
           </Card>
+
+          <TotalsPanel />
         </aside>
       </div>
 
