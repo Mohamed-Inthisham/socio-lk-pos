@@ -7,6 +7,7 @@ import CartLines from "../../components/pos/CartLines";
 import CustomerAttachDialog from "../../components/pos/CustomerAttachDialog";
 import CustomerCard from "../../components/pos/CustomerCard";
 import NewSaleDialog from "../../components/pos/NewSaleDialog";
+import PaymentDialog from "../../components/pos/PaymentDialog";
 import ScanBar from "../../components/pos/ScanBar";
 import TotalsPanel from "../../components/pos/TotalsPanel";
 import useTerminalBranch from "../../hooks/useTerminalBranch";
@@ -14,6 +15,7 @@ import { isTouchOnly } from "../../utils/device";
 import {
   discardDraftSale,
   ensureDraftSale,
+  selectCanPay,
   selectCartLines,
   selectDraftSale,
   selectPosError,
@@ -35,6 +37,8 @@ import {
  * - F3 opens the CustomerAttachDialog from anywhere (also from inputs),
  *   unless a dialog (New sale, Attach customer, IMEI prompt) is already
  *   open.
+ * - F4 opens the PaymentDialog under the same rule, and only when the
+ *   Pay button is enabled (both read selectCanPay).
  * - Automatic hand-offs (qty Enter, line delete, New sale dialog closed)
  *   return focus to it, except on touch-only devices where that would
  *   keep popping the on-screen keyboard. F2 / a tap always work.
@@ -73,8 +77,10 @@ const PosTerminal = () => {
   const error = useSelector(selectPosError);
   const sale = useSelector(selectDraftSale);
   const lines = useSelector(selectCartLines);
+  const canPay = useSelector(selectCanPay);
   const [confirmNewSale, setConfirmNewSale] = useState(false);
   const [attachOpen, setAttachOpen] = useState(false);
+  const [paymentOpen, setPaymentOpen] = useState(false);
 
   useEffect(() => {
     if (branchId) dispatch(ensureDraftSale({ branchId }));
@@ -101,6 +107,14 @@ const PosTerminal = () => {
     },
     { enableOnFormTags: true, preventDefault: true },
     [status],
+  );
+  useHotkeys(
+    "f4",
+    () => {
+      if (canPay && !dialogOpen()) setPaymentOpen(true);
+    },
+    { enableOnFormTags: true, preventDefault: true },
+    [canPay],
   );
   useHotkeys(
     "esc",
@@ -208,7 +222,7 @@ const PosTerminal = () => {
             disabled={status !== "ready"}
           />
 
-          <TotalsPanel />
+          <TotalsPanel onPay={() => setPaymentOpen(true)} />
         </aside>
       </div>
 
@@ -225,6 +239,12 @@ const PosTerminal = () => {
       <CustomerAttachDialog
         open={attachOpen}
         onClose={() => setAttachOpen(false)}
+        afterLeave={() => setTimeout(returnFocus, 0)}
+      />
+
+      <PaymentDialog
+        open={paymentOpen}
+        onClose={() => setPaymentOpen(false)}
         afterLeave={() => setTimeout(returnFocus, 0)}
       />
     </div>

@@ -931,4 +931,23 @@ export const selectIsFullyPaid = (state) =>
   (state.posTerminal.draftSale?.lines?.length ?? 0) > 0 &&
   selectBalanceDueCents(state) === 0;
 
+/**
+ * The Pay button and F4 share this: an open draft with lines, a balance
+ * left, and no line / payment mutation in flight (the balance would be
+ * stale or about to change).
+ */
+export const selectCanPay = (state) =>
+  state.posTerminal.status === "ready" &&
+  (state.posTerminal.draftSale?.lines?.length ?? 0) > 0 &&
+  selectBalanceDueCents(state) > 0 &&
+  !selectCartSyncing(state);
+
+/**
+ * Fully paid per the last confirmed server sale. Deliberately ignores
+ * in-flight mutations: the Totals panel dims it instead of swapping it
+ * for a disabled "Pay LKR 0.00".
+ */
+export const selectReadyToComplete = (state) =>
+  state.posTerminal.status === "ready" && selectIsFullyPaid(state);
+
 export default posTerminalSlice.reducer;

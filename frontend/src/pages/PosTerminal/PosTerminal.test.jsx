@@ -145,3 +145,71 @@ describe("PosTerminal F3 customer hotkey", () => {
     expect(imeiInput).toHaveFocus();
   });
 });
+
+describe("PosTerminal F4 payment hotkey", () => {
+  const paymentDialog = () => screen.queryByRole("dialog", { name: "Take payment" });
+  // `lines` total 3990.00 with nothing paid
+  const payableSale = () => draftSale({ lines, subtotal: "3990.00", total: "3990.00" });
+
+  it("F4 opens the payment dialog from the scan bar", async () => {
+    salesService.createSale.mockResolvedValue(payableSale());
+    const user = userEvent.setup();
+    await renderTerminal();
+    expect(scanBar()).toHaveFocus();
+
+    await user.keyboard("[F4]");
+
+    const dialog = await screen.findByRole("dialog", { name: "Take payment" });
+    expect(within(dialog).getByTestId("payment-balance")).toHaveTextContent("3,990.00");
+  });
+
+  it("the Pay button opens the same dialog", async () => {
+    salesService.createSale.mockResolvedValue(payableSale());
+    const user = userEvent.setup();
+    await renderTerminal();
+
+    await user.click(screen.getByRole("button", { name: /^Pay / }));
+
+    expect(await screen.findByRole("dialog", { name: "Take payment" })).toBeInTheDocument();
+  });
+
+  it("F4 is ignored when the Pay button is disabled (empty cart)", async () => {
+    salesService.createSale.mockResolvedValue(draftSale());
+    const user = userEvent.setup();
+    // An empty cart has no "Cart" list to wait for — wait for the Pay button.
+    renderWithProviders(<PosTerminal />, {
+      preloadedState: { auth: authState(cashierUser), branches: branchesState([mainShop]) },
+    });
+
+    expect(await screen.findByRole("button", { name: /^Pay / })).toBeDisabled();
+    await user.keyboard("[F4]");
+
+    expect(paymentDialog()).not.toBeInTheDocument();
+  });
+
+  it("F4 is ignored while another dialog is open", async () => {
+    salesService.createSale.mockResolvedValue(payableSale());
+    const user = userEvent.setup();
+    await renderTerminal();
+
+    await user.click(screen.getByRole("button", { name: "New sale" }));
+    await screen.findByRole("dialog", { name: "Start a new sale?" });
+    await user.keyboard("[F4]");
+
+    expect(paymentDialog()).not.toBeInTheDocument();
+    expect(screen.getAllByRole("dialog")).toHaveLength(1);
+  });
+
+  it("closing the payment dialog hands focus back to the scan bar", async () => {
+    salesService.createSale.mockResolvedValue(payableSale());
+    const user = userEvent.setup();
+    await renderTerminal();
+
+    await user.keyboard("[F4]");
+    const dialog = await screen.findByRole("dialog", { name: "Take payment" });
+    await user.click(within(dialog).getByRole("button", { name: "Cancel" }));
+
+    await waitFor(() => expect(paymentDialog()).not.toBeInTheDocument());
+    await waitFor(() => expect(scanBar()).toHaveFocus());
+  });
+});
