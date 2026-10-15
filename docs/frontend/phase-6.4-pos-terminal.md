@@ -1,6 +1,6 @@
 # Phase 6.4 — POS Terminal (Frontend) — Planning
 
-**Status:** planning complete — every decision is recorded in §8. Ready to build P0 once the Q13 backend PR is merged.
+**Status:** P0 shipped (#18). P1 (scan bar, cart, totals) built on `feature/phase-6.4-pos-p1`. Decisions that changed while building P1 are recorded in §8 "P1 decision log", and the sections they touch are marked "revised P1".
 
 **Target setup:** a laptop (1366×768 reference) with a USB/HID barcode scanner as the till. Tablet and phone layouts are supported as secondary.
 
@@ -123,38 +123,46 @@ const initialState = { brands: [], loading: false, error: null, initialized: fal
 
 | Concern | Lives in | Why |
 |---------|----------|-----|
-| Current draft sale (lines, payments, totals, status) | Redux `terminalSlice` | Domain state; matches the existing ADR. DevTools action log is useful when a cashier reports "the total was wrong". |
+| Current draft sale (lines, payments, totals, status) | Redux `posTerminal` slice (`store/slices/posTerminalSlice.js`) | Domain state; matches the existing ADR. DevTools action log is useful when a cashier reports "the total was wrong". |
 | Draft sale id across reloads | Zustand `terminalSessionStore` (persisted) | It is a pointer, same category as `activeBranchStore`. Cleared on logout. |
-| Product catalog for the branch | Redux `posCatalogSlice` (or reuse a new `productsSlice`) | Read-mostly reference data shared by scan, trade-in picker, search. |
+| Product catalog for the branch | **Not held** _(revised P1, 2026-10-15; see §8 P1 decision log)_ | Hybrid loading (§5): exact barcode lookup plus a scoped server search as the cashier types. Only the current search results live in the `posTerminal` slice. |
 | Dialog open/close, search results, form fields | Component state | View-local, as in Path B. |
 | Recent sales list | Component state on the page | View-specific list, as with `ProductsList`. |
 
 Zustand is **already used** (theme, layout, active branch). It is not proposed for cart state because the cart is server state, not a UI preference.
 
-**`terminalSlice` shape (proposed):**
+**`posTerminal` slice shape (as built in P1)** _(revised P1, 2026-10-15; see §8 P1 decision log)_:
 
 ```js
 {
-  sale: null,            // full hydrated sale (incl. sale.customer) from the last server response, or null
-  status: "idle",        // idle | creating | ready | mutating | completing | completed | error
-  pendingOp: null,       // e.g. "addLine" — drives per-control spinners
-  error: null,           // { message, existing_unit?, target?: { lineId | paymentId } }
-  lastCompleted: null,   // { sale_number, change_due, total } for the "Sale complete" panel
+  draftSaleId: null,     // mirrors terminalSessionStore (persisted pointer)
+  draftSale: null,       // full hydrated sale from the last server response
+  status: "idle",        // idle | loading | ready | discarding | error | gone
+  error: null,           // draft-lifecycle error { message, status }
+  pendingLines: [],      // optimistic rows for in-flight addLine calls
+  busyLineIds: [],       // lines with an in-flight qty edit / removal
+  lineError: null,       // last cart mutation error { message, status, existing_unit }
+  scanState: "idle",     // idle | searching (name search) | loading (barcode lookup)
+  scanResults: [], scanQuery: null, scanError: null,
+  stockByProduct: {},    // { [productId]: { quantity, manage_stock } } for the Q1 warning
+  stockErrors: {},       // { [productId]: true }: lookup failed, the line shows "?"
 }
 ```
 
-**Optimistic updates: none.** Line/payment mutations return the authoritative sale; the reducer replaces `state.sale` wholesale. Reasons: totals, discounts, rounding and line numbers are computed server-side; a wrong optimistic total at a till is worse than a ~100 ms wait; it removes reconciliation code. UI stays responsive with per-control spinners and the scan input never blocks (queued scans — see §6).
+Later slices add payment, completion (`lastCompleted`) and customer state to this slice.
+
+**Optimistic updates: `addLine` only** _(revised P1, 2026-10-15; see §8 P1 decision log)_. Dispatching `addLine` shows a pending row at once (product name and catalog price, a spinner in place of the line total, controls disabled). The server's hydrated sale replaces it on success; on failure the row is removed and the error shows under the scan bar. **Totals are never optimistic:** the Totals panel shows the server's figures and dims with "Updating…" while any line mutation is in flight. Qty edits and removals aren't optimistic either: the row is dimmed ("busy") until the server answers, and the reducer replaces `draftSale` wholesale. The original reasoning still holds for money: totals, discounts, rounding and line numbers are computed server-side, and a wrong total at a till is worse than a short wait. The pending row only acknowledges the scan at once. Line mutations run one at a time through a queue in the slice, so fast scans reach the server in order and an older response can't overwrite a newer sale.
 
 **Server ↔ client sync:**
 
-- No DRAFT exists until the first item is added (or a customer is attached). First mutation → `POST /sales { branch_id }` then the actual mutation. Avoids empty drafts on every page load.
+- **A DRAFT is created when the terminal opens** _(revised P1, 2026-10-15; see §8 P1 decision log)_. On mount, `ensureDraftSale` resumes the stored draft or calls `POST /sales { branch_id }`, so the first scan never waits on a create. The cost is one empty DRAFT per terminal session that never gets an item. "New sale" discards with `DELETE /sales/:id` (behind a confirm; disabled while the cart is empty) and opens a fresh one. Concurrent opens (StrictMode, re-renders) are deduplicated with a thunk `condition`.
 - After each mutation the client holds exactly what the server returned. Line/payment `DELETE` (204) is followed by `GET /sales/:id`. `PATCH /sales/:id` (customer attach/detach) returns the hydrated sale, including the new `customer`, and replaces the held sale like any other mutation.
 - If any call returns 400 "Only DRAFT sales are mutable" or 404, the client drops the draft and shows "This sale is no longer open" (another tab or user completed/discarded it).
 
 **Page reload mid-sale:**
 
 1. On terminal mount, read `draftSaleId` from `terminalSessionStore`.
-2. `GET /sales/:id`. If DRAFT and same branch → restore (the customer comes with the sale). If COMPLETED/VOIDED/404 → clear the pointer, start fresh.
+2. `GET /sales/:id`. If DRAFT and same branch → restore (the customer comes with the sale). If COMPLETED/VOIDED/404, or a different branch → clear the pointer and start fresh. A network or 5xx error does **not** start a fresh draft; the terminal shows "Try again". (Known gap: switching branch leaves the old DRAFT orphaned; see FOLLOWUPS.)
 3. Pointer is cleared on complete, discard, and logout.
 
 Alternative (no local pointer) is in §8 Q8.
@@ -203,7 +211,7 @@ The sale id is **not** in the `/pos` URL (the draft is session state, not a shar
 
 **New service:** `services/salesService.js` (`createSale`, `getSale`, `listSales`, `updateSale`, `discardSale`, `addLine`, `updateLine`, `removeLine`, `addPayment`, `removePayment`, `completeSale`, `voidSale`), plus `customersService.js` (`searchCustomers`, `createCustomer`). No `getCustomer` is needed: the sale response carries the customer.
 
-**Thunks** in `terminalSlice` wrap service calls and normalize errors to `{ message, status, existing_unit? }`.
+**Thunks** in the `posTerminal` slice wrap service calls and normalize errors to `{ message, status, existing_unit? }`.
 
 **Retries:**
 
@@ -212,7 +220,14 @@ The sale id is **not** in the `/pos` URL (the draft is session state, not a shar
 
 **Offline:** none in R1 (see Q4). A network-status indicator in the status strip (`navigator.onLine` + last request outcome); mutations disabled while offline.
 
-**Catalog loading:** `GET /products?branchId=<terminal branch>` once on terminal mount, filtered client-side for search (same strategy as `ProductsList`). Barcode scans always go to `GET /products/by-barcode/:barcode` (authoritative, handles manufacturer barcodes) and fall back to the in-memory catalog only for name search.
+**Catalog loading: hybrid, no preload** _(decided 2026-10-15, after #19 added server-side `search` and made `GET /products` paginated with `limit` ≤ 200; replaces "load the branch catalog once and filter client-side")_. The scan bar routes each value by its shape:
+
+- **Barcode-shaped** (8–20 digits, or an `SLP-` prefix): Enter → `GET /products/by-barcode/:barcode`. A 404 shows inline ("No product found"). A 15-digit miss shows "That looks like an IMEI — scan the product label first" (Q9).
+- **Anything else, 2+ chars:** debounced 250 ms → `GET /products?search=<query>&branchId=<terminal branch>&limit=20`, shown as a keyboard-navigable dropdown (↑/↓, Enter, Esc). Each result list is tagged with its query, so Enter never picks a stale list, and out-of-date responses are dropped.
+
+Nothing is cached between searches, so the 200-row cap on `/products` doesn't matter: every search is scoped and limited. Server `search` matches **name only**, so name search doesn't find SKU text or alphanumeric manufacturer barcodes (barcode fallback in FOLLOWUPS).
+
+**Stock (Q1 warning):** after each add or qty change, one `GET /stock?productId=&branchId=`. On draft resume, **one** `GET /stock?branchId=` for the whole cart. The API throttles at 10 req/s per IP, and one lookup per product on reload pushed larger carts past it. A terminal page load is a fixed 5 requests regardless of cart size.
 
 ---
 
@@ -296,11 +311,9 @@ components/pos/
   BranchContextGuard/
   ScanBar/                               # scan input + search results popover + scan queue
   ImeiPromptDialog/
-  Cart/
-    CartTable/                           # ≥ md: rows, selection, keyboard nav
-    CartLineRow/
-    CartCardList/                        # < md: stacked cards with steppers
-    LineDiscountDialog/
+  CartLines/                             # (revised P1) one responsive component: grid ≥ md, cards < md
+  LineDiscountDialog/                    # P2 (FOLLOWUPS)
+  NewSaleDialog/                         # discard-draft confirm (was DiscardDraftDialog)
   MobileActionBar/                       # < lg: sticky total + remaining + Pay
   CustomerPanel/
     CustomerAttachDialog/                # search + pick
@@ -314,23 +327,23 @@ components/pos/
   TotalsPanel/
   CompleteSaleDialog/
   SaleCompletePanel/
-  DiscardDraftDialog/
   RecentSalesTable/
   SaleDetailView/
   VoidSaleDialog/
   KeyboardHelpOverlay/
 pages/PosTerminal/  pages/PosRecentSales/  pages/PosSaleDetail/
 services/salesService.js  services/customersService.js
-store/slices/terminalSlice.js  store/slices/posCatalogSlice.js
+store/slices/posTerminalSlice.js                 # (revised P1) no posCatalogSlice: hybrid loading, §5
 store/zustand/terminalSessionStore.js
 hooks/useTerminalBranch.js  hooks/useMediaQuery.js     # hotkeys: useHotkeys from react-hotkeys-hook (Q17)
 schemas/paymentSchema.js  schemas/customerSchema.js  schemas/voidSchema.js
-utils/money.js                           # formatLKR, toCents, fromCents
+utils/money.js                           # formatLKR (P1); toCents, fromCents when payments need them
+utils/device.js                          # isTouchOnly (P1)
 ```
 
 **Payment modal composition:** one `PaymentDialog` owns method selection, amount, and submit; the method-specific fields are child components selected by method. Each child exports its zod schema fragment, and the dialog builds a discriminated union (`z.discriminatedUnion("payment_method", [...])`) mirroring the backend rules (CASH needs `cash_received >= amount`; reference methods need `reference_number`; TRADE_IN needs product, IMEI, buying price = amount, and a customer on the sale). Client validation is a convenience; the server stays authoritative.
 
-**Data flow:** pages and feature components dispatch `terminalSlice` thunks and read selectors (`selectSale`, `selectRemaining`, `selectCanComplete`, `selectHasTradeIn`); they never call services directly, except dialog-local lookups (customer search, catalog search).
+**Data flow:** pages and feature components dispatch `posTerminal` thunks and read selectors (`selectSale`, `selectRemaining`, `selectCanComplete`, `selectHasTradeIn`); they never call services directly, except dialog-local lookups (customer search, catalog search).
 
 ---
 
@@ -365,6 +378,22 @@ Q6, Q9, Q11, Q12 and Q17 were answered explicitly. The rest were not called out,
 | Q21 | Cashier landing | Default — `/pos` |
 | **Q22** | **Camera scanning** | **None.** The shop has a hardware barcode scanner; it types into the scan input like a keyboard. Camera scanning is dropped from the roadmap, not deferred |
 | **Q23** | **Primary till device** | **A laptop** with the barcode scanner. Desktop-first: the `≥ lg` layout at **1366×768** is the design target (it must fit without scrolling the totals/payments column); 1920×1080 is checked too. Tablet and phone layouts stay fully usable (Q6), as the secondary case |
+
+### P1 decision log (2026-10-15)
+
+Decisions made or changed while building P1. Where they differ from the original planning text, the affected sections are marked "revised P1".
+
+| # | Topic | Decision | Replaces |
+|---|-------|----------|----------|
+| P1-1 | Catalog loading (§5) | **Hybrid:** by-barcode on Enter for barcode-shaped input; a 250 ms debounced server `search` (branch-scoped, `limit=20`) for text. No catalog preload and no `posCatalogSlice`. Decided after #19 (server search + pagination). | "Load the branch catalog once, filter client-side" |
+| P1-2 | Draft creation (§3) | **The DRAFT is created when the terminal opens** (`ensureDraftSale` on mount) and resumed from the persisted pointer on reload. "New sale" is confirm → `DELETE` → fresh draft, and is disabled while the cart is empty. | "No DRAFT until the first item is added" |
+| P1-3 | Optimistic UI (§3) | **`addLine` shows a pending row** at once, replaced by the server sale on success and removed on failure. Totals, qty edits and removals stay server-authoritative (busy rows, "Updating…" totals). Line mutations are queued in order. | "Optimistic updates: none" |
+| P1-4 | Slice name | **`posTerminal`** (`store/slices/posTerminalSlice.js`). The draft pointer lives in `terminalSessionStore` (Zustand persist, cleared on logout). | `terminalSlice` |
+| P1-5 | Serialized add (Q9, §1 #4) | **The IMEI prompt opens _before_ `addLine`.** The backend rejects a serialized line without `imei_snapshot` (400), so the flow is: scan the product label → prompt → `addLine({ product_id, quantity: 1, imei_snapshot })`. 400/409 errors stay inline in the prompt, with `existing_unit.status`. Serialized lines (those with an IMEI) lock qty at 1. | "After adding, show an IMEI prompt" (P1 brief wording) |
+| P1-6 | Stock warning (Q1 b) | Brought forward from P6. Warns when branch stock is below the product's qty **summed across lines**; never blocks. Resume uses one branch-wide stock request (rate limit). A failed lookup shows a muted "?". | P6 |
+| P1-7 | Cart components (§7) | One responsive **`CartLines`** instead of `CartTable` + `CartCardList`. | Two components |
+| P1-8 | P1 scope | Narrowed to scan bar, cart, totals, draft lifecycle, stock warning and F2/focus. Later slices per the P1 brief: customer attach → P2, payments → P3, TRADE_IN → P4, complete → P5. Line discounts → P2 (FOLLOWUPS). Mobile sticky action bar → P6. | §9 P1 row (payments + complete in P1) |
+| P1-9 | Focus (§6) | F2 (from anywhere, including inputs) and Esc (outside inputs) focus the scan bar. Qty Enter, line delete and closing the New sale dialog hand focus back to it. Steppers keep focus (busy = `aria-disabled`, not `disabled`). No automatic hand-offs on touch-only devices, and no auto-focus on mount when the pointer is coarse. | — |
 
 ### Scheduling decisions
 
@@ -470,7 +499,7 @@ Each slice is a vertical, demoable increment. "unit" = reducers/selectors/utils 
 | Slice | Ships | Depends on | Tests (rough) |
 |-------|-------|-----------|:-------------:|
 | **P0 — Foundations + terminal shell** (narrowed 2026-10-13) | Vitest + RTL setup; `mapBackendUser` keeps `branch_id`/`branch`; `react-hotkeys-hook` installed (Q17); full-screen `TerminalLayout` shell (top bar, status strip, `<Outlet/>`); `BranchContextGuard` + `useTerminalBranch`; `/pos` route + Sidebar link; cashier login redirect to `/pos` (Q21); empty `PosTerminal` page. **Runnable:** log in as cashier → land on an empty terminal; admin picks a branch first. Ends with screenshots at 1366×768 (floor), 1920×1080 (ideal) and 390 px (smoke check only). | — | 14 unit, 18 component |
-| **P1 — First runnable cart, payments + complete** | Moved from P0: `salesService`, `terminalSlice`, `posCatalogSlice`, `utils/money`; `TerminalLayout` breakpoint layouts, `ResponsiveDialog`, `useMediaQuery`, `MobileActionBar`; `ScanBar` (barcode + name search, IMEI-shaped hint) adding **non-serialized** lines; `CartTable` + `CartCardList` with qty edit + remove; `TotalsPanel`; discard draft. Then: `PaymentDialog` (bottom sheet on phone) with CASH + reference methods; `PaymentsPanel` with remove; `CompleteSaleDialog`; `SaleCompletePanel`; 409 banner on complete (insufficient stock); reload recovery (Q8); network banner; `Toast`. **First real end-to-end sale.** | P0 | ~31 unit, ~22 component |
+| **P1 — First runnable cart, payments + complete** | Moved from P0: `salesService`, `terminalSlice`, `posCatalogSlice`, `utils/money`; `TerminalLayout` breakpoint layouts, `ResponsiveDialog`, `useMediaQuery`, `MobileActionBar`; `ScanBar` (barcode + name search, IMEI-shaped hint) adding **non-serialized** lines; `CartTable` + `CartCardList` with qty edit + remove; `TotalsPanel`; discard draft. Then: `PaymentDialog` (bottom sheet on phone) with CASH + reference methods; `PaymentsPanel` with remove; `CompleteSaleDialog`; `SaleCompletePanel`; 409 banner on complete (insufficient stock); reload recovery (Q8); network banner; `Toast`. **First real end-to-end sale.** _(Revised P1: narrowed, see §8 P1-8. Shipped scan bar, cart, totals, draft lifecycle, stock warning and F2/focus, with 40 tests in the P1 test files.)_ | P0 | ~31 unit, ~22 component |
 | **P2 — Customers** | `CustomerAttachDialog` (search, pick, detach), `CustomerCreateForm` (inline create, NIC 409 → offer existing); customer shown in terminal; `customersService`. | P0 (Q13 backend tweak optional) | 8 unit, 12 component |
 | **P3 — Serialized lines** | Serialized products route through `ImeiPromptDialog`; IMEI shown on cart rows; serialized rows lock qty; 400/409 handling with `existing_unit` message; complete-time 409 for cross-DRAFT race highlights the line. | P0, P1 | 6 unit, 10 component |
 | **P4 — Trade-in** | TRADE_IN in `PaymentDialog` (product picker over serialized catalog, IMEI, buying = amount, optional selling/notes); requires customer (links to P2 dialog); detach-customer block (Q19); TRADE_IN rows show "frozen" (remove only); trade-in IMEI 409 at add and complete. | P1, P2, P3 | 8 unit, 12 component |
