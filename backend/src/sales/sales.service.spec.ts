@@ -694,6 +694,79 @@ describe('SalesService', () => {
 
       expect(mockCustomersService.findOne).not.toHaveBeenCalled();
     });
+
+    it('throws BadRequestException when detaching customer with a TRADE_IN payment present', async () => {
+      mockSalesRepo.findOne.mockResolvedValue({
+        id: 's1',
+        status: SaleStatus.DRAFT,
+        customer_id: 'cust-1',
+        payments: [
+          { id: 'p1', payment_method: PaymentMethod.CASH },
+          { id: 'p2', payment_method: PaymentMethod.TRADE_IN },
+        ],
+      });
+
+      await expect(service.update('s1', { customer_id: null })).rejects.toThrow(
+        /Cannot change or detach the customer/,
+      );
+
+      expect(mockSalesRepo.save).not.toHaveBeenCalled();
+    });
+
+    it('throws BadRequestException when reassigning customer with a TRADE_IN payment present', async () => {
+      mockSalesRepo.findOne.mockResolvedValue({
+        id: 's1',
+        status: SaleStatus.DRAFT,
+        customer_id: 'cust-1',
+        payments: [{ id: 'p1', payment_method: PaymentMethod.TRADE_IN }],
+      });
+
+      await expect(
+        service.update('s1', { customer_id: 'cust-2' }),
+      ).rejects.toThrow(/Cannot change or detach the customer/);
+
+      // Refused before the reference lookup or any write
+      expect(mockCustomersService.findOne).not.toHaveBeenCalled();
+      expect(mockSalesRepo.save).not.toHaveBeenCalled();
+    });
+
+    it('allows re-sending the same customer_id on a sale with a TRADE_IN payment', async () => {
+      const sale = {
+        id: 's1',
+        status: SaleStatus.DRAFT,
+        customer_id: 'cust-1',
+        notes: null,
+        payments: [{ id: 'p1', payment_method: PaymentMethod.TRADE_IN }],
+      };
+      mockSalesRepo.findOne.mockResolvedValue(sale);
+      mockCustomersService.findOne.mockResolvedValue({
+        id: 'cust-1',
+        deleted_at: null,
+      });
+      mockSalesRepo.save.mockImplementation((e) => Promise.resolve(e));
+
+      const result = await service.update('s1', { customer_id: 'cust-1' });
+
+      expect(result.customer_id).toBe('cust-1');
+      expect(mockSalesRepo.save).toHaveBeenCalledTimes(1);
+    });
+
+    it('allows updating notes without customer_id on a sale with a TRADE_IN payment', async () => {
+      const sale = {
+        id: 's1',
+        status: SaleStatus.DRAFT,
+        customer_id: 'cust-1',
+        notes: null,
+        payments: [{ id: 'p1', payment_method: PaymentMethod.TRADE_IN }],
+      };
+      mockSalesRepo.findOne.mockResolvedValue(sale);
+      mockSalesRepo.save.mockImplementation((e) => Promise.resolve(e));
+
+      const result = await service.update('s1', { notes: 'Box included' });
+
+      expect(result.notes).toBe('Box included');
+      expect(result.customer_id).toBe('cust-1');
+    });
   });
 
   describe('discardDraft', () => {

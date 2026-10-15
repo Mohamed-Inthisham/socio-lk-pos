@@ -4421,6 +4421,54 @@ describe('Sales (e2e)', () => {
       });
     });
 
+    // ---- PATCH /sales/:id — customer lock guard ----
+
+    describe('PATCH /api/v1/sales/:id — TRADE_IN', () => {
+      it('PATCH /sales/:id customer_id=null returns 400 when sale has TRADE_IN payment', async () => {
+        const ctx = await setupTradeIn();
+        const sale = await draftWithLine(ctx);
+        await addTradeIn(ctx, sale.id, IMEI_A, 60000);
+
+        const response = await request(app.getHttpServer())
+          .patch(`/api/v1/sales/${sale.id}`)
+          .set('Cookie', ctx.cookies)
+          .send({ customer_id: null })
+          .expect(400);
+
+        expect(response.body.message).toMatch(
+          /Cannot change or detach the customer/,
+        );
+        const stored = await dataSource
+          .getRepository(Sale)
+          .findOneByOrFail({ id: sale.id });
+        expect(stored.customer_id).toBe(ctx.customer.id);
+      });
+
+      it('PATCH /sales/:id with a different customer_id returns 400 when sale has TRADE_IN payment', async () => {
+        const ctx = await setupTradeIn();
+        const other = await seedCustomer({
+          name: 'Other Customer',
+          phone: '0779990002',
+        });
+        const sale = await draftWithLine(ctx);
+        await addTradeIn(ctx, sale.id, IMEI_A, 60000);
+
+        const response = await request(app.getHttpServer())
+          .patch(`/api/v1/sales/${sale.id}`)
+          .set('Cookie', ctx.cookies)
+          .send({ customer_id: other.id })
+          .expect(400);
+
+        expect(response.body.message).toMatch(
+          /Cannot change or detach the customer/,
+        );
+        const stored = await dataSource
+          .getRepository(Sale)
+          .findOneByOrFail({ id: sale.id });
+        expect(stored.customer_id).toBe(ctx.customer.id);
+      });
+    });
+
     // ---- POST /complete — trade-in materialization ----
 
     describe('POST /api/v1/sales/:id/complete — TRADE_IN', () => {
