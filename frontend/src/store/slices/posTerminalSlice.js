@@ -9,8 +9,13 @@ import {
   discardSale,
   getSale,
   removeSaleLine,
+  updateSale,
   updateSaleLine,
 } from "../../services/salesService";
+import {
+  createCustomer,
+  getCustomer,
+} from "../../services/customersService";
 import {
   getProductByBarcode,
   listProducts,
@@ -55,8 +60,17 @@ import useTerminalSessionStore from "../zustand/terminalSessionStore";
  * flags lines whose product needs more units than the branch has. It
  * warns only — it never blocks a line.
  *
+ * CUSTOMER (P2):
+ * attachCustomer / detachCustomer PATCH /sales/:id { customer_id }. They
+ * are optimistic: the card shows the new customer (or walk-in) at once
+ * and reverts if the PATCH fails. createAndAttachCustomer POSTs the
+ * customer first; a NIC clash (409) rejects with the existing customer so
+ * the dialog can offer to attach that one instead. Detach is refused
+ * while the sale has a TRADE_IN payment (Q19 — the backend would only
+ * fail later, at complete).
+ *
  * ORDERING:
- * Line mutations run one at a time through `enqueue`, so fast consecutive
+ * Line and customer mutations run one at a time through `enqueue`, so fast consecutive
  * scans reach the server in order and an older response can never
  * overwrite a newer sale (planning doc §6, scan queue).
  */
@@ -234,7 +248,7 @@ const refreshStockFor = (dispatch, sale, productIds) => {
 // Thunks — line mutations
 // ---------------------------------------------------------------------------
 
-const lineMutation = (fallback, run, stockProductId) => async (arg, { dispatch, getState, rejectWithValue }) => {
+const saleMutation = (fallback, run, stockProductId) => async (arg, { dispatch, getState, rejectWithValue }) => {
   const saleId = getState().posTerminal.draftSaleId;
   try {
     const sale = await enqueue(() => run(saleId, arg));
@@ -255,7 +269,7 @@ const lineMutation = (fallback, run, stockProductId) => async (arg, { dispatch, 
  */
 export const addLine = createAsyncThunk(
   "posTerminal/addLine",
-  lineMutation("Couldn't add the item", (saleId, { product, quantity = 1, imei }) =>
+  saleMutation("Couldn't add the item", (saleId, { product, quantity = 1, imei }) =>
     addSaleLine(saleId, {
       product_id: product.id,
       quantity,
@@ -268,7 +282,7 @@ export const addLine = createAsyncThunk(
 /** arg: { lineId, quantity } */
 export const updateLineQty = createAsyncThunk(
   "posTerminal/updateLineQty",
-  lineMutation(
+  saleMutation(
     "Couldn't change the quantity",
     (saleId, { lineId, quantity }) => updateSaleLine(saleId, lineId, { quantity }),
     ({ lineId }, sale) => sale.lines.find((l) => l.id === lineId)?.product_id,
@@ -278,10 +292,73 @@ export const updateLineQty = createAsyncThunk(
 /** arg: { lineId } — DELETE is 204, so re-fetch the sale. */
 export const removeLine = createAsyncThunk(
   "posTerminal/removeLine",
-  lineMutation("Couldn't remove the item", async (saleId, { lineId }) => {
+  saleMutation("Couldn't remove the item", async (saleId, { lineId }) => {
     await removeSaleLine(saleId, lineId);
     return getSale(saleId);
   }),
+);
+
+// ---------------------------------------------------------------------------
+// Thunks — customer
+// ---------------------------------------------------------------------------
+
+const hasTradeInPayment = (sale) =>
+  (sale?.payments ?? []).some((p) => p.payment_method === "TRADE_IN");
+
+/**
+ * arg: { customer } — the picked customer row; the card shows it before
+ * the PATCH lands.
+ */
+export const attachCustomer = createAsyncThunk(
+  "posTerminal/attachCustomer",
+  saleMutation("Couldn't attach the customer", (saleId, { customer }) =>
+    updateSale(saleId, { customer_id: customer.id }),
+  ),
+);
+
+/** No arg. Refused (no request, no state change) while a TRADE_IN payment exists. */
+export const detachCustomer = createAsyncThunk(
+  "posTerminal/detachCustomer",
+  saleMutation("Couldn't remove the customer", (saleId) =>
+    updateSale(saleId, { customer_id: null }),
+  ),
+  {
+    condition: (_, { getState }) =>
+      !hasTradeInPayment(getState().posTerminal.draftSale),
+  },
+);
+
+/**
+ * arg: { name, phone, nic? } — POST /customers, then attach.
+ *
+ * Rejections carry a `stage`:
+ * - "create": nothing was saved. On a NIC clash (409) `existing_customer`
+ *   is the customer who already has that NIC (or null if it couldn't be
+ *   fetched; `existing_customer_id` is always set).
+ * - "attach": the customer WAS created (`customer`), but the PATCH failed
+ *   — retry with attachCustomer({ customer }) rather than creating again.
+ */
+export const createAndAttachCustomer = createAsyncThunk(
+  "posTerminal/createAndAttachCustomer",
+  async (dto, { dispatch, rejectWithValue }) => {
+    let customer;
+    try {
+      customer = await createCustomer(dto);
+    } catch (error) {
+      const err = { ...toError(error, "Couldn't create the customer"), stage: "create" };
+      const existingId = error?.response?.data?.existing_customer_id;
+      if (err.status === 409 && existingId) {
+        err.existing_customer_id = existingId;
+        err.existing_customer = await getCustomer(existingId).catch(() => null);
+      }
+      return rejectWithValue(err);
+    }
+    const result = await dispatch(attachCustomer({ customer }));
+    if (attachCustomer.rejected.match(result)) {
+      return rejectWithValue({ ...result.payload, stage: "attach", customer });
+    }
+    return result.payload;
+  },
 );
 
 // ---------------------------------------------------------------------------
@@ -360,6 +437,14 @@ const initialState = {
   stockByProduct: {},
   // Products whose last stock lookup failed: { [productId]: true }
   stockErrors: {},
+  // Latest customer request (attach / detach / create) — only it may
+  // clear `customerSaving` or roll back
+  customerRequestId: null,
+  customerSaving: false,
+  // Customer before the optimistic change: { customer, customer_id }
+  customerRollback: null,
+  // Last customer mutation error: { message, status } | null
+  customerError: null,
 };
 
 const markBusy = (state, lineId) => {
@@ -378,6 +463,59 @@ const applyRejection = (state, payload, fallback) => {
   }
 };
 
+const customerPending = (state, action, customer) => {
+  state.customerRequestId = action.meta.requestId;
+  state.customerSaving = true;
+  state.customerError = null;
+  if (!state.draftSale || customer === undefined) return;
+  state.customerRollback = {
+    customer: state.draftSale.customer ?? null,
+    customer_id: state.draftSale.customer_id ?? null,
+  };
+  state.draftSale.customer = customer;
+  state.draftSale.customer_id = customer?.id ?? null;
+};
+
+// A line response queued before an in-flight customer PATCH still carries
+// the old customer — keep the optimistic one on screen until it settles.
+const replaceSale = (state, sale) => {
+  const optimistic = state.customerRollback && state.draftSale;
+  const { customer, customer_id } = state.draftSale ?? {};
+  state.draftSale = sale;
+  if (optimistic) Object.assign(state.draftSale, { customer, customer_id });
+};
+
+const isLatestCustomerRequest = (state, action) =>
+  action.meta.requestId === state.customerRequestId;
+
+const customerSettled = (state) => {
+  state.customerSaving = false;
+  state.customerRollback = null;
+};
+
+const customerFulfilled = (state, action) => {
+  if (isLatestCustomerRequest(state, action)) {
+    customerSettled(state);
+    state.draftSale = action.payload;
+  } else {
+    // A newer customer request is still in flight — keep its optimistic value.
+    replaceSale(state, action.payload);
+  }
+};
+
+const customerRejected = (state, action, fallback) => {
+  if (!isLatestCustomerRequest(state, action)) return;
+  if (state.customerRollback && state.draftSale) {
+    Object.assign(state.draftSale, state.customerRollback);
+  }
+  customerSettled(state);
+  state.customerError = action.payload || { message: fallback };
+  if (action.payload?.gone) {
+    state.status = "gone";
+    state.draftSaleId = null;
+  }
+};
+
 const posTerminalSlice = createSlice({
   name: "posTerminal",
   initialState,
@@ -385,6 +523,9 @@ const posTerminalSlice = createSlice({
     clearPosTerminal: () => initialState,
     clearLineError: (state) => {
       state.lineError = null;
+    },
+    clearCustomerError: (state) => {
+      state.customerError = null;
     },
     clearScan: (state) => {
       state.scanState = "idle";
@@ -406,6 +547,9 @@ const posTerminalSlice = createSlice({
       state.draftSaleId = action.payload.id;
       state.pendingLines = [];
       state.busyLineIds = [];
+      state.customerRequestId = null;
+      customerSettled(state);
+      state.customerError = null;
     };
     const lifecycleRejected = (state, action) => {
       state.status = "error";
@@ -450,7 +594,7 @@ const posTerminalSlice = createSlice({
         state.pendingLines = state.pendingLines.filter(
           (l) => l.id !== `pending-${action.meta.requestId}`,
         );
-        state.draftSale = action.payload;
+        replaceSale(state, action.payload);
       })
       .addCase(addLine.rejected, (state, action) => {
         state.pendingLines = state.pendingLines.filter(
@@ -466,7 +610,7 @@ const posTerminalSlice = createSlice({
       })
       .addCase(updateLineQty.fulfilled, (state, action) => {
         unmarkBusy(state, action.meta.arg.lineId);
-        state.draftSale = action.payload;
+        replaceSale(state, action.payload);
       })
       .addCase(updateLineQty.rejected, (state, action) => {
         unmarkBusy(state, action.meta.arg.lineId);
@@ -478,11 +622,35 @@ const posTerminalSlice = createSlice({
       })
       .addCase(removeLine.fulfilled, (state, action) => {
         unmarkBusy(state, action.meta.arg.lineId);
-        state.draftSale = action.payload;
+        replaceSale(state, action.payload);
       })
       .addCase(removeLine.rejected, (state, action) => {
         unmarkBusy(state, action.meta.arg.lineId);
         applyRejection(state, action.payload, "Couldn't remove the item");
+      })
+
+      // Customer — optimistic card, rolled back on failure
+      .addCase(attachCustomer.pending, (state, action) => {
+        customerPending(state, action, action.meta.arg.customer);
+      })
+      .addCase(detachCustomer.pending, (state, action) => {
+        customerPending(state, action, null);
+      })
+      .addCase(createAndAttachCustomer.pending, (state, action) => {
+        // Nothing to show until the customer exists; attachCustomer
+        // (dispatched by this thunk) does the optimistic update.
+        customerPending(state, action, undefined);
+      })
+      .addCase(attachCustomer.fulfilled, customerFulfilled)
+      .addCase(detachCustomer.fulfilled, customerFulfilled)
+      .addCase(attachCustomer.rejected, (state, action) => {
+        customerRejected(state, action, "Couldn't attach the customer");
+      })
+      .addCase(detachCustomer.rejected, (state, action) => {
+        customerRejected(state, action, "Couldn't remove the customer");
+      })
+      .addCase(createAndAttachCustomer.rejected, (state, action) => {
+        customerRejected(state, action, "Couldn't create the customer");
       })
 
       // Stock
@@ -542,8 +710,12 @@ const posTerminalSlice = createSlice({
   },
 });
 
-export const { clearPosTerminal, clearLineError, clearScan } =
-  posTerminalSlice.actions;
+export const {
+  clearPosTerminal,
+  clearLineError,
+  clearCustomerError,
+  clearScan,
+} = posTerminalSlice.actions;
 
 // Selectors
 export const selectDraftSale = (state) => state.posTerminal.draftSale;
@@ -554,6 +726,13 @@ export const selectScanState = (state) => state.posTerminal.scanState;
 export const selectScanResults = (state) => state.posTerminal.scanResults;
 export const selectScanQuery = (state) => state.posTerminal.scanQuery;
 export const selectScanError = (state) => state.posTerminal.scanError;
+export const selectAttachedCustomer = (state) =>
+  state.posTerminal.draftSale?.customer ?? null;
+/** Q19: a TRADE_IN payment needs the customer — detach is blocked. */
+export const selectHasTradeInPayment = (state) =>
+  hasTradeInPayment(state.posTerminal.draftSale);
+export const selectCustomerSaving = (state) => state.posTerminal.customerSaving;
+export const selectCustomerError = (state) => state.posTerminal.customerError;
 const selectPendingLines = (state) => state.posTerminal.pendingLines;
 const selectBusyLineIds = (state) => state.posTerminal.busyLineIds;
 

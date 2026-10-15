@@ -76,6 +76,11 @@ const Tooltip = ({
         break;
     }
 
+    // Keep it on screen: a trigger near the viewport edge (e.g. a button
+    // flush right in a column) would otherwise push the tip off-screen.
+    const maxLeft = window.innerWidth - tip.width - OFFSET;
+    left = Math.max(OFFSET, Math.min(left, maxLeft));
+
     setPosition({
       top: top + window.scrollY,
       left: left + window.scrollX,

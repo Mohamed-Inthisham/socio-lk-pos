@@ -41,6 +41,20 @@ export const getSale = async (id) => {
 };
 
 /**
+ * Update a DRAFT sale's customer and/or notes.
+ *
+ * `customer_id: null` detaches the customer (walk-in sale).
+ *
+ * @param {string} id - Sale UUID
+ * @param {Object} payload - { customer_id?, notes? }
+ * @returns {Promise<Object>} Hydrated sale (with the new customer)
+ */
+export const updateSale = async (id, payload) => {
+  const response = await api.patch(`/sales/${id}`, payload);
+  return response.data;
+};
+
+/**
  * Discard a DRAFT sale (hard delete of the sale, its lines and payments).
  *
  * @param {string} id - Sale UUID

@@ -373,7 +373,7 @@ Q6, Q9, Q11, Q12 and Q17 were answered explicitly. The rest were not called out,
 | Q16 | Recent sales | Default — today, this branch, all cashiers |
 | **Q17** | **Hotkeys** | **No existing POS to match.** `react-hotkeys-hook` with the §6 map; refine after cashier use (revised 2026-10-13 from the vanilla hook) |
 | Q18 | Abandoned drafts | Default — confirm and discard |
-| Q19 | Customer detach with trade-in | Default — frontend blocks it |
+| Q19 | Customer detach with trade-in | **Resolved in P2** — frontend guard in `CustomerCard` (dimmed Detach + tooltip) backed by slice-level refusal. Backend-side guard in `updateSale` remains a separate FOLLOWUP (will ship as its own backend PR after P2) |
 | Q20 | Language | Default — English only |
 | Q21 | Cashier landing | Default — `/pos` |
 | **Q22** | **Camera scanning** | **None.** The shop has a hardware barcode scanner; it types into the scan input like a keyboard. Camera scanning is dropped from the roadmap, not deferred |
@@ -481,6 +481,7 @@ The original questions as asked, kept for the reasoning. The table above is auth
 **Q19. Removing the customer while a TRADE_IN payment exists.** The backend allows it (FOLLOWUPS entry) and fails later at complete.
 - (a) Frontend blocks the detach with a message. (b) Also fix the backend now. (c) Leave it.
 - **Default: (a)** in 6.4; backend fix stays in FOLLOWUPS.
+- **Resolved in P2** — frontend guard in `CustomerCard` (dimmed Detach + tooltip) backed by slice-level refusal. Backend-side guard in `updateSale` remains a separate FOLLOWUP (will ship as its own backend PR after P2).
 
 **Q20. Language.**
 - (a) English only. (b) English + Sinhala. (c) English + Sinhala + Tamil.
@@ -502,7 +503,7 @@ Each slice is a vertical, demoable increment. "unit" = reducers/selectors/utils 
 | **P1 — First runnable cart, payments + complete** | Moved from P0: `salesService`, `terminalSlice`, `posCatalogSlice`, `utils/money`; `TerminalLayout` breakpoint layouts, `ResponsiveDialog`, `useMediaQuery`, `MobileActionBar`; `ScanBar` (barcode + name search, IMEI-shaped hint) adding **non-serialized** lines; `CartTable` + `CartCardList` with qty edit + remove; `TotalsPanel`; discard draft. Then: `PaymentDialog` (bottom sheet on phone) with CASH + reference methods; `PaymentsPanel` with remove; `CompleteSaleDialog`; `SaleCompletePanel`; 409 banner on complete (insufficient stock); reload recovery (Q8); network banner; `Toast`. **First real end-to-end sale.** _(Revised P1: narrowed, see §8 P1-8. Shipped scan bar, cart, totals, draft lifecycle, stock warning and F2/focus, with 40 tests in the P1 test files.)_ | P0 | ~31 unit, ~22 component |
 | **P2 — Customers** | `CustomerAttachDialog` (search, pick, detach), `CustomerCreateForm` (inline create, NIC 409 → offer existing); customer shown in terminal; `customersService`. | P0 (Q13 backend tweak optional) | 8 unit, 12 component |
 | **P3 — Serialized lines** | Serialized products route through `ImeiPromptDialog`; IMEI shown on cart rows; serialized rows lock qty; 400/409 handling with `existing_unit` message; complete-time 409 for cross-DRAFT race highlights the line. | P0, P1 | 6 unit, 10 component |
-| **P4 — Trade-in** | TRADE_IN in `PaymentDialog` (product picker over serialized catalog, IMEI, buying = amount, optional selling/notes); requires customer (links to P2 dialog); detach-customer block (Q19); TRADE_IN rows show "frozen" (remove only); trade-in IMEI 409 at add and complete. | P1, P2, P3 | 8 unit, 12 component |
+| **P4 — Trade-in** | TRADE_IN in `PaymentDialog` (product picker over serialized catalog, IMEI, buying = amount, optional selling/notes); requires customer (links to P2 dialog); TRADE_IN rows show "frozen" (remove only); trade-in IMEI 409 at add and complete. **TRADE_IN detach guard: already built in P2. Don't re-implement** (Q19). | P1, P2, P3 | 8 unit, 12 component |
 | **P5 — Recent sales + void** | `/pos/sales` list (paginated, today/branch), `/pos/sales/:id` detail; `VoidSaleDialog` (Q15) gated by `VOID_SALE`; resold-trade-in 409 message. | P1 | 6 unit, 12 component |
 | **P6 — Keyboard, discounts, polish + E2E** | Full §6 hotkey map with `Kbd` chips on pointer devices, `KeyboardHelpOverlay`, scan queue hardening, focus-return audit (keyboard) and no-auto-focus check (touch); stock warning (Q1); line discounts with `APPLY_DISCOUNT` granted to cashiers (Q11); Playwright smoke flows: cash sale, split tender, serialized + trade-in sale, void — each at a desktop viewport, with the cash sale and trade-in also at a 390 px mobile viewport. | P0–P5 | 10 unit, 10 component, 6 e2e |
 | **Total** | | | **~83 unit, ~90 component, ~6 e2e** |

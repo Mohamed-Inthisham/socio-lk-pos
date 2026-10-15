@@ -4,6 +4,8 @@ import { useDispatch, useSelector } from "react-redux";
 import { AlertTriangle, FilePlus2 } from "lucide-react";
 import Button from "../../components/common/Button";
 import CartLines from "../../components/pos/CartLines";
+import CustomerAttachDialog from "../../components/pos/CustomerAttachDialog";
+import CustomerCard from "../../components/pos/CustomerCard";
 import NewSaleDialog from "../../components/pos/NewSaleDialog";
 import ScanBar from "../../components/pos/ScanBar";
 import TotalsPanel from "../../components/pos/TotalsPanel";
@@ -30,13 +32,17 @@ import {
  * - F2 focuses it from anywhere (also from inputs); Esc does too when
  *   focus isn't in an input. Both are ignored while a dialog has focus —
  *   the dialog owns its keys.
+ * - F3 opens the CustomerAttachDialog from anywhere (also from inputs),
+ *   unless a dialog (New sale, Attach customer, IMEI prompt) is already
+ *   open.
  * - Automatic hand-offs (qty Enter, line delete, New sale dialog closed)
  *   return focus to it, except on touch-only devices where that would
  *   keep popping the on-screen keyboard. F2 / a tap always work.
  *
  * Phase 6.4 P1 builds this up: draft lifecycle → ScanBar → CartLines →
- * TotalsPanel. Customer (P2), payments (P3), trade-in (P4) and complete
- * (P5) slot into the right-hand column later.
+ * TotalsPanel; P2 adds the CustomerCard (+ CustomerAttachDialog) under
+ * "Current sale". Payments (P3), trade-in (P4) and complete (P5) slot
+ * into the right-hand column later.
  */
 
 const Card = ({ className = "", children }) => (
@@ -56,6 +62,8 @@ const formatStarted = (iso) =>
     : null;
 
 const inDialog = () => !!document.activeElement?.closest('[role="dialog"]');
+// Any open Headless UI dialog — not just one holding focus.
+const dialogOpen = () => inDialog() || !!document.querySelector('[role="dialog"]');
 
 const PosTerminal = () => {
   const dispatch = useDispatch();
@@ -66,6 +74,7 @@ const PosTerminal = () => {
   const sale = useSelector(selectDraftSale);
   const lines = useSelector(selectCartLines);
   const [confirmNewSale, setConfirmNewSale] = useState(false);
+  const [attachOpen, setAttachOpen] = useState(false);
 
   useEffect(() => {
     if (branchId) dispatch(ensureDraftSale({ branchId }));
@@ -84,6 +93,14 @@ const PosTerminal = () => {
     },
     { enableOnFormTags: true, preventDefault: true },
     [focusScan],
+  );
+  useHotkeys(
+    "f3",
+    () => {
+      if (status === "ready" && !dialogOpen()) setAttachOpen(true);
+    },
+    { enableOnFormTags: true, preventDefault: true },
+    [status],
   );
   useHotkeys(
     "esc",
@@ -186,6 +203,11 @@ const PosTerminal = () => {
             </div>
           </Card>
 
+          <CustomerCard
+            onAttach={() => setAttachOpen(true)}
+            disabled={status !== "ready"}
+          />
+
           <TotalsPanel />
         </aside>
       </div>
@@ -197,6 +219,12 @@ const PosTerminal = () => {
         itemCount={itemCount}
         // Deferred: Headless UI restores focus to the opener (New sale
         // button) after afterLeave; this runs after that.
+        afterLeave={() => setTimeout(returnFocus, 0)}
+      />
+
+      <CustomerAttachDialog
+        open={attachOpen}
+        onClose={() => setAttachOpen(false)}
         afterLeave={() => setTimeout(returnFocus, 0)}
       />
     </div>

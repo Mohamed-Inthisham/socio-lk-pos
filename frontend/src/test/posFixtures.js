@@ -57,3 +57,22 @@ export const draftSale = (overrides = {}) => ({
   payments: [],
   ...overrides,
 });
+
+export const customer = (overrides = {}) => ({
+  id: "cust-1",
+  name: "Kamal Perera",
+  phone: "0771234567",
+  nic: "199012345678",
+  deleted_at: null,
+  ...overrides,
+});
+
+export const tradeInPayment = (overrides = {}) => ({
+  id: "pay-ti",
+  payment_method: "TRADE_IN",
+  amount: "40000.00",
+  trade_in_product_id: "p-phone",
+  trade_in_imei: "354789102345678",
+  trade_in_buying_price: "40000.00",
+  ...overrides,
+});

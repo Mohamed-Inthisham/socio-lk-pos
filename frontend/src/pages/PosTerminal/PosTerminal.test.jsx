@@ -8,14 +8,17 @@ import {
   renderWithProviders,
 } from "../../test/renderWithProviders";
 import { cashierUser, mainShop } from "../../test/fixtures";
-import { draftSale, saleLine } from "../../test/posFixtures";
+import { draftSale, phoneProduct, saleLine } from "../../test/posFixtures";
 import useTerminalSessionStore from "../../store/zustand/terminalSessionStore";
 import * as salesService from "../../services/salesService";
 import * as stockService from "../../services/stockService";
+import * as productsService from "../../services/productsService";
+import * as customersService from "../../services/customersService";
 
 vi.mock("../../services/salesService");
 vi.mock("../../services/stockService");
 vi.mock("../../services/productsService");
+vi.mock("../../services/customersService");
 
 const lines = [
   saleLine({ quantity: 2, line_total: "3000.00" }),
@@ -41,6 +44,7 @@ beforeEach(() => {
   salesService.updateSaleLine.mockResolvedValue(draftSale({ lines }));
   salesService.removeSaleLine.mockResolvedValue();
   salesService.getSale.mockResolvedValue(draftSale({ lines: [lines[1]] }));
+  customersService.listCustomers.mockResolvedValue({ data: [], meta: {} });
 });
 
 describe("PosTerminal hotkeys and focus", () => {
@@ -96,5 +100,48 @@ describe("PosTerminal hotkeys and focus", () => {
     await user.click(plus);
     await waitFor(() => expect(plus).not.toBeDisabled());
     expect(plus).toHaveFocus();
+  });
+});
+
+describe("PosTerminal F3 customer hotkey", () => {
+  const attachDialog = () => screen.queryByRole("dialog", { name: "Attach customer" });
+
+  it("F3 opens the attach dialog from the scan bar, with the search focused", async () => {
+    const user = userEvent.setup();
+    await renderTerminal();
+    expect(scanBar()).toHaveFocus();
+
+    await user.keyboard("[F3]"); // by code: user-event's key map has no F-keys
+
+    expect(await screen.findByRole("dialog", { name: "Attach customer" })).toBeInTheDocument();
+    await waitFor(() =>
+      expect(screen.getByRole("combobox", { name: "Search customers" })).toHaveFocus(),
+    );
+  });
+
+  it("F3 is ignored while the New sale dialog is open", async () => {
+    const user = userEvent.setup();
+    await renderTerminal();
+
+    await user.click(screen.getByRole("button", { name: "New sale" }));
+    await screen.findByRole("dialog", { name: "Start a new sale?" });
+    await user.keyboard("[F3]");
+
+    expect(attachDialog()).not.toBeInTheDocument();
+    expect(screen.getByRole("dialog", { name: "Start a new sale?" })).toBeInTheDocument();
+  });
+
+  it("F3 is ignored while the IMEI prompt is open", async () => {
+    productsService.getProductByBarcode.mockResolvedValue(phoneProduct);
+    const user = userEvent.setup();
+    await renderTerminal();
+
+    await user.type(scanBar(), `${phoneProduct.barcode}{Enter}`);
+    const imeiInput = await screen.findByLabelText("IMEI");
+    await user.keyboard("[F3]");
+
+    expect(attachDialog()).not.toBeInTheDocument();
+    expect(screen.getAllByRole("dialog")).toHaveLength(1);
+    expect(imeiInput).toHaveFocus();
   });
 });
