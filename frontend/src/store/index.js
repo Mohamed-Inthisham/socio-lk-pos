@@ -3,6 +3,7 @@ import authReducer from "./slices/authSlice";
 import branchesReducer from "./slices/branchesSlice";
 import brandsReducer from "./slices/brandsSlice";
 import categoriesReducer from "./slices/categoriesSlice";
+import posTerminalReducer from "./slices/posTerminalSlice";
 
 /**
  * Redux Store Configuration
@@ -25,6 +26,7 @@ export const store = configureStore({
     // cart: cartReducer,
     brands: brandsReducer,
     categories: categoriesReducer,
+    posTerminal: posTerminalReducer,
   },
 
   // Development tools (auto-enabled in dev, disabled in production)

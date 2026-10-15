@@ -6,6 +6,7 @@ import authReducer from "../store/slices/authSlice";
 import branchesReducer from "../store/slices/branchesSlice";
 import brandsReducer from "../store/slices/brandsSlice";
 import categoriesReducer from "../store/slices/categoriesSlice";
+import posTerminalReducer from "../store/slices/posTerminalSlice";
 
 /**
  * Test helpers: a fresh Redux store per test, plus a MemoryRouter.
@@ -19,6 +20,7 @@ export const createTestStore = (preloadedState) =>
       branches: branchesReducer,
       brands: brandsReducer,
       categories: categoriesReducer,
+      posTerminal: posTerminalReducer,
     },
     preloadedState,
   });
@@ -50,3 +52,25 @@ export const renderWithProviders = (
     </Provider>,
   ),
 });
+
+/** posTerminal slice with an open draft (pass overrides, e.g. { draftSale }). */
+export const posTerminalState = (overrides = {}) => {
+  const base = posTerminalReducer(undefined, { type: "@@INIT" });
+  const draftSale = overrides.draftSale ?? {
+    id: "sale-1",
+    status: "DRAFT",
+    branch_id: "branch-main",
+    lines: [],
+    payments: [],
+    subtotal: "0.00",
+    discount_total: "0.00",
+    total: "0.00",
+  };
+  return {
+    ...base,
+    status: "ready",
+    draftSaleId: draftSale.id,
+    draftSale,
+    ...overrides,
+  };
+};

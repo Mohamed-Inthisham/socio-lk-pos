@@ -54,6 +54,7 @@ const Dialog = ({
   dismissible = true,
   children,
   footer,
+  afterLeave,
 }) => {
   // If dismissible=false, we intercept onClose so the dialog can't be dismissed
   // by backdrop click or Escape. The X button is also hidden in that case.
@@ -62,7 +63,7 @@ const Dialog = ({
   };
 
   return (
-    <Transition appear show={open} as={Fragment}>
+    <Transition appear show={open} as={Fragment} afterLeave={afterLeave}>
       <HeadlessDialog as="div" className="relative z-50" onClose={handleClose}>
         {/* Backdrop */}
         <TransitionChild

@@ -8,6 +8,22 @@ Non-blocking issues and tech debt to address opportunistically. When you fix one
 
 - **Stock-lock-ordering latent deadlock.** `SalesService.completeSale` and `voidSale` iterate `sale_lines` by `line_number ASC` and lock Stock rows in that order via `StockService.decrementForSale`/`incrementForReversal`. Two concurrent completes on sales touching products `[P1, P2]` and `[P2, P1]` in different line orders can deadlock. Postgres detects it (kills one tx with `40P01`), so no permanent hang, but the loser gets a 500 with a cryptic message. Fix: collect all `(product_id, branch_id)` pairs across the loop, sort them, lock all before mutating. Same treatment for PU locks. Pre-existing since Phase 6.3; Slice E inherited the exposure. **Priority: high (bumped in Slice G).** Slice G widens the surface with a cross-method Stock/PU inversion: `voidSale`'s trade-in loop locks the PU first (`markReturnedForVoid`) and Stock second (`decrementForVoidedTradeIn`, which needs the PU's `product_id`), while the outgoing loops in both `completeSale` and `voidSale` lock Stock first and PU second. A void of a trade-in sale racing a `completeSale` that sells that same traded-in phone takes the two locks in opposite order. Per the Q8 design lock, not fixed in Slice G — a per-method reorder just moves the asymmetry; the fix has to sort all Stock and PU lock targets globally across `SalesService` (and `PhonePurchasesService.createForTradeIn`) before mutating. _[Phase 6.3, reinforced Slice E, widened Slice G]_
 
+- **API rate limit is per IP, so tills on one shop network share it.** **Priority: medium. Blocks R1 at 3+ concurrent tills.** `ThrottlerModule` in `app.module.ts` applies 10 req/s and 100 req/min to every route, keyed by client IP. All tills behind one shop router share a single public IP and therefore one bucket. A busy scan costs about 3 requests (by-barcode, addLine, stock), so 3 tills scanning steadily reach 100/min and start getting 429s on scans and line edits. Found in Phase 6.4 P1 E: one cashier's terminal hit the limit while reloading the page repeatedly. Fix: key authenticated routes by user instead of IP, by subclassing `ThrottlerGuard` and overriding `getTracker()` to return the user id. `JwtStrategy.validate` maps the token's `sub` to `req.user.id`. and fall back to the IP for anonymous routes. Keep the strict per-IP limit on `/auth/login`. Sketch:
+
+  ```ts
+  @Injectable()
+  export class UserThrottlerGuard extends ThrottlerGuard {
+    protected async getTracker(req: Record<string, any>): Promise<string> {
+      return req.user?.id ? `user:${req.user.id}` : `ip:${req.ip}`;
+    }
+  }
+  // app.module.ts: { provide: APP_GUARD, useClass: UserThrottlerGuard }
+  // req.user exists only if JwtAuthGuard (APP_GUARD in AuthModule) runs before
+  // this guard (APP_GUARD in AppModule). Verify the order, or move both into one
+  // module in the right order, before relying on it.
+  ```
+  _[Phase 6.4 P1]_
+
 - **`updated_at` not bumped on QueryBuilder `.update()`.** `StockService.decrementForSale`/`incrementForReversal` and `ProductUnitsService.markSoldForSale`/`markAvailableForReversal` use `manager.createQueryBuilder().update(Entity).set({...})`, which bypasses TypeORM's `@UpdateDateColumn` auto-bump. `updated_at` stays at the row's creation timestamp even after status/quantity changes. Cosmetic — no data-integrity impact — but breaks any "recently changed" ordering. Fix: add `updated_at: () => 'now()'` to each `.set()` clause, or install a Postgres trigger. _[Phase 6.3 Stock, Slice E PU]_
 
 - **IMEI collision race between pre-check and INSERT (PhonePurchase).** `PhonePurchasesService.create` pre-checks for IMEI collision but the actual INSERT could still race a concurrent creation, surfacing as a raw Postgres `23505` → 500. Fix: catch `23505` in the insert and translate to a structured 409 matching the pre-check's payload shape. _[Slice D]_
@@ -84,4 +100,28 @@ Non-blocking issues and tech debt to address opportunistically. When you fix one
 - **Login response DTO vs `/auth/me` response shape drift.** _[Path B]_
 - **`ProductsList` loads only the first 200 products.** `GET /products` is now paginated (`limit` ≤ 200). The admin list requests one max-size page and still filters in memory (name/SKU/barcode); the header says "first N of M products" when the catalog is bigger. Fix: add a pager (or "Load more") and switch the text box to the server-side `search` param. Server `search` matches name only, so SKU/barcode matching would need extending it. _[products text search]_
 - **Staff may keep a stale `activeBranchId` from before the `mapBackendUser` fix.** `BranchSelector` only defaults the persisted `activeBranchStore` when it is null. Before the fix, `user.branch_id` was always undefined, so staff were defaulted to `activeBranches[0]` instead of their own branch, and that value survives refreshes. A single logout clears it (`logoutUser` calls `activeBranchStore.clear()`), so after deploy it self-heals on each staff member's next logout. Nothing reads `activeBranchId` for staff today, and the POS `BranchContextGuard` reads `user.branch_id` directly, so there is no functional impact while the shop has one branch. Fix if it ever matters: have `BranchSelector` overwrite the store for staff whenever it differs from `user.branch_id`. **Low severity.** _[Phase 6.4 P0]_
-- **Admin can switch branch from the global header while a POS DRAFT is open.** The terminal header shows the branch read-only, but an admin can exit to any app page, change the header `BranchSelector`, and return. The DRAFT still belongs to the old branch; the server rejects the mismatch, but the UX is confusing. Fix (P1 or later, once drafts exist in the terminal): while the terminal holds a DRAFT, warn on or disable the global header `BranchSelector` until the sale is completed or discarded. Not P0 scope. _[Phase 6.4 P0]_
+- **Admin can switch branch from the global header while a POS DRAFT is open.** The terminal header shows the branch read-only, but an admin can exit to any app page, change the header `BranchSelector`, and return. The DRAFT still belongs to the old branch; the server rejects the mismatch, but the UX is confusing. Fix (P1 or later, once drafts exist in the terminal): while the terminal holds a DRAFT, warn on or disable the global header `BranchSelector` until the sale is completed or discarded. Not P0 scope. **Confirmed reproducible as of the P1 D commit:** `ensureDraftSale` resumes a stored draft only when its `branch_id` matches the terminal branch. After a switch it opens a new DRAFT on the new branch and moves the pointer, and the old DRAFT stays on the server as an orphan, with its lines. Repro: admin opens `/pos` on Main Shop (draft X), switches the header branch to another branch, reopens `/pos` (draft Y); `GET /sales/X` still returns `DRAFT` and nothing references it. Not fixed in P1. _[Phase 6.4 P0, confirmed P1]_
+- **POS line discounts have no UI yet (moved to P2).** The Totals panel shows the server's `discount_total`, which is always 0 in P1 because nothing on the terminal sets a line discount. Still to do: a per-line discount control (`PATCH /sales/:id/lines/:lineId` with `{ discount_type: AMOUNT|PERCENT, discount_value }`, and both set to `null` to clear it), the `D` hotkey on the focused cart row (§6), a discount column or badge on `CartLines`, and `APPLY_DISCOUNT` granted to the cashier role (Q11: all roles may discount). The backend already computes `discount_amount` and caps it at the line subtotal, so this is frontend-only. _[Phase 6.4 P1 → P2]_
+- **POS stock lookup has no retry.** A failed `GET /stock` (network, 429) leaves the line with a muted "?" ("stock lookup failed, try reloading") until the next add/qty change or a reload; add one delayed retry per the §5 GET retry rule. _[Phase 6.4 P1]_
+- **ScanBar: alphanumeric manufacturer barcodes are treated as a name search.** `ScanBar` sends a value to `GET /products/by-barcode` only when it is barcode-shaped (`isBarcodeLike`: 8–20 digits, or an `SLP-` prefix). A manufacturer Code 128 barcode with letters (e.g. `A2849LL/A`) goes to the debounced name search instead, finds nothing, and Enter does nothing. Fix: when Enter is pressed in text mode and the current query has no results, try an exact by-barcode lookup before giving up. Only a 404 means "not found"; the name search stays as it is. About a 10-minute change in `components/pos/ScanBar/index.jsx` plus one test (letters-and-digits value, empty search → by-barcode called → line added). _[Phase 6.4 P1]_
+
+  ```js
+  // ScanBar handleKeyDown, Enter branch
+  if (isBarcodeLike(query)) {
+    submitBarcode(query);
+  } else if (resultsCurrent && results[active]) {
+    addProduct(results[active]);
+  } else if (resultsCurrent && results.length === 0) {
+    // Name search came back empty: maybe it's a barcode with letters.
+    submitBarcode(query); // by-barcode → addProduct, or "No product found"
+  } else if (textMode) {
+    // Search still in flight: run it now; on an empty result,
+    // fall through to submitBarcode(query) the same way.
+    clearTimeout(debounceRef.current);
+    dispatch(searchProducts({ query, branchId })).then((action) => {
+      if (searchProducts.fulfilled.match(action) && action.payload.length === 0) {
+        submitBarcode(query);
+      }
+    });
+  }
+  ```

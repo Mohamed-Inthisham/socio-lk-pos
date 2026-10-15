@@ -7,7 +7,9 @@ import {
 import { clearBranches } from "./branchesSlice";
 import { clearBrands } from "./brandsSlice";
 import { clearCategories } from "./categoriesSlice";
+import { clearPosTerminal } from "./posTerminalSlice";
 import useActiveBranchStore from "../zustand/activeBranchStore";
+import useTerminalSessionStore from "../zustand/terminalSessionStore";
 /**
  * Authentication Slice
  *
@@ -42,7 +44,9 @@ export const logoutUser = createAsyncThunk(
       dispatch(clearBranches());
       dispatch(clearBrands());
       dispatch(clearCategories());
+      dispatch(clearPosTerminal());
       useActiveBranchStore.getState().clear();
+      useTerminalSessionStore.getState().clear();
     };
 
     try {
