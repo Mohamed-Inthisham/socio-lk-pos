@@ -373,7 +373,7 @@ Q6, Q9, Q11, Q12 and Q17 were answered explicitly. The rest were not called out,
 | Q16 | Recent sales | Default — today, this branch, all cashiers |
 | **Q17** | **Hotkeys** | **No existing POS to match.** `react-hotkeys-hook` with the §6 map; refine after cashier use (revised 2026-10-13 from the vanilla hook) |
 | Q18 | Abandoned drafts | Default — confirm and discard |
-| Q19 | Customer detach with trade-in | **Resolved in P2** — frontend guard in `CustomerCard` (dimmed Detach + tooltip) backed by slice-level refusal. Backend-side guard in `updateSale` remains a separate FOLLOWUP (will ship as its own backend PR after P2) |
+| Q19 | Customer detach with trade-in | **Resolved in P2** — frontend guard in `CustomerCard` (dimmed Detach + tooltip) backed by slice-level refusal. Backend-side guard in `SalesService.update` shipped in #22 (also covers customer reassignment) |
 | Q20 | Language | Default — English only |
 | Q21 | Cashier landing | Default — `/pos` |
 | **Q22** | **Camera scanning** | **None.** The shop has a hardware barcode scanner; it types into the scan input like a keyboard. Camera scanning is dropped from the roadmap, not deferred |
@@ -481,7 +481,7 @@ The original questions as asked, kept for the reasoning. The table above is auth
 **Q19. Removing the customer while a TRADE_IN payment exists.** The backend allows it (FOLLOWUPS entry) and fails later at complete.
 - (a) Frontend blocks the detach with a message. (b) Also fix the backend now. (c) Leave it.
 - **Default: (a)** in 6.4; backend fix stays in FOLLOWUPS.
-- **Resolved in P2** — frontend guard in `CustomerCard` (dimmed Detach + tooltip) backed by slice-level refusal. Backend-side guard in `updateSale` remains a separate FOLLOWUP (will ship as its own backend PR after P2).
+- **Resolved in P2** — frontend guard in `CustomerCard` (dimmed Detach + tooltip) backed by slice-level refusal. Backend-side guard in `SalesService.update` shipped in #22 (also covers customer reassignment).
 
 **Q20. Language.**
 - (a) English only. (b) English + Sinhala. (c) English + Sinhala + Tamil.
