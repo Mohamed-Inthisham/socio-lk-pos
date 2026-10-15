@@ -97,6 +97,16 @@ describe("CartLines", () => {
     expect(salesService.updateSaleLine).not.toHaveBeenCalled();
   });
 
+  it("marks steppers aria-disabled (not disabled) while the row is busy, so focus survives", async () => {
+    renderCart([cableLine], { busyLineIds: ["line-1"] });
+    const plus = within(row(cableLine.product_name_snapshot)).getByRole("button", { name: /increase/i });
+
+    expect(plus).toHaveAttribute("aria-disabled", "true");
+    expect(plus).not.toHaveAttribute("disabled");
+    await userEvent.setup().click(plus);
+    expect(salesService.updateSaleLine).not.toHaveBeenCalled();
+  });
+
   it("disables controls on a pending (optimistic) row", () => {
     renderCart([], {
       pendingLines: [{ id: "pending-1", product_id: "p-x", product_name_snapshot: "Pending Item", quantity: 1, unit_price: "100.00", imei_snapshot: null, line_total: null }],

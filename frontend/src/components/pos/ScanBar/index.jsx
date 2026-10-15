@@ -3,6 +3,7 @@ import { useDispatch, useSelector } from "react-redux";
 import { AlertCircle, Loader2, ScanBarcode, Smartphone, X } from "lucide-react";
 import ImeiPromptDialog from "../ImeiPromptDialog";
 import { formatLKR } from "../../../utils/money";
+import { isTouchOnly } from "../../../utils/device";
 import {
   addLine,
   clearLineError,
@@ -39,7 +40,8 @@ import {
  *
  * FOCUS: auto-focuses on mount, except on touch-only devices (coarse
  * pointer), where it would pop the on-screen keyboard (§6 "Touch").
- * `inputRef` lets the terminal re-focus it (F2).
+ * `inputRef` lets the terminal re-focus it (F2, focus hand-offs). An "F2"
+ * key chip shows on fine-pointer devices while the bar is empty.
  */
 
 const DEBOUNCE_MS = 250;
@@ -48,10 +50,6 @@ const MIN_SEARCH = 2;
 /** Scanner-shaped values skip the name search and go to by-barcode. */
 const isBarcodeLike = (value) =>
   /^\d{8,20}$/.test(value) || /^SLP-/i.test(value);
-
-const isTouchOnly = () =>
-  typeof window !== "undefined" &&
-  window.matchMedia?.("(pointer: coarse)").matches;
 
 const ScanBar = ({ branchId, disabled = false, inputRef }) => {
   const dispatch = useDispatch();
@@ -196,6 +194,20 @@ const ScanBar = ({ branchId, disabled = false, inputRef }) => {
             disabled:opacity-60
           "
         />
+        {scanState === "idle" && !value && (
+          <kbd
+            aria-hidden="true"
+            className="
+              hidden [@media(hover:hover)_and_(pointer:fine)]:inline-flex
+              absolute right-3 top-1/2 -translate-y-1/2 items-center px-1.5 h-6 rounded-md
+              text-[11px] font-semibold font-sans text-slate-500 dark:text-slate-400
+              border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800
+              pointer-events-none
+            "
+          >
+            F2
+          </kbd>
+        )}
         {scanState !== "idle" && (
           <Loader2
             size={18}

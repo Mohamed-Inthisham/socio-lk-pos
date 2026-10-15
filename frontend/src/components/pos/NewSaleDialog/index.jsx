@@ -13,10 +13,11 @@ import Button from "../../common/Button";
  * PROPS:
  * - open, onClose
  * - onConfirm: () => Promise<void>
- * - itemCount: number of lines being thrown away (for the copy)
+ * - itemCount: units being thrown away (for the copy)
+ * - afterLeave: called once the dialog has fully closed (focus hand-off)
  */
 
-const NewSaleDialog = ({ open, onClose, onConfirm, itemCount = 0 }) => {
+const NewSaleDialog = ({ open, onClose, onConfirm, itemCount = 0, afterLeave }) => {
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState(null);
 
@@ -46,6 +47,7 @@ const NewSaleDialog = ({ open, onClose, onConfirm, itemCount = 0 }) => {
       title="Start a new sale?"
       size="sm"
       dismissible={!submitting}
+      afterLeave={afterLeave}
       footer={
         <>
           <Button

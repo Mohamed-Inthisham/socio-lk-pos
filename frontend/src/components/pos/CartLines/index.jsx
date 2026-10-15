@@ -27,12 +27,16 @@ import {
  *   flight) are dimmed with their controls disabled, so rapid clicks
  *   can't race the server.
  *
+ * Focus (§6): qty Enter and delete hand focus back to the scan bar via
+ * `onReturnFocus`; −/+ clicks and the row's +/- keys keep it, since
+ * repeated presses are the point.
+ *
  * Layout: a table-like grid at ≥ md, stacked cards below (Q6).
  */
 
-// Focus hand-off handled in F: after Enter commits, focus should return to
-// the scan bar (planning doc §6 home position) — sub-step F focus audit.
-const QtyInput = ({ line, disabled, onCommit }) => {
+// Enter commits and hands focus back to the scan bar (§6 home position);
+// blur commits without moving focus (the cashier is already elsewhere).
+const QtyInput = ({ line, disabled, onCommit, onDone }) => {
   const [draft, setDraft] = useState(null);
   const shown = draft ?? String(line.quantity);
 
@@ -56,7 +60,9 @@ const QtyInput = ({ line, disabled, onCommit }) => {
         if (e.key === "Enter") {
           e.preventDefault();
           commit();
+          onDone?.();
         } else if (e.key === "Escape") {
+          e.stopPropagation(); // revert only — don't trigger the terminal's Esc
           setDraft(null);
         }
       }}
@@ -71,15 +77,21 @@ const QtyInput = ({ line, disabled, onCommit }) => {
   );
 };
 
-const StepButton = ({ icon: Icon, label, ...props }) => (
+// `busy` (request in flight) uses aria-disabled, not `disabled`: browsers
+// move focus off a disabled button, which would break repeated presses.
+// `disabled` is kept for permanent states (− at qty 1).
+const StepButton = ({ icon: Icon, label, busy, onClick, ...props }) => (
   <button
     type="button"
     aria-label={label}
+    aria-disabled={busy || undefined}
+    onClick={busy ? undefined : onClick}
     className="
       w-9 h-9 flex items-center justify-center rounded-lg
       text-slate-600 dark:text-slate-300
       hover:bg-slate-100 dark:hover:bg-slate-800
       disabled:opacity-40 disabled:hover:bg-transparent
+      aria-disabled:cursor-wait
       focus:outline-none focus-visible:ring-2 focus-visible:ring-cyan-500
     "
     {...props}
@@ -114,7 +126,7 @@ const StockUnknown = () => (
   </span>
 );
 
-const CartLineRow = ({ line, index, stockWarning, stockUnknown }) => {
+const CartLineRow = ({ line, index, stockWarning, stockUnknown, onReturnFocus }) => {
   const dispatch = useDispatch();
   const serialized = !!line.imei_snapshot;
   const locked = line.pending || line.busy;
@@ -189,14 +201,15 @@ const CartLineRow = ({ line, index, stockWarning, stockUnknown }) => {
             <StepButton
               icon={Minus}
               label={`Decrease ${line.product_name_snapshot}`}
-              disabled={locked || line.quantity <= 1}
+              busy={locked}
+              disabled={line.quantity <= 1}
               onClick={() => setQty(line.quantity - 1)}
             />
-            <QtyInput line={line} disabled={locked} onCommit={setQty} />
+            <QtyInput line={line} disabled={locked} onCommit={setQty} onDone={onReturnFocus} />
             <StepButton
               icon={Plus}
               label={`Increase ${line.product_name_snapshot}`}
-              disabled={locked}
+              busy={locked}
               onClick={() => setQty(line.quantity + 1)}
             />
           </>
@@ -228,7 +241,10 @@ const CartLineRow = ({ line, index, stockWarning, stockUnknown }) => {
           type="button"
           aria-label={`Remove ${line.product_name_snapshot}`}
           disabled={locked}
-          onClick={() => dispatch(removeLine({ lineId: line.id }))}
+          onClick={() => {
+            dispatch(removeLine({ lineId: line.id }));
+            onReturnFocus?.();
+          }}
           className="
             w-9 h-9 flex items-center justify-center rounded-lg
             text-slate-400 dark:text-slate-500
@@ -244,7 +260,7 @@ const CartLineRow = ({ line, index, stockWarning, stockUnknown }) => {
   );
 };
 
-const CartLines = () => {
+const CartLines = ({ onReturnFocus }) => {
   const lines = useSelector(selectCartLines);
   const stockWarnings = useSelector(selectStockWarnings);
   const stockErrors = useSelector(selectStockErrors);
@@ -290,6 +306,7 @@ const CartLines = () => {
             index={index}
             stockWarning={stockWarnings[line.id]}
             stockUnknown={!line.pending && !!stockErrors[line.product_id]}
+            onReturnFocus={onReturnFocus}
           />
         ))}
       </ul>

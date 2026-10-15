@@ -1,4 +1,5 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { useHotkeys } from "react-hotkeys-hook";
 import { useDispatch, useSelector } from "react-redux";
 import { AlertTriangle, FilePlus2 } from "lucide-react";
 import Button from "../../components/common/Button";
@@ -7,6 +8,7 @@ import NewSaleDialog from "../../components/pos/NewSaleDialog";
 import ScanBar from "../../components/pos/ScanBar";
 import TotalsPanel from "../../components/pos/TotalsPanel";
 import useTerminalBranch from "../../hooks/useTerminalBranch";
+import { isTouchOnly } from "../../utils/device";
 import {
   discardDraftSale,
   ensureDraftSale,
@@ -23,6 +25,14 @@ import {
  * lays out the terminal:
  * - ≥ lg: cart column left, sale/totals column right (Q23, 1366×768 target)
  * - < lg: single column, sale/totals stacked under the cart
+ *
+ * FOCUS (§6): the scan bar is the home position.
+ * - F2 focuses it from anywhere (also from inputs); Esc does too when
+ *   focus isn't in an input. Both are ignored while a dialog has focus —
+ *   the dialog owns its keys.
+ * - Automatic hand-offs (qty Enter, line delete, New sale dialog closed)
+ *   return focus to it, except on touch-only devices where that would
+ *   keep popping the on-screen keyboard. F2 / a tap always work.
  *
  * Phase 6.4 P1 builds this up: draft lifecycle → ScanBar → CartLines →
  * TotalsPanel. Customer (P2), payments (P3), trade-in (P4) and complete
@@ -45,8 +55,11 @@ const formatStarted = (iso) =>
       })
     : null;
 
+const inDialog = () => !!document.activeElement?.closest('[role="dialog"]');
+
 const PosTerminal = () => {
   const dispatch = useDispatch();
+  const scanRef = useRef(null);
   const { branchId } = useTerminalBranch();
   const status = useSelector(selectPosStatus);
   const error = useSelector(selectPosError);
@@ -57,6 +70,28 @@ const PosTerminal = () => {
   useEffect(() => {
     if (branchId) dispatch(ensureDraftSale({ branchId }));
   }, [dispatch, branchId]);
+
+  const focusScan = useCallback(() => scanRef.current?.focus(), []);
+  // Automatic hand-off: skipped on touch-only devices.
+  const returnFocus = useCallback(() => {
+    if (!isTouchOnly()) focusScan();
+  }, [focusScan]);
+
+  useHotkeys(
+    "f2",
+    () => {
+      if (!inDialog()) focusScan();
+    },
+    { enableOnFormTags: true, preventDefault: true },
+    [focusScan],
+  );
+  useHotkeys(
+    "esc",
+    () => {
+      if (!inDialog()) focusScan();
+    },
+    [focusScan],
+  );
 
   const openSale = () => dispatch(ensureDraftSale({ branchId }));
   const startNewSale = () =>
@@ -120,10 +155,10 @@ const PosTerminal = () => {
             </div>
           )}
 
-          <ScanBar branchId={branchId} disabled={status !== "ready"} />
+          <ScanBar branchId={branchId} disabled={status !== "ready"} inputRef={scanRef} />
 
           <Card className="flex-1 min-h-[16rem] flex flex-col overflow-hidden">
-            <CartLines />
+            <CartLines onReturnFocus={returnFocus} />
           </Card>
         </section>
 
@@ -160,6 +195,9 @@ const PosTerminal = () => {
         onClose={() => setConfirmNewSale(false)}
         onConfirm={startNewSale}
         itemCount={itemCount}
+        // Deferred: Headless UI restores focus to the opener (New sale
+        // button) after afterLeave; this runs after that.
+        afterLeave={() => setTimeout(returnFocus, 0)}
       />
     </div>
   );
