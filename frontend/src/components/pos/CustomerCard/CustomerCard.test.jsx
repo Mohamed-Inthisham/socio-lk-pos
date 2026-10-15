@@ -29,6 +29,8 @@ describe("CustomerCard", () => {
     const { onAttach } = renderCard();
 
     expect(screen.getByText("Walk-in sale")).toBeInTheDocument();
+    expect(screen.getByText("F3")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /attach customer/i })).toHaveAttribute("aria-keyshortcuts", "F3");
     expect(screen.queryByRole("button", { name: /detach/i })).not.toBeInTheDocument();
 
     await user.click(screen.getByRole("button", { name: /attach customer/i }));

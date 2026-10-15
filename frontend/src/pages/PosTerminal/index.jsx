@@ -32,6 +32,9 @@ import {
  * - F2 focuses it from anywhere (also from inputs); Esc does too when
  *   focus isn't in an input. Both are ignored while a dialog has focus —
  *   the dialog owns its keys.
+ * - F3 opens the CustomerAttachDialog from anywhere (also from inputs),
+ *   unless a dialog (New sale, Attach customer, IMEI prompt) is already
+ *   open.
  * - Automatic hand-offs (qty Enter, line delete, New sale dialog closed)
  *   return focus to it, except on touch-only devices where that would
  *   keep popping the on-screen keyboard. F2 / a tap always work.
@@ -59,6 +62,8 @@ const formatStarted = (iso) =>
     : null;
 
 const inDialog = () => !!document.activeElement?.closest('[role="dialog"]');
+// Any open Headless UI dialog — not just one holding focus.
+const dialogOpen = () => inDialog() || !!document.querySelector('[role="dialog"]');
 
 const PosTerminal = () => {
   const dispatch = useDispatch();
@@ -88,6 +93,14 @@ const PosTerminal = () => {
     },
     { enableOnFormTags: true, preventDefault: true },
     [focusScan],
+  );
+  useHotkeys(
+    "f3",
+    () => {
+      if (status === "ready" && !dialogOpen()) setAttachOpen(true);
+    },
+    { enableOnFormTags: true, preventDefault: true },
+    [status],
   );
   useHotkeys(
     "esc",

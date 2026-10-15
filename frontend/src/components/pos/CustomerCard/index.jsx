@@ -19,7 +19,8 @@ import {
  * The draft's customer, in the terminal's right column under "Current
  * sale".
  *
- * - No customer: muted "Walk-in sale" + "Attach customer".
+ * - No customer: muted "Walk-in sale" + "Attach customer", with an "F3"
+ *   key chip on fine-pointer devices (same chip as the scan bar's F2).
  * - Customer: name, phone (077 123 4567), NIC when present, with
  *   "Change" (reopens the attach dialog) and "Detach" (PATCH
  *   customer_id: null, optimistic).
@@ -134,11 +135,23 @@ const CustomerCard = ({ onAttach, disabled = false }) => {
             <UserRound size={18} />
           </div>
           <p className="flex-1 text-sm text-slate-500 dark:text-slate-400">Walk-in sale</p>
+          <kbd
+            aria-hidden="true"
+            className="
+              hidden [@media(hover:hover)_and_(pointer:fine)]:inline-flex
+              items-center px-1.5 h-6 rounded-md
+              text-[11px] font-semibold font-sans text-slate-500 dark:text-slate-400
+              border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800
+            "
+          >
+            F3
+          </kbd>
           <Button
             size="sm"
             variant="secondary"
             icon={UserPlus}
             label="Attach customer"
+            aria-keyshortcuts="F3"
             onClick={onAttach}
             disabled={saving || disabled}
           />
