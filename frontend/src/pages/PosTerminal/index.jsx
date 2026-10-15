@@ -1,29 +1,167 @@
-import { ScanBarcode } from "lucide-react";
+import { useEffect, useState } from "react";
+import { useDispatch, useSelector } from "react-redux";
+import { AlertTriangle, FilePlus2, ShoppingCart } from "lucide-react";
+import Button from "../../components/common/Button";
+import NewSaleDialog from "../../components/pos/NewSaleDialog";
 import useTerminalBranch from "../../hooks/useTerminalBranch";
+import {
+  discardDraftSale,
+  ensureDraftSale,
+  selectCartLines,
+  selectDraftSale,
+  selectPosError,
+  selectPosStatus,
+} from "../../store/slices/posTerminalSlice";
 
 /**
  * PosTerminal Page
  *
- * Route: /pos. Phase 6.4 P0 ships the empty shell only — the scan bar,
- * cart, totals and payments arrive in P1 and replace this empty state.
+ * Route: /pos. Opens (or resumes) the branch's DRAFT sale on mount and
+ * lays out the terminal:
+ * - ≥ lg: cart column left, sale/totals column right (Q23, 1366×768 target)
+ * - < lg: single column, sale/totals stacked under the cart
+ *
+ * Phase 6.4 P1 builds this up: draft lifecycle → ScanBar → CartLines →
+ * TotalsPanel. Customer (P2), payments (P3), trade-in (P4) and complete
+ * (P5) slot into the right-hand column later.
  */
+
+const Card = ({ className = "", children }) => (
+  <div
+    className={`rounded-2xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 shadow-sm ${className}`}
+  >
+    {children}
+  </div>
+);
+
+const formatStarted = (iso) =>
+  iso
+    ? new Date(iso).toLocaleTimeString("en-LK", {
+        hour: "2-digit",
+        minute: "2-digit",
+      })
+    : null;
+
 const PosTerminal = () => {
-  const { branch } = useTerminalBranch();
+  const dispatch = useDispatch();
+  const { branchId } = useTerminalBranch();
+  const status = useSelector(selectPosStatus);
+  const error = useSelector(selectPosError);
+  const sale = useSelector(selectDraftSale);
+  const lines = useSelector(selectCartLines);
+  const [confirmNewSale, setConfirmNewSale] = useState(false);
+
+  useEffect(() => {
+    if (branchId) dispatch(ensureDraftSale({ branchId }));
+  }, [dispatch, branchId]);
+
+  const openSale = () => dispatch(ensureDraftSale({ branchId }));
+  const startNewSale = () =>
+    dispatch(discardDraftSale({ branchId })).unwrap();
+
+  if (status === "error") {
+    return (
+      <div className="h-full flex items-center justify-center p-4">
+        <Card className="w-full max-w-md p-6">
+          <div className="w-11 h-11 rounded-xl flex items-center justify-center mb-4 bg-amber-100 text-amber-700 dark:bg-amber-900/40 dark:text-amber-300">
+            <AlertTriangle size={22} aria-hidden="true" />
+          </div>
+          <h1 className="text-lg font-semibold">Couldn&apos;t open a sale</h1>
+          <p className="mt-2 text-sm text-slate-600 dark:text-slate-400">
+            {error?.message}
+          </p>
+          <Button
+            className="mt-5"
+            variant="accent"
+            label="Try again"
+            onClick={openSale}
+          />
+        </Card>
+      </div>
+    );
+  }
+
+  if (status === "idle" || status === "loading") {
+    return (
+      <div className="h-full flex items-center justify-center">
+        <div className="text-center">
+          <div className="w-10 h-10 border-4 border-cyan-500 border-t-transparent rounded-full animate-spin mx-auto mb-3" />
+          <p className="text-sm text-slate-500 dark:text-slate-400">
+            Opening sale...
+          </p>
+        </div>
+      </div>
+    );
+  }
+
+  const started = formatStarted(sale?.created_at);
 
   return (
-    <div className="h-full flex items-center justify-center p-4">
-      <div className="text-center max-w-sm">
-        <div className="w-14 h-14 mx-auto mb-4 rounded-2xl flex items-center justify-center bg-cyan-50 text-cyan-700 dark:bg-cyan-900/40 dark:text-cyan-300">
-          <ScanBarcode size={28} aria-hidden="true" />
-        </div>
-        <h1 className="text-xl font-semibold text-slate-900 dark:text-slate-100">
-          Terminal ready
-        </h1>
-        <p className="mt-1 text-sm text-slate-500 dark:text-slate-400">
-          {branch?.name ? `${branch.name} · ` : ""}Scanning, cart and payments
-          arrive in the next slice.
-        </p>
+    <div className="h-full overflow-y-auto lg:overflow-hidden">
+      <div className="min-h-full lg:h-full flex flex-col lg:flex-row gap-4 p-3 sm:p-4">
+        {/* Left: scan + cart */}
+        <section className="flex-1 min-w-0 min-h-0 flex flex-col gap-3">
+          {status === "gone" && (
+            <div
+              role="alert"
+              className="flex flex-wrap items-center gap-3 rounded-xl border border-amber-200 dark:border-amber-900 bg-amber-50 dark:bg-amber-950/40 px-4 py-3 text-sm text-amber-800 dark:text-amber-200"
+            >
+              <AlertTriangle size={16} aria-hidden="true" />
+              <span className="flex-1">
+                This sale is no longer open — it was completed or discarded
+                elsewhere.
+              </span>
+              <Button size="sm" variant="accent" label="Start a new sale" onClick={openSale} />
+            </div>
+          )}
+
+          <Card className="flex-1 min-h-[16rem] flex flex-col overflow-hidden">
+            <div className="flex-1 flex items-center justify-center p-6 text-center">
+              <div>
+                <ShoppingCart
+                  size={28}
+                  aria-hidden="true"
+                  className="mx-auto mb-2 text-slate-300 dark:text-slate-600"
+                />
+                <p className="text-sm text-slate-500 dark:text-slate-400">
+                  Cart is empty
+                </p>
+              </div>
+            </div>
+          </Card>
+        </section>
+
+        {/* Right: sale + totals */}
+        <aside className="lg:w-[24rem] xl:w-[28rem] flex-shrink-0 flex flex-col gap-3">
+          <Card className="p-4">
+            <div className="flex items-start justify-between gap-3">
+              <div className="min-w-0">
+                <p className="text-xs font-semibold uppercase tracking-wider text-slate-500 dark:text-slate-400">
+                  Current sale
+                </p>
+                <p className="mt-0.5 text-sm text-slate-700 dark:text-slate-200" data-testid="sale-meta">
+                  Draft{started ? ` · started ${started}` : ""}
+                </p>
+              </div>
+              <Button
+                size="sm"
+                variant="secondary"
+                icon={FilePlus2}
+                label="New sale"
+                disabled={status !== "ready" || lines.length === 0}
+                onClick={() => setConfirmNewSale(true)}
+              />
+            </div>
+          </Card>
+        </aside>
       </div>
+
+      <NewSaleDialog
+        open={confirmNewSale}
+        onClose={() => setConfirmNewSale(false)}
+        onConfirm={startNewSale}
+        itemCount={lines.length}
+      />
     </div>
   );
 };

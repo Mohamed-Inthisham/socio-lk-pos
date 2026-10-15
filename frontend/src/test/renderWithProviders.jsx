@@ -6,6 +6,7 @@ import authReducer from "../store/slices/authSlice";
 import branchesReducer from "../store/slices/branchesSlice";
 import brandsReducer from "../store/slices/brandsSlice";
 import categoriesReducer from "../store/slices/categoriesSlice";
+import posTerminalReducer from "../store/slices/posTerminalSlice";
 
 /**
  * Test helpers: a fresh Redux store per test, plus a MemoryRouter.
@@ -19,6 +20,7 @@ export const createTestStore = (preloadedState) =>
       branches: branchesReducer,
       brands: brandsReducer,
       categories: categoriesReducer,
+      posTerminal: posTerminalReducer,
     },
     preloadedState,
   });
