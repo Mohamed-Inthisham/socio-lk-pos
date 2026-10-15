@@ -11,7 +11,7 @@
 - Line and payment `POST`/`PATCH`, `PATCH /sales/:id`, `complete`, and `void` **return the full hydrated sale** (branch, cashier, customer, lines, payments, totals). Line/payment `DELETE` and `DELETE /sales/:id` return **204** — re-fetch with `GET /sales/:id`. `POST /sales` returns the **bare new row** (it has no lines or payments yet anyway).
 - The hydrated sale includes **`customer`** (null when none; still present, with `deleted_at` set, if the customer was soft-deleted) once the Q13 backend PR (`feature/sales-customer-relation`) is merged. Before that PR, only `customer_id` came back.
 - Money fields are numeric **strings** (`"60000.00"`); request bodies take **numbers**.
-- `GET /products` returns a **plain array** (unpaginated, no text-search param). `GET /products/by-barcode/:barcode` is the scan lookup. `GET /sales` is **paginated** (`{ data, meta }`, filters `branchId`, `cashierId`, `status`, `from`, `to`, `page`, `limit≤200`).
+- `GET /products` is **paginated** (`{ data, meta }`, `limit` ≤ 200) with a server-side `search` param (case-insensitive name substring, 2–100 chars) — added after planning (`feature/products-text-search`); it was a plain array with no search when this doc was written. `GET /products/by-barcode/:barcode` is the scan lookup. `GET /sales` is **paginated** (`{ data, meta }`, filters `branchId`, `cashierId`, `status`, `from`, `to`, `page`, `limit≤200`).
 - `GET /product-units?imei=` is **admin/manager only** — a cashier cannot resolve an IMEI to a product today.
 - `addLine` does **not** check stock. Insufficient stock surfaces only at `POST /sales/:id/complete` (409).
 - `POST /sales` requires `branch_id`. Staff users have one; **admins have `branch_id = null`**.

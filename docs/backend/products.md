@@ -262,7 +262,7 @@ All endpoints are prefixed with `/api/v1` and require authentication via the `ac
 
 | Method | Path | Role | Purpose |
 |--------|------|------|---------|
-| GET | `/products` | any | List products (paginated, filterable by branch/brand/category/type/condition/is_active/search) |
+| GET | `/products` | any | List products — paginated `{ data, meta }` (`page`, `limit` ≤ 200, default 50). Filters (AND): `search` (case-insensitive name substring, trimmed, 2–100 chars), `branchId`, `brandId`, `categoryId`, `productType`, `includeInactive` |
 | GET | `/products/by-barcode/:barcode` | any | Barcode lookup — for cashier scan-to-cart |
 | GET | `/products/:id` | any | Get one product with nested `{ brand, category, branch }` |
 | POST | `/products` | admin | Create (auto-generates SKU and, if omitted, barcode; auto-creates stock row) |

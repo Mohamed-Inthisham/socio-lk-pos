@@ -1,4 +1,5 @@
 import { Test, TestingModule } from '@nestjs/testing';
+import { ILike } from 'typeorm';
 import { getRepositoryToken } from '@nestjs/typeorm';
 import {
   NotFoundException,
@@ -22,6 +23,7 @@ describe('ProductsService', () => {
     create: jest.fn(),
     save: jest.fn(),
     find: jest.fn(),
+    findAndCount: jest.fn(),
     findOne: jest.fn(),
   };
 
@@ -178,34 +180,56 @@ describe('ProductsService', () => {
   });
 
   describe('findAll', () => {
-    it('returns only active products by default, sorted DESC by created_at', async () => {
-      mockRepo.find.mockResolvedValue([]);
+    beforeEach(() => {
+      mockRepo.findAndCount.mockResolvedValue([[], 0]);
+    });
 
-      await service.findAll({});
+    it('returns active products, paginated with defaults, newest first', async () => {
+      const rows = [{ id: 'p1' }, { id: 'p2' }];
+      mockRepo.findAndCount.mockResolvedValue([rows, 2]);
 
-      expect(mockRepo.find).toHaveBeenCalledWith({
+      const result = await service.findAll({});
+
+      expect(mockRepo.findAndCount).toHaveBeenCalledWith({
         where: { is_active: true },
         relations: ['brand', 'category', 'branch'],
-        order: { created_at: 'DESC' },
+        order: { created_at: 'DESC', id: 'DESC' },
+        skip: 0,
+        take: 50,
+      });
+      expect(result).toEqual({
+        data: rows,
+        meta: {
+          total: 2,
+          page: 1,
+          limit: 50,
+          totalPages: 1,
+          hasNext: false,
+          hasPrev: false,
+        },
       });
     });
 
-    it('includes inactive when includeInactive=true', async () => {
-      mockRepo.find.mockResolvedValue([]);
+    it('applies page and limit as skip/take', async () => {
+      await service.findAll({ page: 3, limit: 20 });
 
+      expect(mockRepo.findAndCount).toHaveBeenCalledWith(
+        expect.objectContaining({ skip: 40, take: 20 }),
+      );
+    });
+
+    it('includes inactive when includeInactive=true', async () => {
       await service.findAll({ includeInactive: true });
 
-      expect(mockRepo.find).toHaveBeenCalledWith(
+      expect(mockRepo.findAndCount).toHaveBeenCalledWith(
         expect.objectContaining({ where: {} }),
       );
     });
 
     it('filters by brandId when provided', async () => {
-      mockRepo.find.mockResolvedValue([]);
-
       await service.findAll({ brandId: 'brand-1' });
 
-      expect(mockRepo.find).toHaveBeenCalledWith(
+      expect(mockRepo.findAndCount).toHaveBeenCalledWith(
         expect.objectContaining({
           where: { is_active: true, brand_id: 'brand-1' },
         }),
@@ -213,16 +237,14 @@ describe('ProductsService', () => {
     });
 
     it('filters by multiple criteria', async () => {
-      mockRepo.find.mockResolvedValue([]);
-
       await service.findAll({
         brandId: 'brand-1',
         categoryId: 'cat-1',
         branchId: 'branch-1',
-        productType: 'PHONE',
+        productType: ProductType.PHONE,
       });
 
-      expect(mockRepo.find).toHaveBeenCalledWith(
+      expect(mockRepo.findAndCount).toHaveBeenCalledWith(
         expect.objectContaining({
           where: {
             is_active: true,
@@ -231,6 +253,40 @@ describe('ProductsService', () => {
             branch_id: 'branch-1',
             product_type: 'PHONE',
           },
+        }),
+      );
+    });
+
+    it('adds a case-insensitive partial name match for search', async () => {
+      await service.findAll({ search: 'iphone' });
+
+      expect(mockRepo.findAndCount).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: { is_active: true, name: ILike('%iphone%') },
+        }),
+      );
+    });
+
+    it('combines search with the other filters using AND', async () => {
+      await service.findAll({ search: 'galaxy', branchId: 'branch-1' });
+
+      expect(mockRepo.findAndCount).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: {
+            is_active: true,
+            branch_id: 'branch-1',
+            name: ILike('%galaxy%'),
+          },
+        }),
+      );
+    });
+
+    it('escapes LIKE wildcards in search so they match literally', async () => {
+      await service.findAll({ search: '50%_off' });
+
+      expect(mockRepo.findAndCount).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: { is_active: true, name: ILike('%50\\%\\_off%') },
         }),
       );
     });

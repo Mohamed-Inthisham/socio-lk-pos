@@ -12,17 +12,21 @@ import api from "./api";
  */
 
 /**
- * List products with optional filters.
+ * List products with optional filters (paginated).
  *
  * All filters are AND-combined server-side. Omitting a filter means "any".
  *
  * @param {Object} [filters]
+ * @param {string}  [filters.search]          - Case-insensitive name match (2–100 chars)
  * @param {boolean} [filters.includeInactive] - Include deactivated products
  * @param {string}  [filters.brandId]         - Filter by brand UUID
  * @param {string}  [filters.categoryId]      - Filter by category UUID
  * @param {string}  [filters.branchId]        - Filter by branch UUID
  * @param {string}  [filters.productType]     - PHONE | ACCESSORY | WATCH | SPEAKER
- * @returns {Promise<Array>} Products with nested brand/category/branch
+ * @param {number}  [filters.page]            - 1-based page (default 1)
+ * @param {number}  [filters.limit]           - Page size (default 50, max 200)
+ * @returns {Promise<{data: Array, meta: Object}>} Products with nested
+ *   brand/category/branch, plus { total, page, limit, totalPages, hasNext, hasPrev }
  */
 export const listProducts = async (filters = {}) => {
   // Strip undefined/null/empty-string values so axios doesn't send them

@@ -5,10 +5,15 @@ import {
   BadRequestException,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Not, Repository } from 'typeorm';
+import { ILike, Not, Repository } from 'typeorm';
 import { Product } from './entities/product.entity';
 import { CreateProductDto } from './dto/create-product.dto';
 import { UpdateProductDto } from './dto/update-product.dto';
+import { ListProductsQueryDto } from './dto/list-products-query.dto';
+import {
+  PaginatedResponse,
+  paginate,
+} from '../common/dto/paginated-response.dto';
 import { BrandsService } from '../brands/brands.service';
 import { CategoriesService } from '../categories/categories.service';
 import { BranchesService } from '../branches/branches.service';
@@ -91,29 +96,39 @@ export class ProductsService {
   }
 
   /**
-   * List products. Default sort: created_at DESC (newest first).
-   * Includes nested brand/category/branch data.
-   * Supports filters via query params.
+   * Paginated list of products. Default sort: created_at DESC (newest
+   * first), id DESC as tiebreaker. Includes nested brand/category/branch.
+   * All filters combine with AND; `search` is a case-insensitive
+   * substring match on name.
    */
-  async findAll(options: {
-    includeInactive?: boolean;
-    brandId?: string;
-    categoryId?: string;
-    branchId?: string;
-    productType?: string;
-  }): Promise<Product[]> {
-    const where: Record<string, unknown> = {};
-    if (!options.includeInactive) where.is_active = true;
-    if (options.brandId) where.brand_id = options.brandId;
-    if (options.categoryId) where.category_id = options.categoryId;
-    if (options.branchId) where.branch_id = options.branchId;
-    if (options.productType) where.product_type = options.productType;
+  async findAll(
+    query: ListProductsQueryDto,
+  ): Promise<PaginatedResponse<Product>> {
+    const page = query.page ?? 1;
+    const limit = query.limit ?? 50;
 
-    return this.productsRepository.find({
+    const where: Record<string, unknown> = {};
+    if (!query.includeInactive) where.is_active = true;
+    if (query.brandId) where.brand_id = query.brandId;
+    if (query.categoryId) where.category_id = query.categoryId;
+    if (query.branchId) where.branch_id = query.branchId;
+    if (query.productType) where.product_type = query.productType;
+    if (query.search) {
+      // Escape LIKE wildcards so "50%" or "a_b" match literally.
+      const escaped = query.search.replace(/[\\%_]/g, '\\$&');
+      where.name = ILike(`%${escaped}%`);
+    }
+
+    const [data, total] = await this.productsRepository.findAndCount({
       where,
       relations: [...PRODUCT_RELATIONS],
-      order: { created_at: 'DESC' },
+      // id tiebreaker keeps page boundaries stable when created_at ties
+      order: { created_at: 'DESC', id: 'DESC' },
+      skip: (page - 1) * limit,
+      take: limit,
     });
+
+    return paginate(data, total, page, limit);
   }
 
   /**
