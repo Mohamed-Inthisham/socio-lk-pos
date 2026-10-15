@@ -1,21 +1,34 @@
 import { vi } from "vitest";
 import { createTestStore } from "../../test/renderWithProviders";
-import { draftSale, saleLine, cableProduct } from "../../test/posFixtures";
+import {
+  draftSale,
+  saleLine,
+  cableProduct,
+  customer,
+  tradeInPayment,
+} from "../../test/posFixtures";
 import useTerminalSessionStore from "../zustand/terminalSessionStore";
 import * as salesService from "../../services/salesService";
 import * as stockService from "../../services/stockService";
+import * as customersService from "../../services/customersService";
 import {
   addLine,
+  attachCustomer,
+  createAndAttachCustomer,
+  detachCustomer,
   discardDraftSale,
   ensureDraftSale,
   removeLine,
+  selectAttachedCustomer,
   selectCartLines,
+  selectHasTradeInPayment,
   selectStockWarnings,
   updateLineQty,
 } from "./posTerminalSlice";
 
 vi.mock("../../services/salesService");
 vi.mock("../../services/stockService");
+vi.mock("../../services/customersService");
 
 const httpError = (status, message = "error") =>
   Object.assign(new Error(message), {
@@ -270,3 +283,143 @@ describe("posTerminal stock refresh", () => {
   });
 });
 
+
+describe("posTerminal customer", () => {
+  it("attaches a customer optimistically, then settles on the server sale", async () => {
+    const { store, ready } = readyStore();
+    await ready;
+    const request = deferred();
+    salesService.updateSale.mockReturnValue(request.promise);
+
+    const pending = store.dispatch(attachCustomer({ customer: customer() }));
+
+    expect(selectAttachedCustomer(store.getState())).toEqual(customer());
+    expect(store.getState().posTerminal.customerSaving).toBe(true);
+
+    request.resolve(draftSale({ customer_id: "cust-1", customer: customer() }));
+    await pending;
+
+    expect(salesService.updateSale).toHaveBeenCalledWith("sale-1", { customer_id: "cust-1" });
+    expect(selectAttachedCustomer(store.getState())).toEqual(customer());
+    expect(store.getState().posTerminal.customerSaving).toBe(false);
+  });
+
+  it("rolls the card back and reports the error when the attach fails", async () => {
+    const { store, ready } = readyStore();
+    await ready;
+    salesService.updateSale.mockRejectedValue(httpError(400, "customer_id cust-1 refers to a deleted customer"));
+
+    await store.dispatch(attachCustomer({ customer: customer() }));
+
+    expect(selectAttachedCustomer(store.getState())).toBeNull();
+    expect(store.getState().posTerminal.customerError.message).toMatch(/deleted customer/);
+    expect(store.getState().posTerminal.customerSaving).toBe(false);
+  });
+
+  it("detaches the customer with customer_id: null", async () => {
+    const { store, ready } = readyStore(draftSale({ customer_id: "cust-1", customer: customer() }));
+    await ready;
+    salesService.updateSale.mockResolvedValue(draftSale());
+
+    await store.dispatch(detachCustomer());
+
+    expect(salesService.updateSale).toHaveBeenCalledWith("sale-1", { customer_id: null });
+    expect(selectAttachedCustomer(store.getState())).toBeNull();
+  });
+
+  it("refuses to detach while the sale has a TRADE_IN payment", async () => {
+    const { store, ready } = readyStore(
+      draftSale({ customer_id: "cust-1", customer: customer(), payments: [tradeInPayment()] }),
+    );
+    await ready;
+
+    await store.dispatch(detachCustomer());
+
+    expect(selectHasTradeInPayment(store.getState())).toBe(true);
+    expect(salesService.updateSale).not.toHaveBeenCalled();
+    expect(selectAttachedCustomer(store.getState())).toEqual(customer());
+  });
+
+  it("creates a customer, then attaches it to the sale", async () => {
+    const { store, ready } = readyStore();
+    await ready;
+    const created = customer({ id: "cust-new", nic: null });
+    customersService.createCustomer.mockResolvedValue(created);
+    salesService.updateSale.mockResolvedValue(draftSale({ customer_id: "cust-new", customer: created }));
+
+    const result = await store.dispatch(
+      createAndAttachCustomer({ name: "Kamal Perera", phone: "0771234567" }),
+    );
+
+    expect(result.error).toBeUndefined();
+    expect(customersService.createCustomer).toHaveBeenCalledWith({ name: "Kamal Perera", phone: "0771234567" });
+    expect(salesService.updateSale).toHaveBeenCalledWith("sale-1", { customer_id: "cust-new" });
+    expect(selectAttachedCustomer(store.getState())).toEqual(created);
+    expect(store.getState().posTerminal.customerSaving).toBe(false);
+  });
+
+  it("rejects a NIC clash with the existing customer and attaches nothing", async () => {
+    const { store, ready } = readyStore();
+    await ready;
+    customersService.createCustomer.mockRejectedValue(
+      Object.assign(new Error("Conflict"), {
+        response: {
+          status: 409,
+          data: { message: "A customer with NIC 199012345678 already exists", existing_customer_id: "cust-1" },
+        },
+      }),
+    );
+    customersService.getCustomer.mockResolvedValue(customer());
+
+    const result = await store.dispatch(
+      createAndAttachCustomer({ name: "K Perera", phone: "0771234567", nic: "199012345678" }),
+    );
+
+    expect(result.payload).toMatchObject({
+      stage: "create",
+      status: 409,
+      existing_customer_id: "cust-1",
+      existing_customer: customer(),
+    });
+    expect(customersService.getCustomer).toHaveBeenCalledWith("cust-1");
+    expect(salesService.updateSale).not.toHaveBeenCalled();
+    expect(selectAttachedCustomer(store.getState())).toBeNull();
+  });
+
+  it("returns the created customer when only the attach step fails", async () => {
+    const { store, ready } = readyStore();
+    await ready;
+    const created = customer({ id: "cust-new" });
+    customersService.createCustomer.mockResolvedValue(created);
+    salesService.updateSale.mockRejectedValue(new Error("Network Error"));
+
+    const result = await store.dispatch(
+      createAndAttachCustomer({ name: "Kamal Perera", phone: "0771234567" }),
+    );
+
+    expect(result.payload).toMatchObject({ stage: "attach", customer: created });
+    expect(selectAttachedCustomer(store.getState())).toBeNull();
+    expect(store.getState().posTerminal.customerError.message).toBe("Network Error");
+  });
+
+  it("keeps the optimistic customer when an earlier line response lands first", async () => {
+    const { store, ready } = readyStore();
+    await ready;
+    const add = deferred();
+    const patch = deferred();
+    salesService.addSaleLine.mockReturnValue(add.promise);
+    salesService.updateSale.mockReturnValue(patch.promise);
+
+    const adding = store.dispatch(addLine({ product: cableProduct }));
+    const attaching = store.dispatch(attachCustomer({ customer: customer() }));
+    add.resolve(draftSale({ lines: [saleLine()] })); // still customer: null
+    await adding;
+
+    expect(selectAttachedCustomer(store.getState())).toEqual(customer());
+    expect(selectCartLines(store.getState())).toHaveLength(1);
+
+    patch.resolve(draftSale({ lines: [saleLine()], customer_id: "cust-1", customer: customer() }));
+    await attaching;
+    expect(selectAttachedCustomer(store.getState())).toEqual(customer());
+  });
+});
