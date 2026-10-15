@@ -1,10 +1,12 @@
 import { useState } from "react";
 import { useDispatch, useSelector } from "react-redux";
-import { Loader2, Lock, Minus, Plus, ShoppingCart, Trash2 } from "lucide-react";
+import { AlertTriangle, Loader2, Lock, Minus, Plus, ShoppingCart, Trash2 } from "lucide-react";
 import { formatLKR } from "../../../utils/money";
 import {
   removeLine,
   selectCartLines,
+  selectStockErrors,
+  selectStockWarnings,
   updateLineQty,
 } from "../../../store/slices/posTerminalSlice";
 
@@ -18,6 +20,9 @@ import {
  * - Non-serialized: −/+ stepper and a direct qty input (commits on Enter
  *   or blur). With a row focused, `+` / `-` change its qty.
  * - Serialized (line has an IMEI): qty locked at 1, IMEI under the name.
+ * - Stock warning (Q1 b): a yellow "Only N in stock" badge when the
+ *   branch has fewer units than the cart needs. Warns only — the 409 at
+ *   complete is the real guard.
  * - Pending rows (add in flight) and busy rows (qty edit / delete in
  *   flight) are dimmed with their controls disabled, so rapid clicks
  *   can't race the server.
@@ -25,6 +30,8 @@ import {
  * Layout: a table-like grid at ≥ md, stacked cards below (Q6).
  */
 
+// Focus hand-off handled in F: after Enter commits, focus should return to
+// the scan bar (planning doc §6 home position) — sub-step F focus audit.
 const QtyInput = ({ line, disabled, onCommit }) => {
   const [draft, setDraft] = useState(null);
   const shown = draft ?? String(line.quantity);
@@ -81,7 +88,33 @@ const StepButton = ({ icon: Icon, label, ...props }) => (
   </button>
 );
 
-const CartLineRow = ({ line, index }) => {
+const StockBadge = ({ warning }) => (
+  <span
+    role="status"
+    title={`Cart needs ${warning.required}, branch stock shows ${warning.available}. The sale can still be rung up; completing it will fail if stock is really short.`}
+    className="
+      mt-1 inline-flex items-center gap-1 px-1.5 py-0.5 rounded-md
+      text-[11px] font-semibold
+      bg-amber-100 text-amber-800 dark:bg-amber-900/40 dark:text-amber-300
+    "
+  >
+    <AlertTriangle size={11} aria-hidden="true" />
+    Only {warning.available} in stock
+  </span>
+);
+
+const StockUnknown = () => (
+  <span
+    role="status"
+    aria-label="Stock unknown: stock lookup failed, try reloading"
+    title="Stock lookup failed, try reloading"
+    className="mt-1 inline-flex items-center justify-center w-5 h-5 rounded-md text-[11px] font-semibold bg-slate-100 text-slate-500 dark:bg-slate-800 dark:text-slate-400"
+  >
+    ?
+  </span>
+);
+
+const CartLineRow = ({ line, index, stockWarning, stockUnknown }) => {
   const dispatch = useDispatch();
   const serialized = !!line.imei_snapshot;
   const locked = line.pending || line.busy;
@@ -137,6 +170,7 @@ const CartLineRow = ({ line, index }) => {
               </p>
             )
           )}
+          {stockWarning ? <StockBadge warning={stockWarning} /> : stockUnknown && <StockUnknown />}
         </div>
       </div>
 
@@ -212,6 +246,8 @@ const CartLineRow = ({ line, index }) => {
 
 const CartLines = () => {
   const lines = useSelector(selectCartLines);
+  const stockWarnings = useSelector(selectStockWarnings);
+  const stockErrors = useSelector(selectStockErrors);
 
   if (lines.length === 0) {
     return (
@@ -248,7 +284,13 @@ const CartLines = () => {
       </div>
       <ul aria-label="Cart" className="flex-1 min-h-0 overflow-y-auto">
         {lines.map((line, index) => (
-          <CartLineRow key={line.id} line={line} index={index} />
+          <CartLineRow
+            key={line.id}
+            line={line}
+            index={index}
+            stockWarning={stockWarnings[line.id]}
+            stockUnknown={!line.pending && !!stockErrors[line.product_id]}
+          />
         ))}
       </ul>
     </div>

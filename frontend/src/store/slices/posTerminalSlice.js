@@ -15,6 +15,7 @@ import {
   getProductByBarcode,
   listProducts,
 } from "../../services/productsService";
+import { listStock } from "../../services/stockService";
 import useTerminalSessionStore from "../zustand/terminalSessionStore";
 
 /**
@@ -46,6 +47,13 @@ import useTerminalSessionStore from "../zustand/terminalSessionStore";
  * scoped to the branch, 20 results). Neither preloads the catalog
  * (hybrid loading, planning doc §5). The ScanBar decides what to do with
  * the resolved product: addLine, or the IMEI prompt for serialized items.
+ *
+ * STOCK WARNING (Q1 b):
+ * addLine does not check stock; the 409 at complete is the real guard.
+ * After each add / qty change (and for every product on a resumed draft)
+ * refreshStock fetches the branch stock row, and selectStockWarnings
+ * flags lines whose product needs more units than the branch has. It
+ * warns only — it never blocks a line.
  *
  * ORDERING:
  * Line mutations run one at a time through `enqueue`, so fast consecutive
@@ -99,13 +107,19 @@ const createDraft = async (branchId) => {
 
 export const ensureDraftSale = createAsyncThunk(
   "posTerminal/ensureDraftSale",
-  async ({ branchId }, { rejectWithValue }) => {
+  async ({ branchId }, { dispatch, rejectWithValue }) => {
     try {
       const storedId = session().draftSaleId;
       if (storedId) {
         try {
           const sale = await getSale(storedId);
           if (sale.status === "DRAFT" && sale.branch_id === branchId) {
+            if (sale.lines.length) {
+              dispatch(refreshCartStock({
+                branchId,
+                productIds: [...new Set(sale.lines.map((l) => l.product_id))],
+              }));
+            }
             return sale;
           }
         } catch (error) {
@@ -165,13 +179,68 @@ export const discardDraftSale = createAsyncThunk(
 );
 
 // ---------------------------------------------------------------------------
+// Thunks — stock
+// ---------------------------------------------------------------------------
+
+/** arg: { productId, branchId } — failures leave the product unknown (no badge). */
+export const refreshStock = createAsyncThunk(
+  "posTerminal/refreshStock",
+  async ({ productId, branchId }, { rejectWithValue }) => {
+    try {
+      const [row] = await listStock({ productId, branchId });
+      return row
+        ? { quantity: row.quantity, manage_stock: row.manage_stock }
+        : null;
+    } catch (error) {
+      return rejectWithValue(toError(error, "Stock lookup failed"));
+    }
+  },
+);
+
+/**
+ * Resume path: ONE branch-wide GET /stock?branchId= instead of a lookup
+ * per cart product. The API is throttled at 10 req/s per IP, and a
+ * per-product burst on reload pushed carts with ~7+ distinct products
+ * over it (429s → silently missing badges).
+ * arg: { branchId, productIds } → { [productId]: stock | null }
+ */
+export const refreshCartStock = createAsyncThunk(
+  "posTerminal/refreshCartStock",
+  async ({ branchId, productIds }, { rejectWithValue }) => {
+    try {
+      const rows = await listStock({ branchId });
+      const byProduct = Object.fromEntries(rows.map((r) => [r.product_id, r]));
+      return Object.fromEntries(
+        productIds.map((id) => [
+          id,
+          byProduct[id]
+            ? { quantity: byProduct[id].quantity, manage_stock: byProduct[id].manage_stock }
+            : null,
+        ]),
+      );
+    } catch (error) {
+      return rejectWithValue(toError(error, "Stock lookup failed"));
+    }
+  },
+);
+
+const refreshStockFor = (dispatch, sale, productIds) => {
+  for (const productId of new Set(productIds)) {
+    dispatch(refreshStock({ productId, branchId: sale.branch_id }));
+  }
+};
+
+// ---------------------------------------------------------------------------
 // Thunks — line mutations
 // ---------------------------------------------------------------------------
 
-const lineMutation = (fallback, run) => async (arg, { getState, rejectWithValue }) => {
+const lineMutation = (fallback, run, stockProductId) => async (arg, { dispatch, getState, rejectWithValue }) => {
   const saleId = getState().posTerminal.draftSaleId;
   try {
-    return await enqueue(() => run(saleId, arg));
+    const sale = await enqueue(() => run(saleId, arg));
+    const productId = stockProductId?.(arg, sale);
+    if (productId) refreshStockFor(dispatch, sale, [productId]);
+    return sale;
   } catch (error) {
     const err = toError(error, fallback);
     if (err.gone) session().clear();
@@ -192,14 +261,17 @@ export const addLine = createAsyncThunk(
       quantity,
       ...(imei ? { imei_snapshot: imei } : {}),
     }),
+    ({ product }) => product.id,
   ),
 );
 
 /** arg: { lineId, quantity } */
 export const updateLineQty = createAsyncThunk(
   "posTerminal/updateLineQty",
-  lineMutation("Couldn't change the quantity", (saleId, { lineId, quantity }) =>
-    updateSaleLine(saleId, lineId, { quantity }),
+  lineMutation(
+    "Couldn't change the quantity",
+    (saleId, { lineId, quantity }) => updateSaleLine(saleId, lineId, { quantity }),
+    ({ lineId }, sale) => sale.lines.find((l) => l.id === lineId)?.product_id,
   ),
 );
 
@@ -284,6 +356,10 @@ const initialState = {
   scanError: null,
   // Latest search request — older responses are dropped
   searchRequestId: null,
+  // Branch stock per product: { [productId]: { quantity, manage_stock } }
+  stockByProduct: {},
+  // Products whose last stock lookup failed: { [productId]: true }
+  stockErrors: {},
 };
 
 const markBusy = (state, lineId) => {
@@ -409,6 +485,29 @@ const posTerminalSlice = createSlice({
         applyRejection(state, action.payload, "Couldn't remove the item");
       })
 
+      // Stock
+      .addCase(refreshStock.fulfilled, (state, action) => {
+        const { productId } = action.meta.arg;
+        delete state.stockErrors[productId];
+        if (action.payload) state.stockByProduct[productId] = action.payload;
+        else delete state.stockByProduct[productId];
+      })
+      .addCase(refreshStock.rejected, (state, action) => {
+        state.stockErrors[action.meta.arg.productId] = true;
+      })
+      .addCase(refreshCartStock.fulfilled, (state, action) => {
+        for (const [productId, stock] of Object.entries(action.payload)) {
+          delete state.stockErrors[productId];
+          if (stock) state.stockByProduct[productId] = stock;
+          else delete state.stockByProduct[productId];
+        }
+      })
+      .addCase(refreshCartStock.rejected, (state, action) => {
+        for (const productId of action.meta.arg.productIds) {
+          state.stockErrors[productId] = true;
+        }
+      })
+
       // Scanning
       .addCase(scanBarcode.pending, (state) => {
         state.scanState = "loading";
@@ -462,6 +561,40 @@ const selectBusyLineIds = (state) => state.posTerminal.busyLineIds;
 export const selectCartSyncing = (state) =>
   state.posTerminal.pendingLines.length > 0 ||
   state.posTerminal.busyLineIds.length > 0;
+
+const selectStockByProduct = (state) => state.posTerminal.stockByProduct;
+
+/**
+ * Lines whose product needs more units than the branch has in stock:
+ * { [lineId]: { available, required } }. `required` sums every line of
+ * that product. Untracked (manage_stock=false) or unknown stock never
+ * warns.
+ */
+export const selectStockWarnings = createSelector(
+  [selectDraftSale, selectStockByProduct],
+  (sale, stockByProduct) => {
+    const lines = sale?.lines ?? [];
+    const required = {};
+    for (const line of lines) {
+      required[line.product_id] = (required[line.product_id] ?? 0) + line.quantity;
+    }
+    const warnings = {};
+    for (const line of lines) {
+      const stock = stockByProduct[line.product_id];
+      if (!stock || !stock.manage_stock) continue;
+      if (stock.quantity < required[line.product_id]) {
+        warnings[line.id] = {
+          available: stock.quantity,
+          required: required[line.product_id],
+        };
+      }
+    }
+    return warnings;
+  },
+);
+
+/** Product ids whose stock lookup failed (no retry yet — see FOLLOWUPS). */
+export const selectStockErrors = (state) => state.posTerminal.stockErrors;
 
 /** Server lines (flagged busy while mutating) followed by pending rows. */
 export const selectCartLines = createSelector(

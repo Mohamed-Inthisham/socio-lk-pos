@@ -6,9 +6,11 @@ import { posTerminalState, renderWithProviders } from "../../../test/renderWithP
 import { cableProduct, draftSale, phoneProduct, saleLine } from "../../../test/posFixtures";
 import * as productsService from "../../../services/productsService";
 import * as salesService from "../../../services/salesService";
+import * as stockService from "../../../services/stockService";
 
 vi.mock("../../../services/productsService");
 vi.mock("../../../services/salesService");
+vi.mock("../../../services/stockService");
 
 const chargerProduct = { ...cableProduct, id: "p-charger", name: "USB-C Charger 20W", barcode: "SLP-000005" };
 
@@ -21,6 +23,7 @@ const input = () => screen.getByRole("combobox", { name: /scan barcode or search
 
 beforeEach(() => {
   vi.resetAllMocks();
+  stockService.listStock.mockResolvedValue([]);
   salesService.addSaleLine.mockResolvedValue(draftSale({ lines: [saleLine()] }));
 });
 

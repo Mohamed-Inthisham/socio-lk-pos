@@ -5,8 +5,10 @@ import CartLines from ".";
 import { posTerminalState, renderWithProviders } from "../../../test/renderWithProviders";
 import { draftSale, phoneProduct, saleLine } from "../../../test/posFixtures";
 import * as salesService from "../../../services/salesService";
+import * as stockService from "../../../services/stockService";
 
 vi.mock("../../../services/salesService");
+vi.mock("../../../services/stockService");
 
 const cableLine = saleLine({ quantity: 2, line_total: "3000.00" });
 const phoneLine = saleLine({
@@ -29,6 +31,7 @@ const row = (name) => screen.getByRole("listitem", { name });
 
 beforeEach(() => {
   vi.resetAllMocks();
+  stockService.listStock.mockResolvedValue([]);
 });
 
 describe("CartLines", () => {
@@ -103,5 +106,39 @@ describe("CartLines", () => {
     expect(pending).toHaveAttribute("aria-busy", "true");
     expect(within(pending).getByRole("button", { name: /remove/i })).toBeDisabled();
     expect(within(pending).getByLabelText("Adding")).toBeInTheDocument();
+  });
+});
+
+describe("CartLines stock warning", () => {
+  it("shows the badge when the branch has fewer units than the cart needs (summed across lines)", () => {
+    const second = saleLine({ id: "line-9", line_number: 9, quantity: 2 });
+    renderCart([cableLine, second], {
+      stockByProduct: { [cableLine.product_id]: { quantity: 3, manage_stock: true } },
+    });
+
+    // 2 + 2 = 4 needed, 3 in stock → both lines of that product warn
+    expect(screen.getAllByRole("status")).toHaveLength(2);
+    expect(screen.getAllByRole("status")[0]).toHaveTextContent("Only 3 in stock");
+  });
+
+  it("shows no badge when stock covers the cart or isn't tracked", () => {
+    const { unmount } = renderCart([cableLine], {
+      stockByProduct: { [cableLine.product_id]: { quantity: 2, manage_stock: true } },
+    });
+    expect(screen.queryByRole("status")).not.toBeInTheDocument();
+    unmount();
+
+    renderCart([cableLine], {
+      stockByProduct: { [cableLine.product_id]: { quantity: 0, manage_stock: false } },
+    });
+    expect(screen.queryByRole("status")).not.toBeInTheDocument();
+  });
+
+  it("shows a muted ? when the stock lookup failed", () => {
+    renderCart([cableLine], { stockErrors: { [cableLine.product_id]: true } });
+
+    const unknown = screen.getByRole("status", { name: /stock lookup failed/i });
+    expect(unknown).toHaveTextContent("?");
+    expect(unknown).toHaveAttribute("title", "Stock lookup failed, try reloading");
   });
 });

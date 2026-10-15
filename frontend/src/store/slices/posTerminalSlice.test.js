@@ -3,16 +3,19 @@ import { createTestStore } from "../../test/renderWithProviders";
 import { draftSale, saleLine, cableProduct } from "../../test/posFixtures";
 import useTerminalSessionStore from "../zustand/terminalSessionStore";
 import * as salesService from "../../services/salesService";
+import * as stockService from "../../services/stockService";
 import {
   addLine,
   discardDraftSale,
   ensureDraftSale,
   removeLine,
   selectCartLines,
+  selectStockWarnings,
   updateLineQty,
 } from "./posTerminalSlice";
 
 vi.mock("../../services/salesService");
+vi.mock("../../services/stockService");
 
 const httpError = (status, message = "error") =>
   Object.assign(new Error(message), {
@@ -36,6 +39,7 @@ const readyStore = (sale = draftSale()) => {
 
 beforeEach(() => {
   vi.resetAllMocks();
+  stockService.listStock.mockResolvedValue([]);
   useTerminalSessionStore.getState().clear();
 });
 
@@ -212,3 +216,57 @@ describe("posTerminal line mutations", () => {
     expect(selectCartLines(store.getState())).toEqual([]);
   });
 });
+
+describe("posTerminal stock refresh", () => {
+  it("fetches branch stock for the product after each successful add", async () => {
+    const { store, ready } = readyStore();
+    await ready;
+    stockService.listStock.mockResolvedValue([{ quantity: 0, manage_stock: true }]);
+    salesService.addSaleLine.mockResolvedValue(draftSale({ lines: [saleLine()] }));
+
+    await store.dispatch(addLine({ product: cableProduct }));
+
+    await vi.waitFor(() =>
+      expect(store.getState().posTerminal.stockByProduct[cableProduct.id]).toEqual({ quantity: 0, manage_stock: true }),
+    );
+    expect(stockService.listStock).toHaveBeenCalledWith({ productId: cableProduct.id, branchId: "branch-main" });
+    expect(selectStockWarnings(store.getState())).toEqual({ "line-1": { available: 0, required: 1 } });
+  });
+
+  it("loads stock for a resumed draft with one branch-wide request", async () => {
+    const sale = draftSale({
+      lines: [saleLine(), saleLine({ id: "line-2", line_number: 2 }), saleLine({ id: "line-3", product_id: "p-other" })],
+    });
+    useTerminalSessionStore.getState().setDraftSaleId(sale.id);
+    salesService.getSale.mockResolvedValue(sale);
+    stockService.listStock.mockResolvedValue([
+      { product_id: cableProduct.id, quantity: 1, manage_stock: true },
+      { product_id: "p-other", quantity: 9, manage_stock: true },
+      { product_id: "p-not-in-cart", quantity: 4, manage_stock: true },
+    ]);
+    const store = createTestStore();
+
+    await store.dispatch(ensureDraftSale({ branchId: "branch-main" }));
+
+    await vi.waitFor(() => expect(Object.keys(store.getState().posTerminal.stockByProduct)).toHaveLength(2));
+    expect(stockService.listStock).toHaveBeenCalledTimes(1);
+    expect(stockService.listStock).toHaveBeenCalledWith({ branchId: "branch-main" });
+    // cable: 2 lines × 1 = 2 needed, 1 in stock → both cable lines warn
+    expect(Object.keys(selectStockWarnings(store.getState()))).toEqual(["line-1", "line-2"]);
+  });
+
+  it("records a failed lookup and clears it when a later lookup succeeds", async () => {
+    const { store, ready } = readyStore();
+    await ready;
+    salesService.addSaleLine.mockResolvedValue(draftSale({ lines: [saleLine()] }));
+    stockService.listStock.mockRejectedValueOnce(Object.assign(new Error("Too Many Requests"), { response: { status: 429, data: {} } }));
+
+    await store.dispatch(addLine({ product: cableProduct }));
+    await vi.waitFor(() => expect(store.getState().posTerminal.stockErrors).toEqual({ [cableProduct.id]: true }));
+
+    stockService.listStock.mockResolvedValue([{ quantity: 5, manage_stock: true }]);
+    await store.dispatch(addLine({ product: cableProduct }));
+    await vi.waitFor(() => expect(store.getState().posTerminal.stockErrors).toEqual({}));
+  });
+});
+
