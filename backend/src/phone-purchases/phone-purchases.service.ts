@@ -6,10 +6,14 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { DataSource, EntityManager, Repository } from 'typeorm';
+import { DataSource, EntityManager, In, Repository } from 'typeorm';
 import { PhonePurchase } from './entities/phone-purchase.entity';
 import { ProductUnit } from '../product-units/entities/product-unit.entity';
 import { ProductUnitStatus } from '../product-units/enums/product-unit-status.enum';
+import {
+  isLiveImeiConflict,
+  LIVE_UNIT_STATUSES,
+} from '../product-units/live-imei';
 import { Customer } from '../customers/entities/customer.entity';
 import { Branch } from '../branches/entities/branch.entity';
 import { Product } from '../products/entities/product.entity';
@@ -110,7 +114,7 @@ export class PhonePurchasesService {
           dto.selling_price != null ? dto.selling_price.toFixed(2) : null,
         phone_purchase_id: savedPurchase.id,
       });
-      await manager.save(unit);
+      await this.saveUnitOrRejectLiveImei(manager, unit);
 
       // 6. Increment stock. Pessimistic lock on the Stock row is
       //    inside StockService.incrementForReversal (see Phase 6.3).
@@ -240,13 +244,10 @@ export class PhonePurchasesService {
    *      existing dual-purpose method: intake AND void-reversal use it)
    *
    * Any throw rolls back the caller's entire transaction (per
-   * TypeORM's transaction semantics). The unique index on
-   * product_units.imei is the ultimate race arbiter — the pre-check
-   * in step 2 is best-effort UX; a concurrent insert between step 2
-   * and step 4 would hit the unique index at step 4 and raise a raw
-   * error the caller sees as 500. Slice E accepted the same
-   * trade-off for outgoing serialized lines; a followup unifies both
-   * paths into consistent 409 handling via SQL-error interception.
+   * TypeORM's transaction semantics). uq_product_units_imei_live is
+   * the ultimate race arbiter — the pre-check in step 2 is best-effort
+   * UX; a concurrent intake between step 2 and step 4 hits the index at
+   * step 4, which saveUnitOrRejectLiveImei maps to a 409.
    *
    * Must be called inside a transaction; StockService.incrementForReversal
    * uses setLock which throws if the manager isn't in one.
@@ -275,7 +276,7 @@ export class PhonePurchasesService {
 
     // 2. IMEI availability best-effort pre-check. Same helper as
     //    create(); returns the same 409 + existing_unit payload shape
-    //    on collision. The global unique index backstops any race.
+    //    on collision. uq_product_units_imei_live backstops any race.
     await this.assertImeiAvailable(input.imei, manager);
 
     // 3. Insert PhonePurchase. total_amount = buying_price (single
@@ -300,7 +301,7 @@ export class PhonePurchasesService {
       selling_price: input.selling_price,
       phone_purchase_id: savedPurchase.id,
     });
-    const savedUnit = await manager.save(unit);
+    const savedUnit = await this.saveUnitOrRejectLiveImei(manager, unit);
 
     // 5. Increment Stock. Reuses the existing dual-purpose
     //    incrementForReversal (already used for both intake via
@@ -380,7 +381,7 @@ export class PhonePurchasesService {
 
   /**
    * Product must:
-   *   - exist and not be soft-deleted
+   *   - exist, not be soft-deleted, and be active (is_active = true)
    *   - belong to the same branch as the purchase (branch match)
    *   - have is_serialized = true (used-phone SKUs are serialized;
    *     admin flips this via PATCH /products/:id)
@@ -393,7 +394,7 @@ export class PhonePurchasesService {
     const product = await manager.findOne(Product, {
       where: { id: productId },
     });
-    if (!product) {
+    if (!product || !product.is_active) {
       throw new BadRequestException(
         `Product ${productId} not found or inactive`,
       );
@@ -412,21 +413,23 @@ export class PhonePurchasesService {
   }
 
   /**
-   * IMEI must not collide with any existing ProductUnit — regardless
-   * of that unit's status. Returns 409 with a structured existing_unit
-   * payload so the frontend can render status-aware messaging (e.g.
-   * "This IMEI was sold on 2025-03-14 — buy-back flow coming soon").
+   * IMEI must not belong to a unit the shop holds (LIVE_UNIT_STATUSES:
+   * IN_STOCK, WRITTEN_OFF). SOLD and RETURNED units are history, so a
+   * phone we sold, or whose trade-in was voided, can be acquired again
+   * as a new unit row (buy-back). Returns 409 with a structured
+   * existing_unit payload so the frontend can render status-aware
+   * messaging.
    *
-   * Race condition note: between this pre-check and the INSERT,
-   * a concurrent tx could insert the same IMEI. The unique index
-   * catches it as a fallback (raw 500). Rare — see Slice D followup.
+   * Race condition note: between this pre-check and the INSERT, a
+   * concurrent tx could make the same IMEI live. The partial unique
+   * index catches it; saveUnitOrRejectLiveImei maps it to a 409.
    */
   private async assertImeiAvailable(
     imei: string,
     manager: EntityManager,
   ): Promise<void> {
     const existing = await manager.findOne(ProductUnit, {
-      where: { imei },
+      where: { imei, status: In([...LIVE_UNIT_STATUSES]) },
     });
     if (existing) {
       throw new ConflictException({
@@ -437,6 +440,30 @@ export class PhonePurchasesService {
           product_id: existing.product_id,
         },
       });
+    }
+  }
+
+  /**
+   * Insert a new IN_STOCK unit. A concurrent intake of the same IMEI
+   * that got past assertImeiAvailable violates uq_product_units_imei_live;
+   * map that one violation to the same 409 the pre-check gives (without
+   * existing_unit — the aborted transaction can't read the other row).
+   * Anything else propagates unchanged.
+   */
+  private async saveUnitOrRejectLiveImei(
+    manager: EntityManager,
+    unit: ProductUnit,
+  ): Promise<ProductUnit> {
+    try {
+      return await manager.save(unit);
+    } catch (err) {
+      if (isLiveImeiConflict(err)) {
+        throw new ConflictException({
+          message: 'IMEI already exists in inventory',
+          existing_unit: null,
+        });
+      }
+      throw err;
     }
   }
 }

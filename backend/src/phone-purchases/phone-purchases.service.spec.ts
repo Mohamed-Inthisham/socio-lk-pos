@@ -11,6 +11,19 @@ import { PhonePurchase } from './entities/phone-purchase.entity';
 import { ProductUnit } from '../product-units/entities/product-unit.entity';
 import { ProductUnitStatus } from '../product-units/enums/product-unit-status.enum';
 import { StockService } from '../stock/stock.service';
+import { In, QueryFailedError } from 'typeorm';
+
+// A Postgres unique violation (23505) on the named index/constraint, as
+// TypeORM surfaces it.
+const uniqueViolation = (constraint: string) =>
+  new QueryFailedError(
+    'INSERT INTO "product_units" ...',
+    [],
+    Object.assign(new Error('duplicate key value'), {
+      code: '23505',
+      constraint,
+    }),
+  );
 
 describe('PhonePurchasesService', () => {
   let service: PhonePurchasesService;
@@ -76,6 +89,7 @@ describe('PhonePurchasesService', () => {
     name: 'Used iPhone 12 Pro Max 256GB',
     branch_id: 'branch-1',
     is_serialized: true,
+    is_active: true,
   });
 
   const validCreateDto = () => ({
@@ -375,9 +389,10 @@ describe('PhonePurchasesService', () => {
     });
 
     it('throws ConflictException with existing_unit payload when IMEI collides', async () => {
+      // Buy-back: only a unit the shop holds collides (SOLD no longer does).
       const existingUnit = {
         id: 'unit-99',
-        status: ProductUnitStatus.SOLD,
+        status: ProductUnitStatus.IN_STOCK,
         product_id: 'prod-old',
       };
       setupHappyPathLookups({ existingUnit });
@@ -393,11 +408,81 @@ describe('PhonePurchasesService', () => {
         };
         expect(response.existing_unit).toEqual({
           id: 'unit-99',
-          status: ProductUnitStatus.SOLD,
+          status: ProductUnitStatus.IN_STOCK,
           product_id: 'prod-old',
         });
       }
       expect(mockStockService.incrementForReversal).not.toHaveBeenCalled();
+    });
+
+    it('checks IMEI collisions against live units only (IN_STOCK, WRITTEN_OFF)', async () => {
+      setupHappyPathLookups();
+      mockManager.create.mockImplementation((_e, data) => data);
+      mockManager.save.mockImplementation((e) =>
+        Promise.resolve({ id: 'purchase-live', ...e }),
+      );
+      mockStockService.incrementForReversal.mockResolvedValue(undefined);
+      mockRepo.findOne.mockResolvedValue({ id: 'purchase-live' });
+
+      await service.create(validCreateDto(), 'cashier-1');
+
+      expect(mockManager.findOne).toHaveBeenCalledWith(ProductUnit, {
+        where: {
+          imei: '356938035643809',
+          status: In([
+            ProductUnitStatus.IN_STOCK,
+            ProductUnitStatus.WRITTEN_OFF,
+          ]),
+        },
+      });
+    });
+
+    it('throws BadRequestException when product is inactive', async () => {
+      setupHappyPathLookups({
+        product: { ...validSerializedProduct(), is_active: false },
+      });
+
+      await expect(
+        service.create(validCreateDto(), 'cashier-1'),
+      ).rejects.toThrow('Product prod-1 not found or inactive');
+      expect(mockStockService.incrementForReversal).not.toHaveBeenCalled();
+    });
+
+    it('maps a concurrent live-IMEI unique violation on the unit insert to 409', async () => {
+      setupHappyPathLookups();
+      mockManager.create.mockImplementation((_e, data) => data);
+      mockManager.save.mockImplementation((e: { imei?: string }) =>
+        e.imei
+          ? Promise.reject(uniqueViolation('uq_product_units_imei_live'))
+          : Promise.resolve({ id: 'purchase-race', ...e }),
+      );
+
+      try {
+        await service.create(validCreateDto(), 'cashier-1');
+        fail('Expected ConflictException');
+      } catch (err) {
+        expect(err).toBeInstanceOf(ConflictException);
+        expect((err as ConflictException).getResponse()).toEqual({
+          message: 'IMEI already exists in inventory',
+          existing_unit: null,
+        });
+      }
+      expect(mockStockService.incrementForReversal).not.toHaveBeenCalled();
+    });
+
+    it('propagates other database errors from the unit insert unchanged', async () => {
+      setupHappyPathLookups();
+      mockManager.create.mockImplementation((_e, data) => data);
+      const other = uniqueViolation('PK_product_units_id');
+      mockManager.save.mockImplementation((e: { imei?: string }) =>
+        e.imei
+          ? Promise.reject(other)
+          : Promise.resolve({ id: 'purchase-other', ...e }),
+      );
+
+      await expect(service.create(validCreateDto(), 'cashier-1')).rejects.toBe(
+        other,
+      );
     });
 
     it('propagates errors from stock increment (data integrity failure rolls back)', async () => {
@@ -742,11 +827,12 @@ describe('PhonePurchasesService', () => {
 
     it('throws ConflictException with existing_unit payload on IMEI collision', async () => {
       // Cross-DRAFT race arbiter behavior: the pre-check inside
-      // createForTradeIn returns 409 (best-effort UX); the global
-      // unique index backstops any race that leaks through.
+      // createForTradeIn returns 409 (best-effort UX);
+      // uq_product_units_imei_live backstops any race that leaks through.
+      // Only a live unit collides (buy-back: SOLD no longer does).
       const existingUnit = {
         id: 'unit-99',
-        status: ProductUnitStatus.SOLD,
+        status: ProductUnitStatus.IN_STOCK,
         product_id: 'prod-old',
       };
       setupHappyPathLookups({ existingUnit });
@@ -762,7 +848,7 @@ describe('PhonePurchasesService', () => {
         };
         expect(response.existing_unit).toEqual({
           id: 'unit-99',
-          status: ProductUnitStatus.SOLD,
+          status: ProductUnitStatus.IN_STOCK,
           product_id: 'prod-old',
         });
       }
@@ -782,6 +868,47 @@ describe('PhonePurchasesService', () => {
       ).rejects.toThrow(BadRequestException);
       expect(mockManager.create).not.toHaveBeenCalled();
       expect(mockStockService.incrementForReversal).not.toHaveBeenCalled();
+    });
+
+    it('throws BadRequestException when product was deactivated since addPayment', async () => {
+      setupHappyPathLookups({
+        product: { ...validSerializedProduct(), is_active: false },
+      });
+
+      await expect(
+        service.createForTradeIn(mockManager as never, validInput()),
+      ).rejects.toThrow('Product prod-1 not found or inactive');
+      expect(mockManager.create).not.toHaveBeenCalled();
+    });
+
+    it('maps a concurrent live-IMEI unique violation on the unit insert to 409', async () => {
+      setupHappyPathLookups();
+      mockManager.create.mockImplementation((_e, data) => data);
+      mockManager.save.mockImplementation((e: { imei?: string }) =>
+        e.imei
+          ? Promise.reject(uniqueViolation('uq_product_units_imei_live'))
+          : Promise.resolve({ id: 'purchase-race', ...e }),
+      );
+
+      await expect(
+        service.createForTradeIn(mockManager as never, validInput()),
+      ).rejects.toBeInstanceOf(ConflictException);
+      expect(mockStockService.incrementForReversal).not.toHaveBeenCalled();
+    });
+
+    it('propagates other database errors from the unit insert unchanged', async () => {
+      setupHappyPathLookups();
+      mockManager.create.mockImplementation((_e, data) => data);
+      const other = new Error('connection reset');
+      mockManager.save.mockImplementation((e: { imei?: string }) =>
+        e.imei
+          ? Promise.reject(other)
+          : Promise.resolve({ id: 'purchase-other', ...e }),
+      );
+
+      await expect(
+        service.createForTradeIn(mockManager as never, validInput()),
+      ).rejects.toBe(other);
     });
 
     it('throws BadRequestException when product does not exist (defensive)', async () => {
@@ -873,13 +1000,13 @@ describe('PhonePurchasesService', () => {
       ).resolves.toBeDefined();
     });
 
-    it('surfaces existing unit status in the ConflictException payload for each status', async () => {
-      // Verify the payload correctly reflects each ProductUnitStatus
-      // — critical for frontend messaging.
+    it('surfaces existing unit status in the ConflictException payload for each live status', async () => {
+      // Verify the payload correctly reflects each blocking status —
+      // critical for frontend messaging. Only live statuses can come
+      // back from the (status-filtered) lookup; SOLD / RETURNED are
+      // buy-back cases and are covered by the e2e suite.
       const statuses = [
         ProductUnitStatus.IN_STOCK,
-        ProductUnitStatus.SOLD,
-        ProductUnitStatus.RETURNED,
         ProductUnitStatus.WRITTEN_OFF,
       ];
 

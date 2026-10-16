@@ -95,10 +95,11 @@ export class CreatePhonePurchaseDto {
   @ApiProperty({
     example: '356938035643809',
     description:
-      'IMEI of the physical phone being intaken. Globally unique — ' +
-      'collides with any existing ProductUnit (IN_STOCK, SOLD, ' +
-      'RETURNED, or WRITTEN_OFF) return 409 with a structured ' +
-      'existing_unit payload. Trimmed on input; typically 15 digits ' +
+      'IMEI of the physical phone being intaken. Must not belong to a ' +
+      'unit the shop holds (IN_STOCK or WRITTEN_OFF): that returns 409 ' +
+      'with a structured existing_unit payload. A SOLD or RETURNED unit ' +
+      'does not block (buy-back creates a new unit row). Trimmed on ' +
+      'input; typically 15 digits ' +
       'but 8–50 chars accepted for older devices and edge cases.',
     minLength: 8,
     maxLength: 50,

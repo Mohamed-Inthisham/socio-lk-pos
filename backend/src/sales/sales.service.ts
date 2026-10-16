@@ -9,6 +9,7 @@ import { InjectRepository, InjectDataSource } from '@nestjs/typeorm';
 import {
   DataSource,
   EntityManager,
+  In,
   QueryFailedError,
   Repository,
 } from 'typeorm';
@@ -19,6 +20,7 @@ import { ProductUnit } from '../product-units/entities/product-unit.entity';
 import { Product } from '../products/entities/product.entity';
 import { ProductUnitStatus } from '../product-units/enums/product-unit-status.enum';
 import { ProductUnitsService } from '../product-units/product-units.service';
+import { LIVE_UNIT_STATUSES } from '../product-units/live-imei';
 import { SaleStatus } from './enums/sale-status.enum';
 import { SaleType } from './enums/sale-type.enum';
 import { DiscountType } from './enums/discount-type.enum';
@@ -243,7 +245,16 @@ export class SalesService {
   async findOne(id: string): Promise<Sale> {
     const sale = await this.salesRepository.findOne({
       where: { id },
-      relations: ['branch', 'cashier', 'customer', 'lines', 'payments'],
+      // payments.trade_in_product: TRADE_IN rows show the traded-in
+      // phone's product name (POS payments list, sale detail).
+      relations: [
+        'branch',
+        'cashier',
+        'customer',
+        'lines',
+        'payments',
+        'payments.trade_in_product',
+      ],
       withDeleted: true,
       order: {
         lines: { line_number: 'ASC' },
@@ -1270,8 +1281,10 @@ export class SalesService {
    *   4. Load all lines and payments for this sale (need both for the
    *      mutations below; single-fetch each rather than one-by-one).
    *   5. For each line where external_supplier_id IS NULL: re-increment
-   *      stock via StockService.incrementForReversal. External-supplier
-   *      lines were never decremented from our stock, so nothing to
+   *      stock via StockService.incrementForReversal; serialized lines
+   *      also flip their PU SOLD → IN_STOCK, which is 409 if the phone
+   *      was bought back on a later sale (markAvailableForReversal).
+   *      External-supplier lines were never decremented from our stock, so nothing to
    *      reverse — symmetric to completeSale's skip.
    *   5b. For each TRADE_IN payment: flip its ProductUnit IN_STOCK →
    *      RETURNED via ProductUnitsService.markReturnedForVoid, then
@@ -1885,16 +1898,17 @@ export class SalesService {
    * reads see the same consistent snapshot as the surrounding addPayment
    * work.
    *
-   * Product must exist, belong to the sale's branch, and be serialized.
-   * IMEI must not collide with any existing ProductUnit — 409 with the
-   * same existing_unit payload shape as PhonePurchasesService and
-   * ProductUnitsService.
+   * Product must exist, be active, belong to the sale's branch, and be
+   * serialized. IMEI must not belong to a unit the shop holds
+   * (LIVE_UNIT_STATUSES) — 409 with the same existing_unit payload shape
+   * as PhonePurchasesService and ProductUnitsService. A SOLD or RETURNED
+   * unit doesn't block: buying back a phone we sold, or re-ringing a
+   * voided trade-in, creates a new unit row at complete.
    *
    * This is best-effort at addPayment time: a concurrent intake could
-   * insert the same IMEI between this check and completeSale's
-   * createForTradeIn. That race is the same one Slice E accepted for
-   * outgoing serialized lines, arbitrated at complete-time by the
-   * global unique index on product_units.imei.
+   * make the same IMEI live between this check and completeSale's
+   * createForTradeIn, which re-checks and is backstopped by
+   * uq_product_units_imei_live.
    *
    * Duplicates the logic of PhonePurchasesService.assertProductReference
    * and .assertImeiAvailable — see the docstring on createForTradeIn
@@ -1912,7 +1926,7 @@ export class SalesService {
     const product = await manager.findOne(Product, {
       where: { id: productId },
     });
-    if (!product) {
+    if (!product || !product.is_active) {
       throw new BadRequestException(
         `Trade-in product ${productId} not found or inactive`,
       );
@@ -1929,9 +1943,10 @@ export class SalesService {
       );
     }
 
-    // IMEI availability (best-effort UX pre-check)
+    // IMEI availability (best-effort UX pre-check). Only units the shop
+    // holds collide; SOLD / RETURNED history allows a buy-back.
     const existing = await manager.findOne(ProductUnit, {
-      where: { imei },
+      where: { imei, status: In([...LIVE_UNIT_STATUSES]) },
     });
     if (existing) {
       throw new ConflictException({
@@ -2067,10 +2082,13 @@ export class SalesService {
    * varies per unit; averaging via Product.buying_price would corrupt
    * margin reports.
    *
-   * Query is by imei alone (no product/branch/status filter) so we can
-   * distinguish failure modes for actionable error messages. Runs inside
-   * caller's transaction; no lock — the complete-time markSoldForSale
-   * lock is the sole gate (Slice E Q5).
+   * Query is by imei (no product/branch filter) so we can distinguish
+   * failure modes for actionable error messages. An IMEI can have several
+   * unit rows, one per acquisition (buy-back): the live one is used if it
+   * exists (at most one, uq_product_units_imei_live), otherwise the
+   * newest, so a sold-and-not-back phone still reports "status: SOLD".
+   * Runs inside caller's transaction; no lock — the complete-time
+   * markSoldForSale lock is the sole gate (Slice E Q5).
    */
   private async resolveInHouseSerializedLine(
     manager: EntityManager,
@@ -2083,9 +2101,14 @@ export class SalesService {
     unitPrice: string;
     costPrice: string;
   }> {
-    const unit = await manager.findOne(ProductUnit, {
-      where: { imei },
-    });
+    const unit =
+      (await manager.findOne(ProductUnit, {
+        where: { imei, status: In([...LIVE_UNIT_STATUSES]) },
+      })) ??
+      (await manager.findOne(ProductUnit, {
+        where: { imei },
+        order: { created_at: 'DESC' },
+      }));
 
     // 1. Not found
     if (!unit) {

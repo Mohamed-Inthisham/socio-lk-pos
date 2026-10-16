@@ -549,6 +549,157 @@ describe('Phone Purchases (e2e)', () => {
       });
     });
 
+    // ---- Buy-back: one ProductUnit row per acquisition ----
+
+    async function intakeOnce(
+      cookies: string[],
+      branchId: string,
+      productId: string,
+      customerId: string,
+      imei: string,
+      buyingPrice: number,
+      expected: number,
+    ) {
+      return request(app.getHttpServer())
+        .post('/api/v1/phone-purchases')
+        .set('Cookie', cookies)
+        .send({
+          customer_id: customerId,
+          branch_id: branchId,
+          product_id: productId,
+          imei,
+          buying_price: buyingPrice,
+        })
+        .expect(expected);
+    }
+
+    it.each([ProductUnitStatus.SOLD, ProductUnitStatus.RETURNED])(
+      'buys back an IMEI whose earlier unit is %s as a new unit row, leaving the old row untouched',
+      async (oldStatus) => {
+        const { user: cashier, password } = await seedUser(
+          UserRole.CASHIER,
+          `cashier-buyback-${oldStatus.toLowerCase()}@test.com`,
+        );
+        const cookies = await loginAndGetCookies(cashier.email, password);
+        const branch = await getOrCreateMainShop();
+        const product = await seedSerializedProduct(branch.id);
+        const customer = await seedCustomer();
+        const imei = validImei();
+
+        const first = await intakeOnce(
+          cookies,
+          branch.id,
+          product.id,
+          customer.id,
+          imei,
+          80000,
+          201,
+        );
+        const unitRepo = dataSource.getRepository(ProductUnit);
+        const firstUnitId = first.body.product_units[0].id;
+        // The phone left the shop (sold, or its trade-in was voided).
+        await unitRepo.update(firstUnitId, { status: oldStatus });
+        const oldRow = await unitRepo.findOneByOrFail({ id: firstUnitId });
+
+        const second = await intakeOnce(
+          cookies,
+          branch.id,
+          product.id,
+          customer.id,
+          imei,
+          55000,
+          201,
+        );
+
+        const units = await unitRepo.find({
+          where: { imei },
+          order: { created_at: 'ASC' },
+        });
+        expect(units).toHaveLength(2);
+        // Old row is history: byte-for-byte unchanged.
+        expect(units[0]).toEqual(oldRow);
+        expect(units[1]).toMatchObject({
+          id: second.body.product_units[0].id,
+          status: ProductUnitStatus.IN_STOCK,
+          buying_price: '55000.00',
+          phone_purchase_id: second.body.id,
+        });
+        const stock = await dataSource
+          .getRepository(Stock)
+          .findOneByOrFail({ product_id: product.id, branch_id: branch.id });
+        expect(stock.quantity).toBe(2); // one increment per intake
+      },
+    );
+
+    it('still rejects an IMEI whose unit is WRITTEN_OFF (409)', async () => {
+      const { user: cashier, password } = await seedUser(
+        UserRole.CASHIER,
+        'cashier-written-off@test.com',
+      );
+      const cookies = await loginAndGetCookies(cashier.email, password);
+      const branch = await getOrCreateMainShop();
+      const product = await seedSerializedProduct(branch.id);
+      const customer = await seedCustomer();
+      const imei = validImei();
+
+      const first = await intakeOnce(
+        cookies,
+        branch.id,
+        product.id,
+        customer.id,
+        imei,
+        80000,
+        201,
+      );
+      const firstUnitId = first.body.product_units[0].id;
+      await dataSource
+        .getRepository(ProductUnit)
+        .update(firstUnitId, { status: ProductUnitStatus.WRITTEN_OFF });
+
+      const response = await intakeOnce(
+        cookies,
+        branch.id,
+        product.id,
+        customer.id,
+        imei,
+        55000,
+        409,
+      );
+      expect(response.body.existing_unit).toMatchObject({
+        id: firstUnitId,
+        status: ProductUnitStatus.WRITTEN_OFF,
+      });
+      expect(
+        await dataSource.getRepository(ProductUnit).count({ where: { imei } }),
+      ).toBe(1);
+    });
+
+    it('rejects with 400 when the product is inactive', async () => {
+      const { user: cashier, password } = await seedUser(
+        UserRole.CASHIER,
+        'cashier-inactive-product@test.com',
+      );
+      const cookies = await loginAndGetCookies(cashier.email, password);
+      const branch = await getOrCreateMainShop();
+      const product = await seedSerializedProduct(branch.id, {
+        is_active: false,
+      });
+      const customer = await seedCustomer();
+
+      const response = await intakeOnce(
+        cookies,
+        branch.id,
+        product.id,
+        customer.id,
+        validImei(),
+        80000,
+        400,
+      );
+      expect(response.body.message).toBe(
+        `Product ${product.id} not found or inactive`,
+      );
+    });
+
     it('rejects with 400 when imei is malformed (contains special chars)', async () => {
       const { user: cashier, password } = await seedUser(
         UserRole.CASHIER,
