@@ -1,5 +1,5 @@
 import { vi } from "vitest";
-import { screen, waitFor, within } from "@testing-library/react";
+import { fireEvent, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import PaymentDialog from ".";
 import { posTerminalState, renderWithProviders } from "../../../test/renderWithProviders";
@@ -137,15 +137,156 @@ describe("PaymentDialog", () => {
     expect(salesService.addSalePayment).not.toHaveBeenCalled();
   });
 
-  it("rejects cash received below the amount", async () => {
+  describe("cash change", () => {
+    const change = () => within(dialog()).queryByTestId("cash-change");
+
+    it("shows the change live, in cents: 2,000.00 for 1,234.50 → 765.50", async () => {
+      const user = userEvent.setup();
+      renderDialog();
+
+      await user.clear(amount());
+      await user.type(amount(), "1234.50");
+      await user.type(cashReceived(), "2000.00");
+
+      expect(change()).toHaveTextContent(/^Change:LKR\s765\.50$/);
+    });
+
+    it("shows LKR 0.00 for exact cash", async () => {
+      const user = userEvent.setup();
+      renderDialog();
+
+      await user.type(cashReceived(), "2500");
+
+      expect(change()).toHaveTextContent(/^Change:LKR\s0\.00$/);
+    });
+
+    it("hides the change while cash received is blank", async () => {
+      const user = userEvent.setup();
+      renderDialog();
+      expect(change()).not.toBeInTheDocument();
+
+      await user.type(cashReceived(), "3000");
+      expect(change()).toBeInTheDocument();
+
+      await user.clear(cashReceived());
+      expect(change()).not.toBeInTheDocument();
+    });
+
+    it("updates when the amount changes", async () => {
+      const user = userEvent.setup();
+      renderDialog();
+
+      await user.type(cashReceived(), "3000");
+      expect(change()).toHaveTextContent(/500\.00$/);
+
+      await user.clear(amount());
+      await user.type(amount(), "1000.20");
+      expect(change()).toHaveTextContent(/1,999\.80$/);
+    });
+
+    it("flags short cash as it's typed and disables Record payment", async () => {
+      const user = userEvent.setup();
+      renderDialog();
+
+      await user.type(cashReceived(), "2000");
+
+      expect(within(dialog()).getByText("Cash received is less than the amount")).toBeInTheDocument();
+      expect(change()).not.toBeInTheDocument();
+      expect(submit()).toBeDisabled();
+
+      await user.keyboard("{Enter}");
+      expect(salesService.addSalePayment).not.toHaveBeenCalled();
+
+      await user.type(cashReceived(), "0"); // 20000
+      expect(within(dialog()).queryByText("Cash received is less than the amount")).not.toBeInTheDocument();
+      expect(submit()).toBeEnabled();
+    });
+
+    it("doesn't flag short cash while the amount is invalid", async () => {
+      const user = userEvent.setup();
+      renderDialog();
+
+      await user.clear(amount());
+      await user.type(cashReceived(), "100");
+
+      expect(within(dialog()).queryByText("Cash received is less than the amount")).not.toBeInTheDocument();
+      expect(change()).not.toBeInTheDocument();
+      expect(submit()).toBeEnabled();
+    });
+  });
+
+  it.each([
+    ["Cash received", () => cashReceived()],
+    ["Amount", () => amount()],
+  ])("Enter in %s records a valid cash payment", async (_, field) => {
+    salesService.addSalePayment.mockResolvedValue({ ...sale, amount_paid: "2500.00" });
+    const user = userEvent.setup();
+    const { onClose } = renderDialog();
+
+    await user.type(cashReceived(), "3000");
+    await user.click(field());
+    await user.keyboard("{Enter}");
+
+    await waitFor(() => expect(onClose).toHaveBeenCalledTimes(1));
+    expect(salesService.addSalePayment).toHaveBeenCalledTimes(1);
+    expect(salesService.addSalePayment).toHaveBeenCalledWith("sale-1", {
+      payment_method: "CASH",
+      amount: 2500,
+      cash_received: 3000,
+    });
+  });
+
+  it.each([
+    ["valid cash", "3000"],
+    ["short cash (no-op)", "2000"],
+  ])("Enter in Cash received cancels the browser's own submission — %s", async (_, cash) => {
     const user = userEvent.setup();
     renderDialog();
 
-    await user.type(cashReceived(), "2000");
+    await user.type(cashReceived(), cash);
+
+    // fireEvent returns false when a handler called preventDefault().
+    expect(fireEvent.keyDown(cashReceived(), { key: "Enter", code: "Enter" })).toBe(false);
+  });
+
+  it("one Enter records the payment exactly once, even if a second submit lands in the same tick", async () => {
+    let resolvePayment;
+    salesService.addSalePayment.mockImplementation(
+      () => new Promise((resolve) => { resolvePayment = resolve; }),
+    );
+    const user = userEvent.setup();
+    const { onClose, store } = renderDialog();
+
+    await user.type(cashReceived(), "3000");
+    // Our keydown handler's requestSubmit, then a native implicit
+    // submission in the same tick (what preventDefault guards against).
+    fireEvent.keyDown(cashReceived(), { key: "Enter", code: "Enter" });
+    within(dialog()).getByRole("form", { name: "Payment" }).requestSubmit();
+
+    await waitFor(() => expect(salesService.addSalePayment).toHaveBeenCalledTimes(1));
+    // Further Enters / clicks while the request is in flight are ignored.
+    await user.keyboard("{Enter}");
     await user.click(submit());
+    // One addPayment dispatched → one pending row. (A second dispatch
+    // would queue behind the first and POST once it settles.)
+    expect(store.getState().posTerminal.pendingPayments).toHaveLength(1);
+
+    resolvePayment({ ...sale, amount_paid: "2500.00" });
+    await waitFor(() => expect(onClose).toHaveBeenCalledTimes(1));
+    await new Promise((r) => setTimeout(r, 0)); // let any queued POST run
+    expect(salesService.addSalePayment).toHaveBeenCalledTimes(1);
+  });
+
+  it("Enter with an invalid amount shows the error instead of recording", async () => {
+    const user = userEvent.setup();
+    renderDialog();
+
+    await user.clear(amount());
+    await user.type(amount(), "2500.01");
+    await user.type(cashReceived(), "3000{Enter}");
 
     expect(
-      await within(dialog()).findByText("Cash received is less than the amount"),
+      await within(dialog()).findByText(/^Can't be more than the balance due/),
     ).toBeInTheDocument();
     expect(salesService.addSalePayment).not.toHaveBeenCalled();
   });

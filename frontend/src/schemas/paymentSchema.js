@@ -24,8 +24,22 @@ export const CASH = "CASH";
 export const REFERENCE_METHODS = ["CARD", "BANK_TRANSFER", "KOKO", "MINTPAY"];
 const REFERENCE_MAX = 100;
 
+export const CASH_SHORT_MESSAGE = "Cash received is less than the amount";
+
 // Up to 2 decimals, no sign, no thousands separators.
 const MONEY_SHAPE = /^\d+(\.\d{1,2})?$/;
+
+const isMoney = (value) => MONEY_SHAPE.test(String(value ?? "").trim());
+
+/**
+ * Live change for the CASH form: cash received − amount, in integer cents
+ * (P3-9). Negative when the cash is short. null while either input is
+ * blank or not a valid amount, so the dialog shows nothing yet.
+ */
+export const computeChangeCents = (amount, cashReceived) =>
+  isMoney(amount) && isMoney(cashReceived)
+    ? toCents(String(cashReceived).trim()) - toCents(String(amount).trim())
+    : null;
 
 const money = (requiredMessage) =>
   z
@@ -55,10 +69,8 @@ export const buildPaymentSchema = (balanceDue) => {
       cash_received: money("Enter the cash received"),
     })
     .refine(
-      (v) =>
-        !MONEY_SHAPE.test(v.amount.trim()) ||
-        toCents(v.cash_received) >= toCents(v.amount),
-      { path: ["cash_received"], message: "Cash received is less than the amount" },
+      (v) => (computeChangeCents(v.amount, v.cash_received) ?? 0) >= 0,
+      { path: ["cash_received"], message: CASH_SHORT_MESSAGE },
     );
 
   const referenced = REFERENCE_METHODS.map((method) =>

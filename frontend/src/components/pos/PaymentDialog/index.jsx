@@ -10,11 +10,12 @@ import InputField from "../../common/InputField";
 import CashFields from "./CashFields";
 import ReferenceFields from "./ReferenceFields";
 import { PAYMENT_METHODS } from "./methods";
-import { formatLKR } from "../../../utils/money";
+import { formatLKR, fromCents } from "../../../utils/money";
 import {
   CASH,
   buildPaymentPayload,
   buildPaymentSchema,
+  computeChangeCents,
   paymentFormDefaults,
 } from "../../../schemas/paymentSchema";
 import {
@@ -42,8 +43,14 @@ import {
  *   primary field reaches Amount.
  * - Amount defaults to the balance due and is editable (a partial tender
  *   leaves a balance for the next one).
- * - CASH shows Cash received (CashFields); the other methods show a
- *   reference number (ReferenceFields).
+ * - CASH shows Cash received (CashFields) with a live "Change: LKR X"
+ *   (cash received − amount, in cents). Short cash shows its error as
+ *   soon as it's typed and disables Record payment. The other methods
+ *   show a reference number (ReferenceFields).
+ * - Enter in a text field submits. Handled here rather than left to the
+ *   browser's implicit submission: the submit button sits in the dialog
+ *   footer (joined by its `form` attribute), and an explicit handler
+ *   also honours the short-cash block.
  *
  * Validation: react-hook-form + paymentSchema (zod), rebuilt against the
  * current balance. Submit dispatches addPayment; on success the dialog
@@ -114,6 +121,9 @@ const PaymentDialog = ({ open, onClose, afterLeave }) => {
   }, [open, reset, dispatch]);
 
   const method = useWatch({ control, name: "payment_method" });
+  const [amountValue, cashValue] = useWatch({ control, name: ["amount", "cash_received"] });
+  const changeCents = method === CASH ? computeChangeCents(amountValue, cashValue) : null;
+  const cashShort = changeCents !== null && changeCents < 0;
 
   // A number key asks for its method's primary field to be focused. The
   // field may only mount on the next render (Cash ↔ reference swap), so
@@ -132,7 +142,16 @@ const PaymentDialog = ({ open, onClose, afterLeave }) => {
   };
 
   const handleKeyDown = (event) => {
-    if (event.altKey || event.ctrlKey || event.metaKey || isTextField(event.target)) return;
+    if (event.altKey || event.ctrlKey || event.metaKey) return;
+    if (isTextField(event.target)) {
+      if (event.key === "Enter" && event.target.tagName === "INPUT") {
+        // Always cancel the browser's own implicit submission, so one
+        // Enter can't submit twice; submitForm guards re-entry.
+        event.preventDefault();
+        if (!cashShort) event.currentTarget.requestSubmit();
+      }
+      return;
+    }
     const picked = PAYMENT_METHODS.find((m) => m.key === event.key);
     if (picked && !isSubmitting) {
       event.preventDefault();
@@ -152,6 +171,21 @@ const PaymentDialog = ({ open, onClose, afterLeave }) => {
     if (addPayment.fulfilled.match(result)) onClose();
   };
 
+  // One submission at a time. isSubmitting is render state, so a second
+  // submit arriving before the re-render would still see false; the ref
+  // flips synchronously. A payment POST is not idempotent (§5).
+  const submittingRef = useRef(false);
+  const submitForm = (event) => {
+    if (submittingRef.current) {
+      event.preventDefault();
+      return;
+    }
+    submittingRef.current = true;
+    return handleSubmit(onSubmit)(event).finally(() => {
+      submittingRef.current = false;
+    });
+  };
+
   return (
     <Dialog
       open={open}
@@ -168,6 +202,7 @@ const PaymentDialog = ({ open, onClose, afterLeave }) => {
             variant="accent"
             label="Record payment"
             loading={isSubmitting}
+            disabled={cashShort}
           />
         </>
       }
@@ -182,7 +217,7 @@ const PaymentDialog = ({ open, onClose, afterLeave }) => {
         id={formId}
         noValidate
         aria-label="Payment"
-        onSubmit={handleSubmit(onSubmit)}
+        onSubmit={submitForm}
         onKeyDown={handleKeyDown}
         className="mt-5 space-y-4"
       >
@@ -245,6 +280,8 @@ const PaymentDialog = ({ open, onClose, afterLeave }) => {
           <CashFields
             register={register}
             error={errors.cash_received?.message}
+            change={changeCents !== null && !cashShort ? formatLKR(fromCents(changeCents)) : null}
+            insufficient={cashShort}
             disabled={isSubmitting}
           />
         ) : (
