@@ -18,12 +18,19 @@ jest.mock('bcrypt', () => ({
 describe('UsersService', () => {
   let service: UsersService;
 
+  const mockQueryBuilder = {
+    addSelect: jest.fn().mockReturnThis(),
+    where: jest.fn().mockReturnThis(),
+    getOne: jest.fn(),
+  };
+
   const mockUsersRepo = {
     create: jest.fn(),
     save: jest.fn(),
     findOne: jest.fn(),
     update: jest.fn(),
     softDelete: jest.fn(),
+    createQueryBuilder: jest.fn(() => mockQueryBuilder),
   };
 
   const mockBranchesRepo = {
@@ -72,32 +79,42 @@ describe('UsersService', () => {
 
   describe('findByEmail', () => {
     it('normalizes email to lowercase before lookup', async () => {
-      mockUsersRepo.findOne.mockResolvedValue(null);
+      mockQueryBuilder.getOne.mockResolvedValue(null);
       await service.findByEmail('User@Test.COM');
-      expect(mockUsersRepo.findOne).toHaveBeenCalledWith({
-        where: { email: 'user@test.com' },
-      });
+      expect(mockQueryBuilder.where).toHaveBeenCalledWith(
+        'user.email = :email',
+        { email: 'user@test.com' },
+      );
+    });
+
+    it('opts password_hash back in (it is select: false on the entity)', async () => {
+      mockQueryBuilder.getOne.mockResolvedValue(null);
+      await service.findByEmail('a@b.com');
+      expect(mockUsersRepo.createQueryBuilder).toHaveBeenCalledWith('user');
+      expect(mockQueryBuilder.addSelect).toHaveBeenCalledWith(
+        'user.password_hash',
+      );
     });
 
     it('returns the user when found', async () => {
-      const user = { id: 'u1', email: 'a@b.com' } as User;
-      mockUsersRepo.findOne.mockResolvedValue(user);
+      const user = { id: 'u1', email: 'a@b.com', password_hash: 'x' } as User;
+      mockQueryBuilder.getOne.mockResolvedValue(user);
       const result = await service.findByEmail('a@b.com');
       expect(result).toBe(user);
     });
 
     it('returns null when not found', async () => {
-      mockUsersRepo.findOne.mockResolvedValue(null);
+      mockQueryBuilder.getOne.mockResolvedValue(null);
       const result = await service.findByEmail('nobody@t.com');
       expect(result).toBeNull();
     });
   });
 
-  describe('findByIdWithHash', () => {
-    it('returns the user by id (including password_hash)', async () => {
-      const user = { id: 'u1', password_hash: 'x' } as User;
+  describe('findByIdForAuth', () => {
+    it('returns the user by id without opting password_hash in', async () => {
+      const user = { id: 'u1' } as User;
       mockUsersRepo.findOne.mockResolvedValue(user);
-      const result = await service.findByIdWithHash('u1');
+      const result = await service.findByIdForAuth('u1');
       expect(mockUsersRepo.findOne).toHaveBeenCalledWith({
         where: { id: 'u1' },
       });

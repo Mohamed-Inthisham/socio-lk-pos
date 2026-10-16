@@ -31,19 +31,24 @@ export class UsersService {
   /**
    * Find a user by email — INCLUDES password_hash.
    * Used by AuthService during login. Do not expose externally.
+   *
+   * password_hash is `select: false` on the entity, so it has to be
+   * opted back in explicitly here — this is the only read that needs it.
    */
   async findByEmail(email: string): Promise<User | null> {
-    return this.usersRepository.findOne({
-      where: { email: email.toLowerCase() },
-    });
+    return this.usersRepository
+      .createQueryBuilder('user')
+      .addSelect('user.password_hash')
+      .where('user.email = :email', { email: email.toLowerCase() })
+      .getOne();
   }
 
   /**
-   * Find a user by id — INCLUDES password_hash.
-   * Used internally by AuthService for token generation flows.
-   * Do not expose externally.
+   * Find a user by id — no password_hash, no relations.
+   * Used internally by AuthService for token generation flows
+   * (needs id, role, branch_id, is_active).
    */
-  async findByIdWithHash(id: string): Promise<User | null> {
+  async findByIdForAuth(id: string): Promise<User | null> {
     return this.usersRepository.findOne({ where: { id } });
   }
 
@@ -101,7 +106,8 @@ export class UsersService {
   }
 
   /**
-   * Partial update. Password changes go through a separate flow.
+   * Partial update. Password is not updatable here (and there is no
+   * password-change endpoint yet — see FOLLOWUPS.md).
    * Role is IMMUTABLE post-creation (enforced at both DTO and service layers).
    * Branch transfers are allowed for staff; admins cannot be given a branch.
    */
