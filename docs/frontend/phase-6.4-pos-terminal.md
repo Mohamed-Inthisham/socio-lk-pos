@@ -414,6 +414,7 @@ Decisions made before building P3 (payment entry). Where they differ from the or
 | P3-9 | Money math | Balance and change are computed in **integer cents** (`toCents` / `fromCents` in `utils/money.js`), never by float subtraction. Balance due = `total − amount_paid` from the server sale. | — |
 | P3-10 | Backend fixes found in P3 recon | **Fixed in #24** before P3. (B1) The remaining-balance check compared floats, so paying the exact remainder after a partial payment with cents was rejected ("50.20 exceeds remaining balance 50.20"); it now compares in cents. (B2) A cart change that would drop `total` below `amount_paid` hit a DB CHECK and returned 500; it now returns 400 "Cannot reduce the sale total below the amount already paid. Remove or reduce payments first." #24 also bounds AMOUNT discounts in cents. | — |
 | P3-11 | Bottom sheets below `md` (§6) | **Deferred to P6.** The PaymentDialog is a centred modal at every width, like every other dialog in the app; no dialog has the §6 bottom-sheet variant yet. P6 adds it for all terminal dialogs at once. | §6 "Dialogs become bottom sheets below `md`" (for P3) |
+| P3-12 | Quick-tender chips (§1 #8) | **Deferred to P6.** The CASH form has no quick-tender chips (Exact / next 500 / next 1,000 / 5,000) in P3. The cashier types the cash received and sees the live change (P3-9); P6 can add chips that fill Cash received. | — |
 
 ### Scheduling decisions
 
