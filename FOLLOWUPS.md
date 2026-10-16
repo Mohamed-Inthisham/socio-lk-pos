@@ -26,7 +26,7 @@ Non-blocking issues and tech debt to address opportunistically. When you fix one
 
 - **`updated_at` not bumped on QueryBuilder `.update()`.** `StockService.decrementForSale`/`incrementForReversal` and `ProductUnitsService.markSoldForSale`/`markAvailableForReversal` use `manager.createQueryBuilder().update(Entity).set({...})`, which bypasses TypeORM's `@UpdateDateColumn` auto-bump. `updated_at` stays at the row's creation timestamp even after status/quantity changes. Cosmetic — no data-integrity impact — but breaks any "recently changed" ordering. Fix: add `updated_at: () => 'now()'` to each `.set()` clause, or install a Postgres trigger. _[Phase 6.3 Stock, Slice E PU]_
 
-- **IMEI collision race between pre-check and INSERT (PhonePurchase).** `PhonePurchasesService.create` pre-checks for IMEI collision but the actual INSERT could still race a concurrent creation, surfacing as a raw Postgres `23505` → 500. Fix: catch `23505` in the insert and translate to a structured 409 matching the pre-check's payload shape. _[Slice D]_
+- **`CreatePhonePurchaseDto.selling_price` accepts 0.** Same trap the buy-back PR closed for `trade_in_selling_price`: `@Min(0)` lets an outright intake store `selling_price = 0.00`, and resale prices with `unit.selling_price ?? product.selling_price`, so the phone rings up for free (the fallback only applies to null). Fix: `@Min(0.01)` plus an e2e test. Left out of the buy-back PR to keep its scope to trade-ins. _[buy-back PR]_
 
 - **Customer can be cleared from a DRAFT that has TRADE_IN payments.** `addPayment` requires `sale.customer_id` for TRADE_IN, but `PATCH /sales/:id` with `customer_id: null` still succeeds afterwards. `completeSale` catches it with a 400 before calling `createForTradeIn` (PhonePurchase needs a customer), so there is no data risk — but the error surfaces late. Fix: in `SalesService.update`, reject clearing `customer_id` when the sale has any TRADE_IN payment. _[Slice G]_ **Resolved** — shipped in #22 (also covers customer reassignment).
 
@@ -66,9 +66,7 @@ Non-blocking issues and tech debt to address opportunistically. When you fix one
 
 ## Deferred features
 
-- **Buy-back flow.** Customer re-selling a phone we previously sold to them. New endpoint or extended intake path. Related to but distinct from the RETURNED flow. _[Slice D]_
-
-- **Returned phone re-stock (RETURNED → IN_STOCK).** Customer physically returns a phone; separate from a full sale void. Needs its own endpoint and business rules. _[Slice D/E]_
+- **Customer-return re-stock.** Customer physically returns a phone; separate from a full sale void. Needs its own endpoint and business rules. **Must use a new ProductUnit status (e.g. `RETURN_PENDING`), not RETURNED**, and add it to the WHERE clause of `uq_product_units_imei_live` (migration + entity `@Index` + `LIVE_UNIT_STATUSES` in `product-units/live-imei.ts`): the shop holds the phone, so it is live. RETURNED means "trade-in reversed; the phone is back with the customer" and stays out of the index so a voided trade-in can be re-rung. _[Slice D/E, revised buy-back PR]_
 
 - **Admin endpoint to update `ProductUnit.selling_price` post-intake.** The "price later" workflow (Cashier Option C from Slice D) requires this. Currently there's no way to set the per-unit price after intake if the cashier left it null. _[Slice D]_
 
@@ -87,6 +85,10 @@ Non-blocking issues and tech debt to address opportunistically. When you fix one
 - **Extend `ProductType` enum for real-business coverage.** DB CHECK exists; add enum values and migration. _[Phase 6.3]_
 
 - **No password-change endpoint.** `UpdateUserDto` omits `password`, and there is no self-service change-password or admin reset route, so a user's password can only be changed directly in the DB. When it lands: verify the current password via a lookup that opts `password_hash` in (it is `select: false` on `User`, see `UsersService.findByEmail`), re-hash with `BCRYPT_ROUNDS`, and revoke the user's refresh tokens. _[password-hash exclusion fix]_
+
+## Go-live setup
+
+- **Create the common used-phone catalogue models before go-live.** A trade-in or phone purchase needs an existing, active, serialized product at the branch, one per model/storage (e.g. "Used iPhone 12 128GB"), and only admins can create products. If the customer's model is missing, the cashier is stuck (the POS shows "No used-phone product for this model. Ask an admin to add one."). Seed the models the shop commonly takes in (`is_serialized = true`, `phone_condition = USED`) at each branch. _[Phase 6.4 P4 planning]_
 
 ## Deferred infrastructure
 
