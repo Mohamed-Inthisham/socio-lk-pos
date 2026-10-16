@@ -8,6 +8,7 @@ import CustomerAttachDialog from "../../components/pos/CustomerAttachDialog";
 import CustomerCard from "../../components/pos/CustomerCard";
 import NewSaleDialog from "../../components/pos/NewSaleDialog";
 import PaymentDialog from "../../components/pos/PaymentDialog";
+import PaymentsList from "../../components/pos/PaymentsList";
 import ScanBar from "../../components/pos/ScanBar";
 import TotalsPanel from "../../components/pos/TotalsPanel";
 import useTerminalBranch from "../../hooks/useTerminalBranch";
@@ -27,8 +28,9 @@ import {
  *
  * Route: /pos. Opens (or resumes) the branch's DRAFT sale on mount and
  * lays out the terminal:
- * - ≥ lg: cart column left, sale/totals column right (Q23, 1366×768 target)
- * - < lg: single column, sale/totals stacked under the cart
+ * - ≥ lg: cart + payments column left, sale/customer/totals column right
+ *   (Q23, 1366×768 target)
+ * - < lg: single column — scan, cart, payments, then sale/customer/totals
  *
  * FOCUS (§6): the scan bar is the home position.
  * - F2 focuses it from anywhere (also from inputs); Esc does too when
@@ -45,8 +47,10 @@ import {
  *
  * Phase 6.4 P1 builds this up: draft lifecycle → ScanBar → CartLines →
  * TotalsPanel; P2 adds the CustomerCard (+ CustomerAttachDialog) under
- * "Current sale". Payments (P3), trade-in (P4) and complete (P5) slot
- * into the right-hand column later.
+ * "Current sale"; P3 adds the PaymentDialog (Pay / F4) and the
+ * PaymentsList below the cart (the cart has the spare height; the
+ * right-hand column doesn't). Trade-in (P4) and complete (P5) slot in
+ * later.
  */
 
 const Card = ({ className = "", children }) => (
@@ -170,7 +174,12 @@ const PosTerminal = () => {
   return (
     <div className="h-full overflow-y-auto lg:overflow-hidden">
       <div className="min-h-full lg:h-full flex flex-col lg:flex-row gap-4 p-3 sm:p-4">
-        {/* Left: scan + cart */}
+        {/*
+          Left: scan + cart + payments. The cart flexes (scrolling inside
+          when long); Payments below it keeps its natural height (up to 3
+          rows, then it scrolls) and renders nothing before the first
+          tender. < lg the same order stacks: Payments right after the cart.
+        */}
         <section className="flex-1 min-w-0 min-h-0 flex flex-col gap-3">
           {status === "gone" && (
             <div
@@ -188,14 +197,22 @@ const PosTerminal = () => {
 
           <ScanBar branchId={branchId} disabled={status !== "ready"} inputRef={scanRef} />
 
-          <Card className="flex-1 min-h-[16rem] flex flex-col overflow-hidden">
+          {/* lg:min-h-40 leaves room for 3 payment rows at a ~640px viewport */}
+          <Card className="flex-1 min-h-[16rem] lg:min-h-40 flex flex-col overflow-hidden">
             <CartLines onReturnFocus={returnFocus} />
           </Card>
+
+          <PaymentsList onReturnFocus={returnFocus} />
         </section>
 
-        {/* Right: sale + totals */}
-        <aside className="lg:w-[24rem] xl:w-[28rem] flex-shrink-0 flex flex-col gap-3">
-          <Card className="p-4">
+        {/*
+          Right: sale + totals. ≥ lg the column has the viewport's height
+          (Q23: judged at the real browser viewport, ~640px on a 1366×768
+          laptop). Safety net: if it can't fit, the column scrolls and
+          Totals (Pay / Ready) stays pinned at the bottom.
+        */}
+        <aside className="lg:w-[24rem] xl:w-[28rem] flex-shrink-0 flex flex-col gap-3 lg:gap-2 lg:min-h-0 lg:overflow-y-auto">
+          <Card className="px-4 py-3">
             <div className="flex items-start justify-between gap-3">
               <div className="min-w-0">
                 <p className="text-xs font-semibold uppercase tracking-wider text-slate-500 dark:text-slate-400">
@@ -222,7 +239,9 @@ const PosTerminal = () => {
             disabled={status !== "ready"}
           />
 
-          <TotalsPanel onPay={() => setPaymentOpen(true)} />
+          <div data-testid="totals-dock" className="lg:sticky lg:bottom-0">
+            <TotalsPanel onPay={() => setPaymentOpen(true)} />
+          </div>
         </aside>
       </div>
 

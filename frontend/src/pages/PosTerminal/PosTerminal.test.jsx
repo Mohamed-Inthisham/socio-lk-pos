@@ -103,6 +103,43 @@ describe("PosTerminal hotkeys and focus", () => {
   });
 });
 
+describe("PosTerminal layout", () => {
+  const paidSale = () =>
+    draftSale({
+      lines, subtotal: "3990.00", total: "3990.00", amount_paid: "3990.00", change_due: "10.00",
+      payments: [{ id: "pay-1", payment_method: "CASH", amount: "3990.00", cash_received: "4000.00", reference_number: null }],
+    });
+
+  it("places Payments in the left column, directly below the cart — not in the right column", async () => {
+    salesService.createSale.mockResolvedValue(paidSale());
+    await renderTerminal();
+
+    const payments = screen.getByTestId("payments-card");
+    const cartCard = screen.getByRole("list", { name: "Cart" }).closest(".rounded-2xl");
+    expect(payments.previousElementSibling).toBe(cartCard);
+    expect(payments.parentElement).toContainElement(scanBar());
+    expect(screen.getByRole("complementary")).not.toContainElement(payments);
+    // The cart flexes; its ≥ lg minimum leaves room for 3 payment rows
+    expect(cartCard).toHaveClass("flex-1", "lg:min-h-40");
+  });
+
+  it("renders no Payments card before the first tender", async () => {
+    await renderTerminal();
+    expect(screen.queryByTestId("payments-card")).not.toBeInTheDocument();
+  });
+
+  it("right column: scrolls at ≥ lg as a last resort, with Totals pinned to the bottom", async () => {
+    await renderTerminal();
+
+    const aside = screen.getByRole("complementary");
+    expect(aside).toHaveClass("lg:overflow-y-auto", "lg:min-h-0");
+    const dock = screen.getByTestId("totals-dock");
+    expect(dock).toHaveClass("lg:sticky", "lg:bottom-0");
+    expect(within(dock).getByRole("region", { name: "Sale totals" })).toBeInTheDocument();
+    expect(aside.lastElementChild).toBe(dock);
+  });
+});
+
 describe("PosTerminal F3 customer hotkey", () => {
   const attachDialog = () => screen.queryByRole("dialog", { name: "Attach customer" });
 
@@ -279,11 +316,39 @@ describe("PosTerminal F4 payment hotkey", () => {
     expect(screen.getByTestId("totals-change")).toHaveTextContent("10.00");
     expect(screen.getByTestId("totals-balance")).toHaveTextContent("0.00");
     expect(screen.queryByRole("button", { name: /^Pay / })).not.toBeInTheDocument();
+    const payments = within(screen.getByRole("list", { name: "Payments" })).getAllByRole("listitem");
+    expect(payments.map((p) => p.getAttribute("aria-label"))).toEqual([
+      expect.stringMatching(/^Card LKR\s1,000\.00$/),
+      expect.stringMatching(/^Cash LKR\s2,990\.00$/),
+    ]);
 
     // Fully paid: F4 does nothing
     await user.keyboard("[F4]");
     expect(paymentDialog()).not.toBeInTheDocument();
     expect(salesService.addSalePayment).toHaveBeenCalledTimes(2);
+  });
+
+  it("removing a payment on a fully paid sale brings Pay back and hands focus to the scan bar", async () => {
+    const card = { id: "pay-1", payment_method: "CARD", amount: "1000.00", cash_received: null, reference_number: "AUTH-1" };
+    const cash = { id: "pay-2", payment_method: "CASH", amount: "2990.00", cash_received: "3000.00", reference_number: null };
+    salesService.createSale.mockResolvedValue({
+      ...payableSale(), amount_paid: "3990.00", change_due: "10.00", payments: [card, cash],
+    });
+    salesService.removeSalePayment.mockResolvedValue();
+    salesService.getSale.mockResolvedValue({
+      ...payableSale(), amount_paid: "1000.00", change_due: "0.00", payments: [card],
+    });
+    const user = userEvent.setup();
+    await renderTerminal();
+    expect(screen.getByTestId("totals-ready")).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: /^Remove Cash payment/ }));
+
+    await waitFor(() => expect(screen.getByRole("button", { name: /^Pay / })).toHaveTextContent("2,990.00"));
+    expect(salesService.removeSalePayment).toHaveBeenCalledWith("sale-1", "pay-2");
+    expect(screen.queryByTestId("totals-ready")).not.toBeInTheDocument();
+    expect(within(screen.getByRole("list", { name: "Payments" })).getAllByRole("listitem")).toHaveLength(1);
+    expect(scanBar()).toHaveFocus();
   });
 
   it("closing the payment dialog hands focus back to the scan bar", async () => {

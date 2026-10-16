@@ -76,7 +76,7 @@ const TotalsPanel = ({ onPay }) => {
     <section
       aria-label="Sale totals"
       aria-busy={syncing}
-      className="rounded-2xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 shadow-sm p-4"
+      className="rounded-2xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 shadow-sm px-4 py-3"
     >
       <div className="flex items-center justify-between mb-3">
         <h2 className="text-xs font-semibold uppercase tracking-wider text-slate-500 dark:text-slate-400">
