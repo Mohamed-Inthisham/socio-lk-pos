@@ -9,7 +9,7 @@ import Button from "../../common/Button";
 import InputField from "../../common/InputField";
 import CashFields from "./CashFields";
 import ReferenceFields from "./ReferenceFields";
-import { PAYMENT_METHODS } from "./methods";
+import { PAYMENT_METHODS, referenceHint } from "./methods";
 import { formatLKR, fromCents } from "../../../utils/money";
 import {
   CASH,
@@ -288,6 +288,7 @@ const PaymentDialog = ({ open, onClose, afterLeave }) => {
           <ReferenceFields
             register={register}
             error={errors.reference_number?.message}
+            hint={referenceHint(method)}
             disabled={isSubmitting}
           />
         )}

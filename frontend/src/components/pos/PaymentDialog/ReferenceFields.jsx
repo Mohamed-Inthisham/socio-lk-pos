@@ -8,13 +8,17 @@ import InputField from "../../common/InputField";
  * by the backend for reconciliation (auth code, slip reference or the
  * provider's transaction ID).
  *
+ * The label stays "Reference number" for every method; `hint` names the
+ * method's own reference (methods.js referenceHint).
+ *
  * PROPS:
  * - register: react-hook-form register
  * - error: field error message
+ * - hint: which reference to enter for the selected method
  * - disabled
  */
 
-const ReferenceFields = ({ register, error, disabled }) => (
+const ReferenceFields = ({ register, error, hint, disabled }) => (
   <InputField
     label="Reference number"
     required
@@ -22,6 +26,7 @@ const ReferenceFields = ({ register, error, disabled }) => (
     autoComplete="off"
     spellCheck={false}
     error={error}
+    hint={hint}
     disabled={disabled}
     {...register("reference_number")}
     name="reference_number"

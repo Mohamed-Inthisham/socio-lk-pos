@@ -302,6 +302,82 @@ describe("PaymentDialog", () => {
     expect(salesService.addSalePayment).not.toHaveBeenCalled();
   });
 
+  describe.each([
+    ["Card", "CARD", "2", "Auth code or RRN from the card terminal slip"],
+    ["Bank transfer", "BANK_TRANSFER", "3", "Reference on the transfer slip or banking app"],
+    ["Koko", "KOKO", "4", "Transaction ID from Koko"],
+    ["Mintpay", "MINTPAY", "5", "Transaction ID from Mintpay"],
+  ])("%s reference", (label, value, key, hint) => {
+    const pick = async (user) => {
+      await waitFor(() => expect(method("Cash")).toHaveFocus());
+      await user.keyboard(key);
+      expect(method(label)).toBeChecked();
+      await waitFor(() => expect(reference()).toHaveFocus());
+    };
+
+    it("shows its own hint and hides Cash received", async () => {
+      const user = userEvent.setup();
+      renderDialog();
+      await pick(user);
+
+      expect(within(dialog()).getByText(hint)).toBeInTheDocument();
+      expect(cashReceived()).not.toBeInTheDocument();
+    });
+
+    it("rejects a blank, whitespace-only or over-long reference", async () => {
+      const user = userEvent.setup();
+      renderDialog();
+      await pick(user);
+
+      await user.keyboard("{Enter}");
+      expect(await within(dialog()).findByText("Enter the reference number")).toBeInTheDocument();
+
+      await user.type(reference(), "   {Enter}");
+      expect(await within(dialog()).findByText("Enter the reference number")).toBeInTheDocument();
+
+      await user.clear(reference());
+      await user.paste("R".repeat(101));
+      await user.keyboard("{Enter}");
+      expect(
+        await within(dialog()).findByText("Reference must be 100 characters or fewer"),
+      ).toBeInTheDocument();
+
+      expect(salesService.addSalePayment).not.toHaveBeenCalled();
+    });
+
+    it("rejects an amount above the balance due", async () => {
+      const user = userEvent.setup();
+      renderDialog();
+      await pick(user);
+
+      await user.type(reference(), "REF-1");
+      await user.clear(amount());
+      await user.type(amount(), "2600{Enter}");
+
+      expect(
+        await within(dialog()).findByText(/^Can't be more than the balance due/),
+      ).toBeInTheDocument();
+      expect(salesService.addSalePayment).not.toHaveBeenCalled();
+    });
+
+    it("records a 100-character reference with the method and no cash received", async () => {
+      salesService.addSalePayment.mockResolvedValue({ ...sale, amount_paid: "2500.00" });
+      const user = userEvent.setup();
+      const { onClose } = renderDialog();
+      await pick(user);
+
+      await user.paste("R".repeat(100));
+      await user.keyboard("{Enter}");
+
+      await waitFor(() => expect(onClose).toHaveBeenCalledTimes(1));
+      expect(salesService.addSalePayment).toHaveBeenCalledWith("sale-1", {
+        payment_method: value,
+        amount: 2500,
+        reference_number: "R".repeat(100),
+      });
+    });
+  });
+
   it("records a cash payment and closes", async () => {
     salesService.addSalePayment.mockResolvedValue({
       ...sale,

@@ -224,6 +224,68 @@ describe("PosTerminal F4 payment hotkey", () => {
     expect(screen.getByRole("button", { name: /^Pay / })).toHaveTextContent("2,990.00");
   });
 
+  it("multi-tender: a partial card payment, then F4 reopens on the remainder and cash settles it", async () => {
+    const card = { id: "pay-1", payment_method: "CARD", amount: "1000.00", cash_received: null, reference_number: "AUTH-1" };
+    const cash = { id: "pay-2", payment_method: "CASH", amount: "2990.00", cash_received: "3000.00", reference_number: null };
+    salesService.createSale.mockResolvedValue(payableSale());
+    salesService.addSalePayment
+      .mockResolvedValueOnce({ ...payableSale(), amount_paid: "1000.00", change_due: "0.00", payments: [card] })
+      .mockResolvedValueOnce({ ...payableSale(), amount_paid: "3990.00", change_due: "10.00", payments: [card, cash] });
+    const user = userEvent.setup();
+    await renderTerminal();
+
+    // 1st tender: Card, partial — F4 → 2 → reference → Shift+Tab → amount → Enter
+    await user.keyboard("[F4]");
+    let dialog = await screen.findByRole("dialog", { name: "Take payment" });
+    await waitFor(() => expect(within(dialog).getByRole("radio", { name: "Cash" })).toHaveFocus());
+    await user.keyboard("2");
+    await waitFor(() => expect(within(dialog).getByLabelText(/^Reference number/)).toHaveFocus());
+    await user.keyboard("AUTH-1");
+    await user.tab({ shift: true });
+    await user.clear(within(dialog).getByLabelText(/^Amount/));
+    await user.keyboard("1000{Enter}");
+
+    await waitFor(() => expect(paymentDialog()).not.toBeInTheDocument());
+    expect(salesService.addSalePayment).toHaveBeenNthCalledWith(1, "sale-1", {
+      payment_method: "CARD",
+      amount: 1000,
+      reference_number: "AUTH-1",
+    });
+    expect(screen.getByTestId("totals-paid")).toHaveTextContent("1,000.00");
+    expect(screen.getByTestId("totals-balance")).toHaveTextContent("2,990.00");
+    expect(screen.getByRole("button", { name: /^Pay / })).toHaveTextContent("2,990.00");
+
+    // 2nd tender: F4 reopens fresh — Cash, amount = the new remainder
+    await user.keyboard("[F4]");
+    dialog = await screen.findByRole("dialog", { name: "Take payment" });
+    expect(within(dialog).getByTestId("payment-paid")).toHaveTextContent("1,000.00");
+    expect(within(dialog).getByTestId("payment-balance")).toHaveTextContent("2,990.00");
+    expect(within(dialog).getByRole("radio", { name: "Cash" })).toBeChecked();
+    expect(within(dialog).getByLabelText(/^Amount/)).toHaveValue("2990.00");
+    await waitFor(() => expect(within(dialog).getByRole("radio", { name: "Cash" })).toHaveFocus());
+    await user.keyboard("1");
+    await waitFor(() => expect(within(dialog).getByLabelText(/^Cash received/)).toHaveFocus());
+    await user.keyboard("3000");
+    expect(within(dialog).getByTestId("cash-change")).toHaveTextContent("10.00");
+    await user.keyboard("{Enter}");
+
+    await waitFor(() => expect(paymentDialog()).not.toBeInTheDocument());
+    expect(salesService.addSalePayment).toHaveBeenNthCalledWith(2, "sale-1", {
+      payment_method: "CASH",
+      amount: 2990,
+      cash_received: 3000,
+    });
+    expect(screen.getByTestId("totals-ready")).toHaveTextContent("Ready to complete");
+    expect(screen.getByTestId("totals-change")).toHaveTextContent("10.00");
+    expect(screen.getByTestId("totals-balance")).toHaveTextContent("0.00");
+    expect(screen.queryByRole("button", { name: /^Pay / })).not.toBeInTheDocument();
+
+    // Fully paid: F4 does nothing
+    await user.keyboard("[F4]");
+    expect(paymentDialog()).not.toBeInTheDocument();
+    expect(salesService.addSalePayment).toHaveBeenCalledTimes(2);
+  });
+
   it("closing the payment dialog hands focus back to the scan bar", async () => {
     salesService.createSale.mockResolvedValue(payableSale());
     const user = userEvent.setup();
