@@ -200,6 +200,30 @@ describe("PosTerminal F4 payment hotkey", () => {
     expect(screen.getAllByRole("dialog")).toHaveLength(1);
   });
 
+  it("recording a payment closes the dialog and hands focus back to the scan bar", async () => {
+    salesService.createSale.mockResolvedValue(payableSale());
+    salesService.addSalePayment.mockResolvedValue({
+      ...payableSale(),
+      amount_paid: "1000.00",
+      payments: [{ id: "pay-1", payment_method: "CARD", amount: "1000.00", reference_number: "AUTH-1" }],
+    });
+    const user = userEvent.setup();
+    await renderTerminal();
+
+    await user.keyboard("[F4]");
+    const dialog = await screen.findByRole("dialog", { name: "Take payment" });
+    await user.click(within(dialog).getByRole("radio", { name: "Card" }));
+    const amount = within(dialog).getByLabelText(/^Amount/);
+    await user.clear(amount);
+    await user.type(amount, "1000");
+    await user.type(within(dialog).getByLabelText(/^Reference number/), "AUTH-1");
+    await user.click(within(dialog).getByRole("button", { name: "Record payment" }));
+
+    await waitFor(() => expect(paymentDialog()).not.toBeInTheDocument());
+    await waitFor(() => expect(scanBar()).toHaveFocus());
+    expect(screen.getByRole("button", { name: /^Pay / })).toHaveTextContent("2,990.00");
+  });
+
   it("closing the payment dialog hands focus back to the scan bar", async () => {
     salesService.createSale.mockResolvedValue(payableSale());
     const user = userEvent.setup();
