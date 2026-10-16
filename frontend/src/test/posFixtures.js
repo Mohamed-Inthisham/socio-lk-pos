@@ -67,6 +67,24 @@ export const customer = (overrides = {}) => ({
   ...overrides,
 });
 
+export const cashPayment = (overrides = {}) => ({
+  id: "pay-cash",
+  payment_method: "CASH",
+  amount: "1500.00",
+  cash_received: "2000.00",
+  reference_number: null,
+  ...overrides,
+});
+
+export const cardPayment = (overrides = {}) => ({
+  id: "pay-card",
+  payment_method: "CARD",
+  amount: "1000.00",
+  cash_received: null,
+  reference_number: "AUTH-482913",
+  ...overrides,
+});
+
 export const tradeInPayment = (overrides = {}) => ({
   id: "pay-ti",
   payment_method: "TRADE_IN",

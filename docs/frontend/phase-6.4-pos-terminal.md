@@ -1,6 +1,6 @@
 # Phase 6.4 — POS Terminal (Frontend) — Planning
 
-**Status:** P0 shipped (#18). P1 (scan bar, cart, totals) built on `feature/phase-6.4-pos-p1`. Decisions that changed while building P1 are recorded in §8 "P1 decision log", and the sections they touch are marked "revised P1".
+**Status:** P0 (#18), P1 (#20) and P2 (#21) shipped. P3 (payment entry) is being built on `feature/phase-6.4-p3-payments`. Decisions that changed while building are recorded in the §8 "P1 decision log" and "P3 decision log", and the sections they touch are marked "revised P1" or "revised P3".
 
 **Target setup:** a laptop (1366×768 reference) with a USB/HID barcode scanner as the till. Tablet and phone layouts are supported as secondary.
 
@@ -14,6 +14,7 @@
 - `GET /products` is **paginated** (`{ data, meta }`, `limit` ≤ 200) with a server-side `search` param (case-insensitive name substring, 2–100 chars) — added after planning (`feature/products-text-search`); it was a plain array with no search when this doc was written. `GET /products/by-barcode/:barcode` is the scan lookup. `GET /sales` is **paginated** (`{ data, meta }`, filters `branchId`, `cashierId`, `status`, `from`, `to`, `page`, `limit≤200`).
 - `GET /product-units?imei=` is **admin/manager only** — a cashier cannot resolve an IMEI to a product today.
 - `addLine` does **not** check stock. Insufficient stock surfaces only at `POST /sales/:id/complete` (409).
+- A payment's `amount` can never exceed the remaining balance (CASH included: the excess goes in `cash_received`), so a sale can't be overpaid. A line change that would drop `total` below `amount_paid` returns **400** "Cannot reduce the sale total below the amount already paid. Remove or reduce payments first." (#24; it was a raw 500 before). The sale returns `total`, `amount_paid` and `change_due`, but no balance field.
 - `POST /sales` requires `branch_id`. Staff users have one; **admins have `branch_id = null`**.
 - The frontend's `mapBackendUser` (`frontend/src/services/authService.js`) currently **drops `branch_id` and `branch`** from `/auth/me` and `/auth/login`. Must be fixed before the terminal can create sales.
 - The frontend has **no test runner** (no Vitest/Jest/RTL in `package.json`, no test files). `docs/architecture.md` names Vitest + React Testing Library + Playwright as the intended stack.
@@ -30,7 +31,7 @@ Minimum-viable R1 cashier flow. "R1" = ships in Phase 6.4. "R1.1" = deferred to 
 | # | Screen / interaction | Purpose | Description | Release |
 |---|---------------------|---------|-------------|:-------:|
 | 1 | **Login** | Authenticate | Reuse `LoginPage` as-is. After login, cashiers land on `/pos` instead of `/dashboard` (role-based redirect). | R1 |
-| 2 | **Terminal shell** | Frame for the whole flow | Full-height layout: scan bar on top, cart on the left, totals + payments panel on the right, status strip (branch, cashier, network) at the bottom. Hosts the global hotkey handler and the draft-sale lifecycle (create on first item, resume on reload). | R1 |
+| 2 | **Terminal shell** | Frame for the whole flow | Full-height layout: scan bar on top, cart on the left with the payments list directly below it _(revised P3, see §8 P3-4)_, sale / customer / totals panel on the right, status strip (branch, cashier, network) at the bottom. Hosts the global hotkey handler and the draft-sale lifecycle (create on first item, resume on reload). | R1 |
 | 3 | **Product search / scan input** | Get items into the cart | A single always-focused input. Enter on a value runs an exact barcode lookup first, then falls back to a name/SKU search over the branch catalog with a keyboard-navigable result list. Phones carry both a product label and an IMEI (Q9): if a lookup misses and the value is IMEI-shaped (15 digits), the bar says "That looks like an IMEI — scan the product label first". | R1 |
 | 4 | **Serialized item IMEI prompt** | Sell a specific phone | When the chosen product has `is_serialized = true`, a small dialog asks for the IMEI (scan the phone's IMEI label, or type) before calling `addLine` with `quantity: 1`. Handles 400 (IMEI not found / wrong product) and 409 (unit not IN_STOCK, with `existing_unit`). | R1 |
 | 5 | **Cart view** | Show and edit lines | Rows show name, IMEI (if any), qty, unit price, discount, line total. Qty edit (non-serialized only) and line remove; every edit replaces the cart from the server response. | R1 |
@@ -39,7 +40,7 @@ Minimum-viable R1 cashier flow. "R1" = ships in Phase 6.4. "R1.1" = deferred to 
 | 8 | **Payment entry — CASH** | Take cash | Amount defaults to remaining balance; cashier types cash received; change is shown live. Sends `{ payment_method: CASH, amount, cash_received }`. | R1 |
 | 9 | **Payment entry — CARD / BANK_TRANSFER / KOKO / MINTPAY** | Take reference-based tenders | Same dialog, method switch hides cash-received and shows a required reference number (auth code / slip ref / provider txn id). | R1 |
 | 10 | **Payment entry — TRADE_IN** | Accept a used phone as payment | Requires a customer on the sale. Collects trade-in product (serialized products at the branch), IMEI, buying price (= amount, locked together), optional selling price and notes. 409 on IMEI already in inventory. | R1 |
-| 11 | **Payment list + remove** | Correct mistakes | Payments panel lists tenders with remaining balance. Remove = `DELETE .../payments/:id`. Edit is not exposed (remove + re-add); TRADE_IN is frozen server-side anyway. | R1 (edit: R1.1) |
+| 11 | **Payment list + remove** | Correct mistakes | Payments panel lists tenders with remaining balance. Remove = `DELETE .../payments/:id`, with no confirm (P3-2). Edit is not exposed (remove + re-add, reaffirmed in P3-1); TRADE_IN is frozen server-side anyway. | R1 (edit: R1.1) |
 | 12 | **Complete sale confirmation** | Commit the sale | Enabled only when `amount_paid === total`. Confirm dialog shows totals, tenders, change due; `POST /sales/:id/complete`. Success shows a "Sale complete" panel with sale number and change, then a fresh terminal. 409s (stock, IMEI race, trade-in IMEI) show inline with the offending line/payment highlighted. | R1 |
 | 13 | **Discard draft** | Abandon a cart | `DELETE /sales/:id` behind a confirm. Also offered when starting a new sale with a non-empty draft. | R1 |
 | 14 | **Recent sales list** | Look up today's sales | Paginated `GET /sales` scoped to this branch (and today by default); shows sale number, time, cashier, total, status. Row opens a read-only detail. | R1 |
@@ -48,7 +49,7 @@ Minimum-viable R1 cashier flow. "R1" = ships in Phase 6.4. "R1.1" = deferred to 
 | 17 | **Keyboard help overlay** | Discoverability | `?` / F1 opens a cheat sheet of the shortcuts in §6. Hidden on touch-only devices. | R1 |
 | 18 | **External-supplier (friendly-shop) lines** | Sell stock sourced from another shop | `addLine` with `external_supplier_id` (+ free-text IMEI for serialized). | **R1.1** (Q12) |
 | 19 | **Sale-level notes** | Free-text on the sale | `PATCH /sales/:id { notes }`. | **R1.1 candidate** |
-| 20 | **Payment edit** | Fix an amount without remove + re-add | `PATCH .../payments/:id`. | **R1.1** |
+| 20 | **Payment edit** | Fix an amount without remove + re-add | `PATCH .../payments/:id`. Kept out of P3 (P3-1), including inline CASH edit. | **R1.1** |
 | 21 | **Recent sales filters beyond "today"** | Historic lookup | Date range, status, cashier filters on the list. | **R1.1** |
 
 ---
@@ -153,6 +154,8 @@ Later slices add payment, completion (`lastCompleted`) and customer state to thi
 
 **Optimistic updates: `addLine` only** _(revised P1, 2026-10-15; see §8 P1 decision log)_. Dispatching `addLine` shows a pending row at once (product name and catalog price, a spinner in place of the line total, controls disabled). The server's hydrated sale replaces it on success; on failure the row is removed and the error shows under the scan bar. **Totals are never optimistic:** the Totals panel shows the server's figures and dims with "Updating…" while any line mutation is in flight. Qty edits and removals aren't optimistic either: the row is dimmed ("busy") until the server answers, and the reducer replaces `draftSale` wholesale. The original reasoning still holds for money: totals, discounts, rounding and line numbers are computed server-side, and a wrong total at a till is worse than a short wait. The pending row only acknowledges the scan at once. Line mutations run one at a time through a queue in the slice, so fast scans reach the server in order and an older response can't overwrite a newer sale.
 
+**Payments** _(revised P3, see §8 P3-5)_. `addPayment` shows a pending row (method and amount, dimmed) that the server sale replaces, or that is removed on failure. `removePayment` hides the row at once and restores it if the call fails. Totals stay server-only, with the same "Updating…" dim. Payment calls go through the same queue as line and customer edits, so they can't race the cart.
+
 **Server ↔ client sync:**
 
 - **A DRAFT is created when the terminal opens** _(revised P1, 2026-10-15; see §8 P1 decision log)_. On mount, `ensureDraftSale` resumes the stored draft or calls `POST /sales { branch_id }`, so the first scan never waits on a create. The cost is one empty DRAFT per terminal session that never gets an item. "New sale" discards with `DELETE /sales/:id` (behind a confirm; disabled while the cart is empty) and opens a fresh one. Concurrent opens (StrictMode, re-renders) are deduplicated with a thunk `condition`.
@@ -240,7 +243,7 @@ Nothing is cached between searches, so the 200-row cap on `/products` doesn't ma
 - The scan input is the **home position**. Any closed dialog, completed action, or `Esc` on the terminal returns focus to it.
 - Function-key shortcuts call `preventDefault()`. **Never bound:** F5 (reload), F11 (fullscreen), F12 (devtools), Ctrl+W/T/N/R (browser-reserved).
 - Shortcuts are suppressed while a dialog is open except that dialog's own keys.
-- Destructive actions (discard, remove payment, void) always go through a confirm dialog; Enter confirms, Esc cancels.
+- Destructive actions (discard, void) always go through a confirm dialog; Enter confirms, Esc cancels. **Exception: removing a payment has no confirm** _(revised P3, see §8 P3-2)_. It only affects a DRAFT, and re-adding is one keystroke.
 
 **Barcode scanners:** USB/Bluetooth scanners in HID mode type characters quickly and send Enter. The scan input treats Enter as "submit this value": try exact barcode (`by-barcode`), then catalog name/SKU search. No keystroke-timing heuristics in R1 (a typed SKU + Enter behaves the same as a scan, which is fine). While an `addLine` is in flight, further Enter submissions are **queued in order** and processed sequentially so fast consecutive scans aren't lost or reordered.
 
@@ -262,7 +265,7 @@ Nothing is cached between searches, so the 200-row cap on `/products` doesn't ma
 | | Delete | Remove selected line (confirm) |
 | | `D` | Discount on selected line (if permitted) |
 | IMEI prompt | Enter | Submit IMEI |
-| Payment dialog | 1–6 | Pick method (CASH, CARD, BANK_TRANSFER, KOKO, MINTPAY, TRADE_IN) |
+| Payment dialog | 1–6 | Pick method (CASH, CARD, BANK_TRANSFER, KOKO, MINTPAY, TRADE_IN). 1–5 in P3; 6 (TRADE_IN) arrives with P4 _(revised P3)_ |
 | | Tab | Amount → cash received / reference → submit |
 | | Enter | Record payment |
 | Payments panel | Alt+P then ↑/↓, Delete | Select and remove a payment |
@@ -318,12 +321,11 @@ components/pos/
   CustomerPanel/
     CustomerAttachDialog/                # search + pick
     CustomerCreateForm/                  # inline create (react-hook-form + zod)
-  Payments/
-    PaymentsPanel/                       # tenders list, remaining balance, remove
-    PaymentDialog/                       # method switch; renders one of:
-      CashFields/
-      ReferenceFields/                   # CARD, BANK_TRANSFER, KOKO, MINTPAY
-      TradeInFields/                     # or TradeInDialog — see Q2
+  PaymentDialog/                         # (revised P3) flat folder; method switch; renders one of:
+    CashFields/
+    ReferenceFields/                     # CARD, BANK_TRANSFER, KOKO, MINTPAY
+    TradeInFields/                       # P4 — see Q2
+  PaymentsList/                          # (revised P3) tenders list + remove (no edit, no confirm)
   TotalsPanel/
   CompleteSaleDialog/
   SaleCompletePanel/
@@ -337,13 +339,13 @@ store/slices/posTerminalSlice.js                 # (revised P1) no posCatalogSli
 store/zustand/terminalSessionStore.js
 hooks/useTerminalBranch.js  hooks/useMediaQuery.js     # hotkeys: useHotkeys from react-hotkeys-hook (Q17)
 schemas/paymentSchema.js  schemas/customerSchema.js  schemas/voidSchema.js
-utils/money.js                           # formatLKR (P1); toCents, fromCents when payments need them
+utils/money.js                           # formatLKR (P1); toCents / fromCents (P3: balance and change math in integer cents)
 utils/device.js                          # isTouchOnly (P1)
 ```
 
 **Payment modal composition:** one `PaymentDialog` owns method selection, amount, and submit; the method-specific fields are child components selected by method. Each child exports its zod schema fragment, and the dialog builds a discriminated union (`z.discriminatedUnion("payment_method", [...])`) mirroring the backend rules (CASH needs `cash_received >= amount`; reference methods need `reference_number`; TRADE_IN needs product, IMEI, buying price = amount, and a customer on the sale). Client validation is a convenience; the server stays authoritative.
 
-**Data flow:** pages and feature components dispatch `posTerminal` thunks and read selectors (`selectSale`, `selectRemaining`, `selectCanComplete`, `selectHasTradeIn`); they never call services directly, except dialog-local lookups (customer search, catalog search).
+**Data flow:** pages and feature components dispatch `posTerminal` thunks and read selectors (`selectSale`, `selectBalanceDue` (was `selectRemaining`; revised P3), `selectCanComplete`, `selectHasTradeIn`); they never call services directly, except dialog-local lookups (customer search, catalog search).
 
 ---
 
@@ -394,6 +396,25 @@ Decisions made or changed while building P1. Where they differ from the original
 | P1-7 | Cart components (§7) | One responsive **`CartLines`** instead of `CartTable` + `CartCardList`. | Two components |
 | P1-8 | P1 scope | Narrowed to scan bar, cart, totals, draft lifecycle, stock warning and F2/focus. Later slices per the P1 brief: customer attach → P2, payments → P3, TRADE_IN → P4, complete → P5. Line discounts → P2 (FOLLOWUPS). Mobile sticky action bar → P6. | §9 P1 row (payments + complete in P1) |
 | P1-9 | Focus (§6) | F2 (from anywhere, including inputs) and Esc (outside inputs) focus the scan bar. Qty Enter, line delete and closing the New sale dialog hand focus back to it. Steppers keep focus (busy = `aria-disabled`, not `disabled`). No automatic hand-offs on touch-only devices, and no auto-focus on mount when the pointer is coarse. | — |
+
+### P3 decision log (2026-10-15)
+
+Decisions made before building P3 (payment entry). Where they differ from the original planning text, the affected sections are marked "revised P3".
+
+| # | Topic | Decision | Replaces |
+|---|-------|----------|----------|
+| P3-1 | Payment edit (§1 #11, #20, §10) | **Not in P3.** No inline CASH edit and no `updatePayment` in the service or slice; a wrong tender is fixed by remove + re-add. Edit stays R1.1. | P3 brief (inline CASH edit) |
+| P3-2 | Remove-payment confirm (§6) | **No confirm.** An explicit exception to the §6 "destructive actions confirm" rule: the payment is on a DRAFT and re-adding is one keystroke. Removal is optimistic (hidden at once, restored on failure). | §6 global rule (remove payment confirmed) |
+| P3-3 | Payment service | `addSalePayment` / `removeSalePayment` (matching `addSaleLine` / `removeSaleLine`) added to **`salesService.js`** (§5), not a new `payments.js`; the slice thunks are `addPayment` / `removePayment`. | P3 brief (`services/payments.js`) |
+| P3-4 | Payment components (§7) | **Flat folders** like the other pos components: `components/pos/PaymentDialog/` (with `CashFields` and `ReferenceFields` inside) and `components/pos/PaymentsList/`. **Placement:** `PaymentsList` sits in the **left column, directly below the cart** (and right after the cart in the single-column layouts), not in the right-hand column. At a real 1366×768 laptop viewport (~640px tall) the right column (Current sale, Customer, Totals) has no room left, while the cart has spare height; P4 trade-in rows would add more. The cart flexes (`lg:min-h-40`); Payments keeps its natural height, shows up to 3 rows and scrolls beyond that, and renders nothing before the first tender. Rows switch from stacked to a table on the card's own width (container query, ≥ 32rem; ~538px viewport). The right column keeps a scroll fallback with Totals (Pay / Ready) sticky at the bottom. | `components/pos/Payments/{PaymentsPanel, PaymentDialog}`; payments panel in the right-hand column (§1 #2) |
+| P3-5 | Optimistic UI (§3) | A pending row on add (as `addLine`). Remove hides the row at once and restores it on failure (unlike lines, which dim while removing). Totals stay server-only with the existing "Updating…" dim. All payment calls go through the serial mutation queue. | — (§3 covered lines only) |
+| P3-6 | Pay entry point | A **"Pay LKR X"** button in the Totals panel (X = balance due) plus **F4**; both open the PaymentDialog. Multi-tender = open the dialog again; one payment per submission. | — |
+| P3-7 | Fully paid | The Totals panel shows a calm **"Ready to complete"** state when the cart is non-empty and the balance is 0. No complete button (P5). No overpaid state: the backend makes overpayment impossible. | — |
+| P3-8 | Method keys (§6) | Number keys **1–5** pick CASH, CARD, BANK_TRANSFER, KOKO, MINTPAY inside the dialog. 6 / TRADE_IN arrives with P4. | 1–6 |
+| P3-9 | Money math | Balance and change are computed in **integer cents** (`toCents` / `fromCents` in `utils/money.js`), never by float subtraction. Balance due = `total − amount_paid` from the server sale. | — |
+| P3-10 | Backend fixes found in P3 recon | **Fixed in #24** before P3. (B1) The remaining-balance check compared floats, so paying the exact remainder after a partial payment with cents was rejected ("50.20 exceeds remaining balance 50.20"); it now compares in cents. (B2) A cart change that would drop `total` below `amount_paid` hit a DB CHECK and returned 500; it now returns 400 "Cannot reduce the sale total below the amount already paid. Remove or reduce payments first." #24 also bounds AMOUNT discounts in cents. | — |
+| P3-11 | Bottom sheets below `md` (§6) | **Deferred to P6.** The PaymentDialog is a centred modal at every width, like every other dialog in the app; no dialog has the §6 bottom-sheet variant yet. P6 adds it for all terminal dialogs at once. | §6 "Dialogs become bottom sheets below `md`" (for P3) |
+| P3-12 | Quick-tender chips (§1 #8) | **Deferred to P6.** The CASH form has no quick-tender chips (Exact / next 500 / next 1,000 / 5,000) in P3. The cashier types the cash received and sees the live change (P3-9); P6 can add chips that fill Cash received. | — |
 
 ### Scheduling decisions
 
@@ -502,10 +523,10 @@ Each slice is a vertical, demoable increment. "unit" = reducers/selectors/utils 
 | **P0 — Foundations + terminal shell** (narrowed 2026-10-13) | Vitest + RTL setup; `mapBackendUser` keeps `branch_id`/`branch`; `react-hotkeys-hook` installed (Q17); full-screen `TerminalLayout` shell (top bar, status strip, `<Outlet/>`); `BranchContextGuard` + `useTerminalBranch`; `/pos` route + Sidebar link; cashier login redirect to `/pos` (Q21); empty `PosTerminal` page. **Runnable:** log in as cashier → land on an empty terminal; admin picks a branch first. Ends with screenshots at 1366×768 (floor), 1920×1080 (ideal) and 390 px (smoke check only). | — | 14 unit, 18 component |
 | **P1 — First runnable cart, payments + complete** | Moved from P0: `salesService`, `terminalSlice`, `posCatalogSlice`, `utils/money`; `TerminalLayout` breakpoint layouts, `ResponsiveDialog`, `useMediaQuery`, `MobileActionBar`; `ScanBar` (barcode + name search, IMEI-shaped hint) adding **non-serialized** lines; `CartTable` + `CartCardList` with qty edit + remove; `TotalsPanel`; discard draft. Then: `PaymentDialog` (bottom sheet on phone) with CASH + reference methods; `PaymentsPanel` with remove; `CompleteSaleDialog`; `SaleCompletePanel`; 409 banner on complete (insufficient stock); reload recovery (Q8); network banner; `Toast`. **First real end-to-end sale.** _(Revised P1: narrowed, see §8 P1-8. Shipped scan bar, cart, totals, draft lifecycle, stock warning and F2/focus, with 40 tests in the P1 test files.)_ | P0 | ~31 unit, ~22 component |
 | **P2 — Customers** | `CustomerAttachDialog` (search, pick, detach), `CustomerCreateForm` (inline create, NIC 409 → offer existing); customer shown in terminal; `customersService`. | P0 (Q13 backend tweak optional) | 8 unit, 12 component |
-| **P3 — Serialized lines** | Serialized products route through `ImeiPromptDialog`; IMEI shown on cart rows; serialized rows lock qty; 400/409 handling with `existing_unit` message; complete-time 409 for cross-DRAFT race highlights the line. | P0, P1 | 6 unit, 10 component |
+| **P3 — Payment entry** _(revised P3; serialized lines shipped in P1, see P1-5)_ | `addPayment` / `removePayment` in `salesService`; payment thunks through the serial mutation queue (pending row on add, optimistic remove); `toCents` / `fromCents`; Totals panel Paid + Balance due rows, "Pay LKR X" button + F4, "Ready to complete" state; `PaymentDialog` (method picker with keys 1–5, amount defaults to balance due) with `CashFields` (cash received, live change in cents) and `ReferenceFields` (required reference for CARD, BANK_TRANSFER, KOKO, MINTPAY); multi-tender by reopening the dialog; `PaymentsList` with remove (no edit, no confirm). No TRADE_IN (P4), no complete (P5). See §8 P3 decision log. | P1 | ~10 unit, ~20 component |
 | **P4 — Trade-in** | TRADE_IN in `PaymentDialog` (product picker over serialized catalog, IMEI, buying = amount, optional selling/notes); requires customer (links to P2 dialog); TRADE_IN rows show "frozen" (remove only); trade-in IMEI 409 at add and complete. **TRADE_IN detach guard: already built in P2. Don't re-implement** (Q19). | P1, P2, P3 | 8 unit, 12 component |
 | **P5 — Recent sales + void** | `/pos/sales` list (paginated, today/branch), `/pos/sales/:id` detail; `VoidSaleDialog` (Q15) gated by `VOID_SALE`; resold-trade-in 409 message. | P1 | 6 unit, 12 component |
-| **P6 — Keyboard, discounts, polish + E2E** | Full §6 hotkey map with `Kbd` chips on pointer devices, `KeyboardHelpOverlay`, scan queue hardening, focus-return audit (keyboard) and no-auto-focus check (touch); stock warning (Q1); line discounts with `APPLY_DISCOUNT` granted to cashiers (Q11); Playwright smoke flows: cash sale, split tender, serialized + trade-in sale, void — each at a desktop viewport, with the cash sale and trade-in also at a 390 px mobile viewport. | P0–P5 | 10 unit, 10 component, 6 e2e |
+| **P6 — Keyboard, discounts, polish + E2E** | Full §6 hotkey map with `Kbd` chips on pointer devices, `KeyboardHelpOverlay`, scan queue hardening, focus-return audit (keyboard) and no-auto-focus check (touch); stock warning (Q1); line discounts with `APPLY_DISCOUNT` granted to cashiers (Q11); merge on rescan: a non-serialized product already in the cart increments the existing line's qty instead of adding a new line _(added P3)_; user-friendly error mapping for network/raw errors in cart and payment messages (e.g. "Network Error") _(added P3)_; Playwright smoke flows: cash sale, split tender, serialized + trade-in sale, void — each at a desktop viewport, with the cash sale and trade-in also at a 390 px mobile viewport. | P0–P5 | 10 unit, 10 component, 6 e2e |
 | **Total** | | | **~83 unit, ~90 component, ~6 e2e** |
 
 **Backend prerequisites (small, separate PRs):** Q13 (customer relation on `findOne`) lands before P0. Optional later: Q9(b) cashier IMEI lookup.
@@ -525,7 +546,7 @@ Not in Phase 6.4:
 - **Customer management pages** (full CRUD list, soft delete/restore) — only inline search/create inside the terminal ships.
 - **Product-unit admin browser** (`/product-units` list/detail).
 - **Refunds / partial returns** (void is all-or-nothing; customer-return flow is a backend followup).
-- **Payment edit** (`PATCH` payments), sale-level notes, recent-sales filters beyond today — R1.1.
+- **Payment edit** (`PATCH` payments, including inline CASH edit; reaffirmed in P3-1), sale-level notes, recent-sales filters beyond today — R1.1.
 - **Camera barcode/IMEI scanning** — not planned; the shop uses a hardware scanner (Q22).
 - **Offline mode**, multi-language UI, cash drawer integration, card-terminal integration, customer-facing display.
 - **Multi-branch scoping** of reads (R9).

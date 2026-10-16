@@ -5,10 +5,12 @@ import {
 } from "@reduxjs/toolkit";
 import {
   addSaleLine,
+  addSalePayment,
   createSale,
   discardSale,
   getSale,
   removeSaleLine,
+  removeSalePayment,
   updateSale,
   updateSaleLine,
 } from "../../services/salesService";
@@ -22,6 +24,7 @@ import {
 } from "../../services/productsService";
 import { listStock } from "../../services/stockService";
 import useTerminalSessionStore from "../zustand/terminalSessionStore";
+import { fromCents, toCents } from "../../utils/money";
 
 /**
  * POS Terminal Slice
@@ -69,10 +72,18 @@ import useTerminalSessionStore from "../zustand/terminalSessionStore";
  * while the sale has a TRADE_IN payment (Q19 — the backend would only
  * fail later, at complete).
  *
+ * PAYMENTS (P3):
+ * addPayment shows a pending row (pendingPayments) at once; the server's
+ * sale replaces it, or it is removed on failure. removePayment hides the
+ * row at once (removingPaymentIds) and restores it if the DELETE fails —
+ * no confirm (planning doc P3-2). Paid and balance come from the server's
+ * total / amount_paid, subtracted in integer cents. No payment edit (P3-1).
+ *
  * ORDERING:
- * Line and customer mutations run one at a time through `enqueue`, so fast consecutive
- * scans reach the server in order and an older response can never
- * overwrite a newer sale (planning doc §6, scan queue).
+ * Line, customer and payment mutations run one at a time through
+ * `enqueue`, so fast consecutive scans reach the server in order and an
+ * older response can never overwrite a newer sale (planning doc §6, scan
+ * queue).
  */
 
 // ---------------------------------------------------------------------------
@@ -362,6 +373,31 @@ export const createAndAttachCustomer = createAsyncThunk(
 );
 
 // ---------------------------------------------------------------------------
+// Thunks — payments
+// ---------------------------------------------------------------------------
+
+/**
+ * Record one tender. arg: the AddPaymentDto body —
+ * { payment_method, amount, cash_received? (CASH), reference_number? }.
+ * Its method and amount feed the pending row.
+ */
+export const addPayment = createAsyncThunk(
+  "posTerminal/addPayment",
+  saleMutation("Couldn't record the payment", (saleId, payload) =>
+    addSalePayment(saleId, payload),
+  ),
+);
+
+/** arg: { paymentId } — DELETE is 204, so re-fetch the sale. */
+export const removePayment = createAsyncThunk(
+  "posTerminal/removePayment",
+  saleMutation("Couldn't remove the payment", async (saleId, { paymentId }) => {
+    await removeSalePayment(saleId, paymentId);
+    return getSale(saleId);
+  }),
+);
+
+// ---------------------------------------------------------------------------
 // Thunks — scanning
 // ---------------------------------------------------------------------------
 
@@ -445,6 +481,12 @@ const initialState = {
   customerRollback: null,
   // Last customer mutation error: { message, status } | null
   customerError: null,
+  // Optimistic rows for in-flight addPayment calls
+  pendingPayments: [],
+  // Payment ids hidden while their DELETE is in flight
+  removingPaymentIds: [],
+  // Last payment mutation error: { message, status } | null
+  paymentError: null,
 };
 
 const markBusy = (state, lineId) => {
@@ -455,12 +497,33 @@ const unmarkBusy = (state, lineId) => {
   state.busyLineIds = state.busyLineIds.filter((id) => id !== lineId);
 };
 
-const applyRejection = (state, payload, fallback) => {
-  state.lineError = payload || { message: fallback };
+const markGone = (state, payload) => {
   if (payload?.gone) {
     state.status = "gone";
     state.draftSaleId = null;
   }
+};
+
+const applyRejection = (state, payload, fallback) => {
+  state.lineError = payload || { message: fallback };
+  markGone(state, payload);
+};
+
+const applyPaymentRejection = (state, payload, fallback) => {
+  state.paymentError = payload || { message: fallback };
+  markGone(state, payload);
+};
+
+const dropPendingPayment = (state, action) => {
+  state.pendingPayments = state.pendingPayments.filter(
+    (p) => p.id !== `pending-${action.meta.requestId}`,
+  );
+};
+
+const unhidePayment = (state, action) => {
+  state.removingPaymentIds = state.removingPaymentIds.filter(
+    (id) => id !== action.meta.arg.paymentId,
+  );
 };
 
 const customerPending = (state, action, customer) => {
@@ -527,6 +590,9 @@ const posTerminalSlice = createSlice({
     clearCustomerError: (state) => {
       state.customerError = null;
     },
+    clearPaymentError: (state) => {
+      state.paymentError = null;
+    },
     clearScan: (state) => {
       state.scanState = "idle";
       state.scanResults = [];
@@ -550,6 +616,9 @@ const posTerminalSlice = createSlice({
       state.customerRequestId = null;
       customerSettled(state);
       state.customerError = null;
+      state.pendingPayments = [];
+      state.removingPaymentIds = [];
+      state.paymentError = null;
     };
     const lifecycleRejected = (state, action) => {
       state.status = "error";
@@ -653,6 +722,41 @@ const posTerminalSlice = createSlice({
         customerRejected(state, action, "Couldn't create the customer");
       })
 
+      // Payments — pending row on add, hide-then-restore on remove
+      .addCase(addPayment.pending, (state, action) => {
+        const { payment_method, amount, cash_received, reference_number } =
+          action.meta.arg;
+        state.paymentError = null;
+        state.pendingPayments.push({
+          id: `pending-${action.meta.requestId}`,
+          payment_method,
+          amount: fromCents(toCents(amount)),
+          cash_received:
+            cash_received === undefined ? null : fromCents(toCents(cash_received)),
+          reference_number: reference_number ?? null,
+        });
+      })
+      .addCase(addPayment.fulfilled, (state, action) => {
+        dropPendingPayment(state, action);
+        replaceSale(state, action.payload);
+      })
+      .addCase(addPayment.rejected, (state, action) => {
+        dropPendingPayment(state, action);
+        applyPaymentRejection(state, action.payload, "Couldn't record the payment");
+      })
+      .addCase(removePayment.pending, (state, action) => {
+        state.paymentError = null;
+        state.removingPaymentIds.push(action.meta.arg.paymentId);
+      })
+      .addCase(removePayment.fulfilled, (state, action) => {
+        unhidePayment(state, action);
+        replaceSale(state, action.payload);
+      })
+      .addCase(removePayment.rejected, (state, action) => {
+        unhidePayment(state, action);
+        applyPaymentRejection(state, action.payload, "Couldn't remove the payment");
+      })
+
       // Stock
       .addCase(refreshStock.fulfilled, (state, action) => {
         const { productId } = action.meta.arg;
@@ -714,6 +818,7 @@ export const {
   clearPosTerminal,
   clearLineError,
   clearCustomerError,
+  clearPaymentError,
   clearScan,
 } = posTerminalSlice.actions;
 
@@ -736,10 +841,15 @@ export const selectCustomerError = (state) => state.posTerminal.customerError;
 const selectPendingLines = (state) => state.posTerminal.pendingLines;
 const selectBusyLineIds = (state) => state.posTerminal.busyLineIds;
 
-/** True while a line mutation is in flight — server totals are about to change. */
+/**
+ * True while a line or payment mutation is in flight — server totals
+ * (total, paid, balance) are about to change.
+ */
 export const selectCartSyncing = (state) =>
   state.posTerminal.pendingLines.length > 0 ||
-  state.posTerminal.busyLineIds.length > 0;
+  state.posTerminal.busyLineIds.length > 0 ||
+  state.posTerminal.pendingPayments.length > 0 ||
+  state.posTerminal.removingPaymentIds.length > 0;
 
 const selectStockByProduct = (state) => state.posTerminal.stockByProduct;
 
@@ -787,5 +897,57 @@ export const selectCartLines = createSelector(
     ...pendingLines.map((line) => ({ ...line, pending: true, busy: true })),
   ],
 );
+
+export const selectPaymentError = (state) => state.posTerminal.paymentError;
+const selectPendingPayments = (state) => state.posTerminal.pendingPayments;
+const selectRemovingPaymentIds = (state) => state.posTerminal.removingPaymentIds;
+
+/** Server payments (minus those being removed) followed by pending rows. */
+export const selectPayments = createSelector(
+  [selectDraftSale, selectPendingPayments, selectRemovingPaymentIds],
+  (sale, pendingPayments, removingIds) => [
+    ...(sale?.payments ?? [])
+      .filter((p) => !removingIds.includes(p.id))
+      .map((p) => ({ ...p, pending: false })),
+    ...pendingPayments.map((p) => ({ ...p, pending: true })),
+  ],
+);
+
+/** Server amount_paid ("1500.00"); "0.00" before a sale is loaded. */
+export const selectPaidTotal = (state) =>
+  state.posTerminal.draftSale?.amount_paid ?? "0.00";
+
+const selectBalanceDueCents = (state) => {
+  const sale = state.posTerminal.draftSale;
+  if (!sale) return 0;
+  return toCents(sale.total) - toCents(sale.amount_paid ?? "0.00");
+};
+
+/** Server total − amount_paid, subtracted in integer cents → "1234.50". */
+export const selectBalanceDue = (state) => fromCents(selectBalanceDueCents(state));
+
+/** The cart has lines and the server says nothing is left to pay. */
+export const selectIsFullyPaid = (state) =>
+  (state.posTerminal.draftSale?.lines?.length ?? 0) > 0 &&
+  selectBalanceDueCents(state) === 0;
+
+/**
+ * The Pay button and F4 share this: an open draft with lines, a balance
+ * left, and no line / payment mutation in flight (the balance would be
+ * stale or about to change).
+ */
+export const selectCanPay = (state) =>
+  state.posTerminal.status === "ready" &&
+  (state.posTerminal.draftSale?.lines?.length ?? 0) > 0 &&
+  selectBalanceDueCents(state) > 0 &&
+  !selectCartSyncing(state);
+
+/**
+ * Fully paid per the last confirmed server sale. Deliberately ignores
+ * in-flight mutations: the Totals panel dims it instead of swapping it
+ * for a disabled "Pay LKR 0.00".
+ */
+export const selectReadyToComplete = (state) =>
+  state.posTerminal.status === "ready" && selectIsFullyPaid(state);
 
 export default posTerminalSlice.reducer;
