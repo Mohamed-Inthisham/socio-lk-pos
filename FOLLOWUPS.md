@@ -86,6 +86,8 @@ Non-blocking issues and tech debt to address opportunistically. When you fix one
 
 - **Extend `ProductType` enum for real-business coverage.** DB CHECK exists; add enum values and migration. _[Phase 6.3]_
 
+- **No password-change endpoint.** `UpdateUserDto` omits `password`, and there is no self-service change-password or admin reset route, so a user's password can only be changed directly in the DB. When it lands: verify the current password via a lookup that opts `password_hash` in (it is `select: false` on `User`, see `UsersService.findByEmail`), re-hash with `BCRYPT_ROUNDS`, and revoke the user's refresh tokens. _[password-hash exclusion fix]_
+
 ## Deferred infrastructure
 
 - **Backend `stock_adjustments` audit table + frontend reason field + history view.** _[earlier phases]_

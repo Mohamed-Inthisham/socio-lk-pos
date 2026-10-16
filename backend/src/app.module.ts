@@ -1,8 +1,8 @@
-import { Module } from '@nestjs/common';
+import { ClassSerializerInterceptor, Module } from '@nestjs/common';
 import { ConfigModule } from '@nestjs/config';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { ThrottlerGuard, ThrottlerModule } from '@nestjs/throttler';
-import { APP_GUARD } from '@nestjs/core';
+import { APP_GUARD, APP_INTERCEPTOR } from '@nestjs/core';
 import { AppController } from './app.controller';
 import { AppService } from './app.service';
 import { validateEnv } from './config/validate-env';
@@ -71,6 +71,13 @@ import { PhonePurchasesModule } from './phone-purchases/phone-purchases.module';
     {
       provide: APP_GUARD,
       useClass: ThrottlerGuard,
+    },
+    // Honours @Exclude() on entities (User.password_hash,
+    // RefreshToken.token_hash) for every response. Registered here rather
+    // than in main.ts so e2e apps built from AppModule get it too.
+    {
+      provide: APP_INTERCEPTOR,
+      useClass: ClassSerializerInterceptor,
     },
   ],
 })

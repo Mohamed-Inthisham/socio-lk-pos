@@ -86,7 +86,7 @@ export class AuthService {
     session.revoked_at = new Date();
     await this.refreshTokensRepo.save(session);
 
-    const freshUser = await this.usersService.findByIdWithHash(payload.sub);
+    const freshUser = await this.usersService.findByIdForAuth(payload.sub);
     if (!freshUser || !freshUser.is_active) {
       throw new UnauthorizedException('User no longer active');
     }

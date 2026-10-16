@@ -10,6 +10,7 @@ import {
   ManyToOne,
   JoinColumn,
 } from 'typeorm';
+import { Exclude } from 'class-transformer';
 import { UserRole } from '../enums/user-role.enum';
 import { Branch } from '../../branches/entities/branch.entity';
 
@@ -24,7 +25,16 @@ export class User {
   @Column({ type: 'varchar', length: 255 })
   email!: string;
 
-  @Column({ type: 'varchar', length: 255, name: 'password_hash' })
+  // Never loaded by default (select: false) and never serialized (@Exclude,
+  // via the global ClassSerializerInterceptor). Code that needs the hash
+  // must opt in with addSelect — see UsersService.findByEmail.
+  @Exclude()
+  @Column({
+    type: 'varchar',
+    length: 255,
+    name: 'password_hash',
+    select: false,
+  })
   password_hash!: string;
 
   @Column({ type: 'varchar', length: 100, name: 'full_name' })

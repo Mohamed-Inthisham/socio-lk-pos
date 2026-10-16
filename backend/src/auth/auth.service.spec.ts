@@ -16,7 +16,7 @@ describe('AuthService', () => {
   // Mocks — one per collaborator. `jest.fn()` gives us call inspection + return control.
   const mockUsersService = {
     findByEmail: jest.fn(),
-    findByIdWithHash: jest.fn(),
+    findByIdForAuth: jest.fn(),
   };
 
   const mockJwtService = {
@@ -247,7 +247,7 @@ describe('AuthService', () => {
       mockRefreshTokensRepo.save.mockResolvedValue(undefined);
 
       // The user is still active
-      mockUsersService.findByIdWithHash.mockResolvedValue(fakeUser);
+      mockUsersService.findByIdForAuth.mockResolvedValue(fakeUser);
     });
 
     it('happy path: rotates tokens for a valid, unrevoked, unexpired session', async () => {
@@ -342,7 +342,7 @@ describe('AuthService', () => {
         expires_at: new Date(Date.now() + 60_000),
       };
       mockRefreshTokensRepo.findOne.mockResolvedValue(session);
-      mockUsersService.findByIdWithHash.mockResolvedValueOnce({
+      mockUsersService.findByIdForAuth.mockResolvedValueOnce({
         ...fakeUser,
         is_active: false,
       });

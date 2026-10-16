@@ -7,6 +7,7 @@ import {
   Index,
   CreateDateColumn,
 } from 'typeorm';
+import { Exclude } from 'class-transformer';
 import { User } from '../../users/entities/user.entity';
 
 @Entity('refresh_tokens')
@@ -22,6 +23,7 @@ export class RefreshToken {
   @JoinColumn({ name: 'user_id' })
   user!: User;
 
+  @Exclude()
   @Index('idx_refresh_tokens_token_hash', { unique: true })
   @Column({ type: 'varchar', length: 255, name: 'token_hash' })
   token_hash!: string;
