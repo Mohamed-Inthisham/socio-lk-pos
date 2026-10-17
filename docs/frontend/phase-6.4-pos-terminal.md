@@ -1,6 +1,6 @@
 # Phase 6.4 — POS Terminal (Frontend) — Planning
 
-**Status:** P0 (#18), P1 (#20) and P2 (#21) shipped. P3 (payment entry) is being built on `feature/phase-6.4-p3-payments`. Decisions that changed while building are recorded in the §8 "P1 decision log" and "P3 decision log", and the sections they touch are marked "revised P1" or "revised P3".
+**Status:** P0 (#18), P1 (#20), P2 (#21) and P3 (#26) shipped. The backend buy-back change P4 depends on shipped in #27. P4 (TRADE_IN payment) is planned and not started. Decisions that changed while building are recorded in the §8 "P1 decision log", "P3 decision log" and "P4 decision log", and the sections they touch are marked "revised P1", "revised P3" or "revised P4".
 
 **Target setup:** a laptop (1366×768 reference) with a USB/HID barcode scanner as the till. Tablet and phone layouts are supported as secondary.
 
@@ -36,16 +36,16 @@ Minimum-viable R1 cashier flow. "R1" = ships in Phase 6.4. "R1.1" = deferred to 
 | 4 | **Serialized item IMEI prompt** | Sell a specific phone | When the chosen product has `is_serialized = true`, a small dialog asks for the IMEI (scan the phone's IMEI label, or type) before calling `addLine` with `quantity: 1`. Handles 400 (IMEI not found / wrong product) and 409 (unit not IN_STOCK, with `existing_unit`). | R1 |
 | 5 | **Cart view** | Show and edit lines | Rows show name, IMEI (if any), qty, unit price, discount, line total. Qty edit (non-serialized only) and line remove; every edit replaces the cart from the server response. | R1 |
 | 6 | **Line discount** | Price adjustment | Per-line `{ type: AMOUNT|PERCENT, value }` via `PATCH .../lines/:lineId`. All roles may discount for now (Q11): `APPLY_DISCOUNT` is added to the cashier role. | R1 |
-| 7 | **Customer attach** | Link the sale to a customer | Search `GET /customers?search=` by name/phone/NIC; pick one, or create inline (`POST /customers` with name, phone, optional NIC), then `PATCH /sales/:id { customer_id }`. Detach sets `null` — blocked while a TRADE_IN payment exists. | R1 |
+| 7 | **Customer attach** | Link the sale to a customer | Search `GET /customers?search=` by name/phone/NIC; pick one, or create inline (`POST /customers` with name, phone, optional NIC), then `PATCH /sales/:id { customer_id }`. Detach sets `null`. Detach, Change and F3 are blocked while a TRADE_IN payment (recorded or pending) exists _(revised P4, see §8 P4-11)_. | R1 |
 | 8 | **Payment entry — CASH** | Take cash | Amount defaults to remaining balance; cashier types cash received; change is shown live. Sends `{ payment_method: CASH, amount, cash_received }`. | R1 |
 | 9 | **Payment entry — CARD / BANK_TRANSFER / KOKO / MINTPAY** | Take reference-based tenders | Same dialog, method switch hides cash-received and shows a required reference number (auth code / slip ref / provider txn id). | R1 |
-| 10 | **Payment entry — TRADE_IN** | Accept a used phone as payment | Requires a customer on the sale. Collects trade-in product (serialized products at the branch), IMEI, buying price (= amount, locked together), optional selling price and notes. 409 on IMEI already in inventory. | R1 |
-| 11 | **Payment list + remove** | Correct mistakes | Payments panel lists tenders with remaining balance. Remove = `DELETE .../payments/:id`, with no confirm (P3-2). Edit is not exposed (remove + re-add, reaffirmed in P3-1); TRADE_IN is frozen server-side anyway. | R1 (edit: R1.1) |
+| 10 | **Payment entry — TRADE_IN** _(revised P4, see §8 P4 decision log)_ | Accept a used phone as part payment | Method 6 in the `PaymentDialog` (F6 opens it pre-selected). Requires a customer on the sale: without one, the dialog offers **Attach customer** and comes back to TRADE_IN afterwards. Collects the trade-in product (serialized products at the branch, used SKUs first), IMEI, one **Trade-in value** field (sent as both `amount` and `trade_in_buying_price`, empty by default, capped at the balance due), an optional resale price and condition notes. The customer pays the difference; there is no payout or store credit. A phone the shop sold earlier can be traded back in (buy-back, #27). 409 when the IMEI is a phone the shop holds (`IN_STOCK` / `WRITTEN_OFF`). | R1 |
+| 11 | **Payment list + remove** | Correct mistakes | Payments panel lists tenders with remaining balance. Remove = `DELETE .../payments/:id`, with no confirm (P3-2), **except TRADE_IN, which confirms** _(revised P4, see §8 P4-10)_. Edit is not exposed (remove + re-add, reaffirmed in P3-1); TRADE_IN is frozen server-side anyway. | R1 (edit: R1.1) |
 | 12 | **Complete sale confirmation** | Commit the sale | Enabled only when `amount_paid === total`. Confirm dialog shows totals, tenders, change due; `POST /sales/:id/complete`. Success shows a "Sale complete" panel with sale number and change, then a fresh terminal. 409s (stock, IMEI race, trade-in IMEI) show inline with the offending line/payment highlighted. | R1 |
 | 13 | **Discard draft** | Abandon a cart | `DELETE /sales/:id` behind a confirm. Also offered when starting a new sale with a non-empty draft. | R1 |
 | 14 | **Recent sales list** | Look up today's sales | Paginated `GET /sales` scoped to this branch (and today by default); shows sale number, time, cashier, total, status. Row opens a read-only detail. | R1 |
 | 15 | **Sale detail (read-only)** | Inspect a completed/voided sale | Lines, payments (with reversal stamps), totals, trade-in info. Host for the Void action. | R1 |
-| 16 | **Void sale flow** | Reverse a completed sale | Admin/manager only (`VOID_SALE`). Reason required (≥ 3 chars). Cashiers see the button disabled with a tooltip ("visible but disabled" pattern). 409 when a trade-in was resold — message tells the operator to void the later sale first. | R1 |
+| 16 | **Void sale flow** | Reverse a completed sale | Admin/manager only (`VOID_SALE`). Reason required (≥ 3 chars). Cashiers see the button disabled with a tooltip ("visible but disabled" pattern). 409 when a trade-in was resold — message tells the operator to void the later sale first. Since the buy-back change (#27), also 409 "the phone was taken back into stock on a later sale or purchase" when a phone this sale sold was later taken back; voids unwind newest-first (P5; see §8 P4 decision log, B4) _(revised P4)_. | R1 |
 | 17 | **Keyboard help overlay** | Discoverability | `?` / F1 opens a cheat sheet of the shortcuts in §6. Hidden on touch-only devices. | R1 |
 | 18 | **External-supplier (friendly-shop) lines** | Sell stock sourced from another shop | `addLine` with `external_supplier_id` (+ free-text IMEI for serialized). | **R1.1** (Q12) |
 | 19 | **Sale-level notes** | Free-text on the sale | `PATCH /sales/:id { notes }`. | **R1.1 candidate** |
@@ -243,7 +243,7 @@ Nothing is cached between searches, so the 200-row cap on `/products` doesn't ma
 - The scan input is the **home position**. Any closed dialog, completed action, or `Esc` on the terminal returns focus to it.
 - Function-key shortcuts call `preventDefault()`. **Never bound:** F5 (reload), F11 (fullscreen), F12 (devtools), Ctrl+W/T/N/R (browser-reserved).
 - Shortcuts are suppressed while a dialog is open except that dialog's own keys.
-- Destructive actions (discard, void) always go through a confirm dialog; Enter confirms, Esc cancels. **Exception: removing a payment has no confirm** _(revised P3, see §8 P3-2)_. It only affects a DRAFT, and re-adding is one keystroke.
+- Destructive actions (discard, void) always go through a confirm dialog; Enter confirms, Esc cancels. **Exception: removing a non-trade-in payment has no confirm** _(revised P3, see §8 P3-2; narrowed P4, see §8 P4-10)_. It only affects a DRAFT, and re-adding is one keystroke. Removing a TRADE_IN payment does confirm ("Remove trade-in? You'll need to re-enter the phone details."), because re-adding means re-entering the product, IMEI and prices.
 
 **Barcode scanners:** USB/Bluetooth scanners in HID mode type characters quickly and send Enter. The scan input treats Enter as "submit this value": try exact barcode (`by-barcode`), then catalog name/SKU search. No keystroke-timing heuristics in R1 (a typed SKU + Enter behaves the same as a scan, which is fine). While an `addLine` is in flight, further Enter submissions are **queued in order** and processed sequentially so fast consecutive scans aren't lost or reordered.
 
@@ -252,7 +252,7 @@ Nothing is cached between searches, so the 200-row cap on `/products` doesn't ma
 | Terminal (global) | F2 | Focus scan input |
 | | F3 | Customer attach dialog |
 | | F4 | Payment dialog (method defaults to CASH) |
-| | F6 | Trade-in dialog |
+| | F6 | Payment dialog with TRADE_IN selected; with no customer on the sale, the customer attach dialog first, then the payment dialog _(revised P4, see §8 P4-1, P4-2)_ |
 | | F9 | Complete sale (opens confirm; only when balance is 0) |
 | | Ctrl+Delete | Discard draft (confirm) |
 | | F1 or `?` (when not typing) | Keyboard help overlay |
@@ -265,10 +265,10 @@ Nothing is cached between searches, so the 200-row cap on `/products` doesn't ma
 | | Delete | Remove selected line (confirm) |
 | | `D` | Discount on selected line (if permitted) |
 | IMEI prompt | Enter | Submit IMEI |
-| Payment dialog | 1–6 | Pick method (CASH, CARD, BANK_TRANSFER, KOKO, MINTPAY, TRADE_IN). 1–5 in P3; 6 (TRADE_IN) arrives with P4 _(revised P3)_ |
-| | Tab | Amount → cash received / reference → submit |
-| | Enter | Record payment |
-| Payments panel | Alt+P then ↑/↓, Delete | Select and remove a payment |
+| Payment dialog | 1–6 | Pick method (CASH, CARD, BANK_TRANSFER, KOKO, MINTPAY, TRADE_IN). 1–5 shipped in P3; **6 = TRADE_IN** in P4 _(revised P4)_ |
+| | Tab | Amount → cash received / reference → submit. TRADE_IN: product → IMEI → trade-in value → resale price → notes → submit _(revised P4)_ |
+| | Enter | Record payment. **Exception:** Enter in the trade-in IMEI field moves focus to the next field instead of submitting, because a scanner sends Enter after the IMEI _(revised P4, see §8 P4-7)_ |
+| Payments panel | Alt+P then ↑/↓, Delete | Select and remove a payment (TRADE_IN asks to confirm, P4-10) |
 | Complete confirm | Enter / Esc | Complete / back |
 | Sale complete panel | Enter or any scan | Start next sale |
 | Customer dialog | type → ↓/↑ → Enter | Search and pick; Ctrl+N new customer |
@@ -324,8 +324,8 @@ components/pos/
   PaymentDialog/                         # (revised P3) flat folder; method switch; renders one of:
     CashFields/
     ReferenceFields/                     # CARD, BANK_TRANSFER, KOKO, MINTPAY
-    TradeInFields/                       # P4 — see Q2
-  PaymentsList/                          # (revised P3) tenders list + remove (no edit, no confirm)
+    TradeInFields/                       # (revised P4) method 6: product combobox, IMEI, trade-in value, resale, notes
+  PaymentsList/                          # (revised P3, P4) tenders list + remove (no edit; confirm for TRADE_IN only)
   TotalsPanel/
   CompleteSaleDialog/
   SaleCompletePanel/
@@ -345,7 +345,9 @@ utils/device.js                          # isTouchOnly (P1)
 
 **Payment modal composition:** one `PaymentDialog` owns method selection, amount, and submit; the method-specific fields are child components selected by method. Each child exports its zod schema fragment, and the dialog builds a discriminated union (`z.discriminatedUnion("payment_method", [...])`) mirroring the backend rules (CASH needs `cash_received >= amount`; reference methods need `reference_number`; TRADE_IN needs product, IMEI, buying price = amount, and a customer on the sale). Client validation is a convenience; the server stays authoritative.
 
-**Data flow:** pages and feature components dispatch `posTerminal` thunks and read selectors (`selectSale`, `selectBalanceDue` (was `selectRemaining`; revised P3), `selectCanComplete`, `selectHasTradeIn`); they never call services directly, except dialog-local lookups (customer search, catalog search).
+**TRADE_IN in the dialog** _(revised P4, see §8 P4 decision log)_. `TradeInFields` replaces the generic Amount field with one **Trade-in value** field; `buildPaymentPayload` sends it as both `amount` and `trade_in_buying_price`. Field order: Product → IMEI → Trade-in value → Resale price (optional) → Condition notes (optional). The method picker becomes a 3×2 grid (`grid-cols-3 sm:grid-cols-6`). The zod tradeIn branch checks: value ≤ balance due (in cents), IMEI 8–50 letters/digits, resale > 0 when given, and the IMEI not already on another trade-in on this sale. The product combobox is a dialog-local lookup (`GET /products?search&branchId&productType=PHONE&limit=20`, filtered to `is_serialized` on the client). The no-customer panel, the Luhn hint and the 409 messages are in P4-2, P4-7.
+
+**Data flow:** pages and feature components dispatch `posTerminal` thunks and read selectors (`selectSale`, `selectBalanceDue` (was `selectRemaining`; revised P3), `selectCanComplete`, `selectHasTradeInPayment` (was `selectHasTradeIn`; revised P4, and it counts pending TRADE_IN rows too, P4-11)); they never call services directly, except dialog-local lookups (customer search, catalog search, trade-in product search).
 
 ---
 
@@ -375,7 +377,7 @@ Q6, Q9, Q11, Q12 and Q17 were answered explicitly. The rest were not called out,
 | Q16 | Recent sales | Default — today, this branch, all cashiers |
 | **Q17** | **Hotkeys** | **No existing POS to match.** `react-hotkeys-hook` with the §6 map; refine after cashier use (revised 2026-10-13 from the vanilla hook) |
 | Q18 | Abandoned drafts | Default — confirm and discard |
-| Q19 | Customer detach with trade-in | **Resolved in P2** — frontend guard in `CustomerCard` (dimmed Detach + tooltip) backed by slice-level refusal. Backend-side guard in `SalesService.update` shipped in #22 (also covers customer reassignment) |
+| Q19 | Customer detach with trade-in | **Resolved in P2** — frontend guard in `CustomerCard` (dimmed Detach + tooltip) backed by slice-level refusal. Backend-side guard in `SalesService.update` shipped in #22 (also covers customer reassignment). P4 extends the frontend guard to Change and F3 (P4-11) |
 | Q20 | Language | Default — English only |
 | Q21 | Cashier landing | Default — `/pos` |
 | **Q22** | **Camera scanning** | **None.** The shop has a hardware barcode scanner; it types into the scan input like a keyboard. Camera scanning is dropped from the roadmap, not deferred |
@@ -415,6 +417,33 @@ Decisions made before building P3 (payment entry). Where they differ from the or
 | P3-10 | Backend fixes found in P3 recon | **Fixed in #24** before P3. (B1) The remaining-balance check compared floats, so paying the exact remainder after a partial payment with cents was rejected ("50.20 exceeds remaining balance 50.20"); it now compares in cents. (B2) A cart change that would drop `total` below `amount_paid` hit a DB CHECK and returned 500; it now returns 400 "Cannot reduce the sale total below the amount already paid. Remove or reduce payments first." #24 also bounds AMOUNT discounts in cents. | — |
 | P3-11 | Bottom sheets below `md` (§6) | **Deferred to P6.** The PaymentDialog is a centred modal at every width, like every other dialog in the app; no dialog has the §6 bottom-sheet variant yet. P6 adds it for all terminal dialogs at once. | §6 "Dialogs become bottom sheets below `md`" (for P3) |
 | P3-12 | Quick-tender chips (§1 #8) | **Deferred to P6.** The CASH form has no quick-tender chips (Exact / next 500 / next 1,000 / 5,000) in P3. The cashier types the cash received and sees the live change (P3-9); P6 can add chips that fill Cash received. | — |
+
+### P4 decision log (2026-10-17)
+
+Decisions made before building P4 (TRADE_IN payment). Where they differ from the original planning text, the affected sections are marked "revised P4".
+
+**Business answers (from the shop):**
+
+1. **A trade-in is almost always worth less than the purchase.** The customer pays the difference. There is no payout and no store credit. Buying a phone outright is the separate phone-purchase flow, which is not in 6.4 (§10).
+2. **The catalogue has one used-phone product per model and storage** (e.g. "Used iPhone 12 128GB"). Only admins create products. Before go-live, an admin creates the common used-phone models (FOLLOWUPS, Go-live setup).
+3. **Buy-backs are common.** Customers often trade in phones they bought from the shop, so P4 must not block an IMEI the shop sold before.
+
+**Backend prerequisite: buy-back (#27).** One ProductUnit row per acquisition, so a SOLD or RETURNED IMEI can be traded in again; only `IN_STOCK` / `WRITTEN_OFF` IMEIs collide (409). #27 also added `trade_in_product` to each TRADE_IN payment on the hydrated sale, requires `trade_in_selling_price` ≥ 0.01 when sent, and rejects inactive trade-in products. Its design decisions (B1–B9) are in the #27 PR and in [used-phones.md](../backend/used-phones.md) § One row per acquisition. The one P5 needs is **B4**: voiding a sale whose phone was later taken back returns 409 "the phone was taken back into stock on a later sale or purchase"; voids unwind newest-first (§1 #16). **RETURNED** means "trade-in reversed by a void; the phone is back with the customer", not a phone the shop holds.
+
+| # | Topic | Decision | Replaces |
+|---|-------|----------|----------|
+| P4-1 | Where the form lives (Q2, §7) | **`TradeInFields` inside `PaymentDialog` as method 6.** For TRADE_IN the generic Amount field is replaced by one **"Trade-in value"** field that sends both `amount` and `trade_in_buying_price`. Order: Product → IMEI → Trade-in value → Resale price (optional) → Condition notes. The picker becomes 3×2 (`grid-cols-3 sm:grid-cols-6`), checked at a ~640px-tall viewport. | Separate amount and buying-price fields "locked together" (§1 #10) |
+| P4-2 | No customer attached (§1 #10) | Picking 6 shows an inline **"Trade-in needs a customer"** panel with **Attach customer**: close the PaymentDialog → open the CustomerAttachDialog → on attach, reopen the PaymentDialog with TRADE_IN selected. **F6** with no customer goes straight into that sequence. | — |
+| P4-3 | Picking the product | A combobox over `GET /products?search=&branchId=&productType=PHONE&limit=20`, filtered to `is_serialized` on the client (no server filter), with USED SKUs (`phone_condition === "USED"`) first and a "Used" badge. Empty state: **"No used-phone product for this model. Ask an admin to add one."** No product creation from the till. | — |
+| P4-4 | Worth more than the balance | Keep the backend rule (every payment is capped at the balance due). The UI caps Trade-in value at the balance with a clear message ("Trade-in value can't exceed the balance due (LKR X)…"). No payout or credit (business answer 1). | — |
+| P4-5 | Default value | **Empty**, not pre-filled with the balance: the value becomes the unit's cost. | "Amount defaults to balance due" (P3) for this method |
+| P4-6 | Resale price | Optional; > 0 when given (backend ≥ 0.01). A non-blocking warning when it is below the trade-in value. | — |
+| P4-7 | IMEI input | One scanner-friendly input. **A scanner's Enter moves focus to the next field instead of submitting** (§6). Hard rule = the backend's (8–50 letters/digits). A 15-digit value failing Luhn gets a soft "Check digit doesn't match — rescan?" hint (non-blocking). Blocked on the client if another trade-in on this sale already has the IMEI. 409 messages by `existing_unit.status`: IN_STOCK "Already in stock"; WRITTEN_OFF needs a manager; `existing_unit: null` → a generic "already in inventory". **No SOLD block: buy-backs are supported** (#27). The null case can't happen when the payment is added (that only pre-checks); it comes from the live-IMEI index at complete. P4 keeps the generic message as a fallback, and the real case is handled with complete-time 409s in P5. | — |
+| P4-8 | PaymentsList row (§7) | Keep the fixed row heights (stacked `h-18` 72px, table `h-14` 56px). Label "Trade-in"; one detail line `<product name> · <IMEI>`, mono, truncated, with a `title` tooltip. Resale price and notes are not shown (sale detail, P5). | — |
+| P4-9 | Product name source | From the hydrated sale: `payment.trade_in_product.name` (#27). | — |
+| P4-10 | Remove (§6) | **Confirm for TRADE_IN only** ("Remove trade-in? You'll need to re-enter the phone details."). Other tenders keep P3-2's no-confirm; the §6 exception narrows to non-trade-in payments. | P3-2 for TRADE_IN rows |
+| P4-11 | Customer guard (Q19, §1 #7) | Keep P2's Detach guard and **also guard Change (and F3) while a trade-in exists** (#22 rejects reassignment as well as detach on the backend). `selectHasTradeInPayment` counts pending TRADE_IN rows too. | Detach-only guard (P2) |
+| P4-12 | Not in P4 | Payout or store credit; creating products from the till; editing a trade-in (it's frozen: remove and re-add); the phone-purchase intake screen (§10); complete-time 409 handling (P5); condition fields or photos beyond free-text notes. Buy-back needs no P4 work: it is an ordinary trade-in. | §9 P4 row ("409 at add and complete") |
 
 ### Scheduling decisions
 
@@ -524,8 +553,8 @@ Each slice is a vertical, demoable increment. "unit" = reducers/selectors/utils 
 | **P1 — First runnable cart, payments + complete** | Moved from P0: `salesService`, `terminalSlice`, `posCatalogSlice`, `utils/money`; `TerminalLayout` breakpoint layouts, `ResponsiveDialog`, `useMediaQuery`, `MobileActionBar`; `ScanBar` (barcode + name search, IMEI-shaped hint) adding **non-serialized** lines; `CartTable` + `CartCardList` with qty edit + remove; `TotalsPanel`; discard draft. Then: `PaymentDialog` (bottom sheet on phone) with CASH + reference methods; `PaymentsPanel` with remove; `CompleteSaleDialog`; `SaleCompletePanel`; 409 banner on complete (insufficient stock); reload recovery (Q8); network banner; `Toast`. **First real end-to-end sale.** _(Revised P1: narrowed, see §8 P1-8. Shipped scan bar, cart, totals, draft lifecycle, stock warning and F2/focus, with 40 tests in the P1 test files.)_ | P0 | ~31 unit, ~22 component |
 | **P2 — Customers** | `CustomerAttachDialog` (search, pick, detach), `CustomerCreateForm` (inline create, NIC 409 → offer existing); customer shown in terminal; `customersService`. | P0 (Q13 backend tweak optional) | 8 unit, 12 component |
 | **P3 — Payment entry** _(revised P3; serialized lines shipped in P1, see P1-5)_ | `addPayment` / `removePayment` in `salesService`; payment thunks through the serial mutation queue (pending row on add, optimistic remove); `toCents` / `fromCents`; Totals panel Paid + Balance due rows, "Pay LKR X" button + F4, "Ready to complete" state; `PaymentDialog` (method picker with keys 1–5, amount defaults to balance due) with `CashFields` (cash received, live change in cents) and `ReferenceFields` (required reference for CARD, BANK_TRANSFER, KOKO, MINTPAY); multi-tender by reopening the dialog; `PaymentsList` with remove (no edit, no confirm). No TRADE_IN (P4), no complete (P5). See §8 P3 decision log. | P1 | ~10 unit, ~20 component |
-| **P4 — Trade-in** | TRADE_IN in `PaymentDialog` (product picker over serialized catalog, IMEI, buying = amount, optional selling/notes); requires customer (links to P2 dialog); TRADE_IN rows show "frozen" (remove only); trade-in IMEI 409 at add and complete. **TRADE_IN detach guard: already built in P2. Don't re-implement** (Q19). | P1, P2, P3 | 8 unit, 12 component |
-| **P5 — Recent sales + void** | `/pos/sales` list (paginated, today/branch), `/pos/sales/:id` detail; `VoidSaleDialog` (Q15) gated by `VOID_SALE`; resold-trade-in 409 message. | P1 | 6 unit, 12 component |
+| **P4 — Trade-in** _(revised P4)_ | TRADE_IN as method 6 in `PaymentDialog` (see §8 P4 decision log). Built in five steps, each a checkpoint: **A.** `methods.js` key 6; `paymentSchema` tradeIn branch (value ≤ balance, IMEI shape, resale > 0, no duplicate IMEI on the sale); `buildPaymentPayload` sends `amount = trade_in_buying_price`; the pending payment row carries the `trade_in_*` fields and the trade-in selectors count pending rows. **B.** `TradeInFields`: product combobox (P4-3), IMEI with Enter → next field and the Luhn hint (P4-7), trade-in value, resale price, notes; Amount swapped for Trade-in value; 3×2 picker; 409 messages by `existing_unit.status`. **C.** No-customer flow (P4-2: inline panel, attach then reopen, F6); Change / F3 guard (P4-11). **D.** PaymentsList TRADE_IN row (P4-8, P4-9); TRADE_IN-only remove confirm (P4-10). **E.** Planning-doc touch-ups and FOLLOWUPS entries. The P2 Detach guard stays as built (Q19); P4 adds Change / F3. Trade-in IMEI 409 at add only: complete-time 409s are P5. Buy-back needs no P4 work (#27). | P1, P2, P3; backend #27 | 8 unit, 12 component |
+| **P5 — Recent sales + void** | `/pos/sales` list (paginated, today/branch), `/pos/sales/:id` detail; `VoidSaleDialog` (Q15) gated by `VOID_SALE`; resold-trade-in 409 message, and the taken-back-later 409 from #27 (B4, §1 #16) _(revised P4)_. | P1 | 6 unit, 12 component |
 | **P6 — Keyboard, discounts, polish + E2E** | Full §6 hotkey map with `Kbd` chips on pointer devices, `KeyboardHelpOverlay`, scan queue hardening, focus-return audit (keyboard) and no-auto-focus check (touch); stock warning (Q1); line discounts with `APPLY_DISCOUNT` granted to cashiers (Q11); merge on rescan: a non-serialized product already in the cart increments the existing line's qty instead of adding a new line _(added P3)_; user-friendly error mapping for network/raw errors in cart and payment messages (e.g. "Network Error") _(added P3)_; Playwright smoke flows: cash sale, split tender, serialized + trade-in sale, void — each at a desktop viewport, with the cash sale and trade-in also at a 390 px mobile viewport. | P0–P5 | 10 unit, 10 component, 6 e2e |
 | **Total** | | | **~83 unit, ~90 component, ~6 e2e** |
 
