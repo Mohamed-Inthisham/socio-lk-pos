@@ -38,7 +38,15 @@ export class ProductUnit {
   @JoinColumn({ name: 'branch_id' })
   branch?: Branch;
 
-  @Index({ unique: true })
+  // One row per acquisition (buy-back): IMEI is unique only among units
+  // the shop holds. SOLD and RETURNED rows are history and may repeat an
+  // IMEI. Mirrors uq_product_units_imei_live; the plain index serves
+  // lookups across all statuses.
+  @Index('uq_product_units_imei_live', {
+    unique: true,
+    where: `"status" IN ('IN_STOCK', 'WRITTEN_OFF')`,
+  })
+  @Index('idx_product_units_imei')
   @Column({ type: 'varchar', length: 50 })
   imei!: string;
 

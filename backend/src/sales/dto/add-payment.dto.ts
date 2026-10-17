@@ -146,11 +146,12 @@ export class AddPaymentDto {
   @ApiPropertyOptional({
     example: '356938035643809',
     description:
-      'TRADE_IN only. IMEI of the trade-in phone. Globally unique across ' +
-      'all existing ProductUnits (IN_STOCK / SOLD / RETURNED / ' +
-      'WRITTEN_OFF); collision returns 409 with the existing_unit payload ' +
-      'at addPayment (best-effort) and again at completeSale. Same 8-50 ' +
-      'char, letters+digits regex as CreatePhonePurchaseDto.',
+      'TRADE_IN only. IMEI of the trade-in phone. Must not belong to a ' +
+      'unit the shop holds (IN_STOCK / WRITTEN_OFF); collision returns ' +
+      '409 with the existing_unit payload at addPayment (best-effort) and ' +
+      'again at completeSale. A SOLD or RETURNED unit does not block: ' +
+      'buying back a phone we sold creates a new ProductUnit row. Same ' +
+      '8-50 char, letters+digits regex as CreatePhonePurchaseDto.',
     minLength: 8,
     maxLength: 50,
   })
@@ -183,13 +184,14 @@ export class AddPaymentDto {
       'TRADE_IN only. Optional per-unit selling price override for the ' +
       'materialized ProductUnit. If omitted, ProductUnit.selling_price ' +
       'stays null and the next sale of this phone falls back to ' +
-      'Product.selling_price at ring-up time. Mirrors ' +
-      'CreatePhonePurchaseDto.selling_price semantics.',
-    minimum: 0,
+      'Product.selling_price at ring-up time. Must be >= 0.01 when ' +
+      'sent: a stored 0 would ring the phone up for free on resale ' +
+      '(the fallback only applies to null).',
+    minimum: 0.01,
   })
   @IsOptional()
   @IsNumber({ maxDecimalPlaces: 2 })
-  @Min(0)
+  @Min(0.01)
   trade_in_selling_price?: number;
 
   @ApiPropertyOptional({

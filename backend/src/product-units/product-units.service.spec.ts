@@ -4,6 +4,7 @@ import { ConflictException, NotFoundException } from '@nestjs/common';
 import { ProductUnitsService } from './product-units.service';
 import { ProductUnit } from './entities/product-unit.entity';
 import { ProductUnitStatus } from './enums/product-unit-status.enum';
+import { QueryFailedError } from 'typeorm';
 
 describe('ProductUnitsService', () => {
   let service: ProductUnitsService;
@@ -406,13 +407,36 @@ describe('ProductUnitsService', () => {
       where: jest.Mock;
       execute: jest.Mock;
     };
+    // Buy-back check: "is there a newer unit for this IMEI that isn't
+    // RETURNED?" (alias 'later'). Defaults to none.
+    let mockLaterQb: {
+      where: jest.Mock;
+      andWhere: jest.Mock;
+      orderBy: jest.Mock;
+      getOne: jest.Mock;
+    };
     let mockManager: { createQueryBuilder: jest.Mock };
+
+    const soldUnit = () => ({
+      id: 'u-1',
+      imei: '354789102345678',
+      status: ProductUnitStatus.SOLD,
+      product_id: 'p-1',
+      branch_id: 'b-1',
+      created_at: new Date('2026-01-01T10:00:00Z'),
+    });
 
     beforeEach(() => {
       mockReadQb = {
         setLock: jest.fn().mockReturnThis(),
         where: jest.fn().mockReturnThis(),
         getOne: jest.fn(),
+      };
+      mockLaterQb = {
+        where: jest.fn().mockReturnThis(),
+        andWhere: jest.fn().mockReturnThis(),
+        orderBy: jest.fn().mockReturnThis(),
+        getOne: jest.fn().mockResolvedValue(null),
       };
       mockUpdateQb = {
         update: jest.fn().mockReturnThis(),
@@ -421,10 +445,121 @@ describe('ProductUnitsService', () => {
         execute: jest.fn().mockResolvedValue({ affected: 1 }),
       };
       mockManager = {
-        createQueryBuilder: jest.fn((entityArg?: unknown) =>
-          entityArg ? mockReadQb : mockUpdateQb,
+        createQueryBuilder: jest.fn((entityArg?: unknown, alias?: string) =>
+          !entityArg
+            ? mockUpdateQb
+            : alias === 'later'
+              ? mockLaterQb
+              : mockReadQb,
         ),
       };
+    });
+
+    it('checks for a newer, non-RETURNED unit with the same IMEI before flipping', async () => {
+      const unit = soldUnit();
+      mockReadQb.getOne.mockResolvedValue(unit);
+
+      await service.markAvailableForReversal(
+        mockManager as unknown as import('typeorm').EntityManager,
+        'u-1',
+      );
+
+      expect(mockLaterQb.where).toHaveBeenCalledWith('later.imei = :imei', {
+        imei: '354789102345678',
+      });
+      expect(mockLaterQb.andWhere).toHaveBeenCalledWith('later.id != :id', {
+        id: 'u-1',
+      });
+      expect(mockLaterQb.andWhere).toHaveBeenCalledWith(
+        'later.created_at > :createdAt',
+        { createdAt: unit.created_at },
+      );
+      expect(mockLaterQb.andWhere).toHaveBeenCalledWith(
+        'later.status != :returned',
+        { returned: ProductUnitStatus.RETURNED },
+      );
+      expect(mockUpdateQb.execute).toHaveBeenCalled();
+    });
+
+    it('throws 409 when the phone was bought back after this sale (and does not flip)', async () => {
+      mockReadQb.getOne.mockResolvedValue(soldUnit());
+      mockLaterQb.getOne.mockResolvedValue({
+        id: 'u-2',
+        imei: '354789102345678',
+        status: ProductUnitStatus.IN_STOCK,
+        product_id: 'p-used',
+        branch_id: 'b-1',
+      });
+
+      try {
+        await service.markAvailableForReversal(
+          mockManager as unknown as import('typeorm').EntityManager,
+          'u-1',
+        );
+        fail('Expected ConflictException');
+      } catch (err) {
+        expect(err).toBeInstanceOf(ConflictException);
+        const response = (err as ConflictException).getResponse() as {
+          message: string;
+          existing_unit: unknown;
+        };
+        expect(response.message).toContain('taken back into stock');
+        expect(response.existing_unit).toEqual({
+          id: 'u-2',
+          status: ProductUnitStatus.IN_STOCK,
+          product_id: 'p-used',
+          branch_id: 'b-1',
+        });
+      }
+      expect(mockUpdateQb.execute).not.toHaveBeenCalled();
+    });
+
+    it('maps a live-IMEI unique violation on the flip (concurrent buy-back) to 409', async () => {
+      mockReadQb.getOne.mockResolvedValue(soldUnit());
+      mockUpdateQb.execute.mockRejectedValue(
+        new QueryFailedError(
+          'UPDATE "product_units" ...',
+          [],
+          Object.assign(new Error('duplicate key value'), {
+            code: '23505',
+            constraint: 'uq_product_units_imei_live',
+          }),
+        ),
+      );
+
+      try {
+        await service.markAvailableForReversal(
+          mockManager as unknown as import('typeorm').EntityManager,
+          'u-1',
+        );
+        fail('Expected ConflictException');
+      } catch (err) {
+        expect(err).toBeInstanceOf(ConflictException);
+        const response = (err as ConflictException).getResponse() as {
+          existing_unit: unknown;
+        };
+        expect(response.existing_unit).toBeNull();
+      }
+    });
+
+    it('propagates other errors from the flip unchanged', async () => {
+      mockReadQb.getOne.mockResolvedValue(soldUnit());
+      const other = new QueryFailedError(
+        'UPDATE "product_units" ...',
+        [],
+        Object.assign(new Error('check violation'), {
+          code: '23514',
+          constraint: 'CHK_product_units_status',
+        }),
+      );
+      mockUpdateQb.execute.mockRejectedValue(other);
+
+      await expect(
+        service.markAvailableForReversal(
+          mockManager as unknown as import('typeorm').EntityManager,
+          'u-1',
+        ),
+      ).rejects.toBe(other);
     });
 
     it('flips SOLD to IN_STOCK on the happy path', async () => {

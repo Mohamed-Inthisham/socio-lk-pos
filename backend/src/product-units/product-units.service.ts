@@ -8,6 +8,7 @@ import { EntityManager, Repository } from 'typeorm';
 import { ProductUnitStatus } from './enums/product-unit-status.enum';
 import { ProductUnit } from './entities/product-unit.entity';
 import { ListProductUnitsQueryDto } from './dto/list-product-units-query.dto';
+import { isLiveImeiConflict } from './live-imei';
 import {
   paginate,
   PaginatedResponse,
@@ -185,7 +186,17 @@ export class ProductUnitsService {
    *     don't have a business path that legitimately produces this, so
    *     fail loudly — the operator needs to see this in the logs.
    *
+   *   - If the same IMEI was acquired again after this sale (buy-back:
+   *     a NEWER unit row exists that isn't RETURNED): 409 with that
+   *     unit as existing_unit. The phone is no longer the voided
+   *     customer's to return — it's back in our stock, or sold on. The
+   *     operator voids the later sale first (mirrors the Q7 resale rule
+   *     in markReturnedForVoid). A newer RETURNED row means that later
+   *     trade-in was itself voided, so the chain is clear.
+   *
    *   - Otherwise: UPDATE product_units SET status = IN_STOCK, updated_at = now().
+   *     A concurrent re-acquisition between the check and the UPDATE
+   *     hits uq_product_units_imei_live and is mapped to the same 409.
    *
    * Note: does NOT transition to RETURNED. RETURNED is a separate flow
    * (customer physically returns the phone, not a full sale void).
@@ -223,12 +234,58 @@ export class ProductUnitsService {
       );
     }
 
-    await manager
-      .createQueryBuilder()
-      .update(ProductUnit)
-      .set({ status: ProductUnitStatus.IN_STOCK })
-      .where('id = :id', { id: unit.id })
-      .execute();
+    const reacquired = await manager
+      .createQueryBuilder(ProductUnit, 'later')
+      .where('later.imei = :imei', { imei: unit.imei })
+      .andWhere('later.id != :id', { id: unit.id })
+      .andWhere('later.created_at > :createdAt', {
+        createdAt: unit.created_at,
+      })
+      .andWhere('later.status != :returned', {
+        returned: ProductUnitStatus.RETURNED,
+      })
+      .orderBy('later.created_at', 'DESC')
+      .getOne();
+    if (reacquired) {
+      throw this.reacquiredConflict(unit.imei, reacquired);
+    }
+
+    try {
+      await manager
+        .createQueryBuilder()
+        .update(ProductUnit)
+        .set({ status: ProductUnitStatus.IN_STOCK })
+        .where('id = :id', { id: unit.id })
+        .execute();
+    } catch (err) {
+      if (isLiveImeiConflict(err)) {
+        throw this.reacquiredConflict(unit.imei, null);
+      }
+      throw err;
+    }
+  }
+
+  /**
+   * 409 for voiding a sale whose phone was acquired again later.
+   * `later` is null when the re-acquisition raced the void (only the
+   * unique index saw it, and the aborted transaction can't be queried).
+   */
+  private reacquiredConflict(
+    imei: string,
+    later: ProductUnit | null,
+  ): ConflictException {
+    return new ConflictException({
+      message:
+        `Cannot void this sale: the phone (IMEI '${imei}') was taken ` +
+        `back into stock on a later sale or purchase. Void that sale ` +
+        `first, or contact an administrator.`,
+      existing_unit: later && {
+        id: later.id,
+        status: later.status,
+        product_id: later.product_id,
+        branch_id: later.branch_id,
+      },
+    });
   }
 
   /**

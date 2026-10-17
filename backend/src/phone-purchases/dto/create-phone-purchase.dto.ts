@@ -95,10 +95,11 @@ export class CreatePhonePurchaseDto {
   @ApiProperty({
     example: '356938035643809',
     description:
-      'IMEI of the physical phone being intaken. Globally unique — ' +
-      'collides with any existing ProductUnit (IN_STOCK, SOLD, ' +
-      'RETURNED, or WRITTEN_OFF) return 409 with a structured ' +
-      'existing_unit payload. Trimmed on input; typically 15 digits ' +
+      'IMEI of the physical phone being intaken. Must not belong to a ' +
+      'unit the shop holds (IN_STOCK or WRITTEN_OFF): that returns 409 ' +
+      'with a structured existing_unit payload. A SOLD or RETURNED unit ' +
+      'does not block (buy-back creates a new unit row). Trimmed on ' +
+      'input; typically 15 digits ' +
       'but 8–50 chars accepted for older devices and edge cases.',
     minLength: 8,
     maxLength: 50,
@@ -132,12 +133,14 @@ export class CreatePhonePurchaseDto {
       'ProductUnit.selling_price stays null and the sale flow falls ' +
       'back to Product.selling_price at ring-up time. Cashier sets ' +
       "this at intake when they can assess the specific unit's " +
-      'condition-adjusted price; otherwise defer to admin post-intake.',
-    minimum: 0,
+      'condition-adjusted price; otherwise defer to admin post-intake. ' +
+      'Must be >= 0.01 when sent: a stored 0 would ring the phone up ' +
+      'for free on resale (the fallback only applies to null).',
+    minimum: 0.01,
   })
   @IsOptional()
   @IsNumber({ maxDecimalPlaces: 2 })
-  @Min(0)
+  @Min(0.01)
   selling_price?: number;
 
   @ApiPropertyOptional({

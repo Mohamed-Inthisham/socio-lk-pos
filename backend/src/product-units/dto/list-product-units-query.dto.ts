@@ -54,8 +54,10 @@ export class ListProductUnitsQueryDto extends PaginationQueryDto {
     example: ProductUnitStatus.IN_STOCK,
     description:
       'Filter by current unit status. Values: IN_STOCK (available ' +
-      'to sell), SOLD (already sold), RETURNED (customer returned, ' +
-      'processing), WRITTEN_OFF (damaged/lost/removed).',
+      'to sell), SOLD (already sold), RETURNED (trade-in reversed by a ' +
+      'void; the phone is back with the customer), WRITTEN_OFF ' +
+      '(damaged/lost/removed). An IMEI can have several rows, one per ' +
+      'acquisition; at most one is IN_STOCK or WRITTEN_OFF.',
   })
   @IsOptional()
   @IsEnum(ProductUnitStatus)

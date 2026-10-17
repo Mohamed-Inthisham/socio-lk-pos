@@ -61,10 +61,26 @@ RETURNED      (WRITTEN_OFF: reserved, no path yet)
 ```
 
 - `IN_STOCK → SOLD` — `ProductUnitsService.markSoldForSale` (completeSale, Slice E)
-- `SOLD → IN_STOCK` — `markAvailableForReversal` (voidSale, Slice E)
-- `IN_STOCK → RETURNED` — `markReturnedForVoid` (voidSale trade-in reversal, Slice G). The first path that produces RETURNED.
+- `SOLD → IN_STOCK` — `markAvailableForReversal` (voidSale, Slice E). 409 if the phone was bought back after that sale (see Buy-back below).
+- `IN_STOCK → RETURNED` — `markReturnedForVoid` (voidSale trade-in reversal, Slice G). The only path that produces RETURNED: the trade-in was reversed and **the phone is back with the customer**.
 
 There is no `deleted_at` on ProductUnit — status is the tombstone.
+
+### One row per acquisition (buy-back)
+
+A ProductUnit row is **one acquisition** of a physical phone, not the phone itself. When the shop takes back a phone it no longer holds — a customer trading in a phone we sold them, or a voided trade-in being re-rung — the intake creates a **new** row on the intake's SKU, cost and PhonePurchase. Earlier rows are never rewritten, so each sale line keeps pointing at the exact row it sold, and `SELECT … FROM product_units WHERE imei = $1 ORDER BY created_at` is the phone's full history.
+
+```
+IMEI X:  U1  new SKU   cost 85000  SOLD      ← sale A line
+         U2  used SKU  cost 60000  SOLD      ← trade-in on B (PhonePurchase P_B), sale C line
+         U3  used SKU  cost 55000  IN_STOCK  ← trade-in on D (PhonePurchase P_D)
+```
+
+- **Uniqueness is scoped to live units.** `uq_product_units_imei_live` is `UNIQUE (imei) WHERE status IN ('IN_STOCK', 'WRITTEN_OFF')`: at most one row per IMEI that the shop holds. SOLD and RETURNED rows may repeat. `idx_product_units_imei` (plain) serves lookups across all statuses.
+- **Intake collisions** (`POST /phone-purchases`, `TRADE_IN` at addPayment and at complete) only consider live units: IN_STOCK, or WRITTEN_OFF (a written-off phone turning up again needs a manager). A concurrent intake that slips past the pre-check hits the index and is mapped to the same 409.
+- **Selling an IMEI** (`addLine`) resolves the live row; if there is none, the newest row is used for the 409 message (e.g. `status: SOLD`).
+- **Voids unwind newest-first.** Voiding a sale whose phone was later taken back (a newer row that isn't RETURNED: IN_STOCK, or SOLD on again) returns 409 "the phone was taken back into stock on a later sale or purchase". Void the later sales first. This mirrors the existing rule that blocks voiding a trade-in whose phone was resold.
+- **A future customer-return flow** (phone physically back with the shop, awaiting re-stock) must use a **new status** (e.g. `RETURN_PENDING`) and add it to `uq_product_units_imei_live`. It must not reuse RETURNED.
 
 ## Design Decisions
 
@@ -77,10 +93,10 @@ There is no `deleted_at` on ProductUnit — status is the tombstone.
 
 ### Intake (Slices C–D)
 
-- **IMEI is globally unique across all statuses.** A collision returns 409 with an `existing_unit` payload. Buy-back of a phone we previously sold is a tracked followup.
+- **IMEI is unique among live units (IN_STOCK, WRITTEN_OFF).** A collision returns 409 with an `existing_unit` payload. A phone we sold, or whose trade-in was voided, can be bought back as a new unit row (see "One row per acquisition" above). _Before the buy-back change, IMEI was unique across all statuses._
 - **Intake is atomic.** `POST /phone-purchases` creates the PhonePurchase, an IN_STOCK ProductUnit, and the stock increment in one transaction.
 - **Product must be serialized, active, and at the intake branch.** Non-admin cashiers can only intake at their own branch.
-- **`selling_price` is optional at intake** ("price later"). When null, a sale falls back to `Product.selling_price`.
+- **`selling_price` is optional at intake** ("price later"). When null, a sale falls back to `Product.selling_price`. When sent it must be ≥ 0.01: a stored 0 is not null, so the phone would ring up for free.
 - **`total_amount` is stored**, not derived, matching the `Sale.total` precedent and leaving room for multi-unit purchases.
 
 ### Serialized sale lines (Slice E)
@@ -103,11 +119,12 @@ A trade-in is a payment, not a line: `payment_method = TRADE_IN`, with the phone
 
 **DRAFT — nothing is materialized.** `addPayment` validates and stores the trade-in fields only:
 
-- Required: `trade_in_product_id` (serialized, at the sale's branch), `trade_in_imei`, `trade_in_buying_price`. Optional: `trade_in_selling_price`, `trade_in_notes`.
+- Required: `trade_in_product_id` (active, serialized, at the sale's branch), `trade_in_imei`, `trade_in_buying_price`. Optional: `trade_in_selling_price` (≥ 0.01 when sent: a stored 0 would resell the phone for free), `trade_in_notes`.
 - `amount` must equal `trade_in_buying_price` to the cent.
 - The sale must have a customer (the PhonePurchase needs one).
 - `cash_received` and `reference_number` must be omitted; `trade_in_*` fields are rejected on every other method.
-- IMEI collision with existing inventory → 409 `existing_unit` (best effort; re-checked at complete).
+- IMEI collision with a live unit (IN_STOCK, WRITTEN_OFF) → 409 `existing_unit` (best effort; re-checked at complete). A SOLD or RETURNED unit doesn't block: that's a buy-back, and complete creates a new unit row.
+- `GET /sales/:id` (and every hydrated sale response) includes `trade_in_product` (the product row) on each TRADE_IN payment, so clients can show the product name.
 
 **Frozen once recorded.** `updatePayment` allows only `notes` on a TRADE_IN payment. `amount`, `cash_received`, and `reference_number` are rejected with 400, and `trade_in_*` fields are never patchable on any payment. Renegotiating a trade-in value means removing the payment and adding a new one.
 
@@ -165,13 +182,14 @@ All endpoints are prefixed with `/api/v1` and require the `access_token` cookie.
 | `POST /sales/:saleId/payments` | `TRADE_IN` method + `trade_in_*` fields; 409 on IMEI collision (Slice G) |
 | `PATCH /sales/:saleId/payments/:paymentId` | TRADE_IN frozen except `notes` (Slice G) |
 | `POST /sales/:id/complete` | Flips PUs to SOLD; materializes trade-ins; 409 on IMEI conflicts (Slices E, G) |
-| `POST /sales/:id/void` | Flips PUs back to IN_STOCK; reverses trade-ins; 409 if a trade-in was resold (Slices E, G) |
+| `POST /sales/:id/void` | Flips PUs back to IN_STOCK; reverses trade-ins; 409 if a trade-in was resold (Slices E, G), or if a sold phone was bought back later (buy-back) |
+| `POST /phone-purchases`, `TRADE_IN` | IMEI only collides with live units; SOLD / RETURNED IMEIs are bought back as new rows (buy-back) |
 
 Swagger (`/api/docs`, dev only) is generated from the decorators and reflects all of the above.
 
 ## Migration Notes
 
-Seven migrations, in dependency order:
+Seven migrations, in dependency order, plus one added later for buy-back:
 
 | Order | Migration | Slice | Notes |
 |-------|-----------|:-----:|-------|
@@ -182,6 +200,7 @@ Seven migrations, in dependency order:
 | 5 | `AddProductUnitsPhonePurchaseFk` | D | Separate from 4 for revert granularity |
 | 6 | `AddSaleLinesProductUnitId` | E | `CHK_sale_lines_product_unit_snapshot` (unit implies IMEI snapshot) |
 | 7 | `add-trade-in-columns-to-payments` | G | Six `trade_in_*` columns, two FKs, four CHKs, partial unique index; `TRADE_IN` added to `CHK_payments_method` |
+| 8 | `ProductUnitsImeiUniqueWhenLive` | buy-back | Replaces the global unique `idx_product_units_imei` with `uq_product_units_imei_live` (`WHERE status IN ('IN_STOCK', 'WRITTEN_OFF')`) plus a plain `idx_product_units_imei`. **`down` fails once any IMEI has more than one row** (a buy-back happened); those rows are history and must not be deleted to force a revert |
 
 Project rule: every migration is verified with `migration:run` and `\d <table>` on both `socio_lk_pos_dev` and `socio_lk_pos_test` before commit (recorded explicitly in the Slice A and Slice G commits).
 
@@ -212,5 +231,5 @@ Tracked in [FOLLOWUPS.md](../../FOLLOWUPS.md). The ones this phase touched most:
 - **Stock/PU lock-ordering deadlock — priority high.** Slice G added a PU-then-Stock lock order in the voidSale trade-in loop, opposite to the outgoing loops. Postgres detects the deadlock (one side gets a 500), so nothing corrupts. The fix is global lock-target sorting across `SalesService`.
 - **A customer can be cleared from a DRAFT that has TRADE_IN payments.** `completeSale` catches it with a 400, but `PATCH /sales/:id` should reject it up front.
 - **Resale 409 payload** could include the reselling sale's id.
-- **Buy-back** and **RETURNED → IN_STOCK re-stock** flows.
+- ~~**Buy-back**~~ — done: one unit row per acquisition (see ProductUnit Lifecycle). **Customer-return re-stock** is still open, and needs its own status (not RETURNED).
 - **Admin endpoint to set `ProductUnit.selling_price`** after a "price later" intake.

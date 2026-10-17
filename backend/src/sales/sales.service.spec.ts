@@ -1,6 +1,6 @@
 import { Test, TestingModule } from '@nestjs/testing';
 import { getRepositoryToken, getDataSourceToken } from '@nestjs/typeorm';
-import { QueryFailedError } from 'typeorm';
+import { In, QueryFailedError } from 'typeorm';
 import {
   NotFoundException,
   BadRequestException,
@@ -512,7 +512,14 @@ describe('SalesService', () => {
 
       expect(mockSalesRepo.findOne).toHaveBeenCalledWith({
         where: { id: 's1' },
-        relations: ['branch', 'cashier', 'customer', 'lines', 'payments'],
+        relations: [
+          'branch',
+          'cashier',
+          'customer',
+          'lines',
+          'payments',
+          'payments.trade_in_product',
+        ],
         withDeleted: true,
         order: {
           lines: { line_number: 'ASC' },
@@ -2221,6 +2228,7 @@ describe('SalesService', () => {
         id: 'prod-trade',
         branch_id: 'branch-1',
         is_serialized: true,
+        is_active: true,
       };
       mockManager.findOne
         .mockResolvedValueOnce(
@@ -2369,11 +2377,27 @@ describe('SalesService', () => {
         id: 'prod-trade',
         branch_id: 'branch-1',
         is_serialized: false,
+        is_active: true,
       });
 
       await expect(
         service.addPayment('sale-1', validTradeInDto()),
       ).rejects.toThrow(/is not a serialized SKU/);
+    });
+
+    it('rejects TRADE_IN when trade-in product is inactive', async () => {
+      primeTradeInSale();
+      mockManager.findOne.mockResolvedValueOnce({
+        id: 'prod-trade',
+        branch_id: 'branch-1',
+        is_serialized: true,
+        is_active: false,
+      });
+
+      await expect(
+        service.addPayment('sale-1', validTradeInDto()),
+      ).rejects.toThrow('Trade-in product prod-trade not found or inactive');
+      expect(mockManager.save).not.toHaveBeenCalled();
     });
 
     it('rejects TRADE_IN when trade-in product belongs to a different branch', async () => {
@@ -2382,6 +2406,7 @@ describe('SalesService', () => {
         id: 'prod-trade',
         branch_id: 'branch-99',
         is_serialized: true,
+        is_active: true,
       });
 
       await expect(
@@ -2390,16 +2415,18 @@ describe('SalesService', () => {
     });
 
     it('rejects TRADE_IN with 409 + existing_unit payload when IMEI collides', async () => {
+      // Buy-back: only a unit the shop holds collides (SOLD no longer does).
       primeTradeInSale();
       mockManager.findOne
         .mockResolvedValueOnce({
           id: 'prod-trade',
           branch_id: 'branch-1',
           is_serialized: true,
+          is_active: true,
         })
         .mockResolvedValueOnce({
           id: 'unit-99',
-          status: 'SOLD',
+          status: 'IN_STOCK',
           product_id: 'prod-old',
         });
 
@@ -2413,10 +2440,31 @@ describe('SalesService', () => {
         };
         expect(response.existing_unit).toEqual({
           id: 'unit-99',
-          status: 'SOLD',
+          status: 'IN_STOCK',
           product_id: 'prod-old',
         });
       }
+    });
+
+    it('checks the TRADE_IN IMEI against live units only (IN_STOCK, WRITTEN_OFF)', async () => {
+      primeTradeInSale();
+      primeTradeInReferences();
+      mockManager.create.mockImplementation((_e, data) => data);
+      mockManager.save.mockImplementation((e) =>
+        Promise.resolve({ id: 'pay-trade-live', ...e }),
+      );
+
+      await service.addPayment('sale-1', validTradeInDto());
+
+      expect(mockManager.findOne).toHaveBeenCalledWith(ProductUnit, {
+        where: {
+          imei: '356938035643809',
+          status: In([
+            ProductUnitStatus.IN_STOCK,
+            ProductUnitStatus.WRITTEN_OFF,
+          ]),
+        },
+      });
     });
 
     it('rejects non-TRADE_IN payments that carry trade-in fields', async () => {
@@ -4665,6 +4713,92 @@ describe('SalesService', () => {
         },
       });
     }
+  });
+
+  // ---- Buy-back: an IMEI can have one unit row per acquisition ----
+
+  it('sells the live unit when an IMEI has several rows (bought back)', async () => {
+    mockQueryBuilder.getOne.mockResolvedValue(
+      seedDraftSale({ branch_id: 'branch-1' }),
+    );
+    mockQueryBuilder.getRawOne.mockResolvedValue({ max: '0' });
+    mockProductsService.findOne.mockResolvedValue(
+      seedProduct({
+        id: 'prod-used',
+        is_serialized: true,
+        branch_id: 'branch-1',
+      }),
+    );
+    mockManager.findOne.mockResolvedValueOnce({
+      id: 'unit-2',
+      imei: '354789102345678',
+      status: ProductUnitStatus.IN_STOCK,
+      product_id: 'prod-used',
+      branch_id: 'branch-1',
+      selling_price: '90000.00',
+      buying_price: '60000.00',
+    });
+    mockManager.create.mockImplementation((_e, data) => data);
+    mockManager.save.mockImplementation((e) => Promise.resolve(e));
+
+    await service.addLine(
+      'sale-1',
+      {
+        product_id: 'prod-used',
+        quantity: 1,
+        imei_snapshot: '354789102345678',
+      },
+      'cashier-1',
+    );
+
+    expect(mockManager.findOne).toHaveBeenCalledWith(ProductUnit, {
+      where: {
+        imei: '354789102345678',
+        status: In([ProductUnitStatus.IN_STOCK, ProductUnitStatus.WRITTEN_OFF]),
+      },
+    });
+    // The live row was found, so the newest-row fallback never ran.
+    expect(mockManager.findOne).not.toHaveBeenCalledWith(
+      ProductUnit,
+      expect.objectContaining({ order: { created_at: 'DESC' } }),
+    );
+    expect(mockManager.create).toHaveBeenCalledWith(
+      SaleLine,
+      expect.objectContaining({
+        product_unit_id: 'unit-2',
+        cost_price_snapshot: '60000.00',
+      }),
+    );
+  });
+
+  it('reports the newest row when no unit for the IMEI is live', async () => {
+    mockQueryBuilder.getOne.mockResolvedValue(
+      seedDraftSale({ branch_id: 'branch-1' }),
+    );
+    mockProductsService.findOne.mockResolvedValue(
+      seedProduct({ id: 'prod-1', is_serialized: true, branch_id: 'branch-1' }),
+    );
+    mockManager.findOne
+      .mockResolvedValueOnce(null) // no live unit
+      .mockResolvedValueOnce({
+        id: 'unit-3',
+        imei: '354789102345678',
+        status: ProductUnitStatus.SOLD,
+        product_id: 'prod-1',
+        branch_id: 'branch-1',
+      });
+
+    await expect(
+      service.addLine(
+        'sale-1',
+        { product_id: 'prod-1', quantity: 1, imei_snapshot: '354789102345678' },
+        'cashier-1',
+      ),
+    ).rejects.toBeInstanceOf(ConflictException);
+    expect(mockManager.findOne).toHaveBeenNthCalledWith(2, ProductUnit, {
+      where: { imei: '354789102345678' },
+      order: { created_at: 'DESC' },
+    });
   });
 
   it('throws ConflictException when IMEI is RETURNED', async () => {

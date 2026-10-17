@@ -4343,7 +4343,41 @@ describe('Sales (e2e)', () => {
           trade_in_buying_price: '60000.00',
           trade_in_selling_price: '75000.00',
           trade_in_phone_purchase_id: null,
+          // The traded-in product rides along for display (POS payments list)
+          trade_in_product: {
+            id: ctx.usedProduct.id,
+            name: 'Used iPhone 12',
+          },
         });
+      });
+
+      it('returns 400 when trade_in_selling_price is 0 (would resell for free)', async () => {
+        const ctx = await setupTradeIn();
+        const sale = await draftWithLine(ctx);
+
+        const response = await addTradeIn(ctx, sale.id, IMEI_A, 60000, 400, {
+          trade_in_selling_price: 0,
+        });
+        expect(response.body.message).toEqual(
+          expect.arrayContaining([
+            'trade_in_selling_price must not be less than 0.01',
+          ]),
+        );
+        expect(await paymentsOf(sale.id)).toHaveLength(0);
+      });
+
+      it('returns 400 when the trade-in product is inactive', async () => {
+        const ctx = await setupTradeIn();
+        await dataSource
+          .getRepository(Product)
+          .update(ctx.usedProduct.id, { is_active: false });
+        const sale = await draftWithLine(ctx);
+
+        const response = await addTradeIn(ctx, sale.id, IMEI_A, 60000, 400);
+        expect(response.body.message).toBe(
+          `Trade-in product ${ctx.usedProduct.id} not found or inactive`,
+        );
+        expect(await paymentsOf(sale.id)).toHaveLength(0);
       });
 
       it('accepts a second TRADE_IN with a different IMEI on the same sale', async () => {
@@ -4740,6 +4774,280 @@ describe('Sales (e2e)', () => {
     });
 
     // ---- Crown jewels: trade-in atomicity ----
+
+    // ---- Buy-back: one ProductUnit row per acquisition ----
+
+    describe('Buy-back — one ProductUnit row per acquisition', () => {
+      /**
+       * A serialized "new" SKU with one IN_STOCK unit for IMEI_A, so the
+       * shop can SELL that exact phone before buying it back on the used
+       * SKU (ctx.usedProduct).
+       */
+      async function seedNewSerializedUnit(ctx: TradeInCtx) {
+        const newSerialized = await seedProduct(ctx.branch.id, {
+          name: 'iPhone 12 128GB (new)',
+          is_serialized: true,
+          selling_price: '100000.00',
+          buying_price: '85000.00',
+        });
+        await setStockQuantity(newSerialized.id, ctx.branch.id, 1);
+        const unit = await seedProductUnit(
+          newSerialized.id,
+          ctx.branch.id,
+          ctx.user.id,
+          IMEI_A,
+          { buying_price: '85000.00', selling_price: null },
+        );
+        return { newSerialized, unit };
+      }
+
+      /** Sale A: sell IMEI_A on the new SKU for cash and complete it. */
+      async function sellNew(ctx: TradeInCtx, productId: string) {
+        const sale = await seedSale({
+          branch_id: ctx.branch.id,
+          cashier_id: ctx.user.id,
+          customer_id: ctx.customer.id,
+        });
+        await request(app.getHttpServer())
+          .post(`/api/v1/sales/${sale.id}/lines`)
+          .set('Cookie', ctx.cookies)
+          .send({ product_id: productId, quantity: 1, imei_snapshot: IMEI_A })
+          .expect(201);
+        await addCash(ctx, sale.id, 100000);
+        await completeReq(ctx, sale.id);
+        return sale;
+      }
+
+      /** Trade IMEI_A in for 60000 against a 100000 line, and complete. */
+      async function buyBack(ctx: TradeInCtx) {
+        const sale = await draftWithLine(ctx);
+        await addTradeIn(ctx, sale.id, IMEI_A, 60000);
+        await addCash(ctx, sale.id, 40000);
+        await completeReq(ctx, sale.id);
+        return sale;
+      }
+
+      function unitsOf(imei: string) {
+        return dataSource
+          .getRepository(ProductUnit)
+          .find({ where: { imei }, order: { created_at: 'ASC' } });
+      }
+
+      function linesOf(saleId: string) {
+        return dataSource
+          .getRepository(SaleLine)
+          .find({ where: { sale_id: saleId } });
+      }
+
+      function saleStatus(saleId: string) {
+        return dataSource
+          .getRepository(Sale)
+          .findOneByOrFail({ id: saleId })
+          .then((s) => s.status);
+      }
+
+      it('CROWN JEWEL: sell (A) → buy back (B) → resell (C) → buy back again (D), each acquisition its own row', async () => {
+        const ctx = await setupTradeIn();
+        const { newSerialized, unit: u1 } = await seedNewSerializedUnit(ctx);
+
+        // A: the shop sells the phone new.
+        const saleA = await sellNew(ctx, newSerialized.id);
+        const u1Sold = await dataSource
+          .getRepository(ProductUnit)
+          .findOneByOrFail({ id: u1.id });
+        expect(u1Sold.status).toBe(ProductUnitStatus.SOLD);
+
+        // B: the customer trades it back in. Before buy-back this was
+        // 409 "IMEI already exists in inventory".
+        const saleB = await buyBack(ctx);
+        let units = await unitsOf(IMEI_A);
+        expect(units).toHaveLength(2);
+        // U1 (sold on A) is history and was not touched.
+        expect(units[0]).toEqual(u1Sold);
+        // U2 is a new acquisition on the used SKU at the trade-in cost.
+        const [paymentB] = (await paymentsOf(saleB.id)).filter(
+          (p) => p.payment_method === PaymentMethod.TRADE_IN,
+        );
+        expect(units[1]).toMatchObject({
+          status: ProductUnitStatus.IN_STOCK,
+          product_id: ctx.usedProduct.id,
+          buying_price: '60000.00',
+          selling_price: '75000.00',
+          phone_purchase_id: paymentB.trade_in_phone_purchase_id,
+        });
+        const u2 = units[1];
+
+        // A's line still points at U1 with its original snapshots.
+        const [lineA] = await linesOf(saleA.id);
+        expect(lineA).toMatchObject({
+          product_unit_id: u1.id,
+          product_id: newSerialized.id,
+          imei_snapshot: IMEI_A,
+          cost_price_snapshot: '85000.00',
+        });
+
+        // C: the bought-back phone is resold (addLine picks the live U2).
+        const saleC = await resellTradeIn(ctx, IMEI_A);
+        const [lineC] = await linesOf(saleC.id);
+        expect(lineC).toMatchObject({
+          product_unit_id: u2.id,
+          product_id: ctx.usedProduct.id,
+          unit_price: '75000.00',
+          cost_price_snapshot: '60000.00',
+        });
+
+        // D: bought back a second time.
+        await buyBack(ctx);
+        units = await unitsOf(IMEI_A);
+        expect(units.map((u) => [u.status, u.product_id])).toEqual([
+          [ProductUnitStatus.SOLD, newSerialized.id],
+          [ProductUnitStatus.SOLD, ctx.usedProduct.id],
+          [ProductUnitStatus.IN_STOCK, ctx.usedProduct.id],
+        ]);
+        // Every acquisition has its own PhonePurchase.
+        expect(
+          new Set(units.slice(1).map((u) => u.phone_purchase_id)).size,
+        ).toBe(2);
+        // Stock: new SKU sold once (1 → 0); used SKU +1 (B) −1 (C) +1 (D).
+        expect(await stockQty(newSerialized.id, ctx.branch.id)).toBe(0);
+        expect(await stockQty(ctx.usedProduct.id, ctx.branch.id)).toBe(1);
+      });
+
+      it('blocks voiding the original sale while the bought-back phone is in stock, then unwinds newest-first', async () => {
+        const ctx = await setupTradeIn();
+        const { newSerialized, unit: u1 } = await seedNewSerializedUnit(ctx);
+        const saleA = await sellNew(ctx, newSerialized.id);
+        const saleB = await buyBack(ctx);
+        const before = await unitsOf(IMEI_A);
+        const stockBefore = [
+          await stockQty(newSerialized.id, ctx.branch.id),
+          await stockQty(ctx.usedProduct.id, ctx.branch.id),
+        ];
+
+        // Void A: the phone isn't the customer's to return any more.
+        const blocked = await voidReq(ctx, saleA.id, 409);
+        expect(blocked.body.message).toMatch(/taken back into stock/);
+        expect(blocked.body.existing_unit).toMatchObject({
+          id: before[1].id,
+          status: ProductUnitStatus.IN_STOCK,
+        });
+        // Nothing moved.
+        expect(await saleStatus(saleA.id)).toBe(SaleStatus.COMPLETED);
+        expect(await unitsOf(IMEI_A)).toEqual(before);
+        expect([
+          await stockQty(newSerialized.id, ctx.branch.id),
+          await stockQty(ctx.usedProduct.id, ctx.branch.id),
+        ]).toEqual(stockBefore);
+        expect(
+          (await paymentsOf(saleA.id)).every((p) => p.reversed_at === null),
+        ).toBe(true);
+
+        // Newest first: void B (U2 → RETURNED), then A (U1 → IN_STOCK).
+        await voidReq(ctx, saleB.id);
+        await voidReq(ctx, saleA.id);
+        const after = await unitsOf(IMEI_A);
+        expect(after.map((u) => [u.id, u.status])).toEqual([
+          [u1.id, ProductUnitStatus.IN_STOCK],
+          [before[1].id, ProductUnitStatus.RETURNED],
+        ]);
+      });
+
+      it('blocks voiding the original sale while the bought-back phone is resold (SOLD on a later sale)', async () => {
+        const ctx = await setupTradeIn();
+        const { newSerialized } = await seedNewSerializedUnit(ctx);
+        const saleA = await sellNew(ctx, newSerialized.id);
+        await buyBack(ctx);
+        await resellTradeIn(ctx, IMEI_A);
+
+        const blocked = await voidReq(ctx, saleA.id, 409);
+        expect(blocked.body.existing_unit).toMatchObject({
+          status: ProductUnitStatus.SOLD,
+          product_id: ctx.usedProduct.id,
+        });
+        expect(await saleStatus(saleA.id)).toBe(SaleStatus.COMPLETED);
+      });
+
+      it('re-rings a voided trade-in: the same IMEI can be traded in again (RETURNED → new row)', async () => {
+        const ctx = await setupTradeIn();
+        const saleB = await buyBack(ctx);
+        await voidReq(ctx, saleB.id);
+        expect((await unitsOf(IMEI_A)).map((u) => u.status)).toEqual([
+          ProductUnitStatus.RETURNED,
+        ]);
+
+        // Before buy-back this was 409 forever (RETURNED blocked the IMEI).
+        const saleB2 = await buyBack(ctx);
+
+        const units = await unitsOf(IMEI_A);
+        expect(units.map((u) => u.status)).toEqual([
+          ProductUnitStatus.RETURNED,
+          ProductUnitStatus.IN_STOCK,
+        ]);
+        const [paymentB2] = await paymentsOf(saleB2.id);
+        expect(units[1].phone_purchase_id).toBe(
+          paymentB2.trade_in_phone_purchase_id,
+        );
+        expect(await stockQty(ctx.usedProduct.id, ctx.branch.id)).toBe(1);
+      });
+
+      it('still returns 409 when the IMEI is WRITTEN_OFF', async () => {
+        const ctx = await setupTradeIn();
+        const written = await seedProductUnit(
+          ctx.usedProduct.id,
+          ctx.branch.id,
+          ctx.user.id,
+          IMEI_A,
+          { status: ProductUnitStatus.WRITTEN_OFF },
+        );
+        const sale = await draftWithLine(ctx);
+
+        const response = await addTradeIn(ctx, sale.id, IMEI_A, 60000, 409);
+        expect(response.body.existing_unit).toMatchObject({
+          id: written.id,
+          status: ProductUnitStatus.WRITTEN_OFF,
+        });
+      });
+
+      it('DB: the partial unique index allows history rows but only one live row per IMEI', async () => {
+        const ctx = await setupTradeIn();
+        await seedProductUnit(
+          ctx.usedProduct.id,
+          ctx.branch.id,
+          ctx.user.id,
+          IMEI_A,
+          { status: ProductUnitStatus.SOLD },
+        );
+        await seedProductUnit(
+          ctx.usedProduct.id,
+          ctx.branch.id,
+          ctx.user.id,
+          IMEI_A,
+          { status: ProductUnitStatus.RETURNED },
+        );
+        await seedProductUnit(
+          ctx.usedProduct.id,
+          ctx.branch.id,
+          ctx.user.id,
+          IMEI_A,
+        ); // IN_STOCK
+
+        await expect(
+          seedProductUnit(
+            ctx.usedProduct.id,
+            ctx.branch.id,
+            ctx.user.id,
+            IMEI_A,
+            { status: ProductUnitStatus.WRITTEN_OFF },
+          ),
+        ).rejects.toMatchObject({
+          driverError: expect.objectContaining({
+            code: '23505',
+            constraint: 'uq_product_units_imei_live',
+          }),
+        });
+        expect(await unitsOf(IMEI_A)).toHaveLength(3);
+      });
+    });
 
     describe('TRADE_IN atomicity — crown jewels', () => {
       /**
