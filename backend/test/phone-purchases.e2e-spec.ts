@@ -700,6 +700,35 @@ describe('Phone Purchases (e2e)', () => {
       );
     });
 
+    it('rejects with 400 when selling_price is 0 (would resell for free)', async () => {
+      const { user: cashier, password } = await seedUser(
+        UserRole.CASHIER,
+        'cashier-zero-price@test.com',
+      );
+      const cookies = await loginAndGetCookies(cashier.email, password);
+      const branch = await getOrCreateMainShop();
+      const product = await seedSerializedProduct(branch.id);
+      const customer = await seedCustomer();
+
+      const response = await request(app.getHttpServer())
+        .post('/api/v1/phone-purchases')
+        .set('Cookie', cookies)
+        .send({
+          customer_id: customer.id,
+          branch_id: branch.id,
+          product_id: product.id,
+          imei: validImei(),
+          buying_price: 80000,
+          selling_price: 0,
+        })
+        .expect(400);
+
+      expect(response.body.message).toEqual(
+        expect.arrayContaining(['selling_price must not be less than 0.01']),
+      );
+      expect(await dataSource.getRepository(ProductUnit).count()).toBe(0);
+    });
+
     it('rejects with 400 when imei is malformed (contains special chars)', async () => {
       const { user: cashier, password } = await seedUser(
         UserRole.CASHIER,

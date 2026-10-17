@@ -96,7 +96,7 @@ IMEI X:  U1  new SKU   cost 85000  SOLD      ← sale A line
 - **IMEI is unique among live units (IN_STOCK, WRITTEN_OFF).** A collision returns 409 with an `existing_unit` payload. A phone we sold, or whose trade-in was voided, can be bought back as a new unit row (see "One row per acquisition" above). _Before the buy-back change, IMEI was unique across all statuses._
 - **Intake is atomic.** `POST /phone-purchases` creates the PhonePurchase, an IN_STOCK ProductUnit, and the stock increment in one transaction.
 - **Product must be serialized, active, and at the intake branch.** Non-admin cashiers can only intake at their own branch.
-- **`selling_price` is optional at intake** ("price later"). When null, a sale falls back to `Product.selling_price`.
+- **`selling_price` is optional at intake** ("price later"). When null, a sale falls back to `Product.selling_price`. When sent it must be ≥ 0.01: a stored 0 is not null, so the phone would ring up for free.
 - **`total_amount` is stored**, not derived, matching the `Sale.total` precedent and leaving room for multi-unit purchases.
 
 ### Serialized sale lines (Slice E)

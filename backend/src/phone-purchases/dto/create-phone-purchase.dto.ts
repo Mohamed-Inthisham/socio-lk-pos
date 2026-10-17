@@ -133,12 +133,14 @@ export class CreatePhonePurchaseDto {
       'ProductUnit.selling_price stays null and the sale flow falls ' +
       'back to Product.selling_price at ring-up time. Cashier sets ' +
       "this at intake when they can assess the specific unit's " +
-      'condition-adjusted price; otherwise defer to admin post-intake.',
-    minimum: 0,
+      'condition-adjusted price; otherwise defer to admin post-intake. ' +
+      'Must be >= 0.01 when sent: a stored 0 would ring the phone up ' +
+      'for free on resale (the fallback only applies to null).',
+    minimum: 0.01,
   })
   @IsOptional()
   @IsNumber({ maxDecimalPlaces: 2 })
-  @Min(0)
+  @Min(0.01)
   selling_price?: number;
 
   @ApiPropertyOptional({
