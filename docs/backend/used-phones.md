@@ -229,7 +229,6 @@ Crown-jewel atomicity tests compare the database state before and after a failed
 Tracked in [FOLLOWUPS.md](../../FOLLOWUPS.md). The ones this phase touched most:
 
 - **Stock/PU lock-ordering deadlock — priority high.** Slice G added a PU-then-Stock lock order in the voidSale trade-in loop, opposite to the outgoing loops. Postgres detects the deadlock (one side gets a 500), so nothing corrupts. The fix is global lock-target sorting across `SalesService`.
-- **A customer can be cleared from a DRAFT that has TRADE_IN payments.** `completeSale` catches it with a 400, but `PATCH /sales/:id` should reject it up front.
 - **Resale 409 payload** could include the reselling sale's id.
 - ~~**Buy-back**~~ — done: one unit row per acquisition (see ProductUnit Lifecycle). **Customer-return re-stock** is still open, and needs its own status (not RETURNED).
 - **Admin endpoint to set `ProductUnit.selling_price`** after a "price later" intake.
