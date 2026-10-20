@@ -3,10 +3,12 @@ import { fireEvent, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import PaymentDialog from ".";
 import { posTerminalState, renderWithProviders } from "../../../test/renderWithProviders";
-import { cardPayment, draftSale, saleLine } from "../../../test/posFixtures";
+import { cardPayment, customer, draftSale, saleLine, tradeInPayment } from "../../../test/posFixtures";
 import * as salesService from "../../../services/salesService";
+import * as productsService from "../../../services/productsService";
 
 vi.mock("../../../services/salesService");
+vi.mock("../../../services/productsService");
 
 // Total 2,500.00, nothing paid yet.
 const sale = draftSale({
@@ -50,20 +52,26 @@ describe("PaymentDialog", () => {
     await waitFor(() => expect(method("Cash")).toHaveFocus());
   });
 
-  // P4 Step A: TRADE_IN is defined (methods.js) but hidden until its
-  // fields land in Step B, which replaces this test.
-  it("doesn't offer Trade-in yet, and '6' does nothing", async () => {
+  it("offers six methods; '6' picks Trade-in, swaps Amount for its fields and focuses Product", async () => {
     const user = userEvent.setup();
     renderDialog();
     await waitFor(() => expect(method("Cash")).toHaveFocus());
 
-    expect(within(dialog()).getAllByRole("radio")).toHaveLength(5);
-    expect(within(dialog()).queryByRole("radio", { name: /Trade-in/ })).not.toBeInTheDocument();
+    expect(within(dialog()).getAllByRole("radio")).toHaveLength(6);
+    expect(method("Trade-in")).toHaveAttribute("aria-keyshortcuts", "6");
 
     await user.keyboard("6");
 
-    expect(method("Cash")).toBeChecked();
-    expect(method("Cash")).toHaveFocus();
+    expect(method("Trade-in")).toBeChecked();
+    await waitFor(() =>
+      expect(within(dialog()).getByRole("combobox", { name: /^Product/ })).toHaveFocus(),
+    );
+    expect(within(dialog()).queryByLabelText(/^Amount/)).not.toBeInTheDocument();
+    expect(cashReceived()).not.toBeInTheDocument();
+    expect(reference()).not.toBeInTheDocument();
+    expect(within(dialog()).getByLabelText(/^IMEI/)).toHaveValue("");
+    // Empty, not the balance (P4-5)
+    expect(within(dialog()).getByLabelText(/^Trade-in value/)).toHaveValue("");
   });
 
   it("'2' picks Card and focuses Reference; Shift+Tab reaches Amount", async () => {
@@ -454,5 +462,301 @@ describe("PaymentDialog", () => {
     );
     expect(onClose).not.toHaveBeenCalled();
     expect(submit()).toBeEnabled();
+  });
+});
+
+describe("PaymentDialog — Trade-in", () => {
+  // Total 50,000.00 with a customer; 10,000.00 already paid by card.
+  const tradeInSale = (overrides = {}) =>
+    draftSale({
+      lines: [saleLine({ line_total: "50000.00", unit_price: "50000.00" })],
+      subtotal: "50000.00",
+      total: "50000.00",
+      amount_paid: "10000.00",
+      customer_id: "cust-1",
+      customer: customer(),
+      payments: [cardPayment({ amount: "10000.00" })],
+      ...overrides,
+    });
+
+  const usedIp12 = {
+    id: "p-used-ip12",
+    name: "Used iPhone 12 128GB",
+    is_serialized: true,
+    is_active: true,
+    phone_condition: "USED",
+  };
+  const newIp12 = { id: "p-new-ip12", name: "iPhone 12 128GB", is_serialized: true, is_active: true, phone_condition: "NEW" };
+  const ip12Case = { id: "p-case", name: "iPhone 12 Case", is_serialized: false, is_active: true, phone_condition: null };
+  const inactiveIp12 = { ...usedIp12, id: "p-old", name: "Used iPhone 12 (old)", is_active: false };
+
+  // Passes Luhn; the posFixtures IMEI (354789102345678) does not.
+  const GOOD_IMEI = "354789102345675";
+  const LUHN_HINT = "Check digit doesn't match — rescan?";
+
+  const renderTradeIn = (overrides) => {
+    const onClose = vi.fn();
+    const utils = renderWithProviders(<PaymentDialog open onClose={onClose} />, {
+      preloadedState: { posTerminal: posTerminalState({ draftSale: tradeInSale(overrides) }) },
+    });
+    return { ...utils, onClose };
+  };
+
+  const product = () => within(dialog()).getByRole("combobox", { name: /^Product/ });
+  const imei = () => within(dialog()).getByLabelText(/^IMEI/);
+  const value = () => within(dialog()).getByLabelText(/^Trade-in value/);
+  const resale = () => within(dialog()).getByLabelText(/^Resale price/);
+  const notes = () => within(dialog()).getByLabelText(/^Condition notes/);
+
+  const openTradeIn = async (user) => {
+    await waitFor(() => expect(method("Cash")).toHaveFocus());
+    await user.keyboard("6");
+    await waitFor(() => expect(product()).toHaveFocus());
+  };
+
+  const pickUsedIp12 = async (user) => {
+    await user.keyboard("iphone 12");
+    await within(dialog()).findByRole("option", { name: /Used iPhone 12 128GB/ });
+    await user.keyboard("{Enter}");
+  };
+
+  beforeEach(() => {
+    productsService.listProducts.mockResolvedValue({
+      data: [newIp12, ip12Case, usedIp12, inactiveIp12],
+      meta: { total: 4 },
+    });
+  });
+
+  it("searches serialized phones at the sale's branch, used SKUs first with a badge", async () => {
+    const user = userEvent.setup();
+    renderTradeIn();
+    await openTradeIn(user);
+
+    await user.keyboard("iphone 12");
+    const options = await within(dialog()).findAllByRole("option");
+
+    expect(productsService.listProducts).toHaveBeenLastCalledWith({
+      search: "iphone 12",
+      branchId: "branch-main",
+      productType: "PHONE",
+      limit: 20,
+    });
+    // Non-serialized and inactive products are left out
+    expect(options.map((o) => o.textContent)).toEqual(["Used iPhone 12 128GBUsed", "iPhone 12 128GB"]);
+    expect(options[0]).toHaveAttribute("aria-selected", "true");
+  });
+
+  it("says to ask an admin when no serialized product matches", async () => {
+    productsService.listProducts.mockResolvedValue({ data: [ip12Case], meta: { total: 1 } });
+    const user = userEvent.setup();
+    renderTradeIn();
+    await openTradeIn(user);
+
+    await user.keyboard("iphone 12 case");
+
+    expect(
+      await within(dialog()).findByText("No used-phone product for this model. Ask an admin to add one."),
+    ).toBeInTheDocument();
+  });
+
+  it("Enter picks the product and moves to the IMEI; a scanner's Enter in the IMEI moves to the value without submitting", async () => {
+    const user = userEvent.setup();
+    renderTradeIn();
+    await openTradeIn(user);
+
+    await pickUsedIp12(user);
+
+    expect(product()).toHaveValue("Used iPhone 12 128GB");
+    expect(imei()).toHaveFocus();
+
+    await user.keyboard(`${GOOD_IMEI}{Enter}`);
+
+    expect(value()).toHaveFocus();
+    expect(salesService.addSalePayment).not.toHaveBeenCalled();
+    expect(within(dialog()).queryByText("Enter the trade-in value")).not.toBeInTheDocument();
+  });
+
+  it("Esc closes the product list but not the dialog", async () => {
+    const user = userEvent.setup();
+    const { onClose } = renderTradeIn();
+    await openTradeIn(user);
+
+    await user.keyboard("iphone 12");
+    await within(dialog()).findAllByRole("option");
+    await user.keyboard("{Escape}");
+
+    expect(within(dialog()).queryByRole("listbox")).not.toBeInTheDocument();
+    expect(onClose).not.toHaveBeenCalled();
+    expect(dialog()).toBeInTheDocument();
+  });
+
+  it("typing after a pick clears the product", async () => {
+    const user = userEvent.setup();
+    renderTradeIn();
+    await openTradeIn(user);
+    await pickUsedIp12(user);
+
+    await user.click(product());
+    await user.keyboard("{Backspace}");
+    await user.click(submit());
+
+    expect(await within(dialog()).findByText("Pick the trade-in product")).toBeInTheDocument();
+  });
+
+  it("records the trade-in: value sent as amount and buying price, the pending row named after the product", async () => {
+    let resolvePayment;
+    salesService.addSalePayment.mockImplementation(
+      () => new Promise((resolve) => { resolvePayment = resolve; }),
+    );
+    const user = userEvent.setup();
+    const { onClose, store } = renderTradeIn();
+    await openTradeIn(user);
+    await pickUsedIp12(user);
+
+    await user.keyboard(`${GOOD_IMEI}{Enter}`);
+    await user.keyboard("35000");
+    await user.type(resale(), "52000");
+    await user.type(notes(), "  Battery 89%, no box  {Enter}");
+
+    await waitFor(() => expect(salesService.addSalePayment).toHaveBeenCalledTimes(1));
+    expect(salesService.addSalePayment).toHaveBeenCalledWith("sale-1", {
+      payment_method: "TRADE_IN",
+      amount: 35000,
+      trade_in_product_id: "p-used-ip12",
+      trade_in_imei: GOOD_IMEI,
+      trade_in_buying_price: 35000,
+      trade_in_selling_price: 52000,
+      trade_in_notes: "Battery 89%, no box",
+    });
+    expect(store.getState().posTerminal.pendingPayments).toEqual([
+      expect.objectContaining({
+        payment_method: "TRADE_IN",
+        trade_in_product: { id: "p-used-ip12", name: "Used iPhone 12 128GB" },
+      }),
+    ]);
+
+    resolvePayment(tradeInSale({ amount_paid: "45000.00" }));
+    await waitFor(() => expect(onClose).toHaveBeenCalledTimes(1));
+  });
+
+  it("requires product, IMEI and value, and caps the value at the balance due (P4-4)", async () => {
+    const user = userEvent.setup();
+    renderTradeIn();
+    await openTradeIn(user);
+
+    await user.click(submit());
+
+    expect(await within(dialog()).findByText("Pick the trade-in product")).toBeInTheDocument();
+    expect(within(dialog()).getByText("Enter the IMEI")).toBeInTheDocument();
+    expect(within(dialog()).getByText("Enter the trade-in value")).toBeInTheDocument();
+    // The first field in error, on screen, gets focus
+    await waitFor(() => expect(product()).toHaveFocus());
+
+    await user.type(value(), "40000.01");
+    await user.click(submit());
+
+    expect(
+      await within(dialog()).findByText(
+        /^Trade-in value can't exceed the balance due \(LKR\s40,000\.00\)\. Add items, or record the phone purchase separately\.$/,
+      ),
+    ).toBeInTheDocument();
+    expect(salesService.addSalePayment).not.toHaveBeenCalled();
+  });
+
+  it("blocks an IMEI already on another trade-in on this sale", async () => {
+    const user = userEvent.setup();
+    renderTradeIn({
+      amount_paid: "20000.00",
+      payments: [cardPayment({ amount: "10000.00" }), tradeInPayment({ amount: "10000.00", trade_in_imei: GOOD_IMEI })],
+    });
+    await openTradeIn(user);
+    await pickUsedIp12(user);
+
+    await user.keyboard(`${GOOD_IMEI}{Enter}20000`);
+    await user.click(submit());
+
+    expect(
+      await within(dialog()).findByText("This IMEI is already on another trade-in on this sale"),
+    ).toBeInTheDocument();
+    expect(salesService.addSalePayment).not.toHaveBeenCalled();
+  });
+
+  it("hints at a misscan when a 15-digit IMEI fails the check digit, but still records it", async () => {
+    salesService.addSalePayment.mockResolvedValue(tradeInSale({ amount_paid: "30000.00" }));
+    const user = userEvent.setup();
+    const { onClose } = renderTradeIn();
+    await openTradeIn(user);
+    await pickUsedIp12(user);
+
+    await user.keyboard("354789102345678");
+    expect(within(dialog()).getByText(LUHN_HINT)).toBeInTheDocument();
+
+    await user.clear(imei());
+    await user.keyboard(GOOD_IMEI);
+    expect(within(dialog()).queryByText(LUHN_HINT)).not.toBeInTheDocument();
+
+    await user.clear(imei());
+    await user.keyboard("354789102345678{Enter}20000{Enter}");
+
+    await waitFor(() => expect(onClose).toHaveBeenCalledTimes(1));
+    expect(salesService.addSalePayment).toHaveBeenCalledWith(
+      "sale-1",
+      expect.objectContaining({ trade_in_imei: "354789102345678" }),
+    );
+  });
+
+  it("warns, without blocking, when the resale price is below the trade-in value (P4-6)", async () => {
+    const user = userEvent.setup();
+    renderTradeIn();
+    await openTradeIn(user);
+
+    await user.type(value(), "30000");
+    await user.type(resale(), "29999.99");
+    expect(within(dialog()).getByText("Below the trade-in value")).toBeInTheDocument();
+
+    await user.clear(resale());
+    await user.type(resale(), "30000");
+    expect(within(dialog()).queryByText("Below the trade-in value")).not.toBeInTheDocument();
+  });
+
+  it.each([
+    ["IN_STOCK", { id: "u-1", status: "IN_STOCK" }, "Already in stock: the shop holds a phone with this IMEI."],
+    ["WRITTEN_OFF", { id: "u-1", status: "WRITTEN_OFF" }, "This IMEI is on a written-off phone. Ask a manager to check it."],
+    ["no unit", null, "This IMEI is already in inventory."],
+  ])("shows a 409 (%s) on the IMEI field and clears it when the IMEI changes", async (_, unit, message) => {
+    salesService.addSalePayment.mockRejectedValue(
+      Object.assign(new Error("conflict"), {
+        response: { status: 409, data: { message: "IMEI already exists", existing_unit: unit } },
+      }),
+    );
+    const user = userEvent.setup();
+    const { onClose } = renderTradeIn();
+    await openTradeIn(user);
+    await pickUsedIp12(user);
+
+    await user.keyboard(`${GOOD_IMEI}{Enter}20000{Enter}`);
+
+    expect(await within(dialog()).findByText(message)).toBeInTheDocument();
+    expect(within(dialog()).queryByRole("alert")).not.toBeInTheDocument();
+    expect(onClose).not.toHaveBeenCalled();
+
+    await user.type(imei(), "1");
+    expect(within(dialog()).queryByText(message)).not.toBeInTheDocument();
+  });
+
+  it("shows other server errors in the dialog's alert", async () => {
+    salesService.addSalePayment.mockRejectedValue(
+      Object.assign(new Error("bad"), {
+        response: { status: 400, data: { message: "Trade-in product is inactive" } },
+      }),
+    );
+    const user = userEvent.setup();
+    renderTradeIn();
+    await openTradeIn(user);
+    await pickUsedIp12(user);
+
+    await user.keyboard(`${GOOD_IMEI}{Enter}20000{Enter}`);
+
+    expect(await within(dialog()).findByRole("alert")).toHaveTextContent("Trade-in product is inactive");
   });
 });

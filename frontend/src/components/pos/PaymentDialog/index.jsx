@@ -9,6 +9,8 @@ import Button from "../../common/Button";
 import InputField from "../../common/InputField";
 import CashFields from "./CashFields";
 import ReferenceFields from "./ReferenceFields";
+import TradeInFields from "./TradeInFields";
+import { tradeInImeiConflict } from "./tradeIn";
 import { PAYMENT_METHODS, referenceHint } from "./methods";
 import { formatLKR, fromCents } from "../../../utils/money";
 import {
@@ -26,6 +28,7 @@ import {
   selectDraftSale,
   selectPaidTotal,
   selectPaymentError,
+  selectTradeInImeis,
 } from "../../../store/slices/posTerminalSlice";
 
 /**
@@ -35,10 +38,11 @@ import {
  * Opened by the Totals panel's "Pay LKR X" button or F4.
  *
  * - Header: the server's total, already paid, and balance due.
- * - Method picker (radio group): Cash, Card, Bank transfer, Koko,
- *   Mintpay. It opens on Cash (§6) with the picker focused. Number keys
- *   1–5 (when focus isn't in a text field, P3-8) pick a method AND move
- *   focus to its primary field — Cash received, or Reference number — so
+ * - Method picker (radio group, 3×2 below `sm`, one row above): Cash,
+ *   Card, Bank transfer, Koko, Mintpay, Trade-in. It opens on Cash (§6)
+ *   with the picker focused. Number keys 1–6 (when focus isn't in a text
+ *   field, P3-8, P4-1) pick a method AND move focus to its primary
+ *   field — Cash received, Reference number, or the trade-in Product — so
  *   a cash sale is F4 → 1 → type cash → Enter. Clicks and arrow keys
  *   change the method but leave focus on the picker. Shift+Tab from the
  *   primary field reaches Amount.
@@ -48,13 +52,18 @@ import {
  *   (cash received − amount, in cents). Short cash shows its error as
  *   soon as it's typed and disables Record payment. The other methods
  *   show a reference number (ReferenceFields).
- * - Enter in a text field submits. Handled here rather than left to the
+ * - TRADE_IN (P4) swaps Amount for TradeInFields: product, IMEI,
+ *   Trade-in value (sent as the amount), resale price, notes. The picked
+ *   product row is kept here so the pending payment row can name it. A
+ *   409 on the IMEI shows on that field (by existing_unit.status).
+ * - Enter in a text field submits, unless a field already handled it
+ *   (the trade-in IMEI and product move focus on instead, P4-7). Handled here rather than left to the
  *   browser's implicit submission: the submit button sits in the dialog
  *   footer (joined by its `form` attribute), and an explicit handler
  *   also honours the short-cash block.
  *
  * Validation: react-hook-form + paymentSchema (zod), rebuilt against the
- * current balance. Submit dispatches addPayment; on success the dialog
+ * current balance and this sale's trade-in IMEIs. Submit dispatches addPayment; on success the dialog
  * closes and `afterLeave` hands focus back to the scan bar. On failure
  * it stays open and shows the slice's paymentError inline. It can't be
  * dismissed mid-request.
@@ -82,12 +91,10 @@ const Figure = ({ label, value, testId, strong = false }) => (
 const isTextField = (el) =>
   el?.tagName === "TEXTAREA" || (el?.tagName === "INPUT" && el.type !== "radio");
 
-const primaryField = (method) => (method === CASH ? "cash_received" : "reference_number");
+const PRIMARY_FIELDS = { [CASH]: "cash_received", [TRADE_IN]: "trade_in_product_id" };
+const primaryField = (method) => PRIMARY_FIELDS[method] ?? "reference_number";
 
-// P4 Step A (temporary): TRADE_IN is in methods.js, but its fields
-// arrive in Step B, which removes this filter.
-const PICKER_METHODS = PAYMENT_METHODS.filter((m) => m.value !== TRADE_IN);
-
+// In on-screen order.
 const METHOD_FIELDS = [
   "cash_received",
   "reference_number",
@@ -97,6 +104,7 @@ const METHOD_FIELDS = [
   "trade_in_selling_price",
   "trade_in_notes",
 ];
+const FIELD_ORDER = ["amount", ...METHOD_FIELDS];
 
 const PaymentDialog = ({ open, onClose, afterLeave }) => {
   const dispatch = useDispatch();
@@ -105,13 +113,18 @@ const PaymentDialog = ({ open, onClose, afterLeave }) => {
   const paid = useSelector(selectPaidTotal);
   const balance = useSelector(selectBalanceDue);
   const error = useSelector(selectPaymentError);
+  const tradeInImeis = useSelector(selectTradeInImeis);
+  // The picked trade-in product row (the form only holds its id).
+  const [tradeInProduct, setTradeInProduct] = useState(null);
 
-  // The resolver reads the live balance, so the upper bound never goes
-  // stale. Validation runs on submit (an event), after this effect.
+  // The resolver reads the live balance and trade-in IMEIs, so they never
+  // go stale. Validation runs on submit (an event), after this effect.
   const balanceRef = useRef(balance);
+  const tradeInImeisRef = useRef(tradeInImeis);
   useEffect(() => {
     balanceRef.current = balance;
-  }, [balance]);
+    tradeInImeisRef.current = tradeInImeis;
+  }, [balance, tradeInImeis]);
 
   const {
     control,
@@ -124,8 +137,14 @@ const PaymentDialog = ({ open, onClose, afterLeave }) => {
     formState: { errors, isSubmitting },
   } = useForm({
     defaultValues: paymentFormDefaults(balance),
+    // react-hook-form focuses by registration order, and the trade-in
+    // product (a Controller) registers after the IMEI; focusFirstError
+    // uses the on-screen order instead.
+    shouldFocusError: false,
     resolver: (values, context, options) =>
-      zodResolver(buildPaymentSchema(balanceRef.current))(values, context, options),
+      zodResolver(
+        buildPaymentSchema(balanceRef.current, { tradeInImeis: tradeInImeisRef.current }),
+      )(values, context, options),
   });
 
   // Fresh form each time it opens: Cash, amount = the balance due now.
@@ -139,6 +158,7 @@ const PaymentDialog = ({ open, onClose, afterLeave }) => {
   const [amountValue, cashValue] = useWatch({ control, name: ["amount", "cash_received"] });
   const changeCents = method === CASH ? computeChangeCents(amountValue, cashValue) : null;
   const cashShort = changeCents !== null && changeCents < 0;
+  const imeiConflict = method === TRADE_IN ? tradeInImeiConflict(error) : null;
 
   // A number key asks for its method's primary field to be focused. The
   // field may only mount on the next render (Cash ↔ reference swap), so
@@ -157,7 +177,7 @@ const PaymentDialog = ({ open, onClose, afterLeave }) => {
   };
 
   const handleKeyDown = (event) => {
-    if (event.altKey || event.ctrlKey || event.metaKey) return;
+    if (event.defaultPrevented || event.altKey || event.ctrlKey || event.metaKey) return;
     if (isTextField(event.target)) {
       if (event.key === "Enter" && event.target.tagName === "INPUT") {
         // Always cancel the browser's own implicit submission, so one
@@ -167,7 +187,7 @@ const PaymentDialog = ({ open, onClose, afterLeave }) => {
       }
       return;
     }
-    const picked = PICKER_METHODS.find((m) => m.key === event.key);
+    const picked = PAYMENT_METHODS.find((m) => m.key === event.key);
     if (picked && !isSubmitting) {
       event.preventDefault();
       pickMethod(picked.value);
@@ -182,8 +202,15 @@ const PaymentDialog = ({ open, onClose, afterLeave }) => {
   };
 
   const onSubmit = async (values) => {
-    const result = await dispatch(addPayment(buildPaymentPayload(values)));
+    const payload = buildPaymentPayload(values);
+    if (payload.payment_method === TRADE_IN) payload.trade_in_product = tradeInProduct;
+    const result = await dispatch(addPayment(payload));
     if (addPayment.fulfilled.match(result)) onClose();
+  };
+
+  const focusFirstError = (fieldErrors) => {
+    const first = FIELD_ORDER.find((name) => fieldErrors[name]);
+    if (first) setFocus(first);
   };
 
   // One submission at a time. isSubmitting is render state, so a second
@@ -196,7 +223,7 @@ const PaymentDialog = ({ open, onClose, afterLeave }) => {
       return;
     }
     submittingRef.current = true;
-    return handleSubmit(onSubmit)(event).finally(() => {
+    return handleSubmit(onSubmit, focusFirstError)(event).finally(() => {
       submittingRef.current = false;
     });
   };
@@ -207,7 +234,11 @@ const PaymentDialog = ({ open, onClose, afterLeave }) => {
       onClose={handleClose}
       title="Take payment"
       dismissible={!isSubmitting}
-      afterLeave={afterLeave}
+      afterLeave={() => {
+        // Cleared once closed, so the next open starts without a product.
+        setTradeInProduct(null);
+        afterLeave?.();
+      }}
       footer={
         <>
           <Button variant="secondary" label="Cancel" onClick={handleClose} disabled={isSubmitting} />
@@ -241,9 +272,9 @@ const PaymentDialog = ({ open, onClose, afterLeave }) => {
           onChange={pickMethod}
           disabled={isSubmitting}
           aria-label="Payment method"
-          className="grid grid-cols-3 sm:grid-cols-5 gap-2"
+          className="grid grid-cols-3 sm:grid-cols-6 gap-2"
         >
-          {PICKER_METHODS.map(({ value, label, icon: Icon, key }) => (
+          {PAYMENT_METHODS.map(({ value, label, icon: Icon, key }) => (
             <Radio
               key={value}
               value={value}
@@ -279,19 +310,37 @@ const PaymentDialog = ({ open, onClose, afterLeave }) => {
           ))}
         </RadioGroup>
 
-        <InputField
-          label="Amount"
-          required
-          inputMode="decimal"
-          autoComplete="off"
-          hint={`Balance due ${formatLKR(balance)}`}
-          error={errors.amount?.message}
-          disabled={isSubmitting}
-          {...register("amount")}
-          name="amount"
-        />
+        {method !== TRADE_IN && (
+          <InputField
+            label="Amount"
+            required
+            inputMode="decimal"
+            autoComplete="off"
+            hint={`Balance due ${formatLKR(balance)}`}
+            error={errors.amount?.message}
+            disabled={isSubmitting}
+            {...register("amount")}
+            name="amount"
+          />
+        )}
 
-        {method === CASH ? (
+        {method === TRADE_IN ? (
+          <TradeInFields
+            control={control}
+            register={register}
+            errors={errors}
+            setFocus={setFocus}
+            branchId={sale?.branch_id}
+            product={tradeInProduct}
+            onPickProduct={setTradeInProduct}
+            balance={balance}
+            imeiConflict={imeiConflict}
+            onImeiEdit={() => {
+              if (imeiConflict) dispatch(clearPaymentError());
+            }}
+            disabled={isSubmitting}
+          />
+        ) : method === CASH ? (
           <CashFields
             register={register}
             error={errors.cash_received?.message}
@@ -308,7 +357,7 @@ const PaymentDialog = ({ open, onClose, afterLeave }) => {
           />
         )}
 
-        {error && (
+        {error && !imeiConflict && (
           <p role="alert" className="flex items-start gap-2 text-sm text-red-600 dark:text-red-400">
             <AlertCircle size={16} aria-hidden="true" className="flex-shrink-0 mt-0.5" />
             {error.message}
