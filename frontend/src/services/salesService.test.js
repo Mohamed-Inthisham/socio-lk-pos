@@ -1,6 +1,11 @@
 import { vi } from "vitest";
 import api from "./api";
-import { addSalePayment, removeSalePayment } from "./salesService";
+import {
+  COMPLETE_TIMEOUT_MS,
+  addSalePayment,
+  completeSale,
+  removeSalePayment,
+} from "./salesService";
 
 vi.mock("./api", () => ({
   default: { get: vi.fn(), post: vi.fn(), patch: vi.fn(), delete: vi.fn() },
@@ -36,5 +41,31 @@ describe("salesService payments", () => {
     await expect(
       addSalePayment("sale-1", { payment_method: "CARD", amount: 500 }),
     ).rejects.toBe(error);
+  });
+});
+
+describe("salesService completeSale", () => {
+  beforeEach(() => {
+    vi.resetAllMocks();
+  });
+
+  it("posts with no body and its own 30 s timeout, returning the completed sale", async () => {
+    const sale = { id: "sale-1", status: "COMPLETED", sale_number: "INV-20261020-0001" };
+    api.post.mockResolvedValue({ data: sale });
+
+    await expect(completeSale("sale-1")).resolves.toEqual(sale);
+    expect(COMPLETE_TIMEOUT_MS).toBe(30000);
+    expect(api.post).toHaveBeenCalledWith("/sales/sale-1/complete", undefined, {
+      timeout: 30000,
+    });
+  });
+
+  it("propagates request errors to the caller", async () => {
+    const error = Object.assign(new Error("timeout of 30000ms exceeded"), {
+      code: "ECONNABORTED",
+    });
+    api.post.mockRejectedValue(error);
+
+    await expect(completeSale("sale-1")).rejects.toBe(error);
   });
 });

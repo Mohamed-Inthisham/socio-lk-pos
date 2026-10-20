@@ -17,6 +17,9 @@ import {
   addLine,
   addPayment,
   attachCustomer,
+  clearCompleteError,
+  clearPosTerminal,
+  completeSale,
   createAndAttachCustomer,
   detachCustomer,
   discardDraftSale,
@@ -27,9 +30,13 @@ import {
   saveCustomerNic,
   selectAttachedCustomer,
   selectBalanceDue,
+  selectCanComplete,
   selectCartLines,
   selectCartSyncing,
+  selectCompleteError,
   selectHasTradeInPayment,
+  selectIsCompleting,
+  selectLastCompletedSale,
   selectIsFullyPaid,
   selectPaidTotal,
   selectPayments,
@@ -799,5 +806,440 @@ describe("posTerminal payment selectors", () => {
     };
 
     expect(selectHasTradeInPayment(state)).toBe(expected);
+  });
+});
+
+describe("posTerminal complete (P5)", () => {
+  const paidSale = (overrides = {}) =>
+    draftSale({
+      lines: [saleLine()],
+      subtotal: "1500.00",
+      total: "1500.00",
+      amount_paid: "1500.00",
+      change_due: "500.00",
+      payments: [cashPayment()],
+      ...overrides,
+    });
+  const completedSale = (overrides = {}) =>
+    paidSale({
+      status: "COMPLETED",
+      sale_number: "INV-20261020-0001",
+      completed_at: "2026-10-20T09:15:00.000Z",
+      ...overrides,
+    });
+  const timeoutError = () =>
+    Object.assign(new Error("timeout of 30000ms exceeded"), { code: "ECONNABORTED" });
+
+  const paidStore = async (sale = paidSale()) => {
+    const { store, ready } = readyStore(sale);
+    await ready;
+    return store;
+  };
+
+  it("completes: keeps the sale as lastCompletedSale, clears the draft and its pointer", async () => {
+    const store = await paidStore();
+    salesService.completeSale.mockResolvedValue(completedSale());
+
+    const result = await store.dispatch(completeSale());
+
+    expect(completeSale.fulfilled.match(result)).toBe(true);
+    expect(salesService.completeSale).toHaveBeenCalledWith("sale-1");
+    expect(salesService.getSale).not.toHaveBeenCalled();
+    const { posTerminal } = store.getState();
+    expect(posTerminal.status).toBe("completed");
+    expect(posTerminal.draftSale).toBeNull();
+    expect(posTerminal.draftSaleId).toBeNull();
+    expect(selectLastCompletedSale(store.getState())).toEqual(completedSale());
+    expect(selectCompleteError(store.getState())).toBeNull();
+    expect(useTerminalSessionStore.getState().draftSaleId).toBeNull();
+    expect(useTerminalSessionStore.getState().lastCompletedSaleId).toBe("sale-1");
+  });
+
+  it("is 'completing' while the request is in flight and refuses a second run", async () => {
+    const store = await paidStore();
+    const request = deferred();
+    salesService.completeSale.mockReturnValue(request.promise);
+
+    const first = store.dispatch(completeSale());
+    expect(selectIsCompleting(store.getState())).toBe(true);
+    expect(selectCanComplete(store.getState())).toBe(false);
+
+    const second = await store.dispatch(completeSale());
+    expect(second.meta.condition).toBe(true);
+
+    request.resolve(completedSale());
+    await first;
+
+    expect(salesService.completeSale).toHaveBeenCalledTimes(1);
+    expect(store.getState().posTerminal.status).toBe("completed");
+  });
+
+  it("refuses to run without an open draft", async () => {
+    const store = createTestStore();
+
+    const result = await store.dispatch(completeSale());
+
+    expect(result.meta.condition).toBe(true);
+    expect(salesService.completeSale).not.toHaveBeenCalled();
+  });
+
+  it("waits for a queued cart edit before completing", async () => {
+    const store = await paidStore();
+    const removal = deferred();
+    salesService.removeSalePayment.mockReturnValue(removal.promise);
+    salesService.getSale.mockResolvedValue(paidSale());
+    salesService.completeSale.mockResolvedValue(completedSale());
+
+    const removing = store.dispatch(removePayment({ paymentId: "pay-cash" }));
+    const completing = store.dispatch(completeSale());
+    await Promise.resolve();
+    expect(salesService.completeSale).not.toHaveBeenCalled();
+
+    removal.resolve();
+    await removing;
+    await completing;
+
+    expect(salesService.completeSale).toHaveBeenCalledTimes(1);
+    expect(salesService.removeSalePayment.mock.invocationCallOrder[0]).toBeLessThan(
+      salesService.completeSale.mock.invocationCallOrder[0],
+    );
+  });
+
+  describe("lost answer: re-fetch the sale (P5-7)", () => {
+    it.each([
+      ["no response", () => new Error("Network Error")],
+      ["a timeout", timeoutError],
+      ["a 5xx", () => httpError(500, "Internal server error")],
+      [
+        "E2 (already completed)",
+        () => httpError(400, "Cannot complete a COMPLETED sale. Only DRAFT sales can be completed."),
+      ],
+    ])("after %s, a COMPLETED sale counts as success", async (_, makeError) => {
+      const store = await paidStore();
+      salesService.completeSale.mockRejectedValue(makeError());
+      salesService.getSale.mockResolvedValue(completedSale());
+
+      const result = await store.dispatch(completeSale());
+
+      expect(completeSale.fulfilled.match(result)).toBe(true);
+      expect(salesService.getSale).toHaveBeenCalledWith("sale-1");
+      expect(store.getState().posTerminal.status).toBe("completed");
+      expect(selectLastCompletedSale(store.getState()).sale_number).toBe("INV-20261020-0001");
+      expect(useTerminalSessionStore.getState().draftSaleId).toBeNull();
+      expect(useTerminalSessionStore.getState().lastCompletedSaleId).toBe("sale-1");
+    });
+
+    it("a sale still in DRAFT is an error the cashier can retry; the draft stays", async () => {
+      const store = await paidStore();
+      salesService.completeSale.mockRejectedValueOnce(timeoutError());
+      salesService.getSale.mockResolvedValue(paidSale());
+
+      const result = await store.dispatch(completeSale());
+
+      expect(completeSale.rejected.match(result)).toBe(true);
+      expect(store.getState().posTerminal.status).toBe("ready");
+      expect(store.getState().posTerminal.draftSale).not.toBeNull();
+      expect(selectCompleteError(store.getState())).toMatchObject({
+        kind: "timeout",
+        reconcile: true,
+      });
+      expect(useTerminalSessionStore.getState().draftSaleId).toBe("sale-1");
+
+      // Retry: the same thunk runs again from "ready"
+      salesService.completeSale.mockResolvedValueOnce(completedSale());
+      await store.dispatch(completeSale());
+
+      expect(salesService.completeSale).toHaveBeenCalledTimes(2);
+      expect(store.getState().posTerminal.status).toBe("completed");
+      expect(selectCompleteError(store.getState())).toBeNull();
+    });
+
+    it.each([
+      ["was voided", () => Promise.resolve(completedSale({ status: "VOIDED" }))],
+      ["is gone (404)", () => Promise.reject(httpError(404, "Sale not found"))],
+    ])("a sale that %s → gone", async (_, getSale) => {
+      const store = await paidStore();
+      salesService.completeSale.mockRejectedValue(httpError(500, "Internal server error"));
+      salesService.getSale.mockImplementation(getSale);
+
+      await store.dispatch(completeSale());
+
+      expect(store.getState().posTerminal.status).toBe("gone");
+      expect(store.getState().posTerminal.draftSaleId).toBeNull();
+      expect(selectCompleteError(store.getState())).toMatchObject({ kind: "server", gone: true });
+      expect(useTerminalSessionStore.getState().draftSaleId).toBeNull();
+      expect(useTerminalSessionStore.getState().lastCompletedSaleId).toBeNull();
+    });
+
+    it("when the re-fetch fails too, the error is 'unconfirmed' and the draft stays", async () => {
+      const store = await paidStore();
+      salesService.completeSale.mockRejectedValue(new Error("Network Error"));
+      salesService.getSale.mockRejectedValue(new Error("Network Error"));
+
+      await store.dispatch(completeSale());
+
+      expect(store.getState().posTerminal.status).toBe("ready");
+      expect(selectCompleteError(store.getState())).toMatchObject({
+        kind: "network",
+        unconfirmed: true,
+      });
+      expect(useTerminalSessionStore.getState().draftSaleId).toBe("sale-1");
+    });
+  });
+
+  describe("definite failures: no re-fetch", () => {
+    it("E1: 404 → gone", async () => {
+      const store = await paidStore();
+      salesService.completeSale.mockRejectedValue(httpError(404, "Sale not found"));
+
+      await store.dispatch(completeSale());
+
+      expect(salesService.getSale).not.toHaveBeenCalled();
+      expect(store.getState().posTerminal.status).toBe("gone");
+      expect(selectCompleteError(store.getState())).toMatchObject({ kind: "not_found", gone: true });
+      expect(useTerminalSessionStore.getState().draftSaleId).toBeNull();
+    });
+
+    it("E5: out of stock keeps the draft and carries the line, product and figures", async () => {
+      const store = await paidStore();
+      salesService.completeSale.mockRejectedValue(
+        Object.assign(new Error("Conflict"), {
+          response: {
+            status: 409,
+            data: {
+              message: 'Insufficient stock for "USB-C Cable 1m": requested 1, available 0',
+              product_id: "p-cable",
+              sale_line_id: "line-1",
+            },
+          },
+        }),
+      );
+
+      const result = await store.dispatch(completeSale());
+
+      expect(completeSale.rejected.match(result)).toBe(true);
+      expect(salesService.getSale).not.toHaveBeenCalled();
+      expect(store.getState().posTerminal.status).toBe("ready");
+      expect(selectCompleteError(store.getState())).toMatchObject({
+        kind: "out_of_stock",
+        product_id: "p-cable",
+        sale_line_id: "line-1",
+        requested: 1,
+        available: 0,
+      });
+      expect(useTerminalSessionStore.getState().draftSaleId).toBe("sale-1");
+    });
+
+    it("E6: resolves the line selling the unit that was sold elsewhere", async () => {
+      const store = await paidStore(
+        paidSale({
+          lines: [
+            saleLine(),
+            saleLine({ id: "line-2", product_unit_id: "unit-7", imei_snapshot: "354789102345678" }),
+          ],
+        }),
+      );
+      salesService.completeSale.mockRejectedValue(
+        Object.assign(new Error("Conflict"), {
+          response: {
+            status: 409,
+            data: {
+              message: "Cannot sell IMEI '354789102345678': status is SOLD, expected IN_STOCK.",
+              existing_unit: { id: "unit-7", status: "SOLD" },
+            },
+          },
+        }),
+      );
+
+      await store.dispatch(completeSale());
+
+      expect(selectCompleteError(store.getState())).toMatchObject({
+        kind: "unit_sold",
+        imei: "354789102345678",
+        sale_line_id: "line-2",
+      });
+    });
+
+    it("E10: a trade-in IMEI collision names the payment", async () => {
+      const store = await paidStore();
+      salesService.completeSale.mockRejectedValue(
+        Object.assign(new Error("Conflict"), {
+          response: {
+            status: 409,
+            data: {
+              message: "IMEI already exists in inventory",
+              imei: "354789102345678",
+              payment_id: "pay-ti",
+              existing_unit: { id: "unit-9", status: "IN_STOCK" },
+            },
+          },
+        }),
+      );
+
+      await store.dispatch(completeSale());
+
+      expect(selectCompleteError(store.getState())).toMatchObject({
+        kind: "trade_in_imei_in_stock",
+        imei: "354789102345678",
+        payment_id: "pay-ti",
+      });
+      expect(store.getState().posTerminal.status).toBe("ready");
+    });
+
+    it("E8: a missing NIC is its own kind; clearCompleteError dismisses it", async () => {
+      const store = await paidStore();
+      salesService.completeSale.mockRejectedValue(httpError(400, "A trade-in needs the customer's NIC"));
+
+      await store.dispatch(completeSale());
+      expect(selectCompleteError(store.getState()).kind).toBe("nic_required");
+
+      store.dispatch(clearCompleteError());
+      expect(selectCompleteError(store.getState())).toBeNull();
+    });
+  });
+
+  describe("sale edits are refused while completing and after (no request, no 'gone')", () => {
+    const mutations = [
+      ["addLine (a scan)", () => addLine({ product: cableProduct }), () => salesService.addSaleLine],
+      ["updateLineQty", () => updateLineQty({ lineId: "line-1", quantity: 2 }), () => salesService.updateSaleLine],
+      ["removeLine", () => removeLine({ lineId: "line-1" }), () => salesService.removeSaleLine],
+      [
+        "addPayment",
+        () => addPayment({ payment_method: "CASH", amount: 100, cash_received: 100 }),
+        () => salesService.addSalePayment,
+      ],
+      ["removePayment", () => removePayment({ paymentId: "pay-cash" }), () => salesService.removeSalePayment],
+      ["attachCustomer", () => attachCustomer({ customer: customer() }), () => salesService.updateSale],
+      ["detachCustomer", () => detachCustomer(), () => salesService.updateSale],
+      [
+        "createAndAttachCustomer",
+        () => createAndAttachCustomer({ name: "Nimal", phone: "0771112223" }),
+        () => customersService.createCustomer,
+      ],
+      ["saveCustomerNic", () => saveCustomerNic({ nic: "199012345678" }), () => customersService.updateCustomer],
+      ["discardDraftSale", () => discardDraftSale({ branchId: "branch-main" }), () => salesService.discardSale],
+    ];
+
+    const expectRefused = async (store, makeAction, request, expectedStatus) => {
+      const before = store.getState().posTerminal;
+
+      const result = await store.dispatch(makeAction());
+
+      expect(result.meta.condition).toBe(true);
+      expect(request()).not.toHaveBeenCalled();
+      const after = store.getState().posTerminal;
+      expect(after.status).toBe(expectedStatus);
+      expect(after.status).not.toBe("gone");
+      expect(after.pendingLines).toEqual(before.pendingLines);
+      expect(after.pendingPayments).toEqual(before.pendingPayments);
+      expect(after.lineError).toBeNull();
+      expect(after.paymentError).toBeNull();
+      expect(after.customerError).toBeNull();
+    };
+
+    it.each(mutations)("%s while completing", async (_, makeAction, request) => {
+      const store = await paidStore(paidSale({ customer: customer() }));
+      const completing = deferred();
+      salesService.completeSale.mockReturnValue(completing.promise);
+      const run = store.dispatch(completeSale());
+
+      await expectRefused(store, makeAction, request, "completing");
+
+      completing.resolve(completedSale());
+      await run;
+      expect(store.getState().posTerminal.status).toBe("completed");
+    });
+
+    it.each(mutations)("%s after completed (before the next draft)", async (_, makeAction, request) => {
+      const store = await paidStore(paidSale({ customer: customer() }));
+      salesService.completeSale.mockResolvedValue(completedSale());
+      await store.dispatch(completeSale());
+
+      await expectRefused(store, makeAction, request, "completed");
+      expect(selectLastCompletedSale(store.getState()).id).toBe("sale-1");
+    });
+
+    it("edits work again once the next draft is open", async () => {
+      const store = await paidStore();
+      salesService.completeSale.mockResolvedValue(completedSale());
+      await store.dispatch(completeSale());
+      salesService.createSale.mockResolvedValue(draftSale({ id: "sale-2" }));
+      await store.dispatch(ensureDraftSale({ branchId: "branch-main" }));
+      salesService.addSaleLine.mockResolvedValue(draftSale({ id: "sale-2", lines: [saleLine()] }));
+
+      await store.dispatch(addLine({ product: cableProduct }));
+
+      expect(salesService.addSaleLine).toHaveBeenCalledWith("sale-2", {
+        product_id: cableProduct.id,
+        quantity: 1,
+      });
+      expect(store.getState().posTerminal.status).toBe("ready");
+    });
+  });
+
+  describe("Reprint last receipt pointer (P5-12)", () => {
+    it("survives discarding the next draft, and is replaced by the next completion", async () => {
+      const store = await paidStore();
+      salesService.completeSale.mockResolvedValueOnce(completedSale());
+      await store.dispatch(completeSale());
+
+      salesService.createSale.mockResolvedValue(draftSale({ id: "sale-2" }));
+      await store.dispatch(ensureDraftSale({ branchId: "branch-main" }));
+      salesService.discardSale.mockResolvedValue();
+      salesService.createSale.mockResolvedValue(draftSale({ id: "sale-3" }));
+      await store.dispatch(discardDraftSale({ branchId: "branch-main" }));
+
+      expect(useTerminalSessionStore.getState().draftSaleId).toBe("sale-3");
+      expect(useTerminalSessionStore.getState().lastCompletedSaleId).toBe("sale-1");
+      // The completed sale stays available while the next draft opens
+      expect(selectLastCompletedSale(store.getState()).id).toBe("sale-1");
+    });
+
+    it("is dropped on logout (store clear) with the draft pointer", () => {
+      useTerminalSessionStore.getState().setDraftSaleId("sale-2");
+      useTerminalSessionStore.getState().setLastCompletedSaleId("sale-1");
+
+      useTerminalSessionStore.getState().clear();
+
+      expect(useTerminalSessionStore.getState().draftSaleId).toBeNull();
+      expect(useTerminalSessionStore.getState().lastCompletedSaleId).toBeNull();
+    });
+
+    it("clearPosTerminal (logout) drops lastCompletedSale and completeError", async () => {
+      const store = await paidStore();
+      salesService.completeSale.mockResolvedValue(completedSale());
+      await store.dispatch(completeSale());
+
+      store.dispatch(clearPosTerminal());
+
+      expect(selectLastCompletedSale(store.getState())).toBeNull();
+      expect(selectCompleteError(store.getState())).toBeNull();
+    });
+  });
+
+  describe("selectCanComplete", () => {
+    const stateWith = (posTerminal) => ({
+      posTerminal: {
+        status: "ready",
+        draftSale: paidSale(),
+        pendingLines: [],
+        busyLineIds: [],
+        pendingPayments: [],
+        removingPaymentIds: [],
+        ...posTerminal,
+      },
+    });
+
+    it.each([
+      ["a fully paid open draft", {}, true],
+      ["a balance left", { draftSale: paidSale({ amount_paid: "1000.00" }) }, false],
+      ["an empty cart", { draftSale: paidSale({ lines: [] }) }, false],
+      ["a payment in flight", { pendingPayments: [cashPayment({ id: "pending-1" })] }, false],
+      ["a line being edited", { busyLineIds: ["line-1"] }, false],
+      ["completing", { status: "completing" }, false],
+      ["a gone draft", { status: "gone" }, false],
+    ])("with %s → %s", (_, posTerminal, expected) => {
+      expect(selectCanComplete(stateWith(posTerminal))).toBe(expected);
+    });
   });
 });

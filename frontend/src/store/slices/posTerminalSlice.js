@@ -6,6 +6,7 @@ import {
 import {
   addSaleLine,
   addSalePayment,
+  completeSale as completeSaleRequest,
   createSale,
   discardSale,
   getSale,
@@ -26,6 +27,7 @@ import {
 import { listStock } from "../../services/stockService";
 import useTerminalSessionStore from "../zustand/terminalSessionStore";
 import { fromCents, toCents } from "../../utils/money";
+import { COMPLETE_ERROR, classifyCompleteError } from "../../utils/completeErrors";
 
 /**
  * POS Terminal Slice
@@ -83,6 +85,14 @@ import { fromCents, toCents } from "../../utils/money";
  * A pending TRADE_IN row carries its trade_in_* fields and the picked
  * product (P4), so it reads like the server's row.
  *
+ * COMPLETE (P5):
+ * completeSale moves "ready" → "completing" → "completed" (or back to
+ * "ready" with completeError, or "gone"). It runs at most once at a time
+ * and resolves a lost answer by re-fetching the sale (planning doc P5-7);
+ * failures are classified into kinds (utils/completeErrors.js, P5-8). On
+ * success the draft pointer is cleared and the sale is kept as
+ * lastCompletedSale, its id persisted for "Reprint last receipt" (P5-12).
+ *
  * ORDERING:
  * Line, customer and payment mutations run one at a time through
  * `enqueue`, so fast consecutive scans reach the server in order and an
@@ -129,6 +139,16 @@ const hydrate = (sale) => ({ lines: [], payments: [], ...sale });
 
 const session = () => useTerminalSessionStore.getState();
 
+// While the sale is being completed, and after it is (until the next
+// draft opens), no edit may reach it: a request against a COMPLETED sale
+// would come back "Only DRAFT sales are mutable" and drop the terminal
+// into "gone". Every sale mutation thunk uses this as its `condition`, so
+// the dispatch is refused at once — no request, no pending row, no
+// rejected action. (P5 step A review)
+const SALE_LOCKED = ["completing", "completed"];
+const saleOpen = (_, { getState }) =>
+  !SALE_LOCKED.includes(getState().posTerminal.status);
+
 // ---------------------------------------------------------------------------
 // Thunks — draft lifecycle
 // ---------------------------------------------------------------------------
@@ -161,7 +181,7 @@ export const ensureDraftSale = createAsyncThunk(
           // silently start a second draft.
           if (error?.response?.status !== 404) throw error;
         }
-        session().clear();
+        session().clearDraftSaleId();
       }
       return await createDraft(branchId);
     } catch (error) {
@@ -197,7 +217,7 @@ export const discardDraftSale = createAsyncThunk(
       });
     }
     try {
-      session().clear();
+      session().clearDraftSaleId();
       return await createDraft(branchId);
     } catch (error) {
       return rejectWithValue({
@@ -208,7 +228,7 @@ export const discardDraftSale = createAsyncThunk(
   },
   {
     condition: (_, { getState }) =>
-      !["loading", "discarding"].includes(getState().posTerminal.status),
+      !["loading", "discarding", ...SALE_LOCKED].includes(getState().posTerminal.status),
   },
 );
 
@@ -277,7 +297,7 @@ const saleMutation = (fallback, run, stockProductId) => async (arg, { dispatch, 
     return sale;
   } catch (error) {
     const err = toError(error, fallback);
-    if (err.gone) session().clear();
+    if (err.gone) session().clearDraftSaleId();
     return rejectWithValue(err);
   }
 };
@@ -297,6 +317,7 @@ export const addLine = createAsyncThunk(
     }),
     ({ product }) => product.id,
   ),
+  { condition: saleOpen },
 );
 
 /** arg: { lineId, quantity } */
@@ -307,6 +328,7 @@ export const updateLineQty = createAsyncThunk(
     (saleId, { lineId, quantity }) => updateSaleLine(saleId, lineId, { quantity }),
     ({ lineId }, sale) => sale.lines.find((l) => l.id === lineId)?.product_id,
   ),
+  { condition: saleOpen },
 );
 
 /** arg: { lineId } — DELETE is 204, so re-fetch the sale. */
@@ -316,6 +338,7 @@ export const removeLine = createAsyncThunk(
     await removeSaleLine(saleId, lineId);
     return getSale(saleId);
   }),
+  { condition: saleOpen },
 );
 
 // ---------------------------------------------------------------------------
@@ -339,6 +362,7 @@ export const attachCustomer = createAsyncThunk(
   saleMutation("Couldn't attach the customer", (saleId, { customer }) =>
     updateSale(saleId, { customer_id: customer.id }),
   ),
+  { condition: saleOpen },
 );
 
 /**
@@ -351,7 +375,8 @@ export const detachCustomer = createAsyncThunk(
     updateSale(saleId, { customer_id: null }),
   ),
   {
-    condition: (_, { getState }) => !hasTradeInPayment(getState().posTerminal),
+    condition: (arg, api) =>
+      saleOpen(arg, api) && !hasTradeInPayment(api.getState().posTerminal),
   },
 );
 
@@ -386,6 +411,8 @@ export const createAndAttachCustomer = createAsyncThunk(
     }
     return result.payload;
   },
+  // Refused before the customer is created, not just before the attach.
+  { condition: saleOpen },
 );
 
 /**
@@ -409,6 +436,7 @@ export const saveCustomerNic = createAsyncThunk(
       });
     }
   },
+  { condition: saleOpen },
 );
 
 // ---------------------------------------------------------------------------
@@ -429,6 +457,7 @@ export const addPayment = createAsyncThunk(
     delete body.trade_in_product;
     return addSalePayment(saleId, body);
   }),
+  { condition: saleOpen },
 );
 
 /** arg: { paymentId } — DELETE is 204, so re-fetch the sale. */
@@ -438,6 +467,83 @@ export const removePayment = createAsyncThunk(
     await removeSalePayment(saleId, paymentId);
     return getSale(saleId);
   }),
+  { condition: saleOpen },
+);
+
+// ---------------------------------------------------------------------------
+// Thunks — complete (P5)
+// ---------------------------------------------------------------------------
+
+// E6 names the phone's unit; the line selling that unit is the one to point at.
+const withLineForUnit = (err, sale) => {
+  if (err.kind !== COMPLETE_ERROR.UNIT_SOLD || !err.existing_unit) return err;
+  const line = sale?.lines?.find((l) => l.product_unit_id === err.existing_unit.id);
+  return { ...err, sale_line_id: line?.id ?? null };
+};
+
+/**
+ * Complete the draft (P5-7). No arg.
+ *
+ * Runs once at a time: the `condition` only lets it start from "ready",
+ * so a second dispatch while "completing" (double click, F9 + Enter) is
+ * refused without a request. It is queued behind any line / payment edit
+ * still in flight, and the recovery below runs inside the same queued
+ * task, so nothing can change the sale in between.
+ *
+ * The backend completes at most once, so a lost answer is resolved by
+ * asking: on no response, a timeout, a 5xx or E2 ("Cannot complete a
+ * COMPLETED sale") it re-fetches the sale —
+ * - COMPLETED → fulfilled with that sale, as if the answer had arrived
+ * - DRAFT → rejected with the error; completing again is safe
+ * - VOIDED or 404 → rejected with `gone: true` (as for any vanished draft)
+ * - the re-fetch fails too → rejected with `unconfirmed: true`; completing
+ *   again is still safe (it either completes or gets E2 and recovers)
+ *
+ * Rejections carry the classified error (utils/completeErrors.js). On
+ * success the draft pointer is cleared and the sale becomes
+ * `lastCompletedSale` (its id persisted for "Reprint last receipt");
+ * opening the next draft is the terminal's job (P5-10).
+ */
+export const completeSale = createAsyncThunk(
+  "posTerminal/completeSale",
+  async (_, { getState, rejectWithValue }) => {
+    const saleId = getState().posTerminal.draftSaleId;
+    const outcome = await enqueue(async () => {
+      try {
+        return { sale: await completeSaleRequest(saleId) };
+      } catch (error) {
+        const err = withLineForUnit(
+          classifyCompleteError(error),
+          getState().posTerminal.draftSale,
+        );
+        if (err.kind === COMPLETE_ERROR.NOT_FOUND) return { error: { ...err, gone: true } };
+        if (!err.reconcile) return { error: err };
+        try {
+          const sale = await getSale(saleId);
+          if (sale.status === "COMPLETED") return { sale };
+          if (sale.status === "DRAFT") return { error: err };
+          return { error: { ...err, gone: true } };
+        } catch (fetchError) {
+          if (fetchError?.response?.status === 404) return { error: { ...err, gone: true } };
+          return { error: { ...err, unconfirmed: true } };
+        }
+      }
+    });
+
+    if (outcome.error) {
+      if (outcome.error.gone) session().clearDraftSaleId();
+      return rejectWithValue(outcome.error);
+    }
+    session().clearDraftSaleId();
+    session().setLastCompletedSaleId(outcome.sale.id);
+    return outcome.sale;
+  },
+  {
+    condition: (_, { getState }) => {
+      const { status, draftSaleId } = getState().posTerminal;
+      return status === "ready" && !!draftSaleId;
+    },
+  },
 );
 
 // ---------------------------------------------------------------------------
@@ -494,7 +600,8 @@ export const searchProducts = createAsyncThunk(
 const initialState = {
   draftSaleId: null,
   draftSale: null,
-  // Draft lifecycle: idle | loading | ready | discarding | error | gone
+  // Draft lifecycle: idle | loading | ready | discarding | completing |
+  // completed | error | gone
   status: "idle",
   // Draft lifecycle error: { message, status } | null
   error: null,
@@ -530,6 +637,10 @@ const initialState = {
   removingPaymentIds: [],
   // Last payment mutation error: { message, status } | null
   paymentError: null,
+  // The sale this terminal last completed (P5-9, P5-12)
+  lastCompletedSale: null,
+  // Last complete failure, classified (utils/completeErrors.js) | null
+  completeError: null,
 };
 
 const markBusy = (state, lineId) => {
@@ -656,6 +767,9 @@ const posTerminalSlice = createSlice({
     },
     clearPaymentError: (state) => {
       state.paymentError = null;
+    },
+    clearCompleteError: (state) => {
+      state.completeError = null;
     },
     clearScan: (state) => {
       state.scanState = "idle";
@@ -826,6 +940,34 @@ const posTerminalSlice = createSlice({
         applyPaymentRejection(state, action.payload, "Couldn't remove the payment");
       })
 
+      // Complete (P5-7) — the cart stays on screen while "completing"
+      .addCase(completeSale.pending, (state) => {
+        state.status = "completing";
+        state.completeError = null;
+      })
+      .addCase(completeSale.fulfilled, (state, action) => {
+        state.status = "completed";
+        state.lastCompletedSale = action.payload;
+        state.draftSale = null;
+        state.draftSaleId = null;
+        state.pendingLines = [];
+        state.busyLineIds = [];
+        state.lineError = null;
+        state.pendingPayments = [];
+        state.removingPaymentIds = [];
+        state.paymentError = null;
+      })
+      .addCase(completeSale.rejected, (state, action) => {
+        state.completeError = action.payload || {
+          kind: COMPLETE_ERROR.REJECTED,
+          message: "Couldn't complete the sale",
+          status: null,
+          reconcile: false,
+        };
+        state.status = "ready";
+        markGone(state, action.payload);
+      })
+
       // Stock
       .addCase(refreshStock.fulfilled, (state, action) => {
         const { productId } = action.meta.arg;
@@ -888,6 +1030,7 @@ export const {
   clearLineError,
   clearCustomerError,
   clearPaymentError,
+  clearCompleteError,
   clearScan,
 } = posTerminalSlice.actions;
 
@@ -1030,5 +1173,23 @@ export const selectCanPay = (state) =>
  */
 export const selectReadyToComplete = (state) =>
   state.posTerminal.status === "ready" && selectIsFullyPaid(state);
+
+/**
+ * The Complete sale button and F9 (P5-3, P5-4): fully paid per the
+ * server, and no line / payment mutation in flight (the totals are about
+ * to change).
+ */
+export const selectCanComplete = (state) =>
+  selectReadyToComplete(state) && !selectCartSyncing(state);
+
+export const selectIsCompleting = (state) =>
+  state.posTerminal.status === "completing";
+
+/** Classified complete failure (utils/completeErrors.js), or null. */
+export const selectCompleteError = (state) => state.posTerminal.completeError;
+
+/** The sale this terminal last completed (hydrated), or null. */
+export const selectLastCompletedSale = (state) =>
+  state.posTerminal.lastCompletedSale;
 
 export default posTerminalSlice.reducer;
