@@ -6,9 +6,11 @@ import { posTerminalState, renderWithProviders } from "../../../test/renderWithP
 import { cardPayment, customer, draftSale, saleLine, tradeInPayment } from "../../../test/posFixtures";
 import * as salesService from "../../../services/salesService";
 import * as productsService from "../../../services/productsService";
+import * as customersService from "../../../services/customersService";
 
 vi.mock("../../../services/salesService");
 vi.mock("../../../services/productsService");
+vi.mock("../../../services/customersService");
 
 // Total 2,500.00, nothing paid yet.
 const sale = draftSale({
@@ -18,10 +20,10 @@ const sale = draftSale({
   amount_paid: "0.00",
 });
 
-const renderDialog = (props = {}) => {
+const renderDialog = (props = {}, draftSale = sale) => {
   const onClose = vi.fn();
   const utils = renderWithProviders(<PaymentDialog open onClose={onClose} {...props} />, {
-    preloadedState: { posTerminal: posTerminalState({ draftSale: sale }) },
+    preloadedState: { posTerminal: posTerminalState({ draftSale }) },
   });
   return { ...utils, onClose };
 };
@@ -54,7 +56,8 @@ describe("PaymentDialog", () => {
 
   it("offers six methods; '6' picks Trade-in, swaps Amount for its fields and focuses Product", async () => {
     const user = userEvent.setup();
-    renderDialog();
+    // A trade-in needs a customer with an NIC (P4-2, P4-13)
+    renderDialog({}, { ...sale, customer_id: "cust-1", customer: customer() });
     await waitFor(() => expect(method("Cash")).toHaveFocus());
 
     expect(within(dialog()).getAllByRole("radio")).toHaveLength(6);
@@ -462,6 +465,108 @@ describe("PaymentDialog", () => {
     );
     expect(onClose).not.toHaveBeenCalled();
     expect(submit()).toBeEnabled();
+  });
+});
+
+describe("PaymentDialog — Trade-in customer and NIC (P4-2, P4-13)", () => {
+  const withCustomer = (overrides) => ({ ...sale, customer_id: "cust-1", customer: customer(overrides) });
+  const panelTitle = (name) => within(dialog()).getByRole("region", { name });
+  const nicField = () => within(dialog()).getByLabelText(/^Customer NIC/);
+
+  const pickTradeIn = async (user) => {
+    await waitFor(() => expect(method("Cash")).toHaveFocus());
+    await user.keyboard("6");
+  };
+
+  it("without a customer: shows the attach panel, focuses Attach customer, and blocks Record payment", async () => {
+    const user = userEvent.setup();
+    const onAttachCustomer = vi.fn();
+    renderDialog({ onAttachCustomer });
+    await pickTradeIn(user);
+
+    expect(panelTitle("Trade-in needs a customer")).toBeInTheDocument();
+    const attach = within(dialog()).getByRole("button", { name: "Attach customer" });
+    await waitFor(() => expect(attach).toHaveFocus());
+    expect(within(dialog()).queryByLabelText(/^Amount/)).not.toBeInTheDocument();
+    expect(within(dialog()).queryByLabelText(/^IMEI/)).not.toBeInTheDocument();
+    expect(submit()).toBeDisabled();
+
+    await user.click(attach);
+    expect(onAttachCustomer).toHaveBeenCalledTimes(1);
+    expect(salesService.addSalePayment).not.toHaveBeenCalled();
+  });
+
+  it("opened on Trade-in (initialMethod), focuses Product when the customer has an NIC", async () => {
+    renderDialog({ initialMethod: "TRADE_IN" }, withCustomer());
+
+    expect(await screen.findByRole("radio", { name: "Trade-in" })).toBeChecked();
+    await waitFor(() =>
+      expect(within(dialog()).getByRole("combobox", { name: /^Product/ })).toHaveFocus(),
+    );
+  });
+
+  it("opened on Trade-in with no customer, focuses Attach customer", async () => {
+    renderDialog({ initialMethod: "TRADE_IN" });
+
+    await waitFor(() =>
+      expect(within(dialog()).getByRole("button", { name: "Attach customer" })).toHaveFocus(),
+    );
+  });
+
+  it("a customer without an NIC: shows the NIC panel focused, blocks Record payment, and rejects a short NIC", async () => {
+    const user = userEvent.setup();
+    renderDialog({}, withCustomer({ nic: null }));
+    await pickTradeIn(user);
+
+    expect(panelTitle("Trade-in needs the customer's NIC")).toBeInTheDocument();
+    expect(within(dialog()).getByText("Kamal Perera has no NIC on file. Add it to take the phone.")).toBeInTheDocument();
+    await waitFor(() => expect(nicField()).toHaveFocus());
+    expect(submit()).toBeDisabled();
+
+    // Enter saves the NIC (never the payment) — 4 characters is too short
+    await user.keyboard("1990{Enter}");
+    expect(within(dialog()).getByText("NIC must be 5–20 characters.")).toBeInTheDocument();
+    expect(customersService.updateCustomer).not.toHaveBeenCalled();
+    expect(salesService.addSalePayment).not.toHaveBeenCalled();
+  });
+
+  it("saves a valid NIC and swaps the panel for the trade-in fields", async () => {
+    customersService.updateCustomer.mockResolvedValue(customer({ nic: "199012345678" }));
+    const user = userEvent.setup();
+    const { store } = renderDialog({}, withCustomer({ nic: null }));
+    await pickTradeIn(user);
+    await waitFor(() => expect(nicField()).toHaveFocus());
+
+    await user.keyboard(" 199012345678 {Enter}");
+
+    await waitFor(() =>
+      expect(within(dialog()).getByRole("combobox", { name: /^Product/ })).toHaveFocus(),
+    );
+    expect(customersService.updateCustomer).toHaveBeenCalledWith("cust-1", { nic: "199012345678" });
+    expect(store.getState().posTerminal.draftSale.customer.nic).toBe("199012345678");
+    expect(within(dialog()).queryByRole("region", { name: "Trade-in needs the customer's NIC" })).not.toBeInTheDocument();
+    expect(submit()).toBeEnabled();
+    expect(salesService.addSalePayment).not.toHaveBeenCalled();
+  });
+
+  it("shows an NIC that belongs to another customer inline", async () => {
+    customersService.updateCustomer.mockRejectedValue(
+      Object.assign(new Error("conflict"), {
+        response: { status: 409, data: { message: "A customer with NIC X already exists", existing_customer_id: "cust-2" } },
+      }),
+    );
+    const user = userEvent.setup();
+    renderDialog({}, withCustomer({ nic: null }));
+    await pickTradeIn(user);
+    await waitFor(() => expect(nicField()).toHaveFocus());
+
+    await user.keyboard("199012345678");
+    await user.click(within(dialog()).getByRole("button", { name: "Save NIC" }));
+
+    expect(
+      await within(dialog()).findByText("This NIC is on file for another customer. Check it, or change the customer."),
+    ).toBeInTheDocument();
+    expect(panelTitle("Trade-in needs the customer's NIC")).toBeInTheDocument();
   });
 });
 

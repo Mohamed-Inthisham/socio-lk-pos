@@ -34,6 +34,9 @@ import { attachCustomer } from "../../../store/slices/posTerminalSlice";
  *
  * PROPS:
  * - open, onClose
+ * - onAttached: a customer was attached (picked, created, or the
+ *   existing NIC holder used) — called just before onClose, so the
+ *   terminal can tell it apart from a cancel (P4-2 attach-then-return)
  * - afterLeave: runs once the close transition ends (focus hand-off)
  */
 
@@ -43,7 +46,7 @@ export const CUSTOMER_SEARCH_LIMIT = 10;
 
 const isPhoneLike = (value) => /^\+?[\d\s-]+$/.test(value);
 
-const CustomerAttachDialog = ({ open, onClose, afterLeave }) => {
+const CustomerAttachDialog = ({ open, onClose, onAttached, afterLeave }) => {
   const dispatch = useDispatch();
   const listId = useId();
   const requestSeq = useRef(0);
@@ -109,6 +112,7 @@ const CustomerAttachDialog = ({ open, onClose, afterLeave }) => {
 
   const pick = (customer) => {
     dispatch(attachCustomer({ customer }));
+    onAttached?.();
     onClose();
   };
 
@@ -252,7 +256,10 @@ const CustomerAttachDialog = ({ open, onClose, afterLeave }) => {
         <CustomerCreateForm
           initialValues={createInitialValues}
           onBack={() => setMode("search")}
-          onDone={onClose}
+          onDone={() => {
+            onAttached?.();
+            onClose();
+          }}
           onBusyChange={setBusy}
         />
       )}

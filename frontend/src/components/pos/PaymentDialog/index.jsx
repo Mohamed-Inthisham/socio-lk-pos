@@ -9,8 +9,9 @@ import Button from "../../common/Button";
 import InputField from "../../common/InputField";
 import CashFields from "./CashFields";
 import ReferenceFields from "./ReferenceFields";
+import TradeInCustomerPanel from "./TradeInCustomerPanel";
 import TradeInFields from "./TradeInFields";
-import { tradeInImeiConflict } from "./tradeIn";
+import { tradeInBlocker, tradeInImeiConflict } from "./tradeIn";
 import { PAYMENT_METHODS, referenceHint } from "./methods";
 import { formatLKR, fromCents } from "../../../utils/money";
 import {
@@ -24,6 +25,7 @@ import {
 import {
   addPayment,
   clearPaymentError,
+  selectAttachedCustomer,
   selectBalanceDue,
   selectDraftSale,
   selectPaidTotal,
@@ -56,20 +58,29 @@ import {
  *   Trade-in value (sent as the amount), resale price, notes. The picked
  *   product row is kept here so the pending payment row can name it. A
  *   409 on the IMEI shows on that field (by existing_unit.status).
+ * - TRADE_IN without a customer (P4-2), or with a customer who has no
+ *   NIC (P4-13), shows TradeInCustomerPanel instead, and Record payment
+ *   is disabled until it's resolved.
  * - Enter in a text field submits, unless a field already handled it
- *   (the trade-in IMEI and product move focus on instead, P4-7). Handled here rather than left to the
- *   browser's implicit submission: the submit button sits in the dialog
- *   footer (joined by its `form` attribute), and an explicit handler
- *   also honours the short-cash block.
+ *   (the trade-in IMEI and product move focus on, P4-7; the NIC field
+ *   saves the NIC). Handled here rather than left to the browser's
+ *   implicit submission: the submit button sits in the dialog footer
+ *   (joined by its `form` attribute), and an explicit handler also
+ *   honours the short-cash and trade-in blocks.
  *
  * Validation: react-hook-form + paymentSchema (zod), rebuilt against the
- * current balance and this sale's trade-in IMEIs. Submit dispatches addPayment; on success the dialog
- * closes and `afterLeave` hands focus back to the scan bar. On failure
- * it stays open and shows the slice's paymentError inline. It can't be
- * dismissed mid-request.
+ * current balance and this sale's trade-in IMEIs. Submit dispatches
+ * addPayment; on success the dialog closes and `afterLeave` hands focus
+ * back to the scan bar. On failure it stays open and shows the slice's
+ * paymentError inline. It can't be dismissed mid-request.
  *
  * PROPS:
  * - open, onClose
+ * - initialMethod: the method it opens on (default CASH; F6 and the
+ *   return from attaching a customer open it on TRADE_IN, with that
+ *   method's primary control focused)
+ * - onAttachCustomer: the no-customer panel's Attach customer — the
+ *   terminal closes this dialog, attaches, then reopens it on TRADE_IN
  * - afterLeave: runs once the close transition ends (focus hand-off to
  *   the scan bar)
  */
@@ -106,10 +117,13 @@ const METHOD_FIELDS = [
 ];
 const FIELD_ORDER = ["amount", ...METHOD_FIELDS];
 
-const PaymentDialog = ({ open, onClose, afterLeave }) => {
+const PaymentDialog = ({ open, onClose, initialMethod = CASH, onAttachCustomer, afterLeave }) => {
   const dispatch = useDispatch();
   const formId = useId();
   const sale = useSelector(selectDraftSale);
+  const customer = useSelector(selectAttachedCustomer);
+  // The trade-in panel's primary control (Attach customer / NIC field).
+  const panelActionRef = useRef(null);
   const paid = useSelector(selectPaidTotal);
   const balance = useSelector(selectBalanceDue);
   const error = useSelector(selectPaymentError);
@@ -147,27 +161,38 @@ const PaymentDialog = ({ open, onClose, afterLeave }) => {
       )(values, context, options),
   });
 
-  // Fresh form each time it opens: Cash, amount = the balance due now.
+  // A number key (or opening on a method other than Cash) asks for that
+  // method's primary control to be focused. It may only mount on the
+  // next render (method swap, trade-in panel), so the focus happens in
+  // an effect. A fresh object re-triggers it even when the same key is
+  // pressed twice.
+  const [focusRequest, setFocusRequest] = useState(null);
   useEffect(() => {
-    if (!open) return;
-    reset(paymentFormDefaults(balanceRef.current));
+    if (!focusRequest) return;
+    // The trade-in panel, when shown, stands in for the trade-in fields.
+    if (focusRequest.method === TRADE_IN && panelActionRef.current) panelActionRef.current.focus();
+    else setFocus(primaryField(focusRequest.method));
+  }, [focusRequest, setFocus]);
+
+  // Fresh form each time it opens: initialMethod (Cash unless told
+  // otherwise), amount = the balance due now.
+  useEffect(() => {
+    if (!open) return undefined;
+    reset({ ...paymentFormDefaults(balanceRef.current), payment_method: initialMethod });
     dispatch(clearPaymentError());
-  }, [open, reset, dispatch]);
+    if (initialMethod === CASH) return undefined;
+    // After the Dialog's own initial focus (the picker).
+    const timer = setTimeout(() => setFocusRequest({ method: initialMethod }), 0);
+    return () => clearTimeout(timer);
+  }, [open, initialMethod, reset, dispatch]);
 
   const method = useWatch({ control, name: "payment_method" });
   const [amountValue, cashValue] = useWatch({ control, name: ["amount", "cash_received"] });
   const changeCents = method === CASH ? computeChangeCents(amountValue, cashValue) : null;
   const cashShort = changeCents !== null && changeCents < 0;
   const imeiConflict = method === TRADE_IN ? tradeInImeiConflict(error) : null;
-
-  // A number key asks for its method's primary field to be focused. The
-  // field may only mount on the next render (Cash ↔ reference swap), so
-  // the focus happens in an effect. A fresh object re-triggers it even
-  // when the same key is pressed twice.
-  const [focusRequest, setFocusRequest] = useState(null);
-  useEffect(() => {
-    if (focusRequest) setFocus(focusRequest.field);
-  }, [focusRequest, setFocus]);
+  const tradeInBlocked = method === TRADE_IN ? tradeInBlocker(customer) : null;
+  const submitBlocked = cashShort || !!tradeInBlocked;
 
   const pickMethod = (value) => {
     if (value === method) return;
@@ -183,7 +208,7 @@ const PaymentDialog = ({ open, onClose, afterLeave }) => {
         // Always cancel the browser's own implicit submission, so one
         // Enter can't submit twice; submitForm guards re-entry.
         event.preventDefault();
-        if (!cashShort) event.currentTarget.requestSubmit();
+        if (!submitBlocked) event.currentTarget.requestSubmit();
       }
       return;
     }
@@ -191,7 +216,7 @@ const PaymentDialog = ({ open, onClose, afterLeave }) => {
     if (picked && !isSubmitting) {
       event.preventDefault();
       pickMethod(picked.value);
-      setFocusRequest({ field: primaryField(picked.value) });
+      setFocusRequest({ method: picked.value });
     }
   };
 
@@ -248,7 +273,7 @@ const PaymentDialog = ({ open, onClose, afterLeave }) => {
             variant="accent"
             label="Record payment"
             loading={isSubmitting}
-            disabled={cashShort}
+            disabled={submitBlocked}
           />
         </>
       }
@@ -324,7 +349,18 @@ const PaymentDialog = ({ open, onClose, afterLeave }) => {
           />
         )}
 
-        {method === TRADE_IN ? (
+        {tradeInBlocked ? (
+          <TradeInCustomerPanel
+            customer={customer}
+            onAttachCustomer={() => {
+              dispatch(clearPaymentError());
+              onAttachCustomer?.();
+            }}
+            onNicSaved={() => setFocusRequest({ method: TRADE_IN })}
+            actionRef={panelActionRef}
+            disabled={isSubmitting}
+          />
+        ) : method === TRADE_IN ? (
           <TradeInFields
             control={control}
             register={register}

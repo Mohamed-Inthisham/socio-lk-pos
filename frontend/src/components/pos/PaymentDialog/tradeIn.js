@@ -9,6 +9,19 @@ export const NO_TRADE_IN_PRODUCT =
 export const LUHN_HINT = "Check digit doesn't match — rescan?";
 export const RESALE_BELOW_VALUE_HINT = "Below the trade-in value";
 
+export const TRADE_IN_NEEDS_CUSTOMER = "Trade-in needs a customer";
+export const TRADE_IN_NEEDS_NIC = "Trade-in needs the customer's NIC";
+export const NIC_LENGTH_MESSAGE = "NIC must be 5–20 characters.";
+export const NIC_CONFLICT_MESSAGE =
+  "This NIC is on file for another customer. Check it, or change the customer.";
+
+/** P4-2 / P4-13: why the sale can't take a trade-in yet, or null when it can. */
+export const tradeInBlocker = (customer) => {
+  if (!customer) return "customer";
+  if (!customer.nic) return "nic";
+  return null;
+};
+
 export const isUsedProduct = (product) => product?.phone_condition === "USED";
 
 /**

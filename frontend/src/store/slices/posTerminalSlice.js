@@ -17,6 +17,7 @@ import {
 import {
   createCustomer,
   getCustomer,
+  updateCustomer,
 } from "../../services/customersService";
 import {
   getProductByBarcode,
@@ -70,7 +71,8 @@ import { fromCents, toCents } from "../../utils/money";
  * customer first; a NIC clash (409) rejects with the existing customer so
  * the dialog can offer to attach that one instead. Detach is refused
  * while the sale has a TRADE_IN payment, recorded or pending (Q19,
- * P4-11 — the backend rejects it, #22).
+ * P4-11 — the backend rejects it, #22). saveCustomerNic adds the NIC a
+ * trade-in needs (P4-13) to the attached customer.
  *
  * PAYMENTS (P3):
  * addPayment shows a pending row (pendingPayments) at once; the server's
@@ -383,6 +385,29 @@ export const createAndAttachCustomer = createAsyncThunk(
       return rejectWithValue({ ...result.payload, stage: "attach", customer });
     }
     return result.payload;
+  },
+);
+
+/**
+ * arg: { nic } — PATCH the attached customer's NIC (P4-13: a trade-in
+ * needs it). Queued like the sale mutations, so an older sale response
+ * can't land after it with the NIC-less customer. Fulfils with the
+ * updated customer; on a NIC clash (409) the rejection carries
+ * `existing_customer_id`. The caller shows errors (nothing is kept in
+ * customerError).
+ */
+export const saveCustomerNic = createAsyncThunk(
+  "posTerminal/saveCustomerNic",
+  async ({ nic }, { getState, rejectWithValue }) => {
+    const customerId = getState().posTerminal.draftSale?.customer?.id;
+    try {
+      return await enqueue(() => updateCustomer(customerId, { nic }));
+    } catch (error) {
+      return rejectWithValue({
+        ...toError(error, "Couldn't save the NIC"),
+        existing_customer_id: error?.response?.data?.existing_customer_id ?? null,
+      });
+    }
   },
 );
 
@@ -759,6 +784,10 @@ const posTerminalSlice = createSlice({
       })
       .addCase(createAndAttachCustomer.rejected, (state, action) => {
         customerRejected(state, action, "Couldn't create the customer");
+      })
+      .addCase(saveCustomerNic.fulfilled, (state, action) => {
+        const customer = state.draftSale?.customer;
+        if (customer?.id === action.payload.id) Object.assign(customer, action.payload);
       })
 
       // Payments — pending row on add, hide-then-restore on remove

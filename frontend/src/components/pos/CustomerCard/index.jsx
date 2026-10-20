@@ -25,10 +25,12 @@ import {
  *   "Change" (reopens the attach dialog) and "Detach" (PATCH
  *   customer_id: null, optimistic).
  *
- * TRADE_IN guard (Q19): a trade-in payment needs the customer, so Detach
- * is blocked while one exists. It uses aria-disabled rather than
- * `disabled` so it still takes hover/focus and can explain itself in a
- * tooltip. The slice refuses the detach too.
+ * TRADE_IN guard (Q19, P4-11): a trade-in payment (recorded or pending)
+ * needs the customer, so Detach and Change are both blocked while one
+ * exists (the backend rejects either, #22; F3 is guarded on the
+ * terminal). They use aria-disabled rather than `disabled` so they still
+ * take hover/focus and can explain themselves in a tooltip. The slice
+ * refuses the detach too.
  *
  * A failed attach/detach has already been rolled back by the slice; the
  * error shows here until dismissed or the next customer change.
@@ -38,7 +40,7 @@ import {
  * - disabled: the draft isn't ready (loading / gone)
  */
 
-export const TRADE_IN_DETACH_HINT = "Remove TRADE_IN payment first";
+export const TRADE_IN_CUSTOMER_HINT = "Remove the trade-in payment first";
 
 const initials = (name = "") =>
   name
@@ -57,7 +59,7 @@ const CustomerCard = ({ onAttach, disabled = false }) => {
 
   const hintId = useId();
 
-  const detachBlocked = hasTradeIn || saving || disabled;
+  const changeBlocked = hasTradeIn || saving || disabled;
 
   return (
     <section
@@ -101,28 +103,34 @@ const CustomerCard = ({ onAttach, disabled = false }) => {
             )}
           </div>
           <div className="flex flex-shrink-0 gap-1.5">
-            <Button
-              size="sm"
-              variant="secondary"
-              label="Change"
-              onClick={onAttach}
-              disabled={saving || disabled}
-            />
-            <Tooltip content={hasTradeIn ? TRADE_IN_DETACH_HINT : null} side="bottom" delay={150}>
+            <Tooltip content={hasTradeIn ? TRADE_IN_CUSTOMER_HINT : null} side="bottom" delay={150}>
+              <Button
+                size="sm"
+                variant="secondary"
+                label="Change"
+                aria-disabled={changeBlocked || undefined}
+                aria-describedby={hasTradeIn ? hintId : undefined}
+                onClick={() => {
+                  if (!changeBlocked) onAttach();
+                }}
+                className="aria-disabled:opacity-50 aria-disabled:cursor-not-allowed"
+              />
+            </Tooltip>
+            <Tooltip content={hasTradeIn ? TRADE_IN_CUSTOMER_HINT : null} side="bottom" delay={150}>
               <Button
                 size="sm"
                 variant="ghost"
                 label="Detach"
-                aria-disabled={detachBlocked || undefined}
+                aria-disabled={changeBlocked || undefined}
                 aria-describedby={hasTradeIn ? hintId : undefined}
                 onClick={() => {
-                  if (!detachBlocked) dispatch(detachCustomer());
+                  if (!changeBlocked) dispatch(detachCustomer());
                 }}
                 className="aria-disabled:opacity-50 aria-disabled:cursor-not-allowed"
               />
             </Tooltip>
             {hasTradeIn && (
-              <span id={hintId} className="sr-only">{TRADE_IN_DETACH_HINT}</span>
+              <span id={hintId} className="sr-only">{TRADE_IN_CUSTOMER_HINT}</span>
             )}
           </div>
         </div>

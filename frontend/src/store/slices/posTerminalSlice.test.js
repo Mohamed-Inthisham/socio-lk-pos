@@ -24,6 +24,7 @@ import {
   removeLine,
   removePayment,
   resetMutationQueue,
+  saveCustomerNic,
   selectAttachedCustomer,
   selectBalanceDue,
   selectCartLines,
@@ -376,6 +377,34 @@ describe("posTerminal customer", () => {
     // Settle it: the mutation queue is shared across tests.
     request.reject(httpError(500));
     await paying;
+  });
+
+  it("saves the attached customer's NIC (P4-13) and updates the card's customer", async () => {
+    const { store, ready } = readyStore(draftSale({ customer_id: "cust-1", customer: customer({ nic: null }) }));
+    await ready;
+    customersService.updateCustomer.mockResolvedValue(customer({ nic: "199012345678" }));
+
+    await store.dispatch(saveCustomerNic({ nic: "199012345678" })).unwrap();
+
+    expect(customersService.updateCustomer).toHaveBeenCalledWith("cust-1", { nic: "199012345678" });
+    expect(selectAttachedCustomer(store.getState())).toEqual(customer({ nic: "199012345678" }));
+    expect(store.getState().posTerminal.customerError).toBeNull();
+  });
+
+  it("rejects an NIC clash with the other customer's id, leaving the customer unchanged", async () => {
+    const { store, ready } = readyStore(draftSale({ customer_id: "cust-1", customer: customer({ nic: null }) }));
+    await ready;
+    customersService.updateCustomer.mockRejectedValue(
+      Object.assign(new Error("conflict"), {
+        response: { status: 409, data: { message: "A customer with NIC X already exists", existing_customer_id: "cust-2" } },
+      }),
+    );
+
+    const result = await store.dispatch(saveCustomerNic({ nic: "199012345678" }));
+
+    expect(result.payload).toMatchObject({ status: 409, existing_customer_id: "cust-2" });
+    expect(selectAttachedCustomer(store.getState()).nic).toBeNull();
+    expect(store.getState().posTerminal.customerError).toBeNull();
   });
 
   it("creates a customer, then attaches it to the sale", async () => {

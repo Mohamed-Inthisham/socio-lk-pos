@@ -86,13 +86,47 @@ describe("CustomerCard", () => {
 
     const detach = screen.getByRole("button", { name: "Detach" });
     expect(detach).toHaveAttribute("aria-disabled", "true");
-    expect(detach).toHaveAccessibleDescription("Remove TRADE_IN payment first");
+    expect(detach).toHaveAccessibleDescription("Remove the trade-in payment first");
 
     await user.hover(detach);
-    expect(await screen.findByRole("tooltip")).toHaveTextContent("Remove TRADE_IN payment first");
+    expect(await screen.findByRole("tooltip")).toHaveTextContent("Remove the trade-in payment first");
 
     await user.click(detach);
     expect(salesService.updateSale).not.toHaveBeenCalled();
     expect(screen.getByTestId("customer-name")).toHaveTextContent("Kamal Perera");
+  });
+
+  it("blocks Change with the same tooltip while a TRADE_IN payment exists (P4-11)", async () => {
+    const user = userEvent.setup();
+    const { onAttach } = renderCard(attachedSale({ payments: [tradeInPayment()] }));
+
+    const change = screen.getByRole("button", { name: "Change" });
+    expect(change).toHaveAttribute("aria-disabled", "true");
+    expect(change).toHaveAccessibleDescription("Remove the trade-in payment first");
+
+    await user.hover(change);
+    expect(await screen.findByRole("tooltip")).toHaveTextContent("Remove the trade-in payment first");
+
+    await user.click(change);
+    expect(onAttach).not.toHaveBeenCalled();
+  });
+
+  it("blocks Change and Detach while a trade-in is still pending", async () => {
+    const user = userEvent.setup();
+    const onAttach = vi.fn();
+    renderWithProviders(<CustomerCard onAttach={onAttach} />, {
+      preloadedState: {
+        posTerminal: posTerminalState({
+          draftSale: attachedSale(),
+          pendingPayments: [tradeInPayment({ id: "pending-1" })],
+        }),
+      },
+    });
+
+    await user.click(screen.getByRole("button", { name: "Change" }));
+    await user.click(screen.getByRole("button", { name: "Detach" }));
+
+    expect(onAttach).not.toHaveBeenCalled();
+    expect(salesService.updateSale).not.toHaveBeenCalled();
   });
 });

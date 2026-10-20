@@ -61,3 +61,16 @@ export const createCustomer = async (payload) => {
   const response = await api.post("/customers", payload);
   return response.data;
 };
+
+/**
+ * Update a customer (PATCH: only the fields sent change).
+ *
+ * @param {string} id - Customer UUID
+ * @param {Object} payload - e.g. { nic } (5–20 chars, or null to clear)
+ * @returns {Promise<Object>} The updated customer
+ * @throws 409 with `existing_customer_id` when the NIC is already on file
+ */
+export const updateCustomer = async (id, payload) => {
+  const response = await api.patch(`/customers/${id}`, payload);
+  return response.data;
+};
