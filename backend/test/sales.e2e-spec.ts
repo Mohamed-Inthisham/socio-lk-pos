@@ -101,6 +101,9 @@ describe('Sales (e2e)', () => {
     return { user, password };
   }
 
+  // A trade-in needs the customer's NIC (P4-13), so seeded customers
+  // have one by default; NICs are unique when set.
+  let nicSeq = 0;
   async function seedCustomer(
     overrides: Partial<Customer> = {},
   ): Promise<Customer> {
@@ -109,7 +112,7 @@ describe('Sales (e2e)', () => {
       repo.create({
         name: 'Kamal Perera',
         phone: '0771234567',
-        nic: null,
+        nic: `19900000${String(++nicSeq).padStart(4, '0')}`,
         notes: null,
         ...overrides,
       }),
@@ -4264,6 +4267,21 @@ describe('Sales (e2e)', () => {
         expect(await stockQty(ctx.usedProduct.id, ctx.branch.id)).toBe(0);
       });
 
+      it("returns 400 when the sale's customer has no NIC (P4-13), and records nothing", async () => {
+        const ctx = await setupTradeIn();
+        await dataSource
+          .getRepository(Customer)
+          .update(ctx.customer.id, { nic: null });
+        const sale = await draftWithLine(ctx);
+
+        const response = await addTradeIn(ctx, sale.id, IMEI_A, 60000, 400);
+
+        expect(response.body.message).toBe(
+          "A trade-in needs the customer's NIC",
+        );
+        expect(await paymentsOf(sale.id)).toHaveLength(0);
+      });
+
       it('returns 400 when a required trade-in field is missing', async () => {
         const ctx = await setupTradeIn();
         const sale = await draftWithLine(ctx);
@@ -4542,6 +4560,40 @@ describe('Sales (e2e)', () => {
           (p) => p.payment_method === PaymentMethod.TRADE_IN,
         );
         expect(tradeIn?.trade_in_phone_purchase_id).toBe(purchases[0].id);
+      });
+
+      it("returns 400 and rolls back fully when the customer's NIC was cleared after addPayment (P4-13)", async () => {
+        const ctx = await setupTradeIn();
+        const sale = await draftWithLine(ctx);
+        await addTradeIn(ctx, sale.id, IMEI_A, 60000);
+        await addCash(ctx, sale.id, 40000);
+
+        // The NIC is cleared on the customer between addPayment and complete.
+        await request(app.getHttpServer())
+          .patch(`/api/v1/customers/${ctx.customer.id}`)
+          .set('Cookie', ctx.cookies)
+          .send({ nic: null })
+          .expect(200);
+
+        const response = await completeReq(ctx, sale.id, 400);
+        expect(response.body.message).toBe(
+          "A trade-in needs the customer's NIC",
+        );
+
+        // Nothing committed: still DRAFT, no number, no intake, stock untouched
+        const after = await dataSource
+          .getRepository(Sale)
+          .findOneOrFail({ where: { id: sale.id } });
+        expect(after.status).toBe(SaleStatus.DRAFT);
+        expect(after.sale_number).toBeNull();
+        expect(await purchasesFor(ctx.customer.id)).toHaveLength(0);
+        expect(await unitByImei(IMEI_A)).toBeNull();
+        expect(await stockQty(ctx.usedProduct.id, ctx.branch.id)).toBe(0);
+        expect(await stockQty(ctx.newProduct.id, ctx.branch.id)).toBe(5);
+        const tradeIn = (await paymentsOf(sale.id)).find(
+          (p) => p.payment_method === PaymentMethod.TRADE_IN,
+        );
+        expect(tradeIn?.trade_in_phone_purchase_id).toBeNull();
       });
 
       it('returns 409 and rolls back fully when the IMEI was intaken elsewhere after addPayment', async () => {

@@ -72,13 +72,16 @@ describe('Phone Purchases (e2e)', () => {
     return { user, password };
   }
 
+  // A phone purchase needs the seller's NIC (P4-13), so seeded
+  // customers have one by default; NICs are unique when set.
+  let nicSeq = 0;
   async function seedCustomer(overrides: Partial<Customer> = {}) {
     const repo = dataSource.getRepository(Customer);
     return repo.save(
       repo.create({
         name: 'Kamal Perera',
         phone: '0771234567',
-        nic: null,
+        nic: `19910000${String(++nicSeq).padStart(4, '0')}`,
         notes: null,
         ...overrides,
       }),
@@ -698,6 +701,44 @@ describe('Phone Purchases (e2e)', () => {
       expect(response.body.message).toBe(
         `Product ${product.id} not found or inactive`,
       );
+    });
+
+    it('rejects with 400 when the customer has no NIC (P4-13), leaving the DB unchanged', async () => {
+      const { user: cashier, password } = await seedUser(
+        UserRole.CASHIER,
+        'cashier-no-nic@test.com',
+      );
+      const cookies = await loginAndGetCookies(cashier.email, password);
+      const branch = await getOrCreateMainShop();
+      const product = await seedSerializedProduct(branch.id);
+      const customer = await seedCustomer({ nic: null });
+      const imei = validImei();
+
+      const response = await intakeOnce(
+        cookies,
+        branch.id,
+        product.id,
+        customer.id,
+        imei,
+        80000,
+        400,
+      );
+
+      expect(response.body.message).toBe(
+        "A phone purchase needs the customer's NIC",
+      );
+      expect(
+        await dataSource
+          .getRepository(PhonePurchase)
+          .count({ where: { customer_id: customer.id } }),
+      ).toBe(0);
+      expect(
+        await dataSource.getRepository(ProductUnit).count({ where: { imei } }),
+      ).toBe(0);
+      const stock = await dataSource
+        .getRepository(Stock)
+        .findOne({ where: { product_id: product.id, branch_id: branch.id } });
+      expect(stock?.quantity ?? 0).toBe(0);
     });
 
     it('rejects with 400 when selling_price is 0 (would resell for free)', async () => {
