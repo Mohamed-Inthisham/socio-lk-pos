@@ -1,5 +1,5 @@
 import { useEffect, useId, useRef, useState } from "react";
-import { useDispatch, useSelector } from "react-redux";
+import { useDispatch, useSelector, useStore } from "react-redux";
 import { AlertCircle, Loader2, ScanBarcode, Smartphone, X } from "lucide-react";
 import ImeiPromptDialog from "../ImeiPromptDialog";
 import { formatLKR } from "../../../utils/money";
@@ -15,6 +15,7 @@ import {
   selectScanQuery,
   selectScanResults,
   selectScanState,
+  startNextSale,
 } from "../../../store/slices/posTerminalSlice";
 
 /**
@@ -38,6 +39,11 @@ import {
  * can't resolve out of order. The input clears as soon as a scan is
  * submitted, ready for the next one.
  *
+ * SALE COMPLETE (P5-10): the bar stays live under the Sale complete panel.
+ * A resolved product first starts the next sale (startNextSale: waits for
+ * the background draft) and is then added to it; Enter on the empty bar
+ * just starts the next sale. Outside that panel, adding stays immediate.
+ *
  * FOCUS: auto-focuses on mount, except on touch-only devices (coarse
  * pointer), where it would pop the on-screen keyboard (§6 "Touch").
  * `inputRef` lets the terminal re-focus it (F2, focus hand-offs). An "F2"
@@ -53,6 +59,7 @@ const isBarcodeLike = (value) =>
 
 const ScanBar = ({ branchId, disabled = false, inputRef }) => {
   const dispatch = useDispatch();
+  const store = useStore();
   const localRef = useRef(null);
   const ref = inputRef ?? localRef;
   const debounceRef = useRef(null);
@@ -101,9 +108,9 @@ const ScanBar = ({ branchId, disabled = false, inputRef }) => {
     setActive(0);
   };
 
-  const addProduct = (product) => {
-    resetInput();
-    dispatch(clearScan());
+  const saleCompleteShowing = () => store.getState().posTerminal.status === "completed";
+
+  const add = (product) => {
     if (product.is_serialized) {
       setImeiProduct(product);
       return;
@@ -112,11 +119,22 @@ const ScanBar = ({ branchId, disabled = false, inputRef }) => {
     refocus();
   };
 
+  // Returns a promise only while the Sale complete panel shows (the next
+  // sale has to open first); otherwise adds at once, as before P5.
+  const addProduct = (product) => {
+    resetInput();
+    dispatch(clearScan());
+    if (!saleCompleteShowing()) return add(product);
+    return dispatch(startNextSale()).then((started) => {
+      if (started) add(product);
+    });
+  };
+
   const submitBarcode = (barcode) => {
     resetInput();
     scanChain.current = scanChain.current.then(async () => {
       const result = await dispatch(scanBarcode({ barcode }));
-      if (scanBarcode.fulfilled.match(result)) addProduct(result.payload);
+      if (scanBarcode.fulfilled.match(result)) await addProduct(result.payload);
     });
   };
 
@@ -133,6 +151,10 @@ const ScanBar = ({ branchId, disabled = false, inputRef }) => {
       else resetInput();
     } else if (event.key === "Enter") {
       event.preventDefault();
+      if (!query && !disabled && saleCompleteShowing()) {
+        dispatch(startNextSale());
+        return;
+      }
       if (!query || disabled) return;
       if (isBarcodeLike(query)) {
         submitBarcode(query);

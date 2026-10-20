@@ -3,7 +3,7 @@ import { useDispatch, useSelector, useStore } from "react-redux";
 import { AlertCircle, AlertTriangle, Loader2 } from "lucide-react";
 import Dialog from "../../common/Dialog";
 import Button from "../../common/Button";
-import { methodLabel } from "../PaymentDialog/methods";
+import { methodLabel, tenderDetail } from "../PaymentDialog/methods";
 import TradeInCustomerPanel from "../PaymentDialog/TradeInCustomerPanel";
 import { describeCompleteError } from "./completeErrorCopy";
 import { formatLKR } from "../../../utils/money";
@@ -66,14 +66,6 @@ import {
 const CHECK_IDLE = "idle";
 const CHECK_DONE = "done";
 const CHECK_FAILED = "failed";
-
-const tenderDetail = (payment) => {
-  if (payment.payment_method === "TRADE_IN") {
-    return [payment.trade_in_product?.name, payment.trade_in_imei].filter(Boolean).join(" · ");
-  }
-  if (payment.payment_method === "CASH") return `Received ${formatLKR(payment.cash_received)}`;
-  return payment.reference_number ? `Ref ${payment.reference_number}` : null;
-};
 
 const CompleteSaleDialog = ({ open, onClose, afterLeave }) => {
   const dispatch = useDispatch();

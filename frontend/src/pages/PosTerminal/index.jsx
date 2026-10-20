@@ -10,6 +10,7 @@ import CustomerCard from "../../components/pos/CustomerCard";
 import NewSaleDialog from "../../components/pos/NewSaleDialog";
 import PaymentDialog from "../../components/pos/PaymentDialog";
 import PaymentsList from "../../components/pos/PaymentsList";
+import SaleCompletePanel from "../../components/pos/SaleCompletePanel";
 import ScanBar from "../../components/pos/ScanBar";
 import TotalsPanel from "../../components/pos/TotalsPanel";
 import useTerminalBranch from "../../hooks/useTerminalBranch";
@@ -54,6 +55,12 @@ import { CASH, TRADE_IN } from "../../schemas/paymentSchema";
  * - F9 (P5-4) opens the CompleteSaleDialog when the Complete sale button
  *   is enabled (both read selectCanComplete) and no other dialog is open.
  *   Every F9 is preventDefault-ed too: Edge opens Immersive Reader on F9.
+ *
+ * SALE COMPLETE (P5-9, P5-10): once a sale completes, the
+ * SaleCompletePanel takes the place of the cart, the payments and the
+ * right-hand column; the scan bar stays above it, live and focused. Next
+ * sale, Enter on the empty bar, or a scan returns to the terminal on the
+ * next draft (already opened in the background).
  *
  * TRADE-IN ATTACH-THEN-RETURN (P4-2): the PaymentDialog's "Attach
  * customer" (or F6 with no customer) closes the PaymentDialog, opens the
@@ -245,6 +252,7 @@ const PosTerminal = () => {
     );
   }
 
+  const completed = status === "completed";
   const started = formatStarted(sale?.created_at);
   // Units, not lines — stays visible while the search dropdown covers the cart.
   const itemCount = lines.reduce((sum, line) => sum + line.quantity, 0);
@@ -273,14 +281,24 @@ const PosTerminal = () => {
             </div>
           )}
 
-          <ScanBar branchId={branchId} disabled={status !== "ready"} inputRef={scanRef} />
+          <ScanBar
+            branchId={branchId}
+            disabled={status !== "ready" && !completed}
+            inputRef={scanRef}
+          />
 
-          {/* lg:min-h-40 leaves room for 3 payment rows at a ~640px viewport */}
-          <Card className="flex-1 min-h-[16rem] lg:min-h-40 flex flex-col overflow-hidden">
-            <CartLines onReturnFocus={returnFocus} />
-          </Card>
+          {completed ? (
+            <SaleCompletePanel onReturnFocus={returnFocus} />
+          ) : (
+            <>
+              {/* lg:min-h-40 leaves room for 3 payment rows at a ~640px viewport */}
+              <Card className="flex-1 min-h-[16rem] lg:min-h-40 flex flex-col overflow-hidden">
+                <CartLines onReturnFocus={returnFocus} />
+              </Card>
 
-          <PaymentsList onReturnFocus={returnFocus} />
+              <PaymentsList onReturnFocus={returnFocus} />
+            </>
+          )}
         </section>
 
         {/*
@@ -289,7 +307,11 @@ const PosTerminal = () => {
           laptop). Safety net: if it can't fit, the column scrolls and
           Totals (Pay / Ready) stays pinned at the bottom.
         */}
-        <aside className="lg:w-[24rem] xl:w-[28rem] flex-shrink-0 flex flex-col gap-3 lg:gap-2 lg:min-h-0 lg:overflow-y-auto">
+        {/* Hidden (not unmounted) under the Sale complete panel */}
+        <aside
+          hidden={completed}
+          className="lg:w-[24rem] xl:w-[28rem] flex-shrink-0 flex flex-col gap-3 lg:gap-2 lg:min-h-0 lg:overflow-y-auto"
+        >
           <Card className="px-4 py-3">
             <div className="flex items-start justify-between gap-3">
               <div className="min-w-0">

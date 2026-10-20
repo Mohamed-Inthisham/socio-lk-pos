@@ -94,6 +94,13 @@ import { COMPLETE_ERROR, classifyCompleteError } from "../../utils/completeError
  * success the draft pointer is cleared and the sale is kept as
  * lastCompletedSale, its id persisted for "Reprint last receipt" (P5-12).
  *
+ * NEXT SALE (P5-10):
+ * The next DRAFT is opened in the background as soon as a sale completes
+ * (openNextDraft; progress in `nextDraft`, not `status`), while the Sale
+ * complete panel shows. startNextSale (Next sale, Enter, or a scan) waits
+ * for it — or retries a failed create — and then returns the terminal to
+ * "ready" on it.
+ *
  * ORDERING:
  * Line, customer and payment mutations run one at a time through
  * `enqueue`, so fast consecutive scans reach the server in order and an
@@ -113,9 +120,19 @@ const enqueue = (task) => {
   return run;
 };
 
-/** Tests only: drop the queue so a request one test leaves unsettled can't stall the next. */
+// The in-flight background create of the next draft (P5-10), and the
+// in-flight "start the next sale", so concurrent callers share them.
+let nextDraftRequest = null;
+let nextSaleStart = null;
+
+/**
+ * Tests only: drop the queue (and the next-sale promises) so a request one
+ * test leaves unsettled can't stall the next.
+ */
 export const resetMutationQueue = () => {
   mutationQueue = Promise.resolve();
+  nextDraftRequest = null;
+  nextSaleStart = null;
 };
 
 const toError = (error, fallback) => {
@@ -518,7 +535,7 @@ const withLineForUnit = (err, sale) => {
  */
 export const completeSale = createAsyncThunk(
   "posTerminal/completeSale",
-  async (_, { getState, rejectWithValue }) => {
+  async (_, { dispatch, getState, rejectWithValue }) => {
     const saleId = getState().posTerminal.draftSaleId;
     const outcome = await enqueue(async () => {
       try {
@@ -548,6 +565,9 @@ export const completeSale = createAsyncThunk(
     }
     session().clearDraftSaleId();
     session().setLastCompletedSaleId(outcome.sale.id);
+    // P5-10: open the next draft now, in the background, so the first
+    // scan of the next customer never waits on a create.
+    requestNextDraft(dispatch, outcome.sale.branch_id);
     return outcome.sale;
   },
   {
@@ -557,6 +577,68 @@ export const completeSale = createAsyncThunk(
     },
   },
 );
+
+// ---------------------------------------------------------------------------
+// Thunks — next sale (P5-10)
+// ---------------------------------------------------------------------------
+
+/**
+ * Create the next DRAFT behind the Sale complete panel. Its progress is
+ * `nextDraft.status` (creating | ready | failed), never the page-level
+ * `status`, so the panel stays up meanwhile. On success the draft pointer
+ * moves to it, but `status` stays "completed": edits are still refused
+ * until startNextSale.
+ */
+export const openNextDraft = createAsyncThunk(
+  "posTerminal/openNextDraft",
+  async ({ branchId }, { rejectWithValue }) => {
+    try {
+      return await createDraft(branchId);
+    } catch (error) {
+      return rejectWithValue(toError(error, "Couldn't open the next sale"));
+    }
+  },
+);
+
+const requestNextDraft = (dispatch, branchId) => {
+  nextDraftRequest ??= dispatch(openNextDraft({ branchId })).finally(() => {
+    nextDraftRequest = null;
+  });
+  return nextDraftRequest;
+};
+
+const startNextSaleThunk = createAsyncThunk(
+  "posTerminal/startNextSale",
+  async (_, { dispatch, getState, rejectWithValue }) => {
+    const pos = () => getState().posTerminal;
+    if (pos().nextDraft.status === "creating") await nextDraftRequest;
+    if (pos().nextDraft.status !== "ready") {
+      await requestNextDraft(dispatch, pos().lastCompletedSale?.branch_id);
+    }
+    if (pos().nextDraft.status !== "ready") {
+      return rejectWithValue(pos().nextDraft.error ?? { message: "Couldn't open the next sale" });
+    }
+    return true;
+  },
+);
+
+/**
+ * Leave the Sale complete panel for the next draft (Next sale, Enter on
+ * the empty scan bar, or a scan). Waits for the background create, or
+ * retries it if it failed. Resolves true once the terminal is "ready" on
+ * the next draft (also when it already was), false if the draft couldn't
+ * be opened (the panel shows why). Concurrent calls share one attempt.
+ */
+export const startNextSale = () => (dispatch, getState) => {
+  if (getState().posTerminal.status !== "completed") {
+    return Promise.resolve(getState().posTerminal.status === "ready");
+  }
+  nextSaleStart ??= dispatch(startNextSaleThunk()).then((result) => {
+    nextSaleStart = null;
+    return startNextSaleThunk.fulfilled.match(result);
+  });
+  return nextSaleStart;
+};
 
 // ---------------------------------------------------------------------------
 // Thunks — scanning
@@ -653,6 +735,9 @@ const initialState = {
   lastCompletedSale: null,
   // Last complete failure, classified (utils/completeErrors.js) | null
   completeError: null,
+  // The draft opened behind the Sale complete panel (P5-10):
+  // { status: idle | creating | ready | failed, error }
+  nextDraft: { status: "idle", error: null },
 };
 
 const markBusy = (state, lineId) => {
@@ -957,6 +1042,7 @@ const posTerminalSlice = createSlice({
       .addCase(completeSale.pending, (state) => {
         state.status = "completing";
         state.completeError = null;
+        state.nextDraft = { status: "idle", error: null };
       })
       .addCase(completeSale.fulfilled, (state, action) => {
         state.status = "completed";
@@ -979,6 +1065,29 @@ const posTerminalSlice = createSlice({
         };
         state.status = "ready";
         markGone(state, action.payload);
+      })
+
+      // Next sale (P5-10) — the panel stays up ("completed") throughout
+      .addCase(openNextDraft.pending, (state) => {
+        state.nextDraft = { status: "creating", error: null };
+      })
+      .addCase(openNextDraft.fulfilled, (state, action) => {
+        // A late answer (e.g. after a logout reset) must not revive a draft.
+        if (state.status !== "completed") return;
+        state.nextDraft = { status: "ready", error: null };
+        state.draftSale = action.payload;
+        state.draftSaleId = action.payload.id;
+      })
+      .addCase(openNextDraft.rejected, (state, action) => {
+        state.nextDraft = {
+          status: "failed",
+          error: action.payload || { message: "Couldn't open the next sale" },
+        };
+      })
+      .addCase(startNextSaleThunk.fulfilled, (state) => {
+        state.status = "ready";
+        state.nextDraft = { status: "idle", error: null };
+        state.completeError = null;
       })
 
       .addCase(reloadDraftSale.fulfilled, (state, action) => {
@@ -1282,6 +1391,9 @@ export const selectCompleteIssue = createSelector(
     return { lineIds, paymentIds, label: ISSUE_LABELS[err.kind] };
   },
 );
+
+/** The next draft behind the Sale complete panel: { status, error } (P5-10). */
+export const selectNextDraft = (state) => state.posTerminal.nextDraft;
 
 /** The sale this terminal last completed (hydrated), or null. */
 export const selectLastCompletedSale = (state) =>

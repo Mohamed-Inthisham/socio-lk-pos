@@ -452,6 +452,95 @@ describe("PosTerminal F9 complete hotkey (P5-3, P5-4)", () => {
   });
 });
 
+describe("PosTerminal Sale complete panel (P5-9, P5-10)", () => {
+  const cash = { id: "pay-1", payment_method: "CASH", amount: "3990.00", cash_received: "4000.00", reference_number: null };
+  const paidSale = () =>
+    draftSale({ lines, subtotal: "3990.00", total: "3990.00", amount_paid: "3990.00", change_due: "10.00", payments: [cash] });
+  const completed = () => ({
+    ...paidSale(),
+    status: "COMPLETED",
+    sale_number: "INV-20261020-0001",
+    completed_at: "2026-10-20T09:15:00.000Z",
+  });
+  const nextDraft = () => draftSale({ id: "sale-2" });
+  const panel = () => screen.queryByRole("region", { name: "Sale complete" });
+
+  // F9 → Enter on a paid sale; returns once the panel shows.
+  const completeTheSale = async (user) => {
+    await user.keyboard("[F9]");
+    const dialog = await screen.findByRole("dialog", { name: "Complete this sale?" });
+    await waitFor(() => expect(within(dialog).queryByText("Checking stock…")).not.toBeInTheDocument());
+    await waitFor(() => expect(within(dialog).getByRole("button", { name: /Complete sale/ })).toHaveFocus());
+    await user.keyboard("{Enter}");
+    await screen.findByRole("region", { name: "Sale complete" });
+    await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
+  };
+
+  beforeEach(() => {
+    salesService.createSale.mockResolvedValueOnce(paidSale()).mockResolvedValueOnce(nextDraft());
+    salesService.completeSale.mockResolvedValue(completed());
+  });
+
+  it("replaces the cart and the right column; the scan bar stays live and focused", async () => {
+    const user = userEvent.setup();
+    await renderTerminal();
+
+    await completeTheSale(user);
+
+    expect(within(panel()).getByTestId("sale-number")).toHaveTextContent("INV-20261020-0001");
+    expect(within(panel()).getByTestId("sale-complete-change")).toHaveTextContent("10.00");
+    expect(screen.queryByRole("list", { name: "Cart" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("region", { name: "Sale totals" })).not.toBeInTheDocument();
+    expect(scanBar()).toBeEnabled();
+    await waitFor(() => expect(scanBar()).toHaveFocus());
+    // The next draft is opened in the background, behind the panel
+    await waitFor(() => expect(salesService.createSale).toHaveBeenCalledTimes(2));
+  });
+
+  it("Enter on the empty scan bar starts the next sale", async () => {
+    const user = userEvent.setup();
+    await renderTerminal();
+    await completeTheSale(user);
+    await waitFor(() => expect(scanBar()).toHaveFocus());
+
+    await user.keyboard("{Enter}");
+
+    await waitFor(() => expect(panel()).not.toBeInTheDocument());
+    expect(await screen.findByText("Cart is empty")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /^Pay / })).toBeDisabled();
+    expect(scanBar()).toHaveFocus();
+  });
+
+  it("a scan on the panel starts the next sale and adds the item to it", async () => {
+    productsService.getProductByBarcode.mockResolvedValue({
+      id: "p-cable", name: "USB-C Cable 1m", sku: "ACC-0001", selling_price: "1500.00", is_serialized: false,
+    });
+    salesService.addSaleLine.mockResolvedValue(draftSale({ id: "sale-2", lines: [saleLine()] }));
+    const user = userEvent.setup();
+    await renderTerminal();
+    await completeTheSale(user);
+
+    await user.type(scanBar(), "4006381333931{Enter}");
+
+    await waitFor(() =>
+      expect(salesService.addSaleLine).toHaveBeenCalledWith("sale-2", { product_id: "p-cable", quantity: 1 }),
+    );
+    await waitFor(() => expect(panel()).not.toBeInTheDocument());
+    expect(screen.getByRole("listitem", { name: "USB-C Cable 1m" })).toBeInTheDocument();
+  });
+
+  it("the Next sale button does the same", async () => {
+    const user = userEvent.setup();
+    await renderTerminal();
+    await completeTheSale(user);
+
+    await user.click(within(panel()).getByRole("button", { name: /Next sale/ }));
+
+    await waitFor(() => expect(panel()).not.toBeInTheDocument());
+    await waitFor(() => expect(scanBar()).toHaveFocus());
+  });
+});
+
 describe("PosTerminal trade-in: F6, attach-then-return, F3 guard (P4-2, P4-11)", () => {
   const paymentDialog = () => screen.queryByRole("dialog", { name: "Take payment" });
   const attachDialog = () => screen.queryByRole("dialog", { name: "Attach customer" });

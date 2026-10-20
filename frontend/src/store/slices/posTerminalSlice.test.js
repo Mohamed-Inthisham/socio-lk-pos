@@ -39,6 +39,8 @@ import {
   selectHasTradeInPayment,
   selectIsCompleting,
   selectLastCompletedSale,
+  selectNextDraft,
+  startNextSale,
   selectIsFullyPaid,
   selectPaidTotal,
   selectPayments,
@@ -838,22 +840,36 @@ describe("posTerminal complete (P5)", () => {
     return store;
   };
 
-  it("completes: keeps the sale as lastCompletedSale, clears the draft and its pointer", async () => {
+  it("completes: keeps the sale as lastCompletedSale; the pointer moves to the next draft opened in the background", async () => {
     const store = await paidStore();
     salesService.completeSale.mockResolvedValue(completedSale());
+    const nextDraft = deferred();
+    salesService.createSale.mockReturnValue(nextDraft.promise);
 
     const result = await store.dispatch(completeSale());
 
     expect(completeSale.fulfilled.match(result)).toBe(true);
     expect(salesService.completeSale).toHaveBeenCalledWith("sale-1");
     expect(salesService.getSale).not.toHaveBeenCalled();
-    const { posTerminal } = store.getState();
+    let { posTerminal } = store.getState();
     expect(posTerminal.status).toBe("completed");
     expect(posTerminal.draftSale).toBeNull();
     expect(posTerminal.draftSaleId).toBeNull();
+    expect(selectNextDraft(store.getState()).status).toBe("creating");
     expect(selectLastCompletedSale(store.getState())).toEqual(completedSale());
     expect(selectCompleteError(store.getState())).toBeNull();
     expect(useTerminalSessionStore.getState().draftSaleId).toBeNull();
+    expect(useTerminalSessionStore.getState().lastCompletedSaleId).toBe("sale-1");
+    expect(salesService.createSale).toHaveBeenLastCalledWith({ branch_id: "branch-main" });
+
+    nextDraft.resolve(draftSale({ id: "sale-2" }));
+    await vi.waitFor(() => expect(selectNextDraft(store.getState()).status).toBe("ready"));
+
+    ({ posTerminal } = store.getState());
+    // Still on the panel: the next draft is ready behind it
+    expect(posTerminal.status).toBe("completed");
+    expect(posTerminal.draftSaleId).toBe("sale-2");
+    expect(useTerminalSessionStore.getState().draftSaleId).toBe("sale-2");
     expect(useTerminalSessionStore.getState().lastCompletedSaleId).toBe("sale-1");
   });
 
@@ -920,6 +936,7 @@ describe("posTerminal complete (P5)", () => {
       const store = await paidStore();
       salesService.completeSale.mockRejectedValue(makeError());
       salesService.getSale.mockResolvedValue(completedSale());
+      salesService.createSale.mockResolvedValue(draftSale({ id: "sale-2" }));
 
       const result = await store.dispatch(completeSale());
 
@@ -927,7 +944,8 @@ describe("posTerminal complete (P5)", () => {
       expect(salesService.getSale).toHaveBeenCalledWith("sale-1");
       expect(store.getState().posTerminal.status).toBe("completed");
       expect(selectLastCompletedSale(store.getState()).sale_number).toBe("INV-20261020-0001");
-      expect(useTerminalSessionStore.getState().draftSaleId).toBeNull();
+      await vi.waitFor(() => expect(selectNextDraft(store.getState()).status).toBe("ready"));
+      expect(useTerminalSessionStore.getState().draftSaleId).toBe("sale-2");
       expect(useTerminalSessionStore.getState().lastCompletedSaleId).toBe("sale-1");
     });
 
@@ -1161,12 +1179,12 @@ describe("posTerminal complete (P5)", () => {
       expect(selectLastCompletedSale(store.getState()).id).toBe("sale-1");
     });
 
-    it("edits work again once the next draft is open", async () => {
+    it("edits work again once the next sale starts", async () => {
       const store = await paidStore();
       salesService.completeSale.mockResolvedValue(completedSale());
-      await store.dispatch(completeSale());
       salesService.createSale.mockResolvedValue(draftSale({ id: "sale-2" }));
-      await store.dispatch(ensureDraftSale({ branchId: "branch-main" }));
+      await store.dispatch(completeSale());
+      await expect(store.dispatch(startNextSale())).resolves.toBe(true);
       salesService.addSaleLine.mockResolvedValue(draftSale({ id: "sale-2", lines: [saleLine()] }));
 
       await store.dispatch(addLine({ product: cableProduct }));
@@ -1176,6 +1194,102 @@ describe("posTerminal complete (P5)", () => {
         quantity: 1,
       });
       expect(store.getState().posTerminal.status).toBe("ready");
+    });
+  });
+
+  describe("next sale (P5-10)", () => {
+    const completedStore = async () => {
+      const store = await paidStore();
+      salesService.completeSale.mockResolvedValue(completedSale());
+      return store;
+    };
+
+    it("startNextSale waits for the background draft, then returns to 'ready' on it", async () => {
+      const store = await completedStore();
+      const nextDraft = deferred();
+      salesService.createSale.mockReturnValue(nextDraft.promise);
+      await store.dispatch(completeSale());
+
+      const starting = store.dispatch(startNextSale());
+      await Promise.resolve();
+      expect(store.getState().posTerminal.status).toBe("completed");
+
+      nextDraft.resolve(draftSale({ id: "sale-2" }));
+      await expect(starting).resolves.toBe(true);
+
+      const { posTerminal } = store.getState();
+      expect(posTerminal.status).toBe("ready");
+      expect(posTerminal.draftSaleId).toBe("sale-2");
+      expect(selectNextDraft(store.getState()).status).toBe("idle");
+      expect(salesService.createSale).toHaveBeenCalledTimes(2); // the first draft, then the next one
+      // Still there for "Reprint last receipt"
+      expect(selectLastCompletedSale(store.getState()).id).toBe("sale-1");
+    });
+
+    it("concurrent starts (a scan and Enter) share one attempt", async () => {
+      const store = await completedStore();
+      const nextDraft = deferred();
+      salesService.createSale.mockReturnValue(nextDraft.promise);
+      await store.dispatch(completeSale());
+
+      const a = store.dispatch(startNextSale());
+      const b = store.dispatch(startNextSale());
+      nextDraft.resolve(draftSale({ id: "sale-2" }));
+
+      await expect(Promise.all([a, b])).resolves.toEqual([true, true]);
+      expect(salesService.createSale).toHaveBeenCalledTimes(2);
+    });
+
+    it("a failed background create shows on the panel, and starting retries it", async () => {
+      const store = await completedStore();
+      salesService.createSale.mockRejectedValueOnce(new Error("Network Error"));
+      await store.dispatch(completeSale());
+      await vi.waitFor(() => expect(selectNextDraft(store.getState()).status).toBe("failed"));
+      expect(selectNextDraft(store.getState()).error).toMatchObject({ message: "Network Error" });
+      expect(store.getState().posTerminal.status).toBe("completed");
+
+      salesService.createSale.mockResolvedValueOnce(draftSale({ id: "sale-2" }));
+      await expect(store.dispatch(startNextSale())).resolves.toBe(true);
+
+      expect(store.getState().posTerminal.status).toBe("ready");
+      expect(store.getState().posTerminal.draftSaleId).toBe("sale-2");
+    });
+
+    it("if the retry fails too, the panel stays with the error", async () => {
+      const store = await completedStore();
+      salesService.createSale.mockRejectedValue(httpError(500, "Internal server error"));
+      await store.dispatch(completeSale());
+
+      await expect(store.dispatch(startNextSale())).resolves.toBe(false);
+
+      expect(store.getState().posTerminal.status).toBe("completed");
+      expect(selectNextDraft(store.getState())).toEqual({
+        status: "failed",
+        error: expect.objectContaining({ message: "Internal server error" }),
+      });
+    });
+
+    it("on an open draft startNextSale just says yes, without a request", async () => {
+      const store = await paidStore();
+      salesService.createSale.mockClear();
+
+      await expect(store.dispatch(startNextSale())).resolves.toBe(true);
+      expect(salesService.createSale).not.toHaveBeenCalled();
+    });
+
+    it("a next draft that arrives after a logout reset is ignored", async () => {
+      const store = await completedStore();
+      const nextDraft = deferred();
+      salesService.createSale.mockReturnValue(nextDraft.promise);
+      await store.dispatch(completeSale());
+
+      store.dispatch(clearPosTerminal());
+      nextDraft.resolve(draftSale({ id: "sale-2" }));
+      await Promise.resolve();
+      await Promise.resolve();
+
+      expect(store.getState().posTerminal.draftSale).toBeNull();
+      expect(store.getState().posTerminal.status).toBe("idle");
     });
   });
 
@@ -1359,10 +1473,10 @@ describe("posTerminal complete (P5)", () => {
     it("survives discarding the next draft, and is replaced by the next completion", async () => {
       const store = await paidStore();
       salesService.completeSale.mockResolvedValueOnce(completedSale());
-      await store.dispatch(completeSale());
-
       salesService.createSale.mockResolvedValue(draftSale({ id: "sale-2" }));
-      await store.dispatch(ensureDraftSale({ branchId: "branch-main" }));
+      await store.dispatch(completeSale());
+      await store.dispatch(startNextSale());
+
       salesService.discardSale.mockResolvedValue();
       salesService.createSale.mockResolvedValue(draftSale({ id: "sale-3" }));
       await store.dispatch(discardDraftSale({ branchId: "branch-main" }));

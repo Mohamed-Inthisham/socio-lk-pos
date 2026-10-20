@@ -1,4 +1,5 @@
 import { ArrowLeftRight, Banknote, CreditCard, Landmark, Smartphone, Wallet } from "lucide-react";
+import { formatLKR } from "../../../utils/money";
 
 /**
  * The tenders the terminal takes, in picker order. `key` is the number
@@ -44,3 +45,16 @@ export const methodLabel = (value) =>
 
 export const referenceHint = (value) =>
   PAYMENT_METHODS.find((m) => m.value === value)?.referenceHint;
+
+/**
+ * One line under a tender in the complete confirm and the Sale complete
+ * panel: the phone for a trade-in, cash received for cash, the reference
+ * for the rest (null when there is none).
+ */
+export const tenderDetail = (payment) => {
+  if (payment.payment_method === "TRADE_IN") {
+    return [payment.trade_in_product?.name, payment.trade_in_imei].filter(Boolean).join(" · ");
+  }
+  if (payment.payment_method === "CASH") return `Received ${formatLKR(payment.cash_received)}`;
+  return payment.reference_number ? `Ref ${payment.reference_number}` : null;
+};
