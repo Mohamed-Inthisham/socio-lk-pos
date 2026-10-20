@@ -50,6 +50,22 @@ describe("PaymentDialog", () => {
     await waitFor(() => expect(method("Cash")).toHaveFocus());
   });
 
+  // P4 Step A: TRADE_IN is defined (methods.js) but hidden until its
+  // fields land in Step B, which replaces this test.
+  it("doesn't offer Trade-in yet, and '6' does nothing", async () => {
+    const user = userEvent.setup();
+    renderDialog();
+    await waitFor(() => expect(method("Cash")).toHaveFocus());
+
+    expect(within(dialog()).getAllByRole("radio")).toHaveLength(5);
+    expect(within(dialog()).queryByRole("radio", { name: /Trade-in/ })).not.toBeInTheDocument();
+
+    await user.keyboard("6");
+
+    expect(method("Cash")).toBeChecked();
+    expect(method("Cash")).toHaveFocus();
+  });
+
   it("'2' picks Card and focuses Reference; Shift+Tab reaches Amount", async () => {
     const user = userEvent.setup();
     renderDialog();

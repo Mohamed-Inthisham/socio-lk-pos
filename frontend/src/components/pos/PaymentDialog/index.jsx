@@ -13,6 +13,7 @@ import { PAYMENT_METHODS, referenceHint } from "./methods";
 import { formatLKR, fromCents } from "../../../utils/money";
 import {
   CASH,
+  TRADE_IN,
   buildPaymentPayload,
   buildPaymentSchema,
   computeChangeCents,
@@ -83,6 +84,20 @@ const isTextField = (el) =>
 
 const primaryField = (method) => (method === CASH ? "cash_received" : "reference_number");
 
+// P4 Step A (temporary): TRADE_IN is in methods.js, but its fields
+// arrive in Step B, which removes this filter.
+const PICKER_METHODS = PAYMENT_METHODS.filter((m) => m.value !== TRADE_IN);
+
+const METHOD_FIELDS = [
+  "cash_received",
+  "reference_number",
+  "trade_in_product_id",
+  "trade_in_imei",
+  "trade_in_buying_price",
+  "trade_in_selling_price",
+  "trade_in_notes",
+];
+
 const PaymentDialog = ({ open, onClose, afterLeave }) => {
   const dispatch = useDispatch();
   const formId = useId();
@@ -137,7 +152,7 @@ const PaymentDialog = ({ open, onClose, afterLeave }) => {
   const pickMethod = (value) => {
     if (value === method) return;
     setValue("payment_method", value);
-    clearErrors(["cash_received", "reference_number"]);
+    clearErrors(METHOD_FIELDS);
     dispatch(clearPaymentError());
   };
 
@@ -152,7 +167,7 @@ const PaymentDialog = ({ open, onClose, afterLeave }) => {
       }
       return;
     }
-    const picked = PAYMENT_METHODS.find((m) => m.key === event.key);
+    const picked = PICKER_METHODS.find((m) => m.key === event.key);
     if (picked && !isSubmitting) {
       event.preventDefault();
       pickMethod(picked.value);
@@ -228,7 +243,7 @@ const PaymentDialog = ({ open, onClose, afterLeave }) => {
           aria-label="Payment method"
           className="grid grid-cols-3 sm:grid-cols-5 gap-2"
         >
-          {PAYMENT_METHODS.map(({ value, label, icon: Icon, key }) => (
+          {PICKER_METHODS.map(({ value, label, icon: Icon, key }) => (
             <Radio
               key={value}
               value={value}

@@ -69,8 +69,8 @@ import { fromCents, toCents } from "../../utils/money";
  * and reverts if the PATCH fails. createAndAttachCustomer POSTs the
  * customer first; a NIC clash (409) rejects with the existing customer so
  * the dialog can offer to attach that one instead. Detach is refused
- * while the sale has a TRADE_IN payment (Q19 — the backend would only
- * fail later, at complete).
+ * while the sale has a TRADE_IN payment, recorded or pending (Q19,
+ * P4-11 — the backend rejects it, #22).
  *
  * PAYMENTS (P3):
  * addPayment shows a pending row (pendingPayments) at once; the server's
@@ -78,6 +78,8 @@ import { fromCents, toCents } from "../../utils/money";
  * row at once (removingPaymentIds) and restores it if the DELETE fails —
  * no confirm (planning doc P3-2). Paid and balance come from the server's
  * total / amount_paid, subtracted in integer cents. No payment edit (P3-1).
+ * A pending TRADE_IN row carries its trade_in_* fields and the picked
+ * product (P4), so it reads like the server's row.
  *
  * ORDERING:
  * Line, customer and payment mutations run one at a time through
@@ -96,6 +98,11 @@ const enqueue = (task) => {
   const run = mutationQueue.then(task, task);
   mutationQueue = run.catch(() => {});
   return run;
+};
+
+/** Tests only: drop the queue so a request one test leaves unsettled can't stall the next. */
+export const resetMutationQueue = () => {
+  mutationQueue = Promise.resolve();
 };
 
 const toError = (error, fallback) => {
@@ -313,8 +320,13 @@ export const removeLine = createAsyncThunk(
 // Thunks — customer
 // ---------------------------------------------------------------------------
 
-const hasTradeInPayment = (sale) =>
-  (sale?.payments ?? []).some((p) => p.payment_method === "TRADE_IN");
+const isTradeIn = (payment) => payment.payment_method === "TRADE_IN";
+
+// Recorded or still in flight (P4-11): a pending trade-in needs the
+// customer as much as a recorded one.
+const hasTradeInPayment = (posTerminal) =>
+  (posTerminal.draftSale?.payments ?? []).some(isTradeIn) ||
+  posTerminal.pendingPayments.some(isTradeIn);
 
 /**
  * arg: { customer } — the picked customer row; the card shows it before
@@ -327,15 +339,17 @@ export const attachCustomer = createAsyncThunk(
   ),
 );
 
-/** No arg. Refused (no request, no state change) while a TRADE_IN payment exists. */
+/**
+ * No arg. Refused (no request, no state change) while a TRADE_IN payment
+ * exists, recorded or pending.
+ */
 export const detachCustomer = createAsyncThunk(
   "posTerminal/detachCustomer",
   saleMutation("Couldn't remove the customer", (saleId) =>
     updateSale(saleId, { customer_id: null }),
   ),
   {
-    condition: (_, { getState }) =>
-      !hasTradeInPayment(getState().posTerminal.draftSale),
+    condition: (_, { getState }) => !hasTradeInPayment(getState().posTerminal),
   },
 );
 
@@ -378,14 +392,18 @@ export const createAndAttachCustomer = createAsyncThunk(
 
 /**
  * Record one tender. arg: the AddPaymentDto body —
- * { payment_method, amount, cash_received? (CASH), reference_number? }.
- * Its method and amount feed the pending row.
+ * { payment_method, amount, cash_received? (CASH), reference_number?,
+ * trade_in_* (TRADE_IN) } — plus, for TRADE_IN, `trade_in_product`: the
+ * picked catalog row. It only names the pending row (as the hydrated
+ * sale's `trade_in_product` does) and is not sent.
  */
 export const addPayment = createAsyncThunk(
   "posTerminal/addPayment",
-  saleMutation("Couldn't record the payment", (saleId, payload) =>
-    addSalePayment(saleId, payload),
-  ),
+  saleMutation("Couldn't record the payment", (saleId, payload) => {
+    const body = { ...payload };
+    delete body.trade_in_product;
+    return addSalePayment(saleId, body);
+  }),
 );
 
 /** arg: { paymentId } — DELETE is 204, so re-fetch the sale. */
@@ -519,6 +537,27 @@ const dropPendingPayment = (state, action) => {
     (p) => p.id !== `pending-${action.meta.requestId}`,
   );
 };
+
+// The trade_in_* fields of a pending TRADE_IN row, shaped like the
+// hydrated sale's (money as "40000.00" strings, product as { id, name }).
+const pendingTradeIn = ({
+  trade_in_product,
+  trade_in_product_id,
+  trade_in_imei,
+  trade_in_buying_price,
+  trade_in_selling_price,
+  trade_in_notes,
+}) => ({
+  trade_in_product_id,
+  trade_in_product: trade_in_product
+    ? { id: trade_in_product.id, name: trade_in_product.name }
+    : null,
+  trade_in_imei,
+  trade_in_buying_price: fromCents(toCents(trade_in_buying_price)),
+  trade_in_selling_price:
+    trade_in_selling_price === undefined ? null : fromCents(toCents(trade_in_selling_price)),
+  trade_in_notes: trade_in_notes ?? null,
+});
 
 const unhidePayment = (state, action) => {
   state.removingPaymentIds = state.removingPaymentIds.filter(
@@ -734,6 +773,7 @@ const posTerminalSlice = createSlice({
           cash_received:
             cash_received === undefined ? null : fromCents(toCents(cash_received)),
           reference_number: reference_number ?? null,
+          ...(payment_method === "TRADE_IN" ? pendingTradeIn(action.meta.arg) : {}),
         });
       })
       .addCase(addPayment.fulfilled, (state, action) => {
@@ -833,9 +873,12 @@ export const selectScanQuery = (state) => state.posTerminal.scanQuery;
 export const selectScanError = (state) => state.posTerminal.scanError;
 export const selectAttachedCustomer = (state) =>
   state.posTerminal.draftSale?.customer ?? null;
-/** Q19: a TRADE_IN payment needs the customer — detach is blocked. */
+/**
+ * Q19 / P4-11: a TRADE_IN payment (recorded or pending) needs the
+ * customer — detach and change are blocked.
+ */
 export const selectHasTradeInPayment = (state) =>
-  hasTradeInPayment(state.posTerminal.draftSale);
+  hasTradeInPayment(state.posTerminal);
 export const selectCustomerSaving = (state) => state.posTerminal.customerSaving;
 export const selectCustomerError = (state) => state.posTerminal.customerError;
 const selectPendingLines = (state) => state.posTerminal.pendingLines;
@@ -911,6 +954,15 @@ export const selectPayments = createSelector(
       .map((p) => ({ ...p, pending: false })),
     ...pendingPayments.map((p) => ({ ...p, pending: true })),
   ],
+);
+
+/**
+ * IMEIs on this sale's trade-ins, recorded and pending (P4-7: a second
+ * trade-in can't reuse one). One being removed is left out: its DELETE
+ * is queued ahead of any new payment.
+ */
+export const selectTradeInImeis = createSelector([selectPayments], (payments) =>
+  payments.filter(isTradeIn).map((p) => p.trade_in_imei),
 );
 
 /** Server amount_paid ("1500.00"); "0.00" before a sale is loaded. */
