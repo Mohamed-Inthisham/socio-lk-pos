@@ -64,7 +64,7 @@ Invalid transitions — all return `400 Bad Request`:
 
 - DRAFT → DRAFT (already in that state)
 - COMPLETED → DRAFT ("uncomplete" is not a thing — voided sales aren't uncompleted, they're marked reversed)
-- COMPLETED → COMPLETED (idempotency not offered — a repeated complete on a real sale would double-decrement stock)
+- COMPLETED → COMPLETED (a repeated complete — a double click, or a retry after a lost response — gets 400 "Cannot complete a COMPLETED sale. Only DRAFT sales can be completed." and changes nothing: `completeSale` locks the sale row before its DRAFT check, so a concurrent second call waits for the first to commit and then fails the check. Stock is never decremented twice. There is no idempotency key; a client that loses the response re-fetches the sale and treats COMPLETED as success)
 - VOIDED → anything (VOIDED is terminal by design — if a void was itself a mistake, create a new sale)
 
 ### Why VOIDED is terminal
@@ -90,6 +90,17 @@ Once a sale is COMPLETED, it's a real financial record with an invoice number, c
 Product prices change. A phone's `selling_price` might rise tomorrow. If the sale line stored only `product_id`, every historical receipt would silently re-render with today's price, and reports comparing "what did we sell it for" against "what does it cost now" would be structurally impossible.
 
 Snapshotting is the standard e-commerce pattern for this exact reason. The cost of doubling ~40 bytes per line is negligible; the alternative (time-travelling the products table on every historical query) is unaffordable.
+
+### Warranty is snapshotted at complete-time
+
+`warranty_months_snapshot` and `checking_warranty_days_snapshot` (nullable integers) are copied from the line's `Product` (`warranty_months`, `checking_warranty_days`) **inside `completeSale`**, not at add-time, in one set-based `UPDATE sale_lines … FROM products` just before the sale is flipped to COMPLETED. They come back on every hydrated sale's lines.
+
+- `null`: not snapshotted — a DRAFT line, or a sale completed before the snapshot existed (Phase 6.4 P5; no backfill, because today's product values may not be what applied then).
+- `0`: snapshotted, and the product had no warranty.
+
+#### Why complete-time, not add-time
+
+The receipt is printed at complete, and the warranty it promises should be the one in force at that moment. A draft can sit for a while (and drafts created before this change have no snapshot), so add-time would either miss lines or record a value older than the sale. Once completed, later product edits don't touch the line: a receipt reprinted months later shows the warranty the customer bought.
 
 ### Money as `numeric(N,2)` in DB, strings in TypeScript
 
@@ -222,11 +233,29 @@ Inside one Postgres transaction with the sale row `pessimistic_write`-locked:
 1. Load + lock the sale, assert it's DRAFT.
 2. Load lines, assert at least one exists (400 otherwise).
 3. Assert `amount_paid === total` via cents-integer comparison (400 for underpayment; DB CHK stops overpayment separately).
-4. For each in-house line (`external_supplier_id IS NULL`): decrement stock via `StockService.decrementForSale`, enlisted in the same transaction.
-5. Issue the invoice number via `SaleNumberCountersService.generateNext`, also enlisted.
-6. UPDATE the sale: `status = COMPLETED, sale_number = <issued>, completed_at = now()`.
+4. For each in-house line (`external_supplier_id IS NULL`): decrement stock via `StockService.decrementForSale`, enlisted in the same transaction. A serialized in-house line also flips its ProductUnit to SOLD.
+5. For each TRADE_IN payment: check the customer and their NIC, then materialize the trade-in (see [used-phones.md](./used-phones.md#trade-ins-slice-g)).
+6. Issue the invoice number via `SaleNumberCountersService.generateNext`, also enlisted.
+7. Snapshot each line's warranty from its product (see above).
+8. UPDATE the sale: `status = COMPLETED, sale_number = <issued>, completed_at = now()`.
 
 If any step fails — insufficient stock, DB error, anything — the whole transaction rolls back. No partial completion is possible.
+
+#### Error bodies
+
+Every failure leaves the sale a DRAFT with nothing changed. The 409s name what failed so a client can point at it (Phase 6.4 P5):
+
+| Cause | Status | Body |
+|---|---|---|
+| Sale not found | 404 | `Sale not found` |
+| Not a DRAFT | 400 | `Cannot complete a COMPLETED sale. Only DRAFT sales can be completed.` (or VOIDED) |
+| No lines | 400 | `Cannot complete a sale with no lines. Add at least one line first.` |
+| `amount_paid` ≠ `total` | 400 | `Cannot complete sale: amount_paid X does not equal total Y` |
+| Not enough stock (the first short line) | 409 | `{ message: 'Insufficient stock for "<name>": requested N, available M', product_id, sale_line_id }` |
+| A line's phone is no longer IN_STOCK (another sale sold it) | 409 | `{ message: "Cannot sell IMEI '<imei>'…", existing_unit }` — `existing_unit.id` is the line's `product_unit_id` |
+| TRADE_IN without a customer, or the customer has no NIC | 400 | `Cannot complete sale: TRADE_IN payments require a customer…` / `A trade-in needs the customer's NIC` |
+| Trade-in product deactivated since `addPayment` | 400 | `Product "<name>" is inactive` |
+| Trade-in IMEI now held by the shop | 409 | `{ message: 'IMEI already exists in inventory', imei, payment_id, existing_unit }` — `existing_unit` is `null` when a concurrent intake was caught by the live-IMEI index |
 
 #### Why sequential stock decrements instead of Promise.all
 
@@ -286,7 +315,7 @@ Inside the same transaction that flips the sale:
 
 1. `SELECT ... FOR UPDATE` the stock row for `(product_id, branch_id)` — serializes concurrent completes on the same product.
 2. If `stock.manage_stock = false`: silent no-op (services, reloads, unlimited SIMs).
-3. If `stock.quantity < qty`: throw `ConflictException` with product name and available quantity → rolls back the entire transaction, returns `409 Conflict` with a message the frontend can render.
+3. If `stock.quantity < qty`: throw `ConflictException` with product name and available quantity → rolls back the entire transaction, returns `409 Conflict` with a message the frontend can render. The body is `{ message, product_id }`; `completeSale` adds the `sale_line_id`.
 4. Otherwise: `UPDATE stock SET quantity = quantity - $qty` via SQL-side arithmetic (avoids read-then-write lost updates).
 
 Missing stock row throws a raw `Error` (500) — data integrity failure, since Products auto-creates stock rows at product creation.
@@ -391,6 +420,8 @@ Six migrations shipped in Phase 6.3, one per major schema unit, in dependency or
 | 6 | `AddVoidReasonAndPaymentReversal` | Slice G: adds `sales.void_reason`, `payments.reversed_at`, `payments.reversal_reason`; extends `CHK_sales_voided_consistency` |
 
 All six run cleanly on an empty DB and revert cleanly in reverse order. Verified end-to-end during Phase 6.3.
+
+Later sales migrations: Phase 6.4 P5 adds `AddSaleLinesWarrantySnapshot` (`sale_lines.warranty_months_snapshot` and `checking_warranty_days_snapshot`, nullable integers, no backfill; see "Warranty is snapshotted at complete-time").
 
 ## Test Coverage
 

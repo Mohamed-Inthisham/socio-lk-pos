@@ -404,10 +404,15 @@ export class PhonePurchasesService {
     const product = await manager.findOne(Product, {
       where: { id: productId },
     });
-    if (!product || !product.is_active) {
+    if (!product) {
       throw new BadRequestException(
         `Product ${productId} not found or inactive`,
       );
+    }
+    if (!product.is_active) {
+      // Named, not the UUID: at completeSale this reaches the cashier
+      // when a trade-in's product was deactivated (Phase 6.4 P5-2).
+      throw new BadRequestException(`Product "${product.name}" is inactive`);
     }
     if (product.branch_id !== branchId) {
       throw new BadRequestException(
@@ -444,6 +449,7 @@ export class PhonePurchasesService {
     if (existing) {
       throw new ConflictException({
         message: 'IMEI already exists in inventory',
+        imei,
         existing_unit: {
           id: existing.id,
           status: existing.status,
@@ -470,6 +476,7 @@ export class PhonePurchasesService {
       if (isLiveImeiConflict(err)) {
         throw new ConflictException({
           message: 'IMEI already exists in inventory',
+          imei: unit.imei,
           existing_unit: null,
         });
       }

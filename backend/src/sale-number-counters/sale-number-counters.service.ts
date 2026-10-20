@@ -40,10 +40,12 @@ export class SaleNumberCountersService {
    *    handled by INSERT ... ON CONFLICT ... DO UPDATE, atomic even
    *    if two callers arrive simultaneously.
    *
-   * Trade-off accepted: if the outer transaction rolls back AFTER the
-   * counter was incremented, the number is consumed (gap in sequence).
-   * Gaps in invoice numbers are normal and auditable; reusing numbers
-   * would be much worse.
+   * Gaps: when enlisted, a rollback of the outer transaction undoes the
+   * increment too, so a failed complete leaves no gap and the next
+   * successful complete reuses the number. Only a standalone call commits
+   * the increment on its own; if its caller then fails, the number is
+   * consumed. Never reusing an issued number matters more than gaps,
+   * which are normal and auditable (a voided sale keeps its number).
    *
    * Returns e.g. 'INV-20260825-0001'.
    */

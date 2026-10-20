@@ -699,7 +699,7 @@ describe('Phone Purchases (e2e)', () => {
         400,
       );
       expect(response.body.message).toBe(
-        `Product ${product.id} not found or inactive`,
+        `Product "${product.name}" is inactive`,
       );
     });
 

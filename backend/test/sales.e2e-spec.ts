@@ -149,6 +149,8 @@ describe('Sales (e2e)', () => {
       buying_price?: string;
       is_active?: boolean;
       is_serialized?: boolean;
+      warranty_months?: number;
+      checking_warranty_days?: number;
     } = {},
   ): Promise<Product> {
     const brandRepo = dataSource.getRepository(Brand);
@@ -187,6 +189,8 @@ describe('Sales (e2e)', () => {
         selling_price: overrides.selling_price ?? '100000.00',
         is_active: overrides.is_active ?? true,
         is_serialized: overrides.is_serialized ?? false,
+        warranty_months: overrides.warranty_months ?? 0,
+        checking_warranty_days: overrides.checking_warranty_days ?? 0,
       }),
     );
   }
@@ -1960,12 +1964,16 @@ describe('Sales (e2e)', () => {
         stockQty?: number;
         externalSupplierId?: string;
         skipPayment?: boolean;
+        warrantyMonths?: number;
+        checkingWarrantyDays?: number;
       } = {},
     ) {
       const price = opts.productPrice ?? '100.00';
       const product = await seedProduct(branchId, {
         name: opts.productName ?? 'Test Product',
         selling_price: price,
+        warranty_months: opts.warrantyMonths,
+        checking_warranty_days: opts.checkingWarrantyDays,
       });
       // Give it stock (Phase 6.1 auto-creates the row at qty=0)
       if (opts.stockQty !== undefined) {
@@ -2034,6 +2042,129 @@ describe('Sales (e2e)', () => {
         where: { product_id: product.id, branch_id: branch.id },
       });
       expect(stock?.quantity).toBe(4);
+    });
+
+    it("snapshots the product's warranty onto the line at complete (P5-1)", async () => {
+      const branch = await seedBranch();
+      const { user, password } = await seedUser(UserRole.ADMIN, 'a@t.com');
+      const cookies = await loginAndGetCookies(user.email, password);
+      const { sale } = await seedReadyToCompleteSale(
+        branch.id,
+        user.id,
+        cookies,
+        { stockQty: 5, warrantyMonths: 12, checkingWarrantyDays: 7 },
+      );
+
+      // A DRAFT line has no snapshot yet
+      const draft = await request(app.getHttpServer())
+        .get(`/api/v1/sales/${sale.id}`)
+        .set('Cookie', cookies)
+        .expect(200);
+      expect(draft.body.lines[0]).toMatchObject({
+        warranty_months_snapshot: null,
+        checking_warranty_days_snapshot: null,
+      });
+
+      const response = await request(app.getHttpServer())
+        .post(`/api/v1/sales/${sale.id}/complete`)
+        .set('Cookie', cookies)
+        .expect(200);
+
+      expect(response.body.lines[0]).toMatchObject({
+        warranty_months_snapshot: 12,
+        checking_warranty_days_snapshot: 7,
+      });
+    });
+
+    it("keeps a completed sale's warranty snapshot when the product changes later", async () => {
+      const branch = await seedBranch();
+      const { user, password } = await seedUser(UserRole.ADMIN, 'a@t.com');
+      const cookies = await loginAndGetCookies(user.email, password);
+      const { sale, product } = await seedReadyToCompleteSale(
+        branch.id,
+        user.id,
+        cookies,
+        { stockQty: 5, warrantyMonths: 12, checkingWarrantyDays: 7 },
+      );
+      await request(app.getHttpServer())
+        .post(`/api/v1/sales/${sale.id}/complete`)
+        .set('Cookie', cookies)
+        .expect(200);
+
+      await dataSource.getRepository(Product).update(product.id, {
+        warranty_months: 24,
+        checking_warranty_days: 14,
+      });
+
+      const after = await request(app.getHttpServer())
+        .get(`/api/v1/sales/${sale.id}`)
+        .set('Cookie', cookies)
+        .expect(200);
+      expect(after.body.lines[0]).toMatchObject({
+        warranty_months_snapshot: 12,
+        checking_warranty_days_snapshot: 7,
+      });
+    });
+
+    it('records 0, not null, for a product without a warranty', async () => {
+      const branch = await seedBranch();
+      const { user, password } = await seedUser(UserRole.ADMIN, 'a@t.com');
+      const cookies = await loginAndGetCookies(user.email, password);
+      const { sale } = await seedReadyToCompleteSale(
+        branch.id,
+        user.id,
+        cookies,
+        { stockQty: 5 },
+      );
+
+      const response = await request(app.getHttpServer())
+        .post(`/api/v1/sales/${sale.id}/complete`)
+        .set('Cookie', cookies)
+        .expect(200);
+
+      expect(response.body.lines[0]).toMatchObject({
+        warranty_months_snapshot: 0,
+        checking_warranty_days_snapshot: 0,
+      });
+    });
+
+    it('names the product and line in the insufficient-stock 409, and leaves the snapshot null (P5-2)', async () => {
+      const branch = await seedBranch();
+      const { user, password } = await seedUser(UserRole.ADMIN, 'a@t.com');
+      const cookies = await loginAndGetCookies(user.email, password);
+      const { sale, product } = await seedReadyToCompleteSale(
+        branch.id,
+        user.id,
+        cookies,
+        { stockQty: 0, warrantyMonths: 12, checkingWarrantyDays: 7 },
+      );
+      const draft = await request(app.getHttpServer())
+        .get(`/api/v1/sales/${sale.id}`)
+        .set('Cookie', cookies)
+        .expect(200);
+      const lineId = draft.body.lines[0].id as string;
+
+      const response = await request(app.getHttpServer())
+        .post(`/api/v1/sales/${sale.id}/complete`)
+        .set('Cookie', cookies)
+        .expect(409);
+
+      expect(response.body).toEqual({
+        message:
+          'Insufficient stock for "Test Product": requested 1, available 0',
+        product_id: product.id,
+        sale_line_id: lineId,
+      });
+
+      // Rolled back: the line still has no snapshot
+      const refreshed = await request(app.getHttpServer())
+        .get(`/api/v1/sales/${sale.id}`)
+        .set('Cookie', cookies)
+        .expect(200);
+      expect(refreshed.body.lines[0]).toMatchObject({
+        warranty_months_snapshot: null,
+        checking_warranty_days_snapshot: null,
+      });
     });
 
     it('issues sequential sale_numbers within the same day at the same branch', async () => {
@@ -4635,6 +4766,52 @@ describe('Sales (e2e)', () => {
             p.payment_method === PaymentMethod.TRADE_IN,
         );
         expect(tradeIn.trade_in_phone_purchase_id).toBeNull();
+      });
+
+      it('names the IMEI and the trade-in payment in the IMEI-collision 409 (P5-2)', async () => {
+        const ctx = await setupTradeIn();
+        const sale = await draftWithLine(ctx);
+        const added = await addTradeIn(ctx, sale.id, IMEI_A, 60000);
+        const paymentId = (
+          added.body.payments as { id: string; payment_method: PaymentMethod }[]
+        ).find((p) => p.payment_method === PaymentMethod.TRADE_IN)!.id;
+        await addCash(ctx, sale.id, 40000);
+        const other = await seedProductUnit(
+          ctx.usedProduct.id,
+          ctx.branch.id,
+          ctx.user.id,
+          IMEI_A,
+        );
+
+        const response = await completeReq(ctx, sale.id, 409);
+
+        expect(response.body).toMatchObject({
+          message: 'IMEI already exists in inventory',
+          imei: IMEI_A,
+          payment_id: paymentId,
+          existing_unit: { id: other.id, status: ProductUnitStatus.IN_STOCK },
+        });
+      });
+
+      it('names the product when the trade-in product was deactivated after addPayment (P5-2)', async () => {
+        const ctx = await setupTradeIn();
+        const sale = await draftWithLine(ctx);
+        await addTradeIn(ctx, sale.id, IMEI_A, 60000);
+        await addCash(ctx, sale.id, 40000);
+        await dataSource
+          .getRepository(Product)
+          .update(ctx.usedProduct.id, { is_active: false });
+
+        const response = await completeReq(ctx, sale.id, 400);
+
+        expect(response.body.message).toBe(
+          'Product "Used iPhone 12" is inactive',
+        );
+        const saleAfter = await dataSource
+          .getRepository(Sale)
+          .findOne({ where: { id: sale.id } });
+        expect(saleAfter?.status).toBe(SaleStatus.DRAFT);
+        expect(await purchasesFor(ctx.customer.id)).toHaveLength(0);
       });
 
       it('returns 409 on insufficient outgoing stock and creates no trade-in inventory', async () => {

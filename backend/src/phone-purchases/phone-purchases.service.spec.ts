@@ -456,8 +456,16 @@ describe('PhonePurchasesService', () => {
 
       await expect(
         service.create(validCreateDto(), 'cashier-1'),
-      ).rejects.toThrow('Product prod-1 not found or inactive');
+      ).rejects.toThrow('Product "Used iPhone 12 Pro Max 256GB" is inactive');
       expect(mockStockService.incrementForReversal).not.toHaveBeenCalled();
+    });
+
+    it('keeps the id in the message when the product does not exist', async () => {
+      setupHappyPathLookups({ product: null });
+
+      await expect(
+        service.create(validCreateDto(), 'cashier-1'),
+      ).rejects.toThrow('Product prod-1 not found or inactive');
     });
 
     it('maps a concurrent live-IMEI unique violation on the unit insert to 409', async () => {
@@ -476,6 +484,7 @@ describe('PhonePurchasesService', () => {
         expect(err).toBeInstanceOf(ConflictException);
         expect((err as ConflictException).getResponse()).toEqual({
           message: 'IMEI already exists in inventory',
+          imei: '356938035643809',
           existing_unit: null,
         });
       }
@@ -889,7 +898,7 @@ describe('PhonePurchasesService', () => {
 
       await expect(
         service.createForTradeIn(mockManager as never, validInput()),
-      ).rejects.toThrow('Product prod-1 not found or inactive');
+      ).rejects.toThrow('Product "Used iPhone 12 Pro Max 256GB" is inactive');
       expect(mockManager.create).not.toHaveBeenCalled();
     });
 
@@ -906,6 +915,48 @@ describe('PhonePurchasesService', () => {
         service.createForTradeIn(mockManager as never, validInput()),
       ).rejects.toBeInstanceOf(ConflictException);
       expect(mockStockService.incrementForReversal).not.toHaveBeenCalled();
+    });
+
+    it('names the IMEI in the live-index 409 (P5-2)', async () => {
+      setupHappyPathLookups();
+      mockManager.create.mockImplementation((_e, data) => data);
+      mockManager.save.mockImplementation((e: { imei?: string }) =>
+        e.imei
+          ? Promise.reject(uniqueViolation('uq_product_units_imei_live'))
+          : Promise.resolve({ id: 'purchase-race', ...e }),
+      );
+
+      const err = await service
+        .createForTradeIn(mockManager as never, validInput())
+        .catch((e: unknown) => e);
+      expect((err as ConflictException).getResponse()).toEqual({
+        message: 'IMEI already exists in inventory',
+        imei: '356938035643809',
+        existing_unit: null,
+      });
+    });
+
+    it('names the IMEI in the pre-check 409 (P5-2)', async () => {
+      setupHappyPathLookups({
+        existingUnit: {
+          id: 'unit-99',
+          status: ProductUnitStatus.IN_STOCK,
+          product_id: 'prod-old',
+        },
+      });
+
+      const err = await service
+        .createForTradeIn(mockManager as never, validInput())
+        .catch((e: unknown) => e);
+      expect((err as ConflictException).getResponse()).toEqual({
+        message: 'IMEI already exists in inventory',
+        imei: '356938035643809',
+        existing_unit: {
+          id: 'unit-99',
+          status: ProductUnitStatus.IN_STOCK,
+          product_id: 'prod-old',
+        },
+      });
     });
 
     it('propagates other database errors from the unit insert unchanged', async () => {

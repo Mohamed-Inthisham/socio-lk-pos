@@ -3661,7 +3661,13 @@ describe('SalesService', () => {
         });
       });
       mockManager.query.mockImplementation((sql: string) => {
-        callOrder.push(sql.includes('UPDATE payments') ? 'stamp' : 'sale');
+        callOrder.push(
+          sql.includes('UPDATE payments')
+            ? 'stamp'
+            : sql.includes('UPDATE sale_lines')
+              ? 'snapshot'
+              : 'sale',
+        );
         return Promise.resolve();
       });
       mockSaleNumberCountersService.generateNext.mockImplementation(() => {
@@ -3677,6 +3683,7 @@ describe('SalesService', () => {
         'trade-in',
         'stamp',
         'number',
+        'snapshot',
         'sale',
       ]);
     });
@@ -3695,6 +3702,164 @@ describe('SalesService', () => {
         expect.stringContaining('UPDATE payments'),
         expect.anything(),
       );
+    });
+
+    // ============================================================
+    // Phase 6.4 P5 — warranty snapshot (P5-1), 409 details (P5-2)
+    // ============================================================
+
+    it("snapshots each line's warranty from its product in one UPDATE", async () => {
+      mockQueryBuilder.getOne.mockResolvedValueOnce(seedCompletableSale());
+      arrangeManagerFind([
+        seedCompletableLine(),
+        seedCompletableLine({ id: 'line-2', product_id: 'prod-2' }),
+      ]);
+      mockStockService.decrementForSale.mockResolvedValue(undefined);
+      mockSaleNumberCountersService.generateNext.mockResolvedValue(
+        'INV-000015',
+      );
+
+      await service.completeSale('sale-1');
+
+      const snapshotCalls = mockManager.query.mock.calls.filter(
+        ([sql]: [string]) => sql.includes('UPDATE sale_lines'),
+      );
+      expect(snapshotCalls).toHaveLength(1);
+      const [sql, params] = snapshotCalls[0] as [string, unknown[]];
+      expect(sql).toContain(
+        'warranty_months_snapshot = product.warranty_months',
+      );
+      expect(sql).toContain(
+        'checking_warranty_days_snapshot = product.checking_warranty_days',
+      );
+      expect(sql).toContain('product.id = line.product_id');
+      expect(params).toEqual(['sale-1']);
+    });
+
+    it('does not snapshot when the complete fails (insufficient stock)', async () => {
+      mockQueryBuilder.getOne.mockResolvedValueOnce(seedCompletableSale());
+      arrangeManagerFind([seedCompletableLine()]);
+      mockStockService.decrementForSale.mockRejectedValueOnce(
+        new ConflictException({
+          message:
+            'Insufficient stock for "iPhone 15": requested 2, available 0',
+          product_id: 'prod-1',
+        }),
+      );
+
+      await expect(service.completeSale('sale-1')).rejects.toThrow(
+        ConflictException,
+      );
+      expect(mockManager.query).not.toHaveBeenCalledWith(
+        expect.stringContaining('UPDATE sale_lines'),
+        expect.anything(),
+      );
+    });
+
+    it('adds the sale_line_id to the insufficient-stock 409', async () => {
+      mockQueryBuilder.getOne.mockResolvedValueOnce(seedCompletableSale());
+      arrangeManagerFind([
+        seedCompletableLine({ id: 'line-1', product_id: 'prod-1' }),
+        seedCompletableLine({ id: 'line-2', product_id: 'prod-2' }),
+      ]);
+      mockStockService.decrementForSale
+        .mockResolvedValueOnce(undefined)
+        .mockRejectedValueOnce(
+          new ConflictException({
+            message:
+              'Insufficient stock for "AirPods": requested 2, available 1',
+            product_id: 'prod-2',
+          }),
+        );
+
+      const err = await service.completeSale('sale-1').catch((e: unknown) => e);
+
+      expect(err).toBeInstanceOf(ConflictException);
+      expect((err as ConflictException).getResponse()).toEqual({
+        message: 'Insufficient stock for "AirPods": requested 2, available 1',
+        product_id: 'prod-2',
+        sale_line_id: 'line-2',
+      });
+    });
+
+    it('keeps the message of a plain-string 409 when adding the line id', async () => {
+      mockQueryBuilder.getOne.mockResolvedValueOnce(seedCompletableSale());
+      arrangeManagerFind([seedCompletableLine({ id: 'line-1' })]);
+      mockStockService.decrementForSale.mockRejectedValueOnce(
+        new ConflictException('Insufficient stock'),
+      );
+
+      const err = await service.completeSale('sale-1').catch((e: unknown) => e);
+
+      expect((err as ConflictException).getResponse()).toMatchObject({
+        message: 'Insufficient stock',
+        sale_line_id: 'line-1',
+      });
+    });
+
+    it('passes non-409 errors from the stock decrement through unchanged', async () => {
+      mockQueryBuilder.getOne.mockResolvedValueOnce(seedCompletableSale());
+      arrangeManagerFind([seedCompletableLine()]);
+      const integrity = new Error('Stock row missing for product prod-1');
+      mockStockService.decrementForSale.mockRejectedValueOnce(integrity);
+
+      await expect(service.completeSale('sale-1')).rejects.toBe(integrity);
+    });
+
+    it('adds the payment_id of the colliding trade-in to its 409', async () => {
+      mockQueryBuilder.getOne.mockResolvedValueOnce(
+        seedTradeInSale({ total: '100000.00', amount_paid: '100000.00' }),
+      );
+      arrangeManagerFind(
+        [seedCompletableLine({ quantity: 1 })],
+        [
+          seedTradeInRow(),
+          seedTradeInRow({ id: 'pay-ti-2', trade_in_imei: '490154203237518' }),
+        ],
+      );
+      arrangeTradeInCustomer();
+      mockStockService.decrementForSale.mockResolvedValue(undefined);
+      mockPhonePurchasesService.createForTradeIn
+        .mockResolvedValueOnce({
+          phone_purchase: { id: 'pp-1' },
+          product_unit: { id: 'unit-ti-1' },
+        })
+        .mockRejectedValueOnce(
+          new ConflictException({
+            message: 'IMEI already exists in inventory',
+            imei: '490154203237518',
+            existing_unit: null,
+          }),
+        );
+
+      const err = await service.completeSale('sale-1').catch((e: unknown) => e);
+
+      expect(err).toBeInstanceOf(ConflictException);
+      expect((err as ConflictException).getResponse()).toEqual({
+        message: 'IMEI already exists in inventory',
+        imei: '490154203237518',
+        existing_unit: null,
+        payment_id: 'pay-ti-2',
+      });
+      expect(mockSaleNumberCountersService.generateNext).not.toHaveBeenCalled();
+    });
+
+    it('passes a 400 from createForTradeIn (inactive product) through unchanged', async () => {
+      mockQueryBuilder.getOne.mockResolvedValueOnce(seedTradeInSale());
+      arrangeManagerFind(
+        [seedCompletableLine({ quantity: 1 })],
+        [seedTradeInRow()],
+      );
+      arrangeTradeInCustomer();
+      const inactive = new BadRequestException(
+        'Product "Used iPhone 12 128GB" is inactive',
+      );
+      mockStockService.decrementForSale.mockResolvedValue(undefined);
+      mockPhonePurchasesService.createForTradeIn.mockRejectedValueOnce(
+        inactive,
+      );
+
+      await expect(service.completeSale('sale-1')).rejects.toBe(inactive);
     });
   });
 

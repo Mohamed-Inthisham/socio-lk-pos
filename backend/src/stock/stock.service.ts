@@ -191,7 +191,8 @@ export class StockService {
    *     products (services, unlimited SIMs, etc.) don't move inventory.
    *   - If stock.quantity < qty: throw 409 Conflict with the product
    *     name and current available quantity, so the frontend can show
-   *     "Only 3 of iPhone 15 Pro left" instead of a generic error.
+   *     "Only 3 of iPhone 15 Pro left" instead of a generic error. The
+   *     body is { message, product_id }.
    *   - Otherwise: UPDATE stock SET quantity = quantity - qty.
    *
    * Concurrency:
@@ -243,10 +244,14 @@ export class StockService {
     }
 
     if (stock.quantity < qty) {
-      throw new ConflictException(
-        `Insufficient stock for "${productNameForError}": ` +
+      // product_id lets the till find the line(s) (Phase 6.4 P5-2);
+      // completeSale adds the sale_line_id.
+      throw new ConflictException({
+        message:
+          `Insufficient stock for "${productNameForError}": ` +
           `requested ${qty}, available ${stock.quantity}`,
-      );
+        product_id: productId,
+      });
     }
 
     await manager
@@ -352,7 +357,7 @@ export class StockService {
    *      was incremented in that transaction. Insufficient stock at
    *      void time means either data corruption or a concurrent
    *      decrement racing us that shouldn't be possible. We still
-   *      throw ConflictException (same shape as decrementForSale) so
+   *      throw ConflictException (like decrementForSale) so
    *      the outer transaction rolls back cleanly; the error message
    *      names the void context explicitly.
    *

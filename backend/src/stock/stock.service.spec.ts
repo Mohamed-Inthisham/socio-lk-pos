@@ -463,6 +463,27 @@ describe('StockService', () => {
       ).rejects.toThrow(/iPhone 15 Pro.*requested 5.*available 2/);
     });
 
+    it('puts the product_id in the insufficient-stock 409 body (P5-2)', async () => {
+      mockManager.createQueryBuilder.mockReturnValueOnce(
+        buildSelectQB({
+          id: 'stock-3',
+          product_id: 'p1',
+          branch_id: 'b1',
+          quantity: 2,
+          manage_stock: true,
+        }),
+      );
+
+      const err = await service
+        .decrementForSale(mockManager as never, 'p1', 'b1', 5, 'iPhone 15 Pro')
+        .catch((e: unknown) => e);
+      expect((err as ConflictException).getResponse()).toEqual({
+        message:
+          'Insufficient stock for "iPhone 15 Pro": requested 5, available 2',
+        product_id: 'p1',
+      });
+    });
+
     it('throws when stock row is missing (data integrity failure)', async () => {
       mockManager.createQueryBuilder.mockReturnValueOnce(buildSelectQB(null));
 
