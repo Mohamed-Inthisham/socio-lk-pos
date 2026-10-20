@@ -184,6 +184,22 @@ export class SaleLine {
   imei_snapshot!: string | null;
 
   /**
+   * The product's warranty_months / checking_warranty_days, copied when
+   * the sale is completed (Phase 6.4 P5-1) so the receipt shows the
+   * warranty that applied at sale time. NULL on DRAFT lines and on sales
+   * completed before the snapshot existed (no backfill).
+   */
+  @Column({ type: 'integer', nullable: true, name: 'warranty_months_snapshot' })
+  warranty_months_snapshot!: number | null;
+
+  @Column({
+    type: 'integer',
+    nullable: true,
+    name: 'checking_warranty_days_snapshot',
+  })
+  checking_warranty_days_snapshot!: number | null;
+
+  /**
    * Link to the specific ProductUnit sold on this line, for serialized
    * in-house lines only. NULL for non-serialized lines and for
    * serialized lines sourced from a friendly shop (external_supplier_id

@@ -51,6 +51,22 @@ import {
 } from '../common/dto/paginated-response.dto';
 import { toCents } from '../common/utils/money';
 
+/**
+ * completeSale's collaborators know the product or IMEI behind a 409 but
+ * not which line or payment of the sale it came from. Re-throw a 409 with
+ * that id added to its body (Phase 6.4 P5-2), so the till can highlight
+ * the right row. Any other error is returned unchanged.
+ */
+const withConflictDetail = (
+  err: unknown,
+  detail: Record<string, string>,
+): unknown => {
+  if (!(err instanceof ConflictException)) return err;
+  const response = err.getResponse();
+  const body = typeof response === 'string' ? { message: response } : response;
+  return new ConflictException({ ...body, ...detail });
+};
+
 @Injectable()
 export class SalesService {
   constructor(
@@ -1091,17 +1107,20 @@ export class SalesService {
    *      transaction. Lines sourced from friendly shops
    *      (external_supplier_id set) are NOT decremented from our stock —
    *      they were never our inventory. Insufficient stock throws 409
-   *      and rolls the whole transaction back (see Slice F design pass).
+   *      (with product_id and sale_line_id) and rolls the whole
+   *      transaction back (see Slice F design pass).
    *   3b. For each TRADE_IN payment: materialize PhonePurchase +
    *      ProductUnit (IN_STOCK) + Stock increment via
    *      PhonePurchasesService.createForTradeIn, then stamp
    *      trade_in_phone_purchase_id on the payment. 400 if the sale's
-   *      customer was cleared after the trade-in was added.
+   *      customer was cleared after the trade-in was added. An IMEI
+   *      collision's 409 gains the payment_id.
    *   4. Issue sale_number via SaleNumberCountersService.generateNext,
-   *      enlisted in this transaction. If we roll back after this,
-   *      the counter is burned (gap in sequence) — accepted trade-off
-   *      per the counter service's own docstring.
-   *   5. UPDATE sales SET status=COMPLETED, completed_at=now(),
+   *      enlisted in this transaction. A rollback after this rolls the
+   *      counter increment back too, so a failed complete leaves no gap.
+   *   5. Snapshot each line's warranty (warranty_months,
+   *      checking_warranty_days) from its product onto the line.
+   *   6. UPDATE sales SET status=COMPLETED, completed_at=now(),
    *      sale_number=<issued>.
    *
    * Returns void. The controller re-fetches via findOne to get the
@@ -1174,13 +1193,18 @@ export class SalesService {
       //    first, this one loses with 409 + existing_unit payload.
       for (const line of lines) {
         if (line.external_supplier_id === null) {
-          await this.stockService.decrementForSale(
-            manager,
-            line.product_id,
-            sale.branch_id,
-            line.quantity,
-            line.product_name_snapshot,
-          );
+          try {
+            await this.stockService.decrementForSale(
+              manager,
+              line.product_id,
+              sale.branch_id,
+              line.quantity,
+              line.product_name_snapshot,
+            );
+          } catch (err) {
+            // StockService names the product; the sale names the line.
+            throw withConflictDetail(err, { sale_line_id: line.id });
+          }
         }
         if (line.product_unit_id !== null) {
           await this.productUnitsService.markSoldForSale(
@@ -1224,17 +1248,24 @@ export class SalesService {
       for (const payment of tradeInPayments) {
         // CHK_payments_trade_in_fields_consistent guarantees the trio is
         // non-null on TRADE_IN rows.
-        const { phone_purchase } =
-          await this.phonePurchasesService.createForTradeIn(manager, {
-            customer_id: sale.customer_id!,
-            branch_id: sale.branch_id,
-            cashier_id: sale.cashier_id,
-            product_id: payment.trade_in_product_id!,
-            imei: payment.trade_in_imei!,
-            buying_price: payment.trade_in_buying_price!,
-            selling_price: payment.trade_in_selling_price,
-            notes: payment.trade_in_notes,
-          });
+        let phone_purchase: { id: string };
+        try {
+          ({ phone_purchase } =
+            await this.phonePurchasesService.createForTradeIn(manager, {
+              customer_id: sale.customer_id!,
+              branch_id: sale.branch_id,
+              cashier_id: sale.cashier_id,
+              product_id: payment.trade_in_product_id!,
+              imei: payment.trade_in_imei!,
+              buying_price: payment.trade_in_buying_price!,
+              selling_price: payment.trade_in_selling_price,
+              notes: payment.trade_in_notes,
+            }));
+        } catch (err) {
+          // An IMEI collision names the IMEI; the sale names the payment,
+          // so the till can point at the right trade-in.
+          throw withConflictDetail(err, { payment_id: payment.id });
+        }
         await manager.query(
           `UPDATE payments
            SET trade_in_phone_purchase_id = $1,
@@ -1244,14 +1275,30 @@ export class SalesService {
         );
       }
 
-      // 4. Issue the invoice number. Enlisted in this transaction so
-      // a downstream rollback releases it (with a gap, which is fine).
+      // 4. Issue the invoice number. Enlisted in this transaction so a
+      // downstream rollback undoes the increment too: no gap.
       const saleNumber = await this.saleNumberCountersService.generateNext(
         sale.branch_id,
         manager,
       );
 
-      // 5. Flip the sale to COMPLETED. Direct UPDATE rather than
+      // 5. Snapshot the warranty that applies at sale time (P5-1), so a
+      // receipt reprinted later doesn't pick up a changed product. One
+      // set-based UPDATE for all lines. A line whose product row is gone
+      // has nothing to join and stays NULL (products are soft-deleted,
+      // so in practice every line matches).
+      await manager.query(
+        `UPDATE sale_lines AS line
+         SET warranty_months_snapshot = product.warranty_months,
+             checking_warranty_days_snapshot = product.checking_warranty_days,
+             updated_at = now()
+         FROM products AS product
+         WHERE line.sale_id = $1
+           AND product.id = line.product_id`,
+        [saleId],
+      );
+
+      // 6. Flip the sale to COMPLETED. Direct UPDATE rather than
       // manager.save(sale) so we set completed_at server-side via now()
       // and avoid a second round trip for the reload.
       await manager.query(
