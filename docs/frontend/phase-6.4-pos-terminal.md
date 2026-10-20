@@ -1,6 +1,6 @@
 # Phase 6.4 — POS Terminal (Frontend) — Planning
 
-**Status:** P0 (#18), P1 (#20), P2 (#21), P3 (#26) and P4 (TRADE_IN payment) shipped. P4's backend prerequisites shipped in #27 (buy-back) and #29 (a trade-in or phone purchase needs the customer's NIC, P4-13). P5 (complete sale, recent sales, void) is next. Decisions that changed while building are recorded in the §8 "P1 decision log", "P3 decision log" and "P4 decision log", and the sections they touch are marked "revised P1", "revised P3" or "revised P4".
+**Status:** P0 (#18), P1 (#20), P2 (#21), P3 (#26) and P4 (#30) shipped. P4's backend prerequisites shipped in #27 (buy-back) and #29 (a trade-in or phone purchase needs the customer's NIC, P4-13). P5 (complete sale, confirmation panel, printed receipt) is planned in the §8 "P5 decision log"; its backend prerequisite (step 0: warranty snapshot and complete-time 409 details) comes first. Recent sales, sale detail and void move to P6 (P5-15). Decisions that changed while building are recorded in the §8 "P1 decision log", "P3 decision log", "P4 decision log" and "P5 decision log", and the sections they touch are marked "revised P1", "revised P3", "revised P4" or "revised P5".
 
 **Target setup:** a laptop (1366×768 reference) with a USB/HID barcode scanner as the till. Tablet and phone layouts are supported as secondary.
 
@@ -41,11 +41,12 @@ Minimum-viable R1 cashier flow. "R1" = ships in Phase 6.4. "R1.1" = deferred to 
 | 9 | **Payment entry — CARD / BANK_TRANSFER / KOKO / MINTPAY** | Take reference-based tenders | Same dialog, method switch hides cash-received and shows a required reference number (auth code / slip ref / provider txn id). | R1 |
 | 10 | **Payment entry — TRADE_IN** _(revised P4, see §8 P4 decision log)_ | Accept a used phone as part payment | Method 6 in the `PaymentDialog` (F6 opens it pre-selected). Requires a customer on the sale: without one, the dialog offers **Attach customer** and comes back to TRADE_IN afterwards. The customer also needs an NIC on file: without one, the dialog asks for it inline (P4-13; the backend enforces it too, #29). Collects the trade-in product (serialized products at the branch, used SKUs first), IMEI, one **Trade-in value** field (sent as both `amount` and `trade_in_buying_price`, empty by default, capped at the balance due), an optional resale price and condition notes. The customer pays the difference; there is no payout or store credit. A phone the shop sold earlier can be traded back in (buy-back, #27). 409 when the IMEI is a phone the shop holds (`IN_STOCK` / `WRITTEN_OFF`). | R1 |
 | 11 | **Payment list + remove** | Correct mistakes | Payments panel lists tenders with remaining balance. Remove = `DELETE .../payments/:id`, with no confirm (P3-2), **except TRADE_IN, which confirms** _(revised P4, see §8 P4-10)_. Edit is not exposed (remove + re-add, reaffirmed in P3-1); TRADE_IN is frozen server-side anyway. | R1 (edit: R1.1) |
-| 12 | **Complete sale confirmation** | Commit the sale | Enabled only when `amount_paid === total`. Confirm dialog shows totals, tenders, change due; `POST /sales/:id/complete`. Success shows a "Sale complete" panel with sale number and change, then a fresh terminal. 409s (stock, IMEI race, trade-in IMEI) show inline with the offending line/payment highlighted. | R1 |
+| 12 | **Complete sale confirmation** _(revised P5, see §8 P5 decision log)_ | Commit the sale | A **Complete sale** button replaces the Totals panel's Ready box (P5-3), plus **F9** (P5-4); both need a fully paid sale and no mutation in flight. The confirm dialog shows total, tenders and change due, and refreshes branch stock first: a shortfall is listed and blocks Complete (P5-6). `POST /sales/:id/complete`, at most once (P5-7). Errors stay in the dialog, with the offending line or trade-in payment highlighted and the NIC field inline for #29's 400 (P5-8). Success shows the in-terminal "Sale complete" panel (P5-9) while the next DRAFT is created in the background (P5-10). | R1 |
+| 12a | **Printed receipt** _(added P5; was Phase 6.6, see §10)_ | Give the customer a receipt at every sale | An 80mm receipt (Xprinter XP-80T, USB, Windows driver) printed with `window.print()` from a print-only layout (P5-11, P5-13). Prints automatically on complete; **Reprint** on the Sale complete panel and **Reprint last receipt** on the Current sale card until the next sale completes (P5-12). Silent printing via Chrome/Edge `--kiosk-printing` on the till (P5-16). No ESC/POS, no cash drawer. | R1 |
 | 13 | **Discard draft** | Abandon a cart | `DELETE /sales/:id` behind a confirm. Also offered when starting a new sale with a non-empty draft. | R1 |
-| 14 | **Recent sales list** | Look up today's sales | Paginated `GET /sales` scoped to this branch (and today by default); shows sale number, time, cashier, total, status. Row opens a read-only detail. | R1 |
-| 15 | **Sale detail (read-only)** | Inspect a completed/voided sale | Lines, payments (with reversal stamps), totals, trade-in info. Host for the Void action. | R1 |
-| 16 | **Void sale flow** | Reverse a completed sale | Admin/manager only (`VOID_SALE`). Reason required (≥ 3 chars). Cashiers see the button disabled with a tooltip ("visible but disabled" pattern). 409 when a trade-in was resold — message tells the operator to void the later sale first. Since the buy-back change (#27), also 409 "the phone was taken back into stock on a later sale or purchase" when a phone this sale sold was later taken back; voids unwind newest-first (P5; see §8 P4 decision log, B4) _(revised P4)_. | R1 |
+| 14 | **Recent sales list** _(P6, revised P5)_ | Look up today's sales | Paginated `GET /sales` scoped to this branch (and today by default); shows sale number, time, cashier, total, status. Row opens a read-only detail. "Today" must mean completed today: `GET /sales` filters on `created_at`, so a draft opened one evening and completed the next morning would be missing; P6 adds a `completed_at` filter (P5-15). | R1 |
+| 15 | **Sale detail (read-only)** _(P6, revised P5)_ | Inspect a completed/voided sale | Lines, payments (with reversal stamps), totals, trade-in info. Host for the Void action and for **Reprint receipt** of any sale. `findOne` doesn't load `voider` yet; P6 adds it (P5-15). | R1 |
+| 16 | **Void sale flow** _(P6, revised P5)_ | Reverse a completed sale | Admin/manager only (`VOID_SALE`). Reason required (≥ 3 chars). Cashiers see the button disabled with a tooltip ("visible but disabled" pattern). 409 when a trade-in was resold — message tells the operator to void the later sale first. Since the buy-back change (#27), also 409 "the phone was taken back into stock on a later sale or purchase" when a phone this sale sold was later taken back; voids unwind newest-first (P6; see §8 P4 decision log, B4) _(revised P4, P5)_. | R1 |
 | 17 | **Keyboard help overlay** | Discoverability | `?` / F1 opens a cheat sheet of the shortcuts in §6. Hidden on touch-only devices. | R1 |
 | 18 | **External-supplier (friendly-shop) lines** | Sell stock sourced from another shop | `addLine` with `external_supplier_id` (+ free-text IMEI for serialized). | **R1.1** (Q12) |
 | 19 | **Sale-level notes** | Free-text on the sale | `PATCH /sales/:id { notes }`. | **R1.1 candidate** |
@@ -150,7 +151,7 @@ Zustand is **already used** (theme, layout, active branch). It is not proposed f
 }
 ```
 
-Later slices add payment, completion (`lastCompleted`) and customer state to this slice.
+Later slices add payment, completion (`lastCompleted`) and customer state to this slice. _(Revised P5:)_ P5 adds `completing` and `completed` to `status`, the completed sale (`lastCompletedSale`) for the Sale complete panel and the receipt, and a complete error `{ kind, message, status, line_id?, payment_id? }` (P5-7, P5-8).
 
 **Optimistic updates: `addLine` only** _(revised P1, 2026-10-15; see §8 P1 decision log)_. Dispatching `addLine` shows a pending row at once (product name and catalog price, a spinner in place of the line total, controls disabled). The server's hydrated sale replaces it on success; on failure the row is removed and the error shows under the scan bar. **Totals are never optimistic:** the Totals panel shows the server's figures and dims with "Updating…" while any line mutation is in flight. Qty edits and removals aren't optimistic either: the row is dimmed ("busy") until the server answers, and the reducer replaces `draftSale` wholesale. The original reasoning still holds for money: totals, discounts, rounding and line numbers are computed server-side, and a wrong total at a till is worse than a short wait. The pending row only acknowledges the scan at once. Line mutations run one at a time through a queue in the slice, so fast scans reach the server in order and an older response can't overwrite a newer sale.
 
@@ -166,7 +167,7 @@ Later slices add payment, completion (`lastCompleted`) and customer state to thi
 
 1. On terminal mount, read `draftSaleId` from `terminalSessionStore`.
 2. `GET /sales/:id`. If DRAFT and same branch → restore (the customer comes with the sale). If COMPLETED/VOIDED/404, or a different branch → clear the pointer and start fresh. A network or 5xx error does **not** start a fresh draft; the terminal shows "Try again". (Known gap: switching branch leaves the old DRAFT orphaned; see FOLLOWUPS.)
-3. Pointer is cleared on complete, discard, and logout.
+3. Pointer is cleared on complete, discard, and logout. _(Revised P5:)_ on complete it moves to the next DRAFT, created in the background (P5-10), and `terminalSessionStore` also persists `lastCompletedSaleId` for "Reprint last receipt" (P5-12), cleared on logout like the pointer.
 
 Alternative (no local pointer) is in §8 Q8.
 
@@ -219,7 +220,7 @@ The sale id is **not** in the `/pos` URL (the draft is session state, not a shar
 **Retries:**
 
 - **GETs:** one automatic retry after 1 s on network error / 5xx (catalog, `GET /sales/:id`, customer search).
-- **Mutations: never auto-retried.** `POST .../payments` and `POST .../complete` are not idempotent; a retried payment after a lost response could double-record a tender. On a network error during a mutation, the client re-fetches `GET /sales/:id` and shows the real state ("Connection lost — here is what the server has").
+- **Mutations: never auto-retried.** `POST .../payments` and `POST .../complete` are not idempotent; a retried payment after a lost response could double-record a tender. On a network error during a mutation, the client re-fetches `GET /sales/:id` and shows the real state ("Connection lost — here is what the server has"). _(Revised P5:)_ `POST .../complete` gets its own 30 s timeout and the same re-fetch: a COMPLETED sale is treated as success (P5-7). There is no global axios timeout (FOLLOWUPS).
 
 **Offline:** none in R1 (see Q4). A network-status indicator in the status strip (`navigator.onLine` + last request outcome); mutations disabled while offline.
 
@@ -252,10 +253,11 @@ Nothing is cached between searches, so the 200-row cap on `/products` doesn't ma
 | Terminal (global) | F2 | Focus scan input |
 | | F3 | Customer attach dialog (ignored while a TRADE_IN payment holds the customer, P4-11) |
 | | F4 | Payment dialog (method defaults to CASH) |
-| | F6 | Payment dialog with TRADE_IN selected (same rule as F4: Pay enabled, no other dialog open); with no customer on the sale, the customer attach dialog first, then the payment dialog _(revised P4, see §8 P4-1, P4-2, P4-14)_ || | F9 | Complete sale (opens confirm; only when balance is 0) |
+| | F6 | Payment dialog with TRADE_IN selected (same rule as F4: Pay enabled, no other dialog open); with no customer on the sale, the customer attach dialog first, then the payment dialog _(revised P4, see §8 P4-1, P4-2, P4-14)_ |
+| | F9 | Complete sale: opens the confirm, under the same rule as the Complete sale button (fully paid, nothing in flight, no other dialog open). Every F9 is prevented (Edge's F9 opens Immersive Reader); verified with an OS-level keystroke at the start of P5 step B, F10 as the fallback _(revised P5, see §8 P5-4)_ |
 | | Ctrl+Delete | Discard draft (confirm) |
 | | F1 or `?` (when not typing) | Keyboard help overlay |
-| | Alt+R | Recent sales |
+| | Alt+R | Recent sales (P6) |
 | | Esc | Close dialog / clear scan input / return focus |
 | Scan input | Enter | Look up and add |
 | | ↓ / ↑, Enter | Navigate / pick from search results |
@@ -267,13 +269,13 @@ Nothing is cached between searches, so the 200-row cap on `/products` doesn't ma
 | Payment dialog | 1–6 | Pick method (CASH, CARD, BANK_TRANSFER, KOKO, MINTPAY, TRADE_IN). 1–5 shipped in P3; **6 = TRADE_IN** in P4 _(revised P4)_ |
 | | Tab | Amount → cash received / reference → submit. TRADE_IN: product → IMEI → trade-in value → resale price → notes → submit _(revised P4)_ |
 | | Enter | Record payment. **Exceptions:** Enter in the trade-in IMEI field moves focus to the next field instead of submitting, because a scanner sends Enter after the IMEI _(revised P4, see §8 P4-7)_; Enter in the trade-in product combobox picks the highlighted product and moves to the IMEI; Enter in the customer-NIC field saves the NIC (P4-13) |
-| Payments panel | Alt+P then ↑/↓, Delete | Select and remove a payment (TRADE_IN asks to confirm, P4-10). Alt+P is P6; P4 ships the remove buttons |
+| Payments panel | Alt+P then ↑/↓, Delete | Select and remove a payment (TRADE_IN asks to confirm, P4-10). Alt+P is P7 (was P6, revised P5); P4 ships the remove buttons |
 | Remove trade-in confirm | Enter / Esc | Remove (focused on open) / keep _(P4-10)_ |
-| Complete confirm | Enter / Esc | Complete / back |
-| Sale complete panel | Enter or any scan | Start next sale |
+| Complete confirm | Enter / Esc | Complete (focused on open) / back. Disabled while completing, and while a stock shortfall is listed (P5-6) _(revised P5)_ |
+| Sale complete panel | Enter (empty scan bar) or any scan | Start next sale; a scan also adds that item to the next draft. Reprint is a button, no hotkey _(revised P5, see §8 P5-9, P5-10)_ |
 | Customer dialog | type → ↓/↑ → Enter | Search and pick; Ctrl+N new customer |
-| Recent sales | ↑/↓, Enter | Open sale; Esc back to terminal |
-| Sale detail | V | Void (admin/manager) |
+| Recent sales (P6) | ↑/↓, Enter | Open sale; Esc back to terminal |
+| Sale detail (P6) | V | Void (admin/manager) |
 
 Final bindings get a usability pass with an actual cashier after P1.
 
@@ -330,12 +332,13 @@ components/pos/
     tradeIn.js                           # (P4) shared trade-in helpers and copy
   PaymentsList/                          # (revised P3, P4) tenders list + remove (no edit; confirm for TRADE_IN only)
   RemoveTradeInDialog/                   # (P4) the TRADE_IN remove confirm (P4-10)
-  TotalsPanel/
-  CompleteSaleDialog/
-  SaleCompletePanel/
-  RecentSalesTable/
-  SaleDetailView/
-  VoidSaleDialog/
+  TotalsPanel/                           # (revised P5) Complete sale button replaces the Ready box (P5-3)
+  CompleteSaleDialog/                    # (P5) confirm + stock re-check + complete errors (P5-5, P5-6, P5-8)
+  SaleCompletePanel/                     # (P5) replaces cart + right column after complete (P5-9)
+  Receipt/                               # (P5) the 80mm print-only layout (P5-11), rendered into #receipt-root
+  RecentSalesTable/                      # P6
+  SaleDetailView/                        # P6
+  VoidSaleDialog/                        # P6
   KeyboardHelpOverlay/
 pages/PosTerminal/  pages/PosRecentSales/  pages/PosSaleDetail/
 services/salesService.js  services/customersService.js
@@ -346,6 +349,9 @@ schemas/paymentSchema.js  schemas/customerSchema.js  schemas/voidSchema.js
 utils/money.js                           # formatLKR (P1); toCents / fromCents (P3: balance and change math in integer cents)
 utils/device.js                          # isTouchOnly (P1)
 utils/imei.js                            # Luhn check for the trade-in IMEI hint (P4-7)
+utils/completeErrors.js                  # (P5) classify complete errors E1–E12 into kinds (P5-8)
+utils/printReceipt.js                    # (P5) measure the receipt, set @page size, window.print() (P5-13)
+constants/receipt.js                     # (P5) shop name and footer text (P5-14)
 ```
 
 **Payment modal composition:** one `PaymentDialog` owns method selection, amount, and submit; the method-specific fields are child components selected by method. Each child exports its zod schema fragment, and the dialog builds a discriminated union (`z.discriminatedUnion("payment_method", [...])`) mirroring the backend rules (CASH needs `cash_received >= amount`; reference methods need `reference_number`; TRADE_IN needs product, IMEI, buying price = amount, and a customer on the sale). Client validation is a convenience; the server stays authoritative.
@@ -366,7 +372,7 @@ Q6, Q9, Q11, Q12 and Q17 were answered explicitly. The rest were not called out,
 |---|-------|----------|
 | Q1 | Out of stock on add | Default — warn on the line, don't block |
 | Q2 | Trade-in entry | Default — TRADE_IN tab in the payment dialog, sectioned; F6 opens it |
-| Q3 | Post-sale summary | Default — in-terminal "Sale complete" panel |
+| Q3 | Post-sale summary | Default — in-terminal "Sale complete" panel. _Revised P5:_ plus a printed 80mm receipt at every sale, in P5 rather than Phase 6.6 (P5-9 – P5-13) |
 | Q4 | Offline | Default — none; banner + mutations disabled |
 | Q5 | Errors | Default — inline + persistent 409 banner + new Toast primitive |
 | **Q6** | **Design** | **Modern design, mobile responsive.** No mockups; built within Path B tokens. Responsive rules in §6 "Touch and small screens" and §7 |
@@ -377,7 +383,7 @@ Q6, Q9, Q11, Q12 and Q17 were answered explicitly. The rest were not called out,
 | **Q11** | **Discounts** | **All roles may discount for now.** Add `APPLY_DISCOUNT` to the cashier role; revisit when shop policy firms up. No backend change (it already allows all roles) |
 | **Q12** | **Friendly-shop lines** | **R1.1** |
 | Q13 | Customer on sale | Default — backend adds `customer` relation to `findOne` |
-| Q14 | Test tooling | Default — Vitest + RTL from P0, Playwright in P6 |
+| Q14 | Test tooling | Default — Vitest + RTL from P0, Playwright in P7 (was P6, revised P5) |
 | Q15 | Void reason | Default — presets + optional detail |
 | Q16 | Recent sales | Default — today, this branch, all cashiers |
 | **Q17** | **Hotkeys** | **No existing POS to match.** `react-hotkeys-hook` with the §6 map; refine after cashier use (revised 2026-10-13 from the vanilla hook) |
@@ -401,7 +407,7 @@ Decisions made or changed while building P1. Where they differ from the original
 | P1-5 | Serialized add (Q9, §1 #4) | **The IMEI prompt opens _before_ `addLine`.** The backend rejects a serialized line without `imei_snapshot` (400), so the flow is: scan the product label → prompt → `addLine({ product_id, quantity: 1, imei_snapshot })`. 400/409 errors stay inline in the prompt, with `existing_unit.status`. Serialized lines (those with an IMEI) lock qty at 1. | "After adding, show an IMEI prompt" (P1 brief wording) |
 | P1-6 | Stock warning (Q1 b) | Brought forward from P6. Warns when branch stock is below the product's qty **summed across lines**; never blocks. Resume uses one branch-wide stock request (rate limit). A failed lookup shows a muted "?". | P6 |
 | P1-7 | Cart components (§7) | One responsive **`CartLines`** instead of `CartTable` + `CartCardList`. | Two components |
-| P1-8 | P1 scope | Narrowed to scan bar, cart, totals, draft lifecycle, stock warning and F2/focus. Later slices per the P1 brief: customer attach → P2, payments → P3, TRADE_IN → P4, complete → P5. Line discounts → P2 (FOLLOWUPS). Mobile sticky action bar → P6. | §9 P1 row (payments + complete in P1) |
+| P1-8 | P1 scope | Narrowed to scan bar, cart, totals, draft lifecycle, stock warning and F2/focus. Later slices per the P1 brief: customer attach → P2, payments → P3, TRADE_IN → P4, complete → P5. Line discounts → P2 (FOLLOWUPS). Mobile sticky action bar → P6 (now P7, revised P5). | §9 P1 row (payments + complete in P1) |
 | P1-9 | Focus (§6) | F2 (from anywhere, including inputs) and Esc (outside inputs) focus the scan bar. Qty Enter, line delete and closing the New sale dialog hand focus back to it. Steppers keep focus (busy = `aria-disabled`, not `disabled`). No automatic hand-offs on touch-only devices, and no auto-focus on mount when the pointer is coarse. | — |
 
 ### P3 decision log (2026-10-15)
@@ -420,8 +426,8 @@ Decisions made before building P3 (payment entry). Where they differ from the or
 | P3-8 | Method keys (§6) | Number keys **1–5** pick CASH, CARD, BANK_TRANSFER, KOKO, MINTPAY inside the dialog. 6 / TRADE_IN arrives with P4. | 1–6 |
 | P3-9 | Money math | Balance and change are computed in **integer cents** (`toCents` / `fromCents` in `utils/money.js`), never by float subtraction. Balance due = `total − amount_paid` from the server sale. | — |
 | P3-10 | Backend fixes found in P3 recon | **Fixed in #24** before P3. (B1) The remaining-balance check compared floats, so paying the exact remainder after a partial payment with cents was rejected ("50.20 exceeds remaining balance 50.20"); it now compares in cents. (B2) A cart change that would drop `total` below `amount_paid` hit a DB CHECK and returned 500; it now returns 400 "Cannot reduce the sale total below the amount already paid. Remove or reduce payments first." #24 also bounds AMOUNT discounts in cents. | — |
-| P3-11 | Bottom sheets below `md` (§6) | **Deferred to P6.** The PaymentDialog is a centred modal at every width, like every other dialog in the app; no dialog has the §6 bottom-sheet variant yet. P6 adds it for all terminal dialogs at once. | §6 "Dialogs become bottom sheets below `md`" (for P3) |
-| P3-12 | Quick-tender chips (§1 #8) | **Deferred to P6.** The CASH form has no quick-tender chips (Exact / next 500 / next 1,000 / 5,000) in P3. The cashier types the cash received and sees the live change (P3-9); P6 can add chips that fill Cash received. | — |
+| P3-11 | Bottom sheets below `md` (§6) | **Deferred to P7** (was P6, revised P5). The PaymentDialog is a centred modal at every width, like every other dialog in the app; no dialog has the §6 bottom-sheet variant yet. P7 adds it for all terminal dialogs at once. | §6 "Dialogs become bottom sheets below `md`" (for P3) |
+| P3-12 | Quick-tender chips (§1 #8) | **Deferred to P7** (was P6, revised P5). The CASH form has no quick-tender chips (Exact / next 500 / next 1,000 / 5,000) in P3. The cashier types the cash received and sees the live change (P3-9); P7 can add chips that fill Cash received. | — |
 
 ### P4 decision log (2026-10-17, updated 2026-10-20)
 
@@ -451,7 +457,56 @@ Decisions made before building P4 (TRADE_IN payment), and P4-13 – P4-15 made w
 | P4-12 | Not in P4 | Payout or store credit; creating products from the till; editing a trade-in (it's frozen: remove and re-add); the phone-purchase intake screen (§10); complete-time 409 handling (P5); condition fields or photos beyond free-text notes. Buy-back needs no P4 work: it is an ordinary trade-in. | §9 P4 row ("409 at add and complete") |
 | P4-13 | Customer NIC (decided 2026-10-20) | **A trade-in needs the customer's NIC**, so a phone that turns out to be stolen can be traced to whoever handed it over. Picking Trade-in for a customer without an NIC shows "Trade-in needs the customer's NIC" with an inline NIC field and Save NIC (`PATCH /customers/:id`, 5–20 characters; another customer's NIC shows inline); the trade-in fields replace it once saved. NIC stays optional on customers otherwise. **Backend enforces it too (#29):** `addPayment` TRADE_IN, `completeSale` (once per sale, before materializing; rolls back) and `POST /phone-purchases` return 400 without an NIC. | NIC optional everywhere |
 | P4-14 | F6 in the browser | **Verified 2026-10-20:** a page can intercept F6. With an OS-level F6 (not a simulated one) in Chrome 155 and Edge 155, `preventDefault()` on keydown kept focus in the page; without it, focus went to the address bar. Every F6 is prevented, also when it does nothing (no fallback key needed). Firefox not tested. | — (a fallback such as F4 then 6 was the plan if F6 couldn't be intercepted) |
-| P4-15 | Trade-in row at phone width | **Kept as P4-8.** In the stacked layout (390px) a long product name truncates the detail line before the IMEI ("Used iPhone 12 Pro …"). Accepted: the till is a desktop, the remove confirm shows the full phone, and so will P5's sale detail. | — (option: IMEI first in the stacked layout) |
+| P4-15 | Trade-in row at phone width | **Kept as P4-8.** In the stacked layout (390px) a long product name truncates the detail line before the IMEI ("Used iPhone 12 Pro …"). Accepted: the till is a desktop, the remove confirm shows the full phone, and so will P6's sale detail _(revised P5)_. | — (option: IMEI first in the stacked layout) |
+
+### P5 decision log (2026-10-20)
+
+Decisions made before building P5 (complete sale, confirmation, receipt). Where they differ from the original planning text, the affected sections are marked "revised P5".
+
+**Business input (from the shop):**
+
+1. **Customers expect a printed receipt at every sale**, so receipts are in P5, not Phase 6.6 (§10, Q3).
+2. **Printer: Xprinter XP-80T**, 80mm paper, USB (it also supports Bluetooth and LAN). **No cash drawer.**
+3. **Browser printing through the Windows driver:** a print-only 80mm layout and `window.print()`. No ESC/POS, no WebUSB. Auto-cut comes from the driver setting; silent printing from Chrome/Edge `--kiosk-printing` on the till (documented, no code).
+
+**What `completeSale` does today (P5 recon).** `POST /sales/:id/complete` has no body and returns 200 with the hydrated sale (`status`, `sale_number`, `completed_at`, branch, cashier, customer, lines, payments). One transaction: lock the sale row → DRAFT check → at least one line → `amount_paid = total` in cents → per line, stock decrement then unit → SOLD → trade-in customer and NIC checks → trade-ins become stock → sale number → COMPLETED. Any failure rolls back everything, including the sale number. The sale number is `INV-YYYYMMDD-NNNN` on the Colombo date of completion, unique **per branch**. Because the sale row is locked first, a second complete waits, then sees COMPLETED and gets 400: the sale completes at most once and stock is never decremented twice. The errors, with the step-0 changes:
+
+| # | Cause | Status and message | After step 0 |
+|---|---|---|---|
+| E1 | Sale not found | 404 `Sale not found` | — |
+| E2 | Not a DRAFT | 400 `Cannot complete a COMPLETED sale. Only DRAFT sales can be completed.` (or VOIDED). Not matched by the slice's "gone" check | — |
+| E3 | No lines | 400 `Cannot complete a sale with no lines…` | — |
+| E4 | Paid ≠ total | 400 `Cannot complete sale: amount_paid X does not equal total Y` | — |
+| E5 | Not enough stock (first short line only) | 409 `Insufficient stock for "<name>": requested N, available M` | + `product_id` (and `line_id` if cheap) |
+| E6 | A line's phone is no longer IN_STOCK (another draft sold it) | 409 `Cannot sell IMEI '<imei>'…` + `existing_unit` (its `id` is the line's `product_unit_id`) | — |
+| E7 | Trade-in with no customer | 400 (can't happen since #22) | — |
+| E8 | Trade-in customer has no NIC (#29) | 400 `A trade-in needs the customer's NIC` | — |
+| E9 | Trade-in product deactivated since it was added | 400 `Product <uuid> not found or inactive` | Product name instead of the UUID |
+| E10 | Trade-in IMEI now held by the shop (pre-check) | 409 `IMEI already exists in inventory` + `existing_unit` | + `imei`, `payment_id` |
+| E11 | Same, caught by the live-IMEI index | 409, same message, `existing_unit: null` | + `imei`, `payment_id` |
+| E12 | Deadlock (40P01, FOLLOWUPS) or data-integrity error | 500 | — |
+
+**Backend prerequisite: step 0, one micro-PR before P5 is built** (P5-1, P5-2). It also corrects two wrong statements found in recon: the comments at `sales.service.ts` `completeSale` step 4 and `SaleNumberCountersService.generateNext` say a rollback "burns" a sale number (it doesn't: the counter is in the same transaction, as `sales.md` says), and `docs/backend/sales.md` says a repeated complete would decrement stock twice (the DRAFT check returns 400).
+
+| # | Topic | Decision | Replaces |
+|---|---|---|---|
+| P5-1 | Warranty on the receipt (backend) | **Snapshot at complete.** New nullable `sale_lines.warranty_months_snapshot` and `checking_warranty_days_snapshot` (migration with up/down). Inside the `completeSale` transaction, each line's product is read in the per-line loop and both values are copied onto the line, so the sale records exactly what applied when it was sold, and drafts that already exist are covered. No backfill: sales completed before the migration keep null, and the receipt prints no warranty for null or 0. | — (warranty was on Product only and not in the sale response) |
+| P5-2 | Complete-time 409 details (backend) | In the same micro-PR: the trade-in 409s (E10, E11) gain `imei` and `payment_id`; the insufficient-stock 409 (E5) gains `product_id`, and `line_id` if it is cheap to pass; E9 names the product instead of its UUID. | — |
+| P5-3 | Complete control | A **"Complete sale"** button replaces the Totals panel's Ready box, in the same place as Pay. "Paid in full · change due X" stays as a line above it. Same rule as Pay (P3-7): an open, fully paid draft with nothing in flight; while syncing it dims. | P3-7's Ready box (no button) |
+| P5-4 | Hotkey | **F9**, as §6 reserved it, under the button's rule. Every F9 is `preventDefault`-ed: Edge opens Immersive Reader on F9 (Firefox has Reader View). Verified with an OS-level F9 in Chrome and Edge at the start of step B, as P4-14 did for F6; **F10** if F9 can't be intercepted. | — |
+| P5-5 | Confirm before completing | **Yes.** `CompleteSaleDialog` shows total, the tenders and change due; Complete is focused on open (Enter completes, Esc goes back). F9 → Enter is two keys, and undoing a completed sale needs a manager's void. | — |
+| P5-6 | Stock check before completing | Opening the confirm refreshes branch stock (one `GET /stock?branchId=`, `refreshCartStock`). A shortfall is listed in the dialog ("<name>: N needed, M in stock") and **disables Complete**, with **Check again**. The server would return 409 for it anyway. If the lookup fails, Complete stays enabled and the 409 is the guard. This is the first place stock blocks anything: adding still only warns (Q1). | Q1 "warn, don't block" (at complete only) |
+| P5-7 | Double-submit and lost responses | **No backend change.** A `completing` status disables the button and F9, and the thunk's `condition` refuses a second run. The complete goes through the mutation queue, after any queued edits. A 30 s timeout on this request only. On a network error, timeout, 5xx or E2, the client re-fetches `GET /sales/:id`: COMPLETED → success (panel and receipt from that sale); DRAFT → the error with "Try again" (safe: nothing was saved); VOIDED or 404 → the existing "gone" banner. | — (no idempotency key) |
+| P5-8 | Complete errors | Shown **in the confirm dialog, which stays open**; `utils/completeErrors.js` classifies them. **E5:** "Not enough stock: <name> (requested N, available M)", the cart's stock badges refreshed, and **Close and fix cart**. **E6:** that line highlighted, "Phone <IMEI> was sold on another sale. Remove the line." **E8:** the P4-13 NIC field inline (shared with `TradeInCustomerPanel`); saving it re-enables Complete. **E10/E11:** the trade-in row (by `payment_id`) highlighted in PaymentsList, "This trade-in phone (<IMEI>) is already in stock. Remove the trade-in and check the phone." **E9:** "The trade-in product <name> was deactivated. Remove the trade-in and re-add it." **E3/E4/E7:** re-fetch the sale and show a generic message. **E12:** "Couldn't complete. Nothing was saved. Try again." Highlights stay until the next cart or payment change. | §1 #12 "409s show inline" (no detail) |
+| P5-9 | Sale complete panel | **`SaleCompletePanel` replaces the cart and the right column**; the scan bar stays live and focused (a modal would trap focus and break "any scan starts the next sale"). Content: "Sale complete", sale number and time, **Change due** largest (when there is cash change), total, paid, the tenders (up to 4 rows, then "+N more"), the customer, **Reprint receipt** and **Next sale (Enter)**. Measured with the mocked-API harness at 1366×650 and 1526×640 (Q23). | — |
+| P5-10 | Next sale | **The next DRAFT is created in the background** as soon as complete succeeds, and the pointer moves to it (as P1-2: the first scan never waits for a create). Enter in the empty scan bar, Next sale, or **a scan** closes the panel; a scan also adds that item to the new draft. If the create fails, the panel shows "Try again" in place of Next sale. | — |
+| P5-11 | Receipt content | **Header:** shop name, branch name, address and phone (null ones skipped). Invoice number, date and time (Colombo), cashier, customer name and phone with the middle digits masked; **no NIC**. **Lines:** name; IMEI for phones; `qty × price` and line total; discount when non-zero; "Warranty 12 months · Checking 7 days" when non-zero (P5-1). **Totals:** subtotal, discount, **TOTAL**. **Tenders** in order: Card / Bank transfer / Koko / Mintpay with reference; Trade-in with model and IMEI; Cash with cash received and change. **Footer:** thanks and warranty/returns terms. Black only (a thermal printer dithers grey); ~72mm printable width. | — |
+| P5-12 | When it prints | **Automatically on complete.** **Reprint receipt** on the Sale complete panel, and a persisted `lastCompletedSaleId` (`terminalSessionStore`, cleared on logout): the Current sale card offers **Reprint last receipt** (`GET /sales/:id`) until the next sale completes, also after a reload. A browser can't see printer errors (paper out, jam), so reprint is the only recovery. Reprinting older sales comes with P6's sale detail. | — |
+| P5-13 | How it prints | The receipt renders into a dedicated `#receipt-root`. `@media print` hides everything else and forces black on white (also in dark mode). Before `window.print()`, `utils/printReceipt.js` measures the receipt and sets `@page { size: 80mm <height>mm; margin: 0 }`, so the driver doesn't feed a long fixed page of blank paper before the cut. Tested without the printer via Chrome print preview → Save as PDF; component tests mock `window.print`. **A printer spike opens step B:** a minimal 80mm page with a dynamic `@page` height, printed on the real XP-80T (page length, auto-cut, margins) before the receipt is built. | — (a hidden iframe was the alternative) |
+| P5-14 | Shop details and footer | **Shop name and footer text in `constants/receipt.js`**; branch name, address and phone from the sale's `branch`. The shop supplies the shop name, the branch address and phone, and the footer text before step E; until then the code uses clearly marked placeholders, listed at the step-E checkpoint. There is no branch admin screen, so a go-live entry in FOLLOWUPS covers filling in branch address and phone. A backend settings source can come later. | — |
+| P5-15 | Void, recent sales, sale detail | **Not in P5.** They become **P6 — Recent sales, sale detail, reprint, void**: §1 #14–16, the B4 and resold-trade-in 409s, reprinting any sale, `voider` on `findOne`, and a `completed_at` filter for "today" (`GET /sales` filters on `created_at`, so a draft opened one evening and completed the next morning would be missing). Polish and E2E move to P7: earlier references to P6 as the polish slice (P1-6, P1-8, P3-11, P3-12, Q14, §6 Alt+P) now mean P7. | §9 "P5 — Recent sales + void" |
+| P5-16 | Till setup | Documented in a new `docs/frontend/pos-till-setup.md` (step F): XP-80T driver with 80mm paper and cut at end of document; XP-80T as the Windows default printer; a Chrome or Edge shortcut with `--kiosk-printing` opening `/pos`; one manual print first to set margins None, scale 100% and headers/footers off. No code. | — |
+| P5-17 | Not in P5 | Void, recent sales, sale detail, reprinting older sales (P6); SMS, WhatsApp or PDF receipts; ESC/POS or WebUSB; cash drawer (the shop has none); editing a completed sale; sale notes; the Toast primitive; bottom sheets (P3-11); line discount UI; a backend settings source; cleaning up orphan drafts. | — |
 
 ### Scheduling decisions
 
@@ -562,11 +617,12 @@ Each slice is a vertical, demoable increment. "unit" = reducers/selectors/utils 
 | **P2 — Customers** | `CustomerAttachDialog` (search, pick, detach), `CustomerCreateForm` (inline create, NIC 409 → offer existing); customer shown in terminal; `customersService`. | P0 (Q13 backend tweak optional) | 8 unit, 12 component |
 | **P3 — Payment entry** _(revised P3; serialized lines shipped in P1, see P1-5)_ | `addPayment` / `removePayment` in `salesService`; payment thunks through the serial mutation queue (pending row on add, optimistic remove); `toCents` / `fromCents`; Totals panel Paid + Balance due rows, "Pay LKR X" button + F4, "Ready to complete" state; `PaymentDialog` (method picker with keys 1–5, amount defaults to balance due) with `CashFields` (cash received, live change in cents) and `ReferenceFields` (required reference for CARD, BANK_TRANSFER, KOKO, MINTPAY); multi-tender by reopening the dialog; `PaymentsList` with remove (no edit, no confirm). No TRADE_IN (P4), no complete (P5). See §8 P3 decision log. | P1 | ~10 unit, ~20 component |
 | **P4 — Trade-in** _(revised P4)_ | TRADE_IN as method 6 in `PaymentDialog` (see §8 P4 decision log). Built in five steps, each a checkpoint: **A.** `methods.js` key 6; `paymentSchema` tradeIn branch (value ≤ balance, IMEI shape, resale > 0, no duplicate IMEI on the sale); `buildPaymentPayload` sends `amount = trade_in_buying_price`; the pending payment row carries the `trade_in_*` fields and the trade-in selectors count pending rows. **B.** `TradeInFields`: product combobox (P4-3), IMEI with Enter → next field and the Luhn hint (P4-7), trade-in value, resale price, notes; Amount swapped for Trade-in value; 3×2 picker; 409 messages by `existing_unit.status`. **C.** No-customer flow (P4-2: inline panel, attach then reopen, F6); Change / F3 guard (P4-11). **D.** PaymentsList TRADE_IN row (P4-8, P4-9); TRADE_IN-only remove confirm (P4-10). **E.** Planning-doc touch-ups and FOLLOWUPS entries. The P2 Detach guard stays as built (Q19); P4 adds Change / F3. Trade-in IMEI 409 at add only: complete-time 409s are P5. Buy-back needs no P4 work (#27). _Shipped (revised P4 build):_ C also added the customer-NIC rule (P4-13, backend #29) and the verified F6 (P4-14); D's row truncation at phone width is accepted (P4-15). The frontend suite went from 240 to 321 tests (23 files). | P1, P2, P3; backend #27, #29 | 8 unit, 12 component (as built: 81 new tests) |
-| **P5 — Recent sales + void** | `/pos/sales` list (paginated, today/branch), `/pos/sales/:id` detail; `VoidSaleDialog` (Q15) gated by `VOID_SALE`; resold-trade-in 409 message, and the taken-back-later 409 from #27 (B4, §1 #16) _(revised P4)_. Complete (moved here by P1-8) must also show #29's 400 "A trade-in needs the customer's NIC" (the NIC was cleared after the trade-in was added) next to the trade-in 409s (P4-13). | P1 | 6 unit, 12 component |
-| **P6 — Keyboard, discounts, polish + E2E** | Full §6 hotkey map with `Kbd` chips on pointer devices, `KeyboardHelpOverlay`, scan queue hardening, focus-return audit (keyboard) and no-auto-focus check (touch); stock warning (Q1); line discounts with `APPLY_DISCOUNT` granted to cashiers (Q11); merge on rescan: a non-serialized product already in the cart increments the existing line's qty instead of adding a new line _(added P3)_; user-friendly error mapping for network/raw errors in cart and payment messages (e.g. "Network Error") _(added P3)_; Playwright smoke flows: cash sale, split tender, serialized + trade-in sale, void — each at a desktop viewport, with the cash sale and trade-in also at a 390 px mobile viewport. | P0–P5 | 10 unit, 10 component, 6 e2e |
+| **P5 — Complete sale, confirmation, receipt** _(revised P5, see §8 P5 decision log)_ | Built in steps, each a checkpoint. **0.** Backend micro-PR, merged first: warranty snapshot on sale lines at complete (P5-1), complete-time 409 details (P5-2), and the two wrong statements on sale numbers and repeated completes. **A.** Slice: `completeSale` in `salesService`, the complete thunk through the mutation queue (`completing` → `completed`, `lastCompletedSale`), the 30 s timeout and re-fetch on a lost response (P5-7), `utils/completeErrors.js` (E1–E12, P5-8), `lastCompletedSaleId` in `terminalSessionStore`. **B.** Opens with the **printer spike** (P5-13: a minimal 80mm page with a dynamic `@page` height, printed on the real XP-80T) and the OS-level F9 check (P5-4). Then the Complete sale button in TotalsPanel (P5-3), F9, `CompleteSaleDialog` with the stock re-check (P5-5, P5-6). **C.** Complete errors (P5-8): line and trade-in-row highlights, the NIC field in the dialog. **D.** `SaleCompletePanel` (P5-9), the background next draft and scan-to-next (P5-10), Reprint last receipt on the Current sale card (P5-12); measured with the mocked-API harness at 1366×650 and 1526×640. **E.** `Receipt` and `utils/printReceipt.js` (P5-11, P5-13), auto-print and Reprint (P5-12), `constants/receipt.js` with the shop's text (P5-14); Save-as-PDF check, then a real print. **F.** `docs/frontend/pos-till-setup.md` (P5-16), planning-doc touch-ups, FOLLOWUPS. Existing TotalsPanel tests that assert the Ready box change in B (listed old/new/reason at that checkpoint). | P1–P4; backend step 0 | ~10 unit, ~25 component |
+| **P6 — Recent sales, sale detail, reprint, void** _(added P5, see §8 P5-15; was P5)_ | `/pos/sales` list (paginated, today/branch; "today" by `completed_at`, which needs a backend filter), `/pos/sales/:id` detail with **Reprint receipt**; `VoidSaleDialog` (Q15) gated by `VOID_SALE`; resold-trade-in 409 message, and the taken-back-later 409 from #27 (B4, §1 #16); `voider` on `findOne` (backend). | P5 | 6 unit, 12 component |
+| **P7 — Keyboard, discounts, polish + E2E** _(was P6, revised P5)_ | Full §6 hotkey map with `Kbd` chips on pointer devices, `KeyboardHelpOverlay`, scan queue hardening, focus-return audit (keyboard) and no-auto-focus check (touch); stock warning (Q1); line discounts with `APPLY_DISCOUNT` granted to cashiers (Q11); merge on rescan: a non-serialized product already in the cart increments the existing line's qty instead of adding a new line _(added P3)_; user-friendly error mapping for network/raw errors in cart and payment messages (e.g. "Network Error") _(added P3)_; Playwright smoke flows: cash sale, split tender, serialized + trade-in sale, void — each at a desktop viewport, with the cash sale and trade-in also at a 390 px mobile viewport. | P0–P6 | 10 unit, 10 component, 6 e2e |
 | **Total** | | | **~83 unit, ~90 component, ~6 e2e** |
 
-**Backend prerequisites (small, separate PRs):** Q13 (customer relation on `findOne`) lands before P0. Optional later: Q9(b) cashier IMEI lookup.
+**Backend prerequisites (small, separate PRs):** Q13 (customer relation on `findOne`) lands before P0. P5 step 0 (P5-1, P5-2) lands before P5. P6 needs a `completed_at` filter on `GET /sales` and `voider` on `findOne`. Optional later: Q9(b) cashier IMEI lookup.
 
 ---
 
@@ -575,7 +631,7 @@ Each slice is a vertical, demoable increment. "unit" = reducers/selectors/utils 
 Not in Phase 6.4:
 
 - **Parked / held sales** (multiple open carts per cashier) — **Phase 6.5**.
-- **Receipts:** thermal printing, PDF, SMS/WhatsApp receipt — **Phase 6.6**. 6.4 shows an on-screen summary only.
+- **Receipts beyond the printed 80mm receipt:** PDF, SMS/WhatsApp receipt, ESC/POS or WebUSB printing — **Phase 6.6**. _(Revised P5:)_ the printed thermal receipt through the browser and the Windows driver is in P5 (§1 #12a, §8 P5-11 – P5-13), because customers expect one at every sale.
 - **External-sourcing settlement** (friendly-shop payables, `Supplier.getSalesCount` UI) — **Phase 6.7**. Selling external-supplier lines is R1.1 per Q12.
 - **User management frontend** (create/edit users, roles, branch assignment, password change) — **Phase 6.8**.
 - **AWS deployment** — **Phase 6.9**.
@@ -585,5 +641,5 @@ Not in Phase 6.4:
 - **Refunds / partial returns** (void is all-or-nothing; customer-return flow is a backend followup).
 - **Payment edit** (`PATCH` payments, including inline CASH edit; reaffirmed in P3-1), sale-level notes, recent-sales filters beyond today — R1.1.
 - **Camera barcode/IMEI scanning** — not planned; the shop uses a hardware scanner (Q22).
-- **Offline mode**, multi-language UI, cash drawer integration, card-terminal integration, customer-facing display.
+- **Offline mode**, multi-language UI, cash drawer integration (the shop has no drawer), card-terminal integration, customer-facing display.
 - **Multi-branch scoping** of reads (R9).
