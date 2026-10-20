@@ -30,6 +30,7 @@ const pendingPayment = {
 };
 
 const payButton = () => screen.getByRole("button", { name: /^Pay / });
+const completeButton = () => screen.getByRole("button", { name: /Complete sale/ });
 
 describe("TotalsPanel", () => {
   it("shows the server's subtotal, discount and total without recomputing", () => {
@@ -98,22 +99,49 @@ describe("TotalsPanel", () => {
     expect(payButton().querySelector(".animate-spin")).toBeNull();
   });
 
-  it("replaces Pay with 'Ready to complete' once fully paid, with the change due", () => {
+  it("replaces Pay with 'Paid in full' and a Complete sale button once fully paid, with the change due", async () => {
+    const onComplete = vi.fn();
+    const user = userEvent.setup();
     renderTotals(
       cartSale({
         amount_paid: "1500.00",
         change_due: "500.00",
         payments: [cashPayment()],
       }),
+      {},
+      { onComplete },
     );
 
     expect(screen.queryByRole("button", { name: /^Pay / })).not.toBeInTheDocument();
-    expect(screen.getByRole("status")).toHaveTextContent("Ready to complete");
+    expect(screen.getByRole("status")).toHaveTextContent("Paid in full");
     expect(screen.getByTestId("totals-change")).toHaveTextContent("500.00");
     expect(screen.getByTestId("totals-balance")).toHaveTextContent("0.00");
+    expect(completeButton()).toBeEnabled();
+    expect(completeButton()).toHaveAttribute("aria-keyshortcuts", "F9");
+
+    await user.click(completeButton());
+    expect(onComplete).toHaveBeenCalledTimes(1);
   });
 
-  it("keeps 'Ready to complete' (dimmed) while a mutation is in flight — never 'Pay LKR 0.00'", () => {
+  it("disables Complete sale while a mutation is in flight", () => {
+    renderTotals(cartSale({ amount_paid: "1500.00", payments: [cashPayment()] }), {
+      removingPaymentIds: ["pay-cash"],
+    });
+
+    expect(completeButton()).toBeDisabled();
+  });
+
+  it("keeps Complete sale (spinning, disabled) while the sale completes — not Pay", () => {
+    renderTotals(cartSale({ amount_paid: "1500.00", payments: [cashPayment()] }), {
+      status: "completing",
+    });
+
+    expect(completeButton()).toBeDisabled();
+    expect(completeButton().querySelector(".animate-spin")).not.toBeNull();
+    expect(screen.queryByRole("button", { name: /^Pay / })).not.toBeInTheDocument();
+  });
+
+  it("keeps 'Paid in full' (dimmed) while a mutation is in flight — never 'Pay LKR 0.00'", () => {
     renderTotals(cartSale({ amount_paid: "1500.00", payments: [cashPayment()] }), {
       removingPaymentIds: ["pay-cash"],
     });

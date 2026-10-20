@@ -4,6 +4,7 @@ import { useDispatch, useSelector } from "react-redux";
 import { AlertTriangle, FilePlus2 } from "lucide-react";
 import Button from "../../components/common/Button";
 import CartLines from "../../components/pos/CartLines";
+import CompleteSaleDialog from "../../components/pos/CompleteSaleDialog";
 import CustomerAttachDialog from "../../components/pos/CustomerAttachDialog";
 import CustomerCard from "../../components/pos/CustomerCard";
 import NewSaleDialog from "../../components/pos/NewSaleDialog";
@@ -16,6 +17,7 @@ import { isTouchOnly } from "../../utils/device";
 import {
   discardDraftSale,
   ensureDraftSale,
+  selectCanComplete,
   selectCanPay,
   selectCartLines,
   selectDraftSale,
@@ -49,6 +51,9 @@ import { CASH, TRADE_IN } from "../../schemas/paymentSchema";
  *   instead. A page can intercept F6 (Chrome/Edge would otherwise move
  *   focus to the address bar): every F6 is preventDefault-ed, also when
  *   it does nothing.
+ * - F9 (P5-4) opens the CompleteSaleDialog when the Complete sale button
+ *   is enabled (both read selectCanComplete) and no other dialog is open.
+ *   Every F9 is preventDefault-ed too: Edge opens Immersive Reader on F9.
  *
  * TRADE-IN ATTACH-THEN-RETURN (P4-2): the PaymentDialog's "Attach
  * customer" (or F6 with no customer) closes the PaymentDialog, opens the
@@ -96,12 +101,14 @@ const PosTerminal = () => {
   const sale = useSelector(selectDraftSale);
   const lines = useSelector(selectCartLines);
   const canPay = useSelector(selectCanPay);
+  const canComplete = useSelector(selectCanComplete);
   const customer = useSelector(selectAttachedCustomer);
   const hasTradeIn = useSelector(selectHasTradeInPayment);
   const [confirmNewSale, setConfirmNewSale] = useState(false);
   const [attachOpen, setAttachOpen] = useState(false);
   const [paymentOpen, setPaymentOpen] = useState(false);
   const [paymentMethod, setPaymentMethod] = useState(CASH);
+  const [completeOpen, setCompleteOpen] = useState(false);
   // Attach-then-return (P4-2): the attach is for a trade-in, and whether
   // a customer was actually attached (vs cancelled).
   const tradeInAttach = useRef({ active: false, attached: false, afterPayment: false });
@@ -182,6 +189,14 @@ const PosTerminal = () => {
     },
     { enableOnFormTags: true, preventDefault: true },
     [canPay, customer],
+  );
+  useHotkeys(
+    "f9",
+    () => {
+      if (canComplete && !dialogOpen()) setCompleteOpen(true);
+    },
+    { enableOnFormTags: true, preventDefault: true },
+    [canComplete],
   );
   useHotkeys(
     "esc",
@@ -303,7 +318,10 @@ const PosTerminal = () => {
           />
 
           <div data-testid="totals-dock" className="lg:sticky lg:bottom-0">
-            <TotalsPanel onPay={() => openPayment(CASH)} />
+            <TotalsPanel
+              onPay={() => openPayment(CASH)}
+              onComplete={() => setCompleteOpen(true)}
+            />
           </div>
         </aside>
       </div>
@@ -333,6 +351,13 @@ const PosTerminal = () => {
         onClose={() => setPaymentOpen(false)}
         onAttachCustomer={attachFromPayment}
         afterLeave={afterPaymentLeave}
+      />
+
+      <CompleteSaleDialog
+        open={completeOpen}
+        onClose={() => setCompleteOpen(false)}
+        // Deferred: Headless UI restores focus to the opener after afterLeave.
+        afterLeave={() => setTimeout(returnFocus, 0)}
       />
     </div>
   );
