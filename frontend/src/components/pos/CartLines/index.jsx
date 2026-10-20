@@ -1,10 +1,11 @@
 import { useState } from "react";
 import { useDispatch, useSelector } from "react-redux";
-import { AlertTriangle, Loader2, Lock, Minus, Plus, ShoppingCart, Trash2 } from "lucide-react";
+import { AlertCircle, AlertTriangle, Loader2, Lock, Minus, Plus, ShoppingCart, Trash2 } from "lucide-react";
 import { formatLKR } from "../../../utils/money";
 import {
   removeLine,
   selectCartLines,
+  selectCompleteIssue,
   selectStockErrors,
   selectStockWarnings,
   updateLineQty,
@@ -26,6 +27,9 @@ import {
  * - Pending rows (add in flight) and busy rows (qty edit / delete in
  *   flight) are dimmed with their controls disabled, so rapid clicks
  *   can't race the server.
+ * - Complete refused because of a line (P5-8: not enough stock, or its
+ *   phone sold elsewhere): the row gets a red ring and a label until the
+ *   cashier changes the sale (selectCompleteIssue).
  *
  * Focus (§6): qty Enter and delete hand focus back to the scan bar via
  * `onReturnFocus`; −/+ clicks and the row's +/- keys keep it, since
@@ -126,7 +130,20 @@ const StockUnknown = () => (
   </span>
 );
 
-const CartLineRow = ({ line, index, stockWarning, stockUnknown, onReturnFocus }) => {
+const IssueBadge = ({ label }) => (
+  <span
+    className="
+      mt-1 inline-flex items-center gap-1 px-1.5 py-0.5 rounded-md
+      text-[11px] font-semibold
+      bg-red-100 text-red-800 dark:bg-red-900/40 dark:text-red-300
+    "
+  >
+    <AlertCircle size={11} aria-hidden="true" />
+    {label}
+  </span>
+);
+
+const CartLineRow = ({ line, index, stockWarning, stockUnknown, issue, onReturnFocus }) => {
   const dispatch = useDispatch();
   const serialized = !!line.imei_snapshot;
   const locked = line.pending || line.busy;
@@ -153,12 +170,14 @@ const CartLineRow = ({ line, index, stockWarning, stockUnknown, onReturnFocus })
       onKeyDown={handleKeyDown}
       aria-label={line.product_name_snapshot}
       aria-busy={locked}
+      aria-invalid={issue ? true : undefined}
       data-testid="cart-line"
       className={`
         grid grid-cols-[1fr_auto] md:grid-cols-[minmax(0,1fr)_8.5rem_7rem_7.5rem_2.5rem]
         items-center gap-x-3 gap-y-2 px-4 py-3
         border-b border-slate-100 dark:border-slate-800 last:border-b-0
         focus:outline-none focus-visible:bg-cyan-50/60 dark:focus-visible:bg-cyan-900/20
+        ${issue ? "ring-2 ring-inset ring-red-500 bg-red-50/60 dark:bg-red-950/30" : ""}
         ${locked ? "opacity-60" : ""}
       `}
     >
@@ -183,6 +202,12 @@ const CartLineRow = ({ line, index, stockWarning, stockUnknown, onReturnFocus })
             )
           )}
           {stockWarning ? <StockBadge warning={stockWarning} /> : stockUnknown && <StockUnknown />}
+          {issue && (
+            <>
+              {" "}
+              <IssueBadge label={issue} />
+            </>
+          )}
         </div>
       </div>
 
@@ -264,6 +289,7 @@ const CartLines = ({ onReturnFocus }) => {
   const lines = useSelector(selectCartLines);
   const stockWarnings = useSelector(selectStockWarnings);
   const stockErrors = useSelector(selectStockErrors);
+  const completeIssue = useSelector(selectCompleteIssue);
 
   if (lines.length === 0) {
     return (
@@ -306,6 +332,7 @@ const CartLines = ({ onReturnFocus }) => {
             index={index}
             stockWarning={stockWarnings[line.id]}
             stockUnknown={!line.pending && !!stockErrors[line.product_id]}
+            issue={completeIssue.lineIds.includes(line.id) ? completeIssue.label : null}
             onReturnFocus={onReturnFocus}
           />
         ))}

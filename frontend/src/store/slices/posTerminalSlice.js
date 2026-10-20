@@ -2,6 +2,7 @@ import {
   createSlice,
   createAsyncThunk,
   createSelector,
+  isAnyOf,
 } from "@reduxjs/toolkit";
 import {
   addSaleLine,
@@ -470,6 +471,17 @@ export const removePayment = createAsyncThunk(
   { condition: saleOpen },
 );
 
+/**
+ * Re-read the draft from the server (P5-8: a complete refused because the
+ * sale no longer matches what the terminal shows — no lines, or paid ≠
+ * total). Queued like any edit; refused while completing / completed.
+ */
+export const reloadDraftSale = createAsyncThunk(
+  "posTerminal/reloadDraftSale",
+  saleMutation("Couldn't reload the sale", (saleId) => getSale(saleId)),
+  { condition: saleOpen },
+);
+
 // ---------------------------------------------------------------------------
 // Thunks — complete (P5)
 // ---------------------------------------------------------------------------
@@ -797,6 +809,7 @@ const posTerminalSlice = createSlice({
       state.pendingPayments = [];
       state.removingPaymentIds = [];
       state.paymentError = null;
+      state.completeError = null;
     };
     const lifecycleRejected = (state, action) => {
       state.status = "error";
@@ -968,6 +981,13 @@ const posTerminalSlice = createSlice({
         markGone(state, action.payload);
       })
 
+      .addCase(reloadDraftSale.fulfilled, (state, action) => {
+        replaceSale(state, action.payload);
+      })
+      .addCase(reloadDraftSale.rejected, (state, action) => {
+        applyRejection(state, action.payload, "Couldn't reload the sale");
+      })
+
       // Stock
       .addCase(refreshStock.fulfilled, (state, action) => {
         const { productId } = action.meta.arg;
@@ -1021,7 +1041,25 @@ const posTerminalSlice = createSlice({
         state.scanState = "idle";
         state.scanResults = [];
         state.scanError = action.payload || { message: "Search failed" };
-      });
+      })
+
+      // P5-8: a complete error (and the line / payment it highlights)
+      // stands until the cashier changes the sale.
+      .addMatcher(
+        isAnyOf(
+          addLine.fulfilled,
+          updateLineQty.fulfilled,
+          removeLine.fulfilled,
+          addPayment.fulfilled,
+          removePayment.fulfilled,
+          attachCustomer.fulfilled,
+          detachCustomer.fulfilled,
+          saveCustomerNic.fulfilled,
+        ),
+        (state) => {
+          state.completeError = null;
+        },
+      );
   },
 });
 
@@ -1187,6 +1225,63 @@ export const selectIsCompleting = (state) =>
 
 /** Classified complete failure (utils/completeErrors.js), or null. */
 export const selectCompleteError = (state) => state.posTerminal.completeError;
+
+const ISSUE_LABELS = {
+  [COMPLETE_ERROR.OUT_OF_STOCK]: "Not enough stock",
+  [COMPLETE_ERROR.UNIT_SOLD]: "Sold on another sale",
+  [COMPLETE_ERROR.TRADE_IN_IMEI_IN_STOCK]: "Already in stock",
+  [COMPLETE_ERROR.TRADE_IN_PRODUCT_INACTIVE]: "Product inactive",
+};
+
+const NO_ISSUE = { lineIds: [], paymentIds: [], label: null };
+
+/**
+ * What the last complete error points at (P5-8): the cart lines and
+ * payments to highlight, and a short label for them. Empty when there is
+ * no complete error, or it isn't about a particular line or payment.
+ *
+ * - out of stock: the line from #32's sale_line_id (or every line of the
+ *   product, from an older server without it)
+ * - a line's phone sold elsewhere: the line selling that unit
+ * - trade-in IMEI in stock: the payment from payment_id (or the trade-in
+ *   with that IMEI)
+ * - inactive trade-in product: the trade-ins on that product (the 400
+ *   names the product, not the payment)
+ */
+export const selectCompleteIssue = createSelector(
+  [selectCompleteError, selectDraftSale],
+  (err, sale) => {
+    if (!err || !sale) return NO_ISSUE;
+    const lines = sale.lines ?? [];
+    const tradeIns = (sale.payments ?? []).filter(isTradeIn);
+    let lineIds = [];
+    let paymentIds = [];
+    switch (err.kind) {
+      case COMPLETE_ERROR.OUT_OF_STOCK:
+        lineIds = lines
+          .filter((l) => (err.sale_line_id ? l.id === err.sale_line_id : l.product_id === err.product_id))
+          .map((l) => l.id);
+        break;
+      case COMPLETE_ERROR.UNIT_SOLD:
+        lineIds = err.sale_line_id ? [err.sale_line_id] : [];
+        break;
+      case COMPLETE_ERROR.TRADE_IN_IMEI_IN_STOCK:
+        paymentIds = tradeIns
+          .filter((p) => (err.payment_id ? p.id === err.payment_id : p.trade_in_imei === err.imei))
+          .map((p) => p.id);
+        break;
+      case COMPLETE_ERROR.TRADE_IN_PRODUCT_INACTIVE:
+        paymentIds = tradeIns
+          .filter((p) => !err.product_name || p.trade_in_product?.name === err.product_name)
+          .map((p) => p.id);
+        break;
+      default:
+        return NO_ISSUE;
+    }
+    if (!lineIds.length && !paymentIds.length) return NO_ISSUE;
+    return { lineIds, paymentIds, label: ISSUE_LABELS[err.kind] };
+  },
+);
 
 /** The sale this terminal last completed (hydrated), or null. */
 export const selectLastCompletedSale = (state) =>

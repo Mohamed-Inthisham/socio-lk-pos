@@ -151,4 +151,26 @@ describe("CartLines stock warning", () => {
     expect(unknown).toHaveTextContent("?");
     expect(unknown).toHaveAttribute("title", "Stock lookup failed, try reloading");
   });
+
+  it("highlights the line a refused complete points at (P5-8)", () => {
+    renderCart([cableLine, phoneLine], {
+      completeError: {
+        kind: "unit_sold",
+        message: "Cannot sell IMEI '356938035643809'",
+        status: 409,
+        reconcile: false,
+        imei: "356938035643809",
+        sale_line_id: "line-2",
+      },
+    });
+
+    const phone = row(phoneProduct.name);
+    expect(phone).toHaveAttribute("aria-invalid", "true");
+    expect(phone).toHaveClass("ring-red-500");
+    expect(within(phone).getByText("Sold on another sale")).toBeInTheDocument();
+
+    const cable = row("USB-C Cable 1m");
+    expect(cable).not.toHaveAttribute("aria-invalid");
+    expect(within(cable).queryByText("Sold on another sale")).not.toBeInTheDocument();
+  });
 });

@@ -4,11 +4,16 @@ import { AlertCircle, AlertTriangle, Loader2 } from "lucide-react";
 import Dialog from "../../common/Dialog";
 import Button from "../../common/Button";
 import { methodLabel } from "../PaymentDialog/methods";
+import TradeInCustomerPanel from "../PaymentDialog/TradeInCustomerPanel";
+import { describeCompleteError } from "./completeErrorCopy";
 import { formatLKR } from "../../../utils/money";
+import { COMPLETE_ERROR } from "../../../utils/completeErrors";
 import {
   clearCompleteError,
   completeSale,
   refreshCartStock,
+  reloadDraftSale,
+  selectAttachedCustomer,
   selectCompleteError,
   selectDraftSale,
   selectIsCompleting,
@@ -35,8 +40,19 @@ import {
  *   nothing is short.
  * - Completing runs the slice's completeSale (at most once, P5-7). The
  *   dialog can't be dismissed meanwhile. Success (or a sale that turned
- *   out to be gone) closes it; any other failure stays here with the
- *   server's message. Step C refines those messages (P5-8).
+ *   out to be gone) closes it.
+ * - A failure stays here (P5-8), worded per kind (completeErrorCopy.js):
+ *   - the sale has to change first (stock, a phone sold elsewhere, a
+ *     trade-in IMEI or product problem, a sale that changed): Complete is
+ *     blocked and "Fix the cart" / "Fix the payments" is focused; it
+ *     closes the dialog, and the line or payment stays highlighted
+ *     (selectCompleteIssue) until the cashier changes the sale. Out of
+ *     stock also refreshes the cart's stock badges; a changed sale is
+ *     re-read from the server.
+ *   - the customer's NIC is missing (E8): the P4-13 NIC form, focused;
+ *     once saved, Complete is focused again.
+ *   - a connection / server failure: Complete stays focused to try again
+ *     (safe: a sale is never completed twice).
  *
  * PROPS:
  * - open
@@ -67,8 +83,12 @@ const CompleteSaleDialog = ({ open, onClose, afterLeave }) => {
   const completing = useSelector(selectIsCompleting);
   const completeError = useSelector(selectCompleteError);
   const warnings = useSelector(selectStockWarnings);
+  const customer = useSelector(selectAttachedCustomer);
   const [check, setCheck] = useState(CHECK_IDLE);
   const checkRequest = useRef(null);
+  const completeRef = useRef(null);
+  const fixRef = useRef(null);
+  const nicRef = useRef(null);
 
   // After success the draft is gone; keep showing that sale while the dialog fades out.
   const sale = draft ?? lastCompleted;
@@ -105,8 +125,26 @@ const CompleteSaleDialog = ({ open, onClose, afterLeave }) => {
     return [...byProduct.values()];
   }, [draft, warnings]);
 
+  const issue = completeError && !completeError.gone ? describeCompleteError(completeError) : null;
   const checking = check === CHECK_IDLE;
-  const blocked = check === CHECK_DONE && shortfall.length > 0;
+  const shortOfStock = check === CHECK_DONE && shortfall.length > 0;
+  const blocked = shortOfStock || !!issue?.fix || !!issue?.nic;
+
+  // React to a new failure: point the cashier at the way out, and bring
+  // the terminal's data up to date where the failure says it is stale.
+  // Once per error: the refresh / reload it triggers changes the deps below.
+  const handledError = useRef(null);
+  useEffect(() => {
+    if (!completeError || completeError.gone || completeError === handledError.current) return;
+    handledError.current = completeError;
+    const { fix, reload, nic } = describeCompleteError(completeError);
+    if (completeError.kind === COMPLETE_ERROR.OUT_OF_STOCK && branchId && productIdsKey) {
+      dispatch(refreshCartStock({ branchId, productIds: productIdsKey.split(",") }));
+    }
+    if (reload) dispatch(reloadDraftSale());
+    if (nic) nicRef.current?.focus();
+    else if (fix) fixRef.current?.focus();
+  }, [completeError, branchId, productIdsKey, dispatch]);
 
   const close = () => {
     if (completing) return;
@@ -150,6 +188,7 @@ const CompleteSaleDialog = ({ open, onClose, afterLeave }) => {
         <>
           <Button variant="secondary" label="Back" onClick={close} disabled={completing} />
           <Button
+            ref={completeRef}
             variant="accent"
             onClick={complete}
             aria-disabled={completing || blocked}
@@ -210,7 +249,7 @@ const CompleteSaleDialog = ({ open, onClose, afterLeave }) => {
             Couldn&apos;t check stock. It will be checked when the sale completes.
           </p>
         )}
-        {blocked && (
+        {shortOfStock && !issue && (
           <div
             role="alert"
             className="rounded-lg border border-amber-200 dark:border-amber-900 bg-amber-50 dark:bg-amber-950/40 px-3 py-2 text-amber-800 dark:text-amber-200"
@@ -232,13 +271,36 @@ const CompleteSaleDialog = ({ open, onClose, afterLeave }) => {
         )}
       </div>
 
-      {completeError && !completeError.gone && (
+      {issue?.nic && (
+        <div className="mt-3">
+          <TradeInCustomerPanel
+            customer={customer}
+            actionRef={nicRef}
+            onNicSaved={() => completeRef.current?.focus()}
+          />
+        </div>
+      )}
+
+      {issue && !issue.nic && (
         <div
           role="alert"
-          className="mt-3 flex gap-2 rounded-lg border border-red-200 dark:border-red-900 bg-red-50 dark:bg-red-950/40 px-3 py-2 text-sm text-red-700 dark:text-red-300"
+          className="mt-3 rounded-lg border border-red-200 dark:border-red-900 bg-red-50 dark:bg-red-950/40 px-3 py-2 text-sm text-red-700 dark:text-red-300"
         >
-          <AlertCircle size={16} aria-hidden="true" className="flex-shrink-0 mt-0.5" />
-          <span>{completeError.message}</span>
+          <p className="flex items-center gap-1.5 font-semibold">
+            <AlertCircle size={14} aria-hidden="true" className="flex-shrink-0" />
+            {issue.title}
+          </p>
+          {issue.body && <p className="mt-1">{issue.body}</p>}
+          {issue.fix && (
+            <Button
+              ref={fixRef}
+              size="sm"
+              variant="secondary"
+              className="mt-2"
+              label={issue.fix === "cart" ? "Fix the cart" : "Fix the payments"}
+              onClick={close}
+            />
+          )}
         </div>
       )}
     </Dialog>

@@ -24,6 +24,7 @@ import {
   detachCustomer,
   discardDraftSale,
   ensureDraftSale,
+  reloadDraftSale,
   removeLine,
   removePayment,
   resetMutationQueue,
@@ -34,6 +35,7 @@ import {
   selectCartLines,
   selectCartSyncing,
   selectCompleteError,
+  selectCompleteIssue,
   selectHasTradeInPayment,
   selectIsCompleting,
   selectLastCompletedSale,
@@ -1174,6 +1176,182 @@ describe("posTerminal complete (P5)", () => {
         quantity: 1,
       });
       expect(store.getState().posTerminal.status).toBe("ready");
+    });
+  });
+
+  describe("complete issues (P5-8)", () => {
+    const failWith = async (store, data, status = 409) => {
+      salesService.completeSale.mockRejectedValueOnce(
+        Object.assign(new Error("failed"), { response: { status, data } }),
+      );
+      await store.dispatch(completeSale());
+    };
+
+    it("out of stock points at the line from sale_line_id", async () => {
+      const store = await paidStore(
+        paidSale({ lines: [saleLine(), saleLine({ id: "line-2", product_id: "p-glass" })] }),
+      );
+
+      await failWith(store, {
+        message: 'Insufficient stock for "Tempered Glass": requested 1, available 0',
+        product_id: "p-glass",
+        sale_line_id: "line-2",
+      });
+
+      expect(selectCompleteIssue(store.getState())).toEqual({
+        lineIds: ["line-2"],
+        paymentIds: [],
+        label: "Not enough stock",
+      });
+    });
+
+    it("out of stock without sale_line_id points at every line of that product", async () => {
+      const store = await paidStore(
+        paidSale({ lines: [saleLine(), saleLine({ id: "line-2" }), saleLine({ id: "line-3", product_id: "p-glass" })] }),
+      );
+
+      await failWith(store, {
+        message: 'Insufficient stock for "USB-C Cable 1m": requested 2, available 1',
+        product_id: "p-cable",
+      });
+
+      expect(selectCompleteIssue(store.getState()).lineIds).toEqual(["line-1", "line-2"]);
+    });
+
+    it("a phone sold elsewhere points at the line selling it", async () => {
+      const store = await paidStore(
+        paidSale({ lines: [saleLine(), saleLine({ id: "line-2", product_unit_id: "unit-7", imei_snapshot: "354789102345678" })] }),
+      );
+
+      await failWith(store, {
+        message: "Cannot sell IMEI '354789102345678': status is SOLD, expected IN_STOCK.",
+        existing_unit: { id: "unit-7", status: "SOLD" },
+      });
+
+      expect(selectCompleteIssue(store.getState())).toEqual({
+        lineIds: ["line-2"],
+        paymentIds: [],
+        label: "Sold on another sale",
+      });
+    });
+
+    it("a trade-in IMEI in stock points at the payment from payment_id, or by IMEI", async () => {
+      const second = tradeInPayment({ id: "pay-ti-2", trade_in_imei: "490154203237518" });
+      const store = await paidStore(paidSale({ payments: [cashPayment(), tradeInPayment(), second] }));
+
+      await failWith(store, {
+        message: "IMEI already exists in inventory",
+        imei: "490154203237518",
+        payment_id: "pay-ti-2",
+        existing_unit: null,
+      });
+      expect(selectCompleteIssue(store.getState())).toEqual({
+        lineIds: [],
+        paymentIds: ["pay-ti-2"],
+        label: "Already in stock",
+      });
+
+      // Without payment_id (older server): matched by IMEI
+      await failWith(store, { message: "IMEI already exists in inventory", imei: "354789102345678", existing_unit: null });
+      expect(selectCompleteIssue(store.getState()).paymentIds).toEqual(["pay-ti"]);
+    });
+
+    it("an inactive trade-in product points at the trade-ins on that product", async () => {
+      const store = await paidStore(
+        paidSale({
+          payments: [
+            tradeInPayment({ trade_in_product: { id: "p-a", name: "Used iPhone 12" } }),
+            tradeInPayment({ id: "pay-ti-2", trade_in_product: { id: "p-b", name: "Used Galaxy S21" } }),
+          ],
+        }),
+      );
+
+      await failWith(store, { message: 'Product "Used Galaxy S21" is inactive' }, 400);
+
+      expect(selectCompleteIssue(store.getState())).toEqual({
+        lineIds: [],
+        paymentIds: ["pay-ti-2"],
+        label: "Product inactive",
+      });
+    });
+
+    it("errors that aren't about a row point at nothing", async () => {
+      const store = await paidStore();
+
+      await failWith(store, { message: "A trade-in needs the customer's NIC" }, 400);
+
+      expect(selectCompleteError(store.getState()).kind).toBe("nic_required");
+      expect(selectCompleteIssue(store.getState())).toEqual({ lineIds: [], paymentIds: [], label: null });
+    });
+
+    it("the issue stands until the cashier changes the sale", async () => {
+      const store = await paidStore();
+      await failWith(store, {
+        message: 'Insufficient stock for "USB-C Cable 1m": requested 1, available 0',
+        product_id: "p-cable",
+        sale_line_id: "line-1",
+      });
+      salesService.updateSaleLine.mockRejectedValueOnce(httpError(400, "Quantity must be at least 1"));
+
+      // A failed edit doesn't clear it
+      await store.dispatch(updateLineQty({ lineId: "line-1", quantity: 2 }));
+      expect(selectCompleteIssue(store.getState()).lineIds).toEqual(["line-1"]);
+
+      // A successful one does
+      salesService.removeSaleLine.mockResolvedValue();
+      salesService.getSale.mockResolvedValue(paidSale({ lines: [] }));
+      await store.dispatch(removeLine({ lineId: "line-1" }));
+      expect(selectCompleteError(store.getState())).toBeNull();
+      expect(selectCompleteIssue(store.getState()).lineIds).toEqual([]);
+    });
+
+    it("saving the customer's NIC clears a missing-NIC error", async () => {
+      const store = await paidStore(paidSale({ customer: customer() }));
+      await failWith(store, { message: "A trade-in needs the customer's NIC" }, 400);
+      customersService.updateCustomer.mockResolvedValue(customer());
+
+      await store.dispatch(saveCustomerNic({ nic: "199012345678" }));
+
+      expect(selectCompleteError(store.getState())).toBeNull();
+    });
+
+    it("a fresh draft starts without a complete error", async () => {
+      const store = await paidStore();
+      await failWith(store, { message: "A trade-in needs the customer's NIC" }, 400);
+      salesService.discardSale.mockResolvedValue();
+      salesService.createSale.mockResolvedValue(draftSale({ id: "sale-2" }));
+
+      await store.dispatch(discardDraftSale({ branchId: "branch-main" }));
+
+      expect(selectCompleteError(store.getState())).toBeNull();
+    });
+
+    it("reloadDraftSale re-reads the draft and keeps the error on screen", async () => {
+      const store = await paidStore();
+      await failWith(
+        store,
+        { message: "Cannot complete sale: amount_paid 1500.00 does not equal total 3000.00" },
+        400,
+      );
+      const serverSale = paidSale({ total: "3000.00", subtotal: "3000.00" });
+      salesService.getSale.mockResolvedValue(serverSale);
+
+      await store.dispatch(reloadDraftSale());
+
+      expect(salesService.getSale).toHaveBeenCalledWith("sale-1");
+      expect(store.getState().posTerminal.draftSale.total).toBe("3000.00");
+      expect(selectCompleteError(store.getState()).kind).toBe("unpaid");
+    });
+
+    it("reloadDraftSale is refused while completing", async () => {
+      const store = await paidStore();
+      salesService.completeSale.mockReturnValue(new Promise(() => {}));
+      store.dispatch(completeSale());
+
+      const result = await store.dispatch(reloadDraftSale());
+
+      expect(result.meta.condition).toBe(true);
+      expect(salesService.getSale).not.toHaveBeenCalled();
     });
   });
 

@@ -13,9 +13,11 @@ import {
 import { resetMutationQueue } from "../../../store/slices/posTerminalSlice";
 import * as salesService from "../../../services/salesService";
 import * as stockService from "../../../services/stockService";
+import * as customersService from "../../../services/customersService";
 
 vi.mock("../../../services/salesService");
 vi.mock("../../../services/stockService");
+vi.mock("../../../services/customersService");
 
 const deferred = () => {
   let resolve, reject;
@@ -214,32 +216,172 @@ describe("CompleteSaleDialog", () => {
     await waitFor(() => expect(onClose).toHaveBeenCalledTimes(1));
   });
 
-  it("stays open with the server's message when completing fails, Complete still focused", async () => {
-    const user = userEvent.setup();
-    salesService.completeSale.mockRejectedValue(
-      Object.assign(new Error("Conflict"), {
-        response: {
-          status: 409,
-          data: {
-            message: 'Insufficient stock for "USB-C Cable 1m": requested 2, available 0',
-            product_id: "p-cable",
-            sale_line_id: "line-1",
-          },
-        },
-      }),
-    );
-    const { onClose } = renderDialog();
-    await waitFor(() => expect(within(dialog()).queryByText("Checking stock…")).not.toBeInTheDocument());
-    await waitFor(() => expect(completeButton()).toHaveFocus());
+  describe("complete errors (P5-8)", () => {
+    const httpError = (status, data) =>
+      Object.assign(new Error(`Request failed with status code ${status}`), {
+        response: { status, data },
+      });
 
-    await user.keyboard("{Enter}");
+    // Open, wait for the stock check, press Complete; resolves with the alert.
+    const failWith = async (error, sale) => {
+      const user = userEvent.setup();
+      salesService.completeSale.mockRejectedValueOnce(error);
+      const utils = renderDialog(sale);
+      await waitFor(() => expect(within(dialog()).queryByText("Checking stock…")).not.toBeInTheDocument());
+      await waitFor(() => expect(completeButton()).toHaveFocus());
+      await user.keyboard("{Enter}");
+      return { ...utils, user };
+    };
 
-    expect(await within(dialog()).findByRole("alert")).toHaveTextContent(
-      'Insufficient stock for "USB-C Cable 1m": requested 2, available 0',
-    );
-    expect(onClose).not.toHaveBeenCalled();
-    expect(completeButton()).toHaveFocus();
-    expect(completeButton()).not.toHaveAttribute("aria-disabled", "true");
+    it("E5 out of stock: says which item, blocks Complete, focuses Fix the cart, refreshes stock", async () => {
+      const { onClose, user } = await failWith(
+        httpError(409, {
+          message: 'Insufficient stock for "USB-C Cable 1m": requested 2, available 0',
+          product_id: "p-cable",
+          sale_line_id: "line-1",
+        }),
+      );
+
+      const alert = await within(dialog()).findByRole("alert");
+      expect(alert).toHaveTextContent("Not enough stock");
+      expect(alert).toHaveTextContent("USB-C Cable 1m: 2 needed, 0 in stock.");
+      const fix = within(alert).getByRole("button", { name: "Fix the cart" });
+      await waitFor(() => expect(fix).toHaveFocus());
+      expect(completeButton()).toHaveAttribute("aria-disabled", "true");
+      // The cart's stock badges are refreshed (open + after the error)
+      await waitFor(() => expect(stockService.listStock).toHaveBeenCalledTimes(2));
+      // One message, not a second shortfall box from that refresh
+      expect(within(dialog()).getAllByRole("alert")).toHaveLength(1);
+
+      await user.click(completeButton());
+      expect(salesService.completeSale).toHaveBeenCalledTimes(1);
+      await user.click(fix);
+      expect(onClose).toHaveBeenCalledTimes(1);
+    });
+
+    it("E6 a phone sold elsewhere: names the IMEI, Fix the cart", async () => {
+      await failWith(
+        httpError(409, {
+          message: "Cannot sell IMEI '354789102345678': status is SOLD, expected IN_STOCK.",
+          existing_unit: { id: "unit-7", status: "SOLD" },
+        }),
+      );
+
+      const alert = await within(dialog()).findByRole("alert");
+      expect(alert).toHaveTextContent("Phone already sold");
+      expect(alert).toHaveTextContent("IMEI 354789102345678 was sold on another sale");
+      expect(within(alert).getByRole("button", { name: "Fix the cart" })).toBeInTheDocument();
+    });
+
+    it("E10/E11 trade-in IMEI in stock: names the IMEI, Fix the payments", async () => {
+      await failWith(
+        httpError(409, {
+          message: "IMEI already exists in inventory",
+          imei: "354789102345678",
+          payment_id: "pay-ti",
+          existing_unit: null,
+        }),
+      );
+
+      const alert = await within(dialog()).findByRole("alert");
+      expect(alert).toHaveTextContent("Trade-in phone already in stock");
+      expect(alert).toHaveTextContent("(IMEI 354789102345678)");
+      await waitFor(() =>
+        expect(within(alert).getByRole("button", { name: "Fix the payments" })).toHaveFocus(),
+      );
+      expect(completeButton()).toHaveAttribute("aria-disabled", "true");
+    });
+
+    it("E9 inactive trade-in product: names the product, Fix the payments", async () => {
+      await failWith(httpError(400, { message: 'Product "Used iPhone 12" is inactive' }));
+
+      const alert = await within(dialog()).findByRole("alert");
+      expect(alert).toHaveTextContent("Trade-in product inactive");
+      expect(alert).toHaveTextContent('"Used iPhone 12" was deactivated');
+      expect(within(alert).getByRole("button", { name: "Fix the payments" })).toBeInTheDocument();
+    });
+
+    it("E4 the sale changed: says so and re-reads the sale", async () => {
+      salesService.getSale.mockResolvedValue(paidSale({ amount_paid: "2000.00" }));
+
+      await failWith(
+        httpError(400, { message: "Cannot complete sale: amount_paid 2000.00 does not equal total 3000.00" }),
+      );
+
+      const alert = await within(dialog()).findByRole("alert");
+      expect(alert).toHaveTextContent("The sale has changed");
+      await waitFor(() => expect(salesService.getSale).toHaveBeenCalledWith("sale-1"));
+      expect(completeButton()).toHaveAttribute("aria-disabled", "true");
+    });
+
+    it("E12 a server error: Nothing was saved, Complete stays focused, and trying again works", async () => {
+      salesService.getSale.mockResolvedValue(paidSale()); // the re-fetch: still a DRAFT
+      salesService.completeSale
+        .mockRejectedValueOnce(httpError(500, { message: "Internal server error" }))
+        .mockResolvedValueOnce(completed());
+      const user = userEvent.setup();
+      const { onClose } = renderDialog();
+      await waitFor(() => expect(within(dialog()).queryByText("Checking stock…")).not.toBeInTheDocument());
+      await waitFor(() => expect(completeButton()).toHaveFocus());
+
+      await user.keyboard("{Enter}");
+
+      const alert = await within(dialog()).findByRole("alert");
+      expect(alert).toHaveTextContent("Couldn't complete the sale");
+      expect(alert).toHaveTextContent("The server had a problem. Nothing was saved. Try again.");
+      expect(within(alert).queryByRole("button")).not.toBeInTheDocument();
+      expect(completeButton()).toHaveFocus();
+      expect(completeButton()).not.toHaveAttribute("aria-disabled", "true");
+
+      await user.keyboard("{Enter}");
+      await waitFor(() => expect(onClose).toHaveBeenCalledTimes(1));
+      expect(salesService.completeSale).toHaveBeenCalledTimes(2);
+    });
+
+    it("a lost answer that couldn't be confirmed says so, and stays retryable", async () => {
+      salesService.getSale.mockRejectedValue(new Error("Network Error"));
+
+      await failWith(new Error("Network Error"));
+
+      const alert = await within(dialog()).findByRole("alert");
+      expect(alert).toHaveTextContent("Couldn't confirm the sale");
+      expect(alert).toHaveTextContent("a sale is never completed twice");
+      expect(completeButton()).not.toHaveAttribute("aria-disabled", "true");
+    });
+
+    it("an unrecognised refusal shows the server's message", async () => {
+      await failWith(httpError(400, { message: "Something the terminal doesn't know about" }));
+
+      const alert = await within(dialog()).findByRole("alert");
+      expect(alert).toHaveTextContent("Couldn't complete the sale");
+      expect(alert).toHaveTextContent("Something the terminal doesn't know about");
+    });
+
+    it("E8 no NIC: the NIC form, focused; saving it lets the sale complete", async () => {
+      const kamal = { id: "cust-1", name: "Kamal Perera", phone: "0771234567", nic: "199012345678", deleted_at: null };
+      customersService.updateCustomer.mockResolvedValue({ ...kamal, nic: "199012345678" });
+      const { onClose, user } = await failWith(
+        httpError(400, { message: "A trade-in needs the customer's NIC" }),
+        paidSale({ customer_id: kamal.id, customer: kamal }),
+      );
+
+      const nic = await within(dialog()).findByLabelText(/^Customer NIC/);
+      await waitFor(() => expect(nic).toHaveFocus());
+      expect(within(dialog()).getByText("Trade-in needs the customer's NIC")).toBeInTheDocument();
+      expect(completeButton()).toHaveAttribute("aria-disabled", "true");
+
+      salesService.completeSale.mockResolvedValueOnce(completed());
+      await user.type(nic, "199012345678{Enter}");
+
+      await waitFor(() => expect(within(dialog()).queryByLabelText(/^Customer NIC/)).not.toBeInTheDocument());
+      expect(customersService.updateCustomer).toHaveBeenCalledWith("cust-1", { nic: "199012345678" });
+      await waitFor(() => expect(completeButton()).toHaveFocus());
+      expect(completeButton()).not.toHaveAttribute("aria-disabled", "true");
+
+      await user.keyboard("{Enter}");
+      await waitFor(() => expect(onClose).toHaveBeenCalledTimes(1));
+      expect(salesService.completeSale).toHaveBeenCalledTimes(2);
+    });
   });
 
   it("Back closes without completing", async () => {

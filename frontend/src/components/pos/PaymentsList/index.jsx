@@ -7,6 +7,7 @@ import { computeChangeCents } from "../../../schemas/paymentSchema";
 import { formatLKR, fromCents } from "../../../utils/money";
 import {
   removePayment,
+  selectCompleteIssue,
   selectPaymentError,
   selectPayments,
   selectPosStatus,
@@ -33,6 +34,10 @@ import {
  * - Pending rows (add in flight) are dimmed with a spinner in place of
  *   the remove button.
  * - No edit (P3-1): a wrong tender is removed and re-added.
+ * - Complete refused because of a trade-in (P5-8: its IMEI is already in
+ *   stock, or its product was deactivated): the row gets a red ring and
+ *   an alert icon (label in the tooltip) until the sale changes
+ *   (selectCompleteIssue).
  *
  * Layout follows the card's own width (container query), not the
  * viewport: a table with a header row when it has ≥ 32rem (desktop and
@@ -99,7 +104,7 @@ const MethodIcon = ({ icon: Icon }) => (
   </span>
 );
 
-const PaymentRow = ({ payment, disabled, onRemove }) => {
+const PaymentRow = ({ payment, disabled, issue, onRemove }) => {
   const label = methodLabel(payment.payment_method);
   const amount = formatLKR(payment.amount);
 
@@ -107,12 +112,14 @@ const PaymentRow = ({ payment, disabled, onRemove }) => {
     <li
       aria-label={`${label} ${amount}`}
       aria-busy={payment.pending}
+      aria-invalid={issue ? true : undefined}
       data-testid="payment-row"
       className={`
         grid grid-cols-[minmax(0,1fr)_auto_2.5rem] ${COLUMNS}
         ${ROW_HEIGHT} content-center
         items-center gap-x-3 gap-y-0.5 px-4 py-2.5
         border-b border-slate-100 dark:border-slate-800 last:border-b-0
+        ${issue ? "ring-2 ring-inset ring-red-500 bg-red-50/60 dark:bg-red-950/30" : ""}
         ${payment.pending ? "opacity-60" : ""}
       `}
     >
@@ -122,6 +129,13 @@ const PaymentRow = ({ payment, disabled, onRemove }) => {
         <span className="text-sm font-medium text-slate-900 dark:text-slate-100 truncate">
           {label}
         </span>
+        {/* Fixed row heights: the label is a tooltip and screen-reader text, not a chip */}
+        {issue && (
+          <span title={issue} className="flex-shrink-0 inline-flex text-red-600 dark:text-red-400">
+            <AlertCircle size={14} aria-hidden="true" />
+            <span className="sr-only">{issue}</span>
+          </span>
+        )}
       </div>
 
       {/* Detail: under the method when narrow, its own column when wide */}
@@ -167,6 +181,7 @@ const PaymentsList = ({ onReturnFocus }) => {
   const payments = useSelector(selectPayments);
   const error = useSelector(selectPaymentError);
   const status = useSelector(selectPosStatus);
+  const completeIssue = useSelector(selectCompleteIssue);
   // The trade-in awaiting its remove confirm (kept while the dialog fades
   // out), and whether the confirm is open.
   const [tradeIn, setTradeIn] = useState(null);
@@ -253,6 +268,7 @@ const PaymentsList = ({ onReturnFocus }) => {
                     key={payment.id}
                     payment={payment}
                     disabled={status !== "ready"}
+                    issue={completeIssue.paymentIds.includes(payment.id) ? completeIssue.label : null}
                     onRemove={() => requestRemove(payment)}
                   />
                 ))}
