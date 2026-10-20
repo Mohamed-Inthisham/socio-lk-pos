@@ -21,7 +21,10 @@ import {
   selectDraftSale,
   selectPosError,
   selectPosStatus,
+  selectAttachedCustomer,
+  selectHasTradeInPayment,
 } from "../../store/slices/posTerminalSlice";
+import { CASH, TRADE_IN } from "../../schemas/paymentSchema";
 
 /**
  * PosTerminal Page
@@ -38,9 +41,20 @@ import {
  *   the dialog owns its keys.
  * - F3 opens the CustomerAttachDialog from anywhere (also from inputs),
  *   unless a dialog (New sale, Attach customer, IMEI prompt) is already
- *   open.
+ *   open, or a trade-in payment holds the customer (P4-11).
  * - F4 opens the PaymentDialog under the same rule, and only when the
  *   Pay button is enabled (both read selectCanPay).
+ * - F6 (P4-1, P4-2) opens it on Trade-in under the F4 rule. With no
+ *   customer on the sale it starts the attach-then-return sequence
+ *   instead. A page can intercept F6 (Chrome/Edge would otherwise move
+ *   focus to the address bar): every F6 is preventDefault-ed, also when
+ *   it does nothing.
+ *
+ * TRADE-IN ATTACH-THEN-RETURN (P4-2): the PaymentDialog's "Attach
+ * customer" (or F6 with no customer) closes the PaymentDialog, opens the
+ * CustomerAttachDialog once it has gone, and — if a customer was
+ * attached — reopens the PaymentDialog on Trade-in. Cancelling the
+ * attach just returns focus to the scan bar.
  * - Automatic hand-offs (qty Enter, line delete, New sale dialog closed)
  *   return focus to it, except on touch-only devices where that would
  *   keep popping the on-screen keyboard. F2 / a tap always work.
@@ -82,9 +96,15 @@ const PosTerminal = () => {
   const sale = useSelector(selectDraftSale);
   const lines = useSelector(selectCartLines);
   const canPay = useSelector(selectCanPay);
+  const customer = useSelector(selectAttachedCustomer);
+  const hasTradeIn = useSelector(selectHasTradeInPayment);
   const [confirmNewSale, setConfirmNewSale] = useState(false);
   const [attachOpen, setAttachOpen] = useState(false);
   const [paymentOpen, setPaymentOpen] = useState(false);
+  const [paymentMethod, setPaymentMethod] = useState(CASH);
+  // Attach-then-return (P4-2): the attach is for a trade-in, and whether
+  // a customer was actually attached (vs cancelled).
+  const tradeInAttach = useRef({ active: false, attached: false, afterPayment: false });
 
   useEffect(() => {
     if (branchId) dispatch(ensureDraftSale({ branchId }));
@@ -104,21 +124,64 @@ const PosTerminal = () => {
     { enableOnFormTags: true, preventDefault: true },
     [focusScan],
   );
+  const openPayment = (method) => {
+    setPaymentMethod(method);
+    setPaymentOpen(true);
+  };
+
+  const startTradeInAttach = () => {
+    tradeInAttach.current = { active: true, attached: false, afterPayment: false };
+    setAttachOpen(true);
+  };
+
+  // The PaymentDialog's "Attach customer": close it, attach once it's gone.
+  const attachFromPayment = () => {
+    tradeInAttach.current = { active: true, attached: false, afterPayment: true };
+    setPaymentOpen(false);
+  };
+
+  const afterPaymentLeave = () => {
+    if (tradeInAttach.current.afterPayment) {
+      tradeInAttach.current.afterPayment = false;
+      setAttachOpen(true);
+      return;
+    }
+    // Deferred: Headless UI restores focus to the opener after afterLeave.
+    setTimeout(returnFocus, 0);
+  };
+
+  const afterAttachLeave = () => {
+    const { active, attached } = tradeInAttach.current;
+    tradeInAttach.current = { active: false, attached: false, afterPayment: false };
+    if (active && attached) openPayment(TRADE_IN);
+    else setTimeout(returnFocus, 0);
+  };
+
   useHotkeys(
     "f3",
     () => {
-      if (status === "ready" && !dialogOpen()) setAttachOpen(true);
+      if (status === "ready" && !hasTradeIn && !dialogOpen()) setAttachOpen(true);
     },
     { enableOnFormTags: true, preventDefault: true },
-    [status],
+    [status, hasTradeIn],
   );
   useHotkeys(
     "f4",
     () => {
-      if (canPay && !dialogOpen()) setPaymentOpen(true);
+      if (canPay && !dialogOpen()) openPayment(CASH);
     },
     { enableOnFormTags: true, preventDefault: true },
     [canPay],
+  );
+  useHotkeys(
+    "f6",
+    () => {
+      if (!canPay || dialogOpen()) return;
+      if (customer) openPayment(TRADE_IN);
+      else startTradeInAttach();
+    },
+    { enableOnFormTags: true, preventDefault: true },
+    [canPay, customer],
   );
   useHotkeys(
     "esc",
@@ -240,7 +303,7 @@ const PosTerminal = () => {
           />
 
           <div data-testid="totals-dock" className="lg:sticky lg:bottom-0">
-            <TotalsPanel onPay={() => setPaymentOpen(true)} />
+            <TotalsPanel onPay={() => openPayment(CASH)} />
           </div>
         </aside>
       </div>
@@ -258,13 +321,18 @@ const PosTerminal = () => {
       <CustomerAttachDialog
         open={attachOpen}
         onClose={() => setAttachOpen(false)}
-        afterLeave={() => setTimeout(returnFocus, 0)}
+        onAttached={() => {
+          tradeInAttach.current.attached = true;
+        }}
+        afterLeave={afterAttachLeave}
       />
 
       <PaymentDialog
         open={paymentOpen}
+        initialMethod={paymentMethod}
         onClose={() => setPaymentOpen(false)}
-        afterLeave={() => setTimeout(returnFocus, 0)}
+        onAttachCustomer={attachFromPayment}
+        afterLeave={afterPaymentLeave}
       />
     </div>
   );

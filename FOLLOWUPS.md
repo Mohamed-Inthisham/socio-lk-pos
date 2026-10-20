@@ -72,7 +72,11 @@ Non-blocking issues and tech debt to address opportunistically. When you fix one
 
 - **`ProductType.USED_PHONE` enum value.** Add a specific type for used phones and gate PhonePurchase intake on it, so accidental intake of new-retail products fails cleanly. _[Slice D]_
 
-- **Admin frontend for `Product.is_serialized` toggle.** No UI yet. Land with Phase 6.8 or the Product-admin UI. _[Slice D]_
+- **No supplier stock intake with IMEIs (new serialized phones can't be sold in-house).** **Priority: high — its own phase after 6.4 P5.** ProductUnit rows are created only by `POST /phone-purchases` (buying from a customer, `phone-purchases.service.ts` `create`) and by trade-ins at `completeSale` (`createForTradeIn`). `PATCH /stock/:id` changes the quantity only and creates no units, and a serialized in-house sale line needs an existing IN_STOCK unit for its IMEI (`resolveInHouseSerializedLine` → 400 "IMEI '…' is not in stock"). So a new phone from a supplier can't be rung up as a serialized line; today's workarounds (mark it non-serialized and lose the IMEI, a fake "supplier" customer on `POST /phone-purchases`, or the external-supplier line mode) are all wrong. Needs a supplier-receiving endpoint that creates N IN_STOCK units with IMEIs and cost, increments stock, and links the supplier, plus its screen. _[Phase 6.4 P4 recon]_
+
+- **No IMEI inventory screen.** `GET /product-units` (admin/manager) has no frontend: nobody can search an IMEI, see a phone's history (one row per acquisition) or list the units in stock without Swagger. Ships with the supplier-intake phase above. _[Phase 6.4 P4 recon]_
+
+- **No phone-purchase screen.** Buying a phone outright (`POST /phone-purchases`) has no frontend; it was deliberately left out of 6.4 (planning doc §10). Ships with the supplier-intake phase above. The backend already requires the seller's NIC (#29). _[Phase 6.4 P4 recon, §10]_
 
 - **Cross-branch Product cloning admin flow.** Currently a Product lives at exactly one branch. If a Product needs to exist at multiple branches, admin has to re-create manually. _[Slice D]_
 
@@ -88,7 +92,7 @@ Non-blocking issues and tech debt to address opportunistically. When you fix one
 
 ## Go-live setup
 
-- **Create the common used-phone catalogue models before go-live.** A trade-in or phone purchase needs an existing, active, serialized product at the branch, one per model/storage (e.g. "Used iPhone 12 128GB"), and only admins can create products. If the customer's model is missing, the cashier is stuck (the POS shows "No used-phone product for this model. Ask an admin to add one."). Seed the models the shop commonly takes in (`is_serialized = true`, `phone_condition = USED`) at each branch. _[Phase 6.4 P4 planning]_
+- **Create the common used-phone catalogue models before go-live.** A trade-in or phone purchase needs an existing, active, serialized product at the branch, one per model/storage (e.g. "Used iPhone 12 128GB"), and only admins can create products. If the customer's model is missing, the cashier is stuck (the POS shows "No used-phone product for this model. Ask an admin to add one."). Seed the models the shop commonly takes in (`is_serialized = true`, `phone_condition = USED`) at each branch, labelled the way the cashier will search for them ("Used iPhone 12 128GB"). Also create one fallback per main brand, **"Used phone – <brand> (other)"** (e.g. "Used phone – Samsung (other)"), so a trade-in of an uncommon model can still be recorded; an admin can add the proper model later. The customer also needs an NIC on file for a trade-in or phone purchase (P4-13, #29). _[Phase 6.4 P4 planning, revised P4 build]_
 
 ## Deferred infrastructure
 

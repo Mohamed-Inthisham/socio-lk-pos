@@ -23,6 +23,8 @@ import {
   ensureDraftSale,
   removeLine,
   removePayment,
+  resetMutationQueue,
+  saveCustomerNic,
   selectAttachedCustomer,
   selectBalanceDue,
   selectCartLines,
@@ -32,6 +34,7 @@ import {
   selectPaidTotal,
   selectPayments,
   selectStockWarnings,
+  selectTradeInImeis,
   updateLineQty,
 } from "./posTerminalSlice";
 
@@ -61,6 +64,7 @@ const readyStore = (sale = draftSale()) => {
 
 beforeEach(() => {
   vi.resetAllMocks();
+  resetMutationQueue();
   stockService.listStock.mockResolvedValue([]);
   useTerminalSessionStore.getState().clear();
 });
@@ -349,6 +353,60 @@ describe("posTerminal customer", () => {
     expect(selectAttachedCustomer(store.getState())).toEqual(customer());
   });
 
+  it("refuses to detach while a TRADE_IN payment is still pending (P4-11)", async () => {
+    const { store, ready } = readyStore(
+      draftSale({ lines: [saleLine()], total: "50000.00", customer_id: "cust-1", customer: customer() }),
+    );
+    await ready;
+    const request = deferred();
+    salesService.addSalePayment.mockReturnValue(request.promise);
+
+    const paying = store.dispatch(addPayment({
+      payment_method: "TRADE_IN",
+      amount: 40000,
+      trade_in_product_id: "p-phone",
+      trade_in_imei: "354789102345678",
+      trade_in_buying_price: 40000,
+    }));
+    await store.dispatch(detachCustomer());
+
+    expect(selectHasTradeInPayment(store.getState())).toBe(true);
+    expect(salesService.updateSale).not.toHaveBeenCalled();
+    expect(selectAttachedCustomer(store.getState())).toEqual(customer());
+
+    // Settle it: the mutation queue is shared across tests.
+    request.reject(httpError(500));
+    await paying;
+  });
+
+  it("saves the attached customer's NIC (P4-13) and updates the card's customer", async () => {
+    const { store, ready } = readyStore(draftSale({ customer_id: "cust-1", customer: customer({ nic: null }) }));
+    await ready;
+    customersService.updateCustomer.mockResolvedValue(customer({ nic: "199012345678" }));
+
+    await store.dispatch(saveCustomerNic({ nic: "199012345678" })).unwrap();
+
+    expect(customersService.updateCustomer).toHaveBeenCalledWith("cust-1", { nic: "199012345678" });
+    expect(selectAttachedCustomer(store.getState())).toEqual(customer({ nic: "199012345678" }));
+    expect(store.getState().posTerminal.customerError).toBeNull();
+  });
+
+  it("rejects an NIC clash with the other customer's id, leaving the customer unchanged", async () => {
+    const { store, ready } = readyStore(draftSale({ customer_id: "cust-1", customer: customer({ nic: null }) }));
+    await ready;
+    customersService.updateCustomer.mockRejectedValue(
+      Object.assign(new Error("conflict"), {
+        response: { status: 409, data: { message: "A customer with NIC X already exists", existing_customer_id: "cust-2" } },
+      }),
+    );
+
+    const result = await store.dispatch(saveCustomerNic({ nic: "199012345678" }));
+
+    expect(result.payload).toMatchObject({ status: 409, existing_customer_id: "cust-2" });
+    expect(selectAttachedCustomer(store.getState()).nic).toBeNull();
+    expect(store.getState().posTerminal.customerError).toBeNull();
+  });
+
   it("creates a customer, then attaches it to the sale", async () => {
     const { store, ready } = readyStore();
     await ready;
@@ -468,6 +526,90 @@ describe("posTerminal payments", () => {
     expect(selectPaidTotal(store.getState())).toBe("1500.00");
     expect(selectBalanceDue(store.getState())).toBe("0.00");
     expect(selectCartSyncing(store.getState())).toBe(false);
+  });
+
+  it("shows a pending trade-in with its trade_in_* fields and product name, without sending the product row", async () => {
+    const { store, ready } = readyStore(cartSale({ total: "50000.00", customer_id: "cust-1", customer: customer() }));
+    await ready;
+    const request = deferred();
+    salesService.addSalePayment.mockReturnValue(request.promise);
+    const body = {
+      payment_method: "TRADE_IN",
+      amount: 40000,
+      trade_in_product_id: "p-used-ip12",
+      trade_in_imei: "354789102345678",
+      trade_in_buying_price: 40000,
+      trade_in_selling_price: 55000.5,
+      trade_in_notes: "Battery 89%",
+    };
+    const product = { id: "p-used-ip12", name: "Used iPhone 12 128GB", is_serialized: true };
+
+    const paying = store.dispatch(addPayment({ ...body, trade_in_product: product }));
+
+    expect(selectPayments(store.getState())).toEqual([
+      {
+        id: expect.stringMatching(/^pending-/),
+        pending: true,
+        payment_method: "TRADE_IN",
+        amount: "40000.00",
+        cash_received: null,
+        reference_number: null,
+        trade_in_product_id: "p-used-ip12",
+        trade_in_product: { id: "p-used-ip12", name: "Used iPhone 12 128GB" },
+        trade_in_imei: "354789102345678",
+        trade_in_buying_price: "40000.00",
+        trade_in_selling_price: "55000.50",
+        trade_in_notes: "Battery 89%",
+      },
+    ]);
+
+    request.resolve(cartSale({ total: "50000.00", amount_paid: "40000.00", payments: [tradeInPayment()] }));
+    await paying;
+
+    expect(salesService.addSalePayment).toHaveBeenCalledWith("sale-1", body);
+    expect(selectPayments(store.getState())).toEqual([
+      expect.objectContaining({ id: "pay-ti", pending: false }),
+    ]);
+  });
+
+  it("gives a pending trade-in null optionals when the resale price, notes and product are left out", async () => {
+    const { store, ready } = readyStore(cartSale({ total: "50000.00" }));
+    await ready;
+    const request = deferred();
+    salesService.addSalePayment.mockReturnValue(request.promise);
+
+    const paying = store.dispatch(addPayment({
+      payment_method: "TRADE_IN",
+      amount: 40000,
+      trade_in_product_id: "p-phone",
+      trade_in_imei: "354789102345678",
+      trade_in_buying_price: 40000,
+    }));
+
+    expect(selectPayments(store.getState())[0]).toMatchObject({
+      trade_in_product: null,
+      trade_in_selling_price: null,
+      trade_in_notes: null,
+    });
+
+    request.reject(httpError(500));
+    await paying;
+  });
+
+  it("keeps trade-in fields off pending rows for other methods", async () => {
+    const { store, ready } = readyStore(cartSale());
+    await ready;
+    const request = deferred();
+    salesService.addSalePayment.mockReturnValue(request.promise);
+
+    const paying = store.dispatch(
+      addPayment({ payment_method: "CARD", amount: 500, reference_number: "AUTH-1" }),
+    );
+
+    expect(Object.keys(selectPayments(store.getState())[0])).not.toContain("trade_in_imei");
+
+    request.reject(httpError(500));
+    await paying;
   });
 
   it("drops the pending row and keeps the error on the slice when the payment fails", async () => {
@@ -624,5 +766,38 @@ describe("posTerminal payment selectors", () => {
     expect(selectPaidTotal(state)).toBe("0.00");
     expect(selectBalanceDue(state)).toBe("0.00");
     expect(selectPayments(state)).toEqual([]);
+    expect(selectHasTradeInPayment(state)).toBe(false);
+    expect(selectTradeInImeis(state)).toEqual([]);
+  });
+
+  it("counts recorded and pending trade-ins, and lists their IMEIs minus one being removed", () => {
+    const pending = tradeInPayment({ id: "pending-1", trade_in_imei: "AB12345678" });
+    const state = {
+      posTerminal: {
+        draftSale: draftSale({
+          payments: [
+            cashPayment(),
+            tradeInPayment(),
+            tradeInPayment({ id: "pay-ti-2", trade_in_imei: "354789102345679" }),
+          ],
+        }),
+        pendingPayments: [pending],
+        removingPaymentIds: ["pay-ti-2"],
+      },
+    };
+
+    expect(selectHasTradeInPayment(state)).toBe(true);
+    expect(selectTradeInImeis(state)).toEqual(["354789102345678", "AB12345678"]);
+  });
+
+  it.each([
+    ["only a pending trade-in", [], [tradeInPayment({ id: "pending-1" })], true],
+    ["only non-trade-in tenders", [cashPayment(), cardPayment()], [], false],
+  ])("selectHasTradeInPayment with %s", (_, payments, pendingPayments, expected) => {
+    const state = {
+      posTerminal: { draftSale: draftSale({ payments }), pendingPayments, removingPaymentIds: [] },
+    };
+
+    expect(selectHasTradeInPayment(state)).toBe(expected);
   });
 });

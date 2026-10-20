@@ -1,5 +1,5 @@
 import { vi } from "vitest";
-import { screen, waitFor, within } from "@testing-library/react";
+import { fireEvent, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import PosTerminal from ".";
 import {
@@ -8,7 +8,7 @@ import {
   renderWithProviders,
 } from "../../test/renderWithProviders";
 import { cashierUser, mainShop } from "../../test/fixtures";
-import { draftSale, phoneProduct, saleLine } from "../../test/posFixtures";
+import { customer, draftSale, phoneProduct, saleLine, tradeInPayment } from "../../test/posFixtures";
 import useTerminalSessionStore from "../../store/zustand/terminalSessionStore";
 import * as salesService from "../../services/salesService";
 import * as stockService from "../../services/stockService";
@@ -362,5 +362,129 @@ describe("PosTerminal F4 payment hotkey", () => {
 
     await waitFor(() => expect(paymentDialog()).not.toBeInTheDocument());
     await waitFor(() => expect(scanBar()).toHaveFocus());
+  });
+});
+
+describe("PosTerminal trade-in: F6, attach-then-return, F3 guard (P4-2, P4-11)", () => {
+  const paymentDialog = () => screen.queryByRole("dialog", { name: "Take payment" });
+  const attachDialog = () => screen.queryByRole("dialog", { name: "Attach customer" });
+  const kamal = customer();
+  // `lines` total 3990.00 with nothing paid
+  const payableSale = (overrides = {}) =>
+    draftSale({ lines, subtotal: "3990.00", total: "3990.00", ...overrides });
+  const withKamal = () => payableSale({ customer_id: kamal.id, customer: kamal });
+
+  const pickKamal = async (user) => {
+    customersService.listCustomers.mockResolvedValue({ data: [kamal], meta: { total: 1 } });
+    salesService.updateSale.mockResolvedValue(withKamal());
+    await user.keyboard("kamal");
+    await screen.findByRole("option", { name: /Kamal Perera/ });
+    await user.keyboard("{Enter}");
+  };
+
+  const expectTradeInOpen = async () => {
+    const dialog = await screen.findByRole("dialog", { name: "Take payment" });
+    expect(within(dialog).getByRole("radio", { name: "Trade-in" })).toBeChecked();
+    return dialog;
+  };
+
+  it("F6 opens the payment dialog on Trade-in with Product focused", async () => {
+    salesService.createSale.mockResolvedValue(withKamal());
+    const user = userEvent.setup();
+    await renderTerminal();
+
+    await user.keyboard("[F6]");
+
+    const dialog = await expectTradeInOpen();
+    await waitFor(() =>
+      expect(within(dialog).getByRole("combobox", { name: /^Product/ })).toHaveFocus(),
+    );
+    expect(within(dialog).queryByLabelText(/^Amount/)).not.toBeInTheDocument();
+  });
+
+  it("F6 cancels the browser's own F6 (address bar) even when it does nothing", async () => {
+    salesService.createSale.mockResolvedValue(draftSale());
+    renderWithProviders(<PosTerminal />, {
+      preloadedState: { auth: authState(cashierUser), branches: branchesState([mainShop]) },
+    });
+    expect(await screen.findByRole("button", { name: /^Pay / })).toBeDisabled();
+
+    // fireEvent returns false when a handler called preventDefault().
+    expect(fireEvent.keyDown(scanBar(), { key: "F6", code: "F6" })).toBe(false);
+    expect(paymentDialog()).not.toBeInTheDocument();
+    expect(attachDialog()).not.toBeInTheDocument();
+  });
+
+  it("F6 with no customer attaches one first, then opens Trade-in", async () => {
+    salesService.createSale.mockResolvedValue(payableSale());
+    const user = userEvent.setup();
+    await renderTerminal();
+
+    await user.keyboard("[F6]");
+    await screen.findByRole("dialog", { name: "Attach customer" });
+    expect(paymentDialog()).not.toBeInTheDocument();
+    await waitFor(() =>
+      expect(screen.getByRole("combobox", { name: "Search customers" })).toHaveFocus(),
+    );
+
+    await pickKamal(user);
+
+    const dialog = await expectTradeInOpen();
+    await waitFor(() => expect(attachDialog()).not.toBeInTheDocument());
+    expect(salesService.updateSale).toHaveBeenCalledWith("sale-1", { customer_id: kamal.id });
+    await waitFor(() =>
+      expect(within(dialog).getByRole("combobox", { name: /^Product/ })).toHaveFocus(),
+    );
+  });
+
+  it("cancelling that attach doesn't open the payment dialog; focus returns to the scan bar", async () => {
+    salesService.createSale.mockResolvedValue(payableSale());
+    const user = userEvent.setup();
+    await renderTerminal();
+
+    await user.keyboard("[F6]");
+    await screen.findByRole("dialog", { name: "Attach customer" });
+    await user.keyboard("{Escape}");
+
+    await waitFor(() => expect(attachDialog()).not.toBeInTheDocument());
+    await waitFor(() => expect(scanBar()).toHaveFocus());
+    expect(paymentDialog()).not.toBeInTheDocument();
+  });
+
+  it("the payment dialog's Attach customer closes it, attaches, and comes back on Trade-in", async () => {
+    salesService.createSale.mockResolvedValue(payableSale());
+    const user = userEvent.setup();
+    await renderTerminal();
+
+    await user.keyboard("[F4]");
+    let dialog = await screen.findByRole("dialog", { name: "Take payment" });
+    await waitFor(() => expect(within(dialog).getByRole("radio", { name: "Cash" })).toHaveFocus());
+    await user.keyboard("6");
+    expect(within(dialog).getByText("Trade-in needs a customer")).toBeInTheDocument();
+    await waitFor(() =>
+      expect(within(dialog).getByRole("button", { name: "Attach customer" })).toHaveFocus(),
+    );
+
+    await user.keyboard("{Enter}");
+    await screen.findByRole("dialog", { name: "Attach customer" });
+    await waitFor(() => expect(paymentDialog()).not.toBeInTheDocument());
+
+    await pickKamal(user);
+
+    dialog = await expectTradeInOpen();
+    expect(within(dialog).queryByText("Trade-in needs a customer")).not.toBeInTheDocument();
+  });
+
+  it("F3 is ignored while a trade-in payment holds the customer", async () => {
+    salesService.createSale.mockResolvedValue(
+      payableSale({ customer_id: kamal.id, customer: kamal, amount_paid: "1000.00", payments: [tradeInPayment({ amount: "1000.00" })] }),
+    );
+    const user = userEvent.setup();
+    await renderTerminal();
+
+    await user.keyboard("[F3]");
+
+    expect(attachDialog()).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Change" })).toHaveAttribute("aria-disabled", "true");
   });
 });

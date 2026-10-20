@@ -1,14 +1,22 @@
 import { vi } from "vitest";
 import api from "./api";
-import { createCustomer, listCustomers } from "./customersService";
+import { createCustomer, listCustomers, updateCustomer } from "./customersService";
 
 vi.mock("./api", () => ({
-  default: { get: vi.fn(), post: vi.fn() },
+  default: { get: vi.fn(), post: vi.fn(), patch: vi.fn() },
 }));
 
 describe("customersService", () => {
   beforeEach(() => {
     vi.resetAllMocks();
+  });
+
+  it("patches a customer and returns the updated row", async () => {
+    const customer = { id: "c1", name: "Kamal Perera", nic: "199012345678" };
+    api.patch.mockResolvedValue({ data: customer });
+
+    await expect(updateCustomer("c1", { nic: "199012345678" })).resolves.toEqual(customer);
+    expect(api.patch).toHaveBeenCalledWith("/customers/c1", { nic: "199012345678" });
   });
 
   it("lists customers with search and limit, dropping empty values", async () => {
