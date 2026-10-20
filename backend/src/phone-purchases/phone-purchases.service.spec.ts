@@ -75,6 +75,8 @@ describe('PhonePurchasesService', () => {
     id: 'cust-1',
     name: 'Kamal Perera',
     phone: '0771234567',
+    // A phone purchase needs the seller's NIC (P4-13)
+    nic: '199012345678',
     deleted_at: null,
   });
 
@@ -334,6 +336,16 @@ describe('PhonePurchasesService', () => {
       await expect(
         service.create(validCreateDto(), 'cashier-1'),
       ).rejects.toThrow(BadRequestException);
+      expect(mockStockService.incrementForReversal).not.toHaveBeenCalled();
+    });
+
+    it('throws BadRequestException when the customer has no NIC (P4-13), before any write', async () => {
+      setupHappyPathLookups({ customer: { ...validCustomer(), nic: null } });
+
+      await expect(
+        service.create(validCreateDto(), 'cashier-1'),
+      ).rejects.toThrow("A phone purchase needs the customer's NIC");
+      expect(mockManager.save).not.toHaveBeenCalled();
       expect(mockStockService.incrementForReversal).not.toHaveBeenCalled();
     });
 

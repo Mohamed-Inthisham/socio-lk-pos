@@ -20,6 +20,7 @@ import { Product } from '../products/entities/product.entity';
 import { User } from '../users/entities/user.entity';
 import { StockService } from '../stock/stock.service';
 import { CreatePhonePurchaseDto } from './dto/create-phone-purchase.dto';
+import { PHONE_PURCHASE_NEEDS_NIC } from './customer-nic';
 import { ListPhonePurchasesQueryDto } from './dto/list-phone-purchases-query.dto';
 import {
   paginate,
@@ -55,7 +56,8 @@ export class PhonePurchasesService {
    * Transaction steps:
    *   1. Load cashier (need branch_id for access check)
    *   2. Branch access check (403 for cross-branch by non-admin)
-   *   3. Payload reference validations (customer, branch, product, IMEI)
+   *   3. Payload reference validations (customer — with an NIC on file,
+   *      P4-13 — branch, product, IMEI)
    *   4. Insert PhonePurchase row
    *   5. Insert ProductUnit row (status IN_STOCK, linked to purchase)
    *   6. Increment Stock row for (product_id, branch_id) under
@@ -87,7 +89,14 @@ export class PhonePurchasesService {
 
       // 3. Payload reference validations. Each throws the appropriate
       //    exception type; NestJS's exception filters map to HTTP status.
-      await this.assertCustomerReference(dto.customer_id, manager);
+      const customer = await this.assertCustomerReference(
+        dto.customer_id,
+        manager,
+      );
+      // The seller's NIC must be on file (P4-13).
+      if (!customer.nic) {
+        throw new BadRequestException(PHONE_PURCHASE_NEEDS_NIC);
+      }
       await this.assertBranchReference(dto.branch_id, manager);
       await this.assertProductReference(dto.product_id, dto.branch_id, manager);
       await this.assertImeiAvailable(dto.imei, manager);
@@ -349,7 +358,7 @@ export class PhonePurchasesService {
   private async assertCustomerReference(
     customerId: string,
     manager: EntityManager,
-  ): Promise<void> {
+  ): Promise<Customer> {
     const customer = await manager.findOne(Customer, {
       where: { id: customerId },
     });
@@ -358,6 +367,7 @@ export class PhonePurchasesService {
         `Customer ${customerId} not found or inactive`,
       );
     }
+    return customer;
   }
 
   /**

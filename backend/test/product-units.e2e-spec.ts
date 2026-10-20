@@ -63,12 +63,16 @@ describe('Product Units (e2e)', () => {
     return { user, password };
   }
 
+  // Units are taken in through POST /phone-purchases, which needs the
+  // seller's NIC (P4-13); NICs are unique when set.
+  let nicSeq = 0;
   async function seedCustomer(): Promise<Customer> {
     const repo = dataSource.getRepository(Customer);
     return repo.save(
       repo.create({
         name: 'Kamal Perera',
         phone: '0771234567',
+        nic: `19920000${String(++nicSeq).padStart(4, '0')}`,
       }),
     );
   }

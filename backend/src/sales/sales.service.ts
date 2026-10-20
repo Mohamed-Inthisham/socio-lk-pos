@@ -42,6 +42,10 @@ import { SaleNumberCountersService } from '../sale-number-counters/sale-number-c
 import { CustomersService } from '../customers/customers.service';
 import { PhonePurchasesService } from '../phone-purchases/phone-purchases.service';
 import {
+  TRADE_IN_NEEDS_NIC,
+  assertCustomerHasNic,
+} from '../phone-purchases/customer-nic';
+import {
   PaginatedResponse,
   paginate,
 } from '../common/dto/paginated-response.dto';
@@ -857,6 +861,15 @@ export class SalesService {
           dto.trade_in_imei!,
           sale.branch_id,
         );
+
+        // The customer handing the phone over must have an NIC on file
+        // (P4-13). completeSale re-checks: the NIC can be cleared on the
+        // customer in between.
+        await assertCustomerHasNic(
+          manager,
+          sale.customer_id,
+          TRADE_IN_NEEDS_NIC,
+        );
       }
 
       // 3. Assert amount does not overshoot remaining balance
@@ -1195,6 +1208,17 @@ export class SalesService {
         throw new BadRequestException(
           'Cannot complete sale: TRADE_IN payments require a customer on ' +
             'the sale; set sale.customer_id first',
+        );
+      }
+      if (tradeInPayments.length > 0) {
+        // Every TRADE_IN on the sale is the sale's customer's, so one
+        // check covers each of them, before any PhonePurchase is
+        // created. The NIC may have been cleared since addPayment
+        // (P4-13); a throw rolls back the whole sale.
+        await assertCustomerHasNic(
+          manager,
+          sale.customer_id!,
+          TRADE_IN_NEEDS_NIC,
         );
       }
       for (const payment of tradeInPayments) {

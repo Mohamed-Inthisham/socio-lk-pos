@@ -23,6 +23,7 @@ import { SuppliersService } from '../suppliers/suppliers.service';
 import { StockService } from '../stock/stock.service';
 import { SaleNumberCountersService } from '../sale-number-counters/sale-number-counters.service';
 import { CustomersService } from '../customers/customers.service';
+import { Customer } from '../customers/entities/customer.entity';
 import { ProductUnitsService } from '../product-units/product-units.service';
 import { ProductUnitStatus } from '../product-units/enums/product-unit-status.enum';
 import { ProductUnit } from '../product-units/entities/product-unit.entity';
@@ -2217,12 +2218,14 @@ describe('SalesService', () => {
       mockQueryBuilder.getRawOne.mockResolvedValue({ sum: '0' });
     };
 
-    // Prime the two manager.findOne lookups inside
-    // assertTradeInPaymentReferencesValid: Product first, then IMEI
-    // check (ProductUnit).
+    // Prime the manager.findOne lookups of the TRADE_IN branch, in
+    // order: Product and IMEI check (ProductUnit) inside
+    // assertTradeInPaymentReferencesValid, then the customer's NIC
+    // check (Customer, P4-13).
     const primeTradeInReferences = (overrides?: {
       product?: unknown;
       existingImei?: unknown;
+      customer?: unknown;
     }) => {
       const defaultProduct = {
         id: 'prod-trade',
@@ -2236,6 +2239,11 @@ describe('SalesService', () => {
         )
         .mockResolvedValueOnce(
           overrides?.existingImei === undefined ? null : overrides.existingImei,
+        )
+        .mockResolvedValueOnce(
+          overrides?.customer === undefined
+            ? { id: 'cust-1', nic: '199012345678' }
+            : overrides.customer,
         );
     };
 
@@ -2328,6 +2336,21 @@ describe('SalesService', () => {
 
       // Reference validation should not have run
       expect(mockManager.findOne).not.toHaveBeenCalled();
+    });
+
+    it('rejects TRADE_IN when the customer has no NIC (P4-13), before any insert', async () => {
+      primeTradeInSale();
+      primeTradeInReferences({ customer: { id: 'cust-1', nic: null } });
+
+      await expect(
+        service.addPayment('sale-1', validTradeInDto()),
+      ).rejects.toThrow("A trade-in needs the customer's NIC");
+
+      expect(mockManager.findOne).toHaveBeenLastCalledWith(Customer, {
+        where: { id: 'cust-1' },
+        withDeleted: true,
+      });
+      expect(mockManager.save).not.toHaveBeenCalled();
     });
 
     it('rejects TRADE_IN when required trade_in_product_id is missing', async () => {
@@ -3407,6 +3430,12 @@ describe('SalesService', () => {
       ...overrides,
     });
 
+    // The NIC check (P4-13) runs once per sale with trade-ins, before
+    // the materialize loop: one Customer lookup through the manager.
+    const arrangeTradeInCustomer = (nic: string | null = '199012345678') => {
+      mockManager.findOne.mockResolvedValueOnce({ id: 'cust-1', nic });
+    };
+
     const arrangeCreateForTradeIn = () => {
       let n = 0;
       mockPhonePurchasesService.createForTradeIn.mockImplementation(() => {
@@ -3424,6 +3453,7 @@ describe('SalesService', () => {
         [seedCompletableLine({ quantity: 1 })],
         [seedTradeInRow()],
       );
+      arrangeTradeInCustomer();
       arrangeCreateForTradeIn();
       mockSaleNumberCountersService.generateNext.mockResolvedValue(
         'INV-000010',
@@ -3469,6 +3499,7 @@ describe('SalesService', () => {
           }),
         ],
       );
+      arrangeTradeInCustomer();
       arrangeCreateForTradeIn();
       mockSaleNumberCountersService.generateNext.mockResolvedValue(
         'INV-000011',
@@ -3505,6 +3536,7 @@ describe('SalesService', () => {
           }),
         ],
       );
+      arrangeTradeInCustomer();
       arrangeCreateForTradeIn();
       mockSaleNumberCountersService.generateNext.mockResolvedValue(
         'INV-000012',
@@ -3542,6 +3574,7 @@ describe('SalesService', () => {
         [seedCompletableLine({ quantity: 1 })],
         [seedTradeInRow()],
       );
+      arrangeTradeInCustomer();
       mockPhonePurchasesService.createForTradeIn.mockRejectedValue(
         new ConflictException({
           message: "IMEI '356938035643809' already exists",
@@ -3574,6 +3607,30 @@ describe('SalesService', () => {
       expect(mockSaleNumberCountersService.generateNext).not.toHaveBeenCalled();
     });
 
+    it("rejects with 400 when the customer's NIC was cleared after a TRADE_IN was added (P4-13)", async () => {
+      mockQueryBuilder.getOne.mockResolvedValueOnce(seedTradeInSale());
+      arrangeManagerFind(
+        [seedCompletableLine({ quantity: 1 })],
+        [
+          seedTradeInRow(),
+          seedTradeInRow({ id: 'pay-ti-2', trade_in_imei: '352810061234569' }),
+        ],
+      );
+      arrangeTradeInCustomer(null);
+
+      await expect(service.completeSale('sale-1')).rejects.toThrow(
+        "A trade-in needs the customer's NIC",
+      );
+      expect(mockManager.findOne).toHaveBeenCalledTimes(1);
+      expect(mockManager.findOne).toHaveBeenCalledWith(Customer, {
+        where: { id: 'cust-1' },
+        withDeleted: true,
+      });
+      expect(mockPhonePurchasesService.createForTradeIn).not.toHaveBeenCalled();
+      expect(mockManager.query).not.toHaveBeenCalled();
+      expect(mockSaleNumberCountersService.generateNext).not.toHaveBeenCalled();
+    });
+
     it('runs the trade-in loop after the outgoing loop and before issuing sale_number', async () => {
       mockQueryBuilder.getOne.mockResolvedValueOnce(seedTradeInSale());
       arrangeManagerFind(
@@ -3585,6 +3642,7 @@ describe('SalesService', () => {
         ],
         [seedTradeInRow()],
       );
+      arrangeTradeInCustomer();
 
       const callOrder: string[] = [];
       mockStockService.decrementForSale.mockImplementation(() => {

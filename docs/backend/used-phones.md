@@ -86,7 +86,7 @@ IMEI X:  U1  new SKU   cost 85000  SOLD      ← sale A line
 
 ### Customers (Slices A–B)
 
-- **Phone required, NIC optional.** Walk-in customers often have no NIC on hand. NIC has a partial unique index when non-null; a clash returns 409 with `existing_customer_id` so the frontend can offer the existing record.
+- **Phone required, NIC optional.** Walk-in customers often have no NIC on hand. NIC has a partial unique index when non-null; a clash returns 409 with `existing_customer_id` so the frontend can offer the existing record. Taking a phone in from a customer (a phone purchase or a trade-in) does need the NIC: see Intake and Trade-ins.
 - **SL phone normalization** at the DTO layer (`normalizeSlPhone`) — local, international, and cosmetic formats all store as `0XXXXXXXXX`.
 - **Soft delete + reactivate.** Delete/reactivate are admin/manager only (supervisor action); all roles can create and edit (the register needs walk-in creation).
 - **`sales.customer_id`** gets a real FK (`RESTRICT`) plus service validation: nonexistent and soft-deleted customers are rejected with 400. Clearing to `null` is always allowed.
@@ -96,6 +96,7 @@ IMEI X:  U1  new SKU   cost 85000  SOLD      ← sale A line
 - **IMEI is unique among live units (IN_STOCK, WRITTEN_OFF).** A collision returns 409 with an `existing_unit` payload. A phone we sold, or whose trade-in was voided, can be bought back as a new unit row (see "One row per acquisition" above). _Before the buy-back change, IMEI was unique across all statuses._
 - **Intake is atomic.** `POST /phone-purchases` creates the PhonePurchase, an IN_STOCK ProductUnit, and the stock increment in one transaction.
 - **Product must be serialized, active, and at the intake branch.** Non-admin cashiers can only intake at their own branch.
+- **The seller must have an NIC on file.** `POST /phone-purchases` for a customer without one returns 400 "A phone purchase needs the customer's NIC", before anything is written. If the phone turns out to be stolen, the shop can trace who sold it (Phase 6.4 P4-13).
 - **`selling_price` is optional at intake** ("price later"). When null, a sale falls back to `Product.selling_price`. When sent it must be ≥ 0.01: a stored 0 is not null, so the phone would ring up for free.
 - **`total_amount` is stored**, not derived, matching the `Sale.total` precedent and leaving room for multi-unit purchases.
 
@@ -121,14 +122,14 @@ A trade-in is a payment, not a line: `payment_method = TRADE_IN`, with the phone
 
 - Required: `trade_in_product_id` (active, serialized, at the sale's branch), `trade_in_imei`, `trade_in_buying_price`. Optional: `trade_in_selling_price` (≥ 0.01 when sent: a stored 0 would resell the phone for free), `trade_in_notes`.
 - `amount` must equal `trade_in_buying_price` to the cent.
-- The sale must have a customer (the PhonePurchase needs one).
+- The sale must have a customer (the PhonePurchase needs one), and that customer must have an NIC on file: 400 "A trade-in needs the customer's NIC" otherwise (Phase 6.4 P4-13, same reason as phone purchases).
 - `cash_received` and `reference_number` must be omitted; `trade_in_*` fields are rejected on every other method.
 - IMEI collision with a live unit (IN_STOCK, WRITTEN_OFF) → 409 `existing_unit` (best effort; re-checked at complete). A SOLD or RETURNED unit doesn't block: that's a buy-back, and complete creates a new unit row.
 - `GET /sales/:id` (and every hydrated sale response) includes `trade_in_product` (the product row) on each TRADE_IN payment, so clients can show the product name.
 
 **Frozen once recorded.** `updatePayment` allows only `notes` on a TRADE_IN payment. `amount`, `cash_received`, and `reference_number` are rejected with 400, and `trade_in_*` fields are never patchable on any payment. Renegotiating a trade-in value means removing the payment and adding a new one.
 
-**`completeSale` materializes.** After the outgoing-lines loop and before the sale number is issued, each TRADE_IN payment (oldest first) goes through `PhonePurchasesService.createForTradeIn`, enlisted in the sale's transaction. That creates the PhonePurchase, an IN_STOCK ProductUnit, and the stock increment, re-validating the product and IMEI. The new PhonePurchase id is then stamped onto `payments.trade_in_phone_purchase_id`. An IMEI that was intaken elsewhere since `addPayment` → 409 and the entire sale rolls back, including the outgoing decrements.
+**`completeSale` materializes.** After the outgoing-lines loop and before the sale number is issued, each TRADE_IN payment (oldest first) goes through `PhonePurchasesService.createForTradeIn`, enlisted in the sale's transaction. That creates the PhonePurchase, an IN_STOCK ProductUnit, and the stock increment, re-validating the product and IMEI. The new PhonePurchase id is then stamped onto `payments.trade_in_phone_purchase_id`. An IMEI that was intaken elsewhere since `addPayment` → 409 and the entire sale rolls back, including the outgoing decrements. The customer's NIC is checked again before the first trade-in is materialized (the NIC can be cleared on the customer after `addPayment`): none → 400 "A trade-in needs the customer's NIC", and the sale rolls back the same way.
 
 **`voidSale` reverses.** After the outgoing-reversal loop and before payments are stamped reversed, each TRADE_IN payment's unit (found via `phone_purchase_id`) goes `IN_STOCK → RETURNED` and its stock is decremented with `StockService.decrementForVoidedTradeIn`. The PhonePurchase row stays as history.
 
@@ -163,7 +164,7 @@ All endpoints are prefixed with `/api/v1` and require the `access_token` cookie.
 |--------|------|------|---------|
 | GET | `/phone-purchases` | any | List (filters: `customer_id`, `branchId`) |
 | GET | `/phone-purchases/:id` | any | Get one with customer, branch, cashier, units |
-| POST | `/phone-purchases` | any | Atomic intake: PhonePurchase + IN_STOCK unit + stock increment |
+| POST | `/phone-purchases` | any | Atomic intake: PhonePurchase + IN_STOCK unit + stock increment (the customer needs an NIC) |
 
 ### Product units
 

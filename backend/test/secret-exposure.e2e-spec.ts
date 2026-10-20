@@ -151,7 +151,13 @@ describe('Secret exposure (e2e)', () => {
     cashier = await seedUser(UserRole.CASHIER, 'cashier@sec.test', branch.id);
     customer = await dataSource
       .getRepository(Customer)
-      .save({ name: 'Kamal', phone: '0771234567', nic: null, notes: null });
+      // NIC: POST /phone-purchases needs the seller's (P4-13)
+      .save({
+        name: 'Kamal',
+        phone: '0771234567',
+        nic: '199300000001',
+        notes: null,
+      });
     product = await seedProduct(false);
     serializedProduct = await seedProduct(true);
 
