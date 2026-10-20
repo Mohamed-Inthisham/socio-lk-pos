@@ -3,7 +3,7 @@ import { screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import PaymentsList from ".";
 import { posTerminalState, renderWithProviders } from "../../../test/renderWithProviders";
-import { cardPayment, cashPayment, draftSale, saleLine } from "../../../test/posFixtures";
+import { cardPayment, cashPayment, draftSale, saleLine, tradeInPayment } from "../../../test/posFixtures";
 import * as salesService from "../../../services/salesService";
 
 vi.mock("../../../services/salesService");
@@ -180,5 +180,119 @@ describe("PaymentsList", () => {
     renderList([cash], { status: "gone" });
 
     expect(removeButton(/^Remove Cash payment/)).toBeDisabled();
+  });
+});
+
+describe("PaymentsList — Trade-in (P4-8 – P4-10)", () => {
+  const usedIp12 = { id: "p-used-ip12", name: "Used iPhone 12 128GB" };
+  const tradeIn = tradeInPayment({
+    amount: "2000.00",
+    trade_in_buying_price: "2000.00",
+    trade_in_imei: "354789102345675",
+    trade_in_product: usedIp12,
+  });
+  const tradeInRow = () => row(/^Trade-in LKR\s2,000\.00$/);
+  const removeTradeIn = () => removeButton(/^Remove Trade-in payment of LKR\s2,000\.00$/);
+  const confirm = () => screen.queryByRole("dialog", { name: "Remove trade-in?" });
+
+  it("shows the product name and IMEI on one mono, truncated line with the full text as a tooltip", () => {
+    renderList([tradeIn, cash, card]);
+
+    expect(rows()).toHaveLength(3);
+    const detail = within(tradeInRow()).getByText("Used iPhone 12 128GB · 354789102345675");
+    expect(detail).toHaveClass("font-mono");
+    expect(detail).toHaveAttribute("title", "Used iPhone 12 128GB · 354789102345675");
+    expect(detail.parentElement).toHaveClass("truncate");
+    // Same fixed row height as every other tender (P4-8)
+    expect(tradeInRow()).toHaveClass("h-18", "@lg:h-14");
+    expect(within(tradeInRow()).queryByText(/52,000|Battery/)).not.toBeInTheDocument();
+  });
+
+  it("names a pending trade-in after the picked product", () => {
+    renderList([cash], {
+      pendingPayments: [
+        { ...tradeIn, id: "pending-1", trade_in_product: { id: usedIp12.id, name: usedIp12.name } },
+      ],
+    });
+
+    const pending = rows()[1];
+    expect(pending).toHaveAttribute("aria-busy", "true");
+    expect(within(pending).getByText("Used iPhone 12 128GB · 354789102345675")).toBeInTheDocument();
+  });
+
+  it("falls back to the IMEI alone when the product isn't on the payment", () => {
+    renderList([{ ...tradeIn, trade_in_product: undefined }]);
+
+    expect(within(tradeInRow()).getByText("354789102345675")).toBeInTheDocument();
+  });
+
+  it("asks before removing a trade-in; Keep trade-in leaves it, with focus back on its remove button", async () => {
+    const onReturnFocus = vi.fn();
+    const user = userEvent.setup();
+    renderList([tradeIn, cash], {}, { onReturnFocus });
+
+    await user.click(removeTradeIn());
+
+    const dialog = await screen.findByRole("dialog", { name: "Remove trade-in?" });
+    expect(within(dialog).getByText("You'll need to re-enter the phone details.")).toBeInTheDocument();
+    expect(within(dialog).getByText("Used iPhone 12 128GB · 354789102345675")).toBeInTheDocument();
+    await waitFor(() =>
+      expect(within(dialog).getByRole("button", { name: "Remove trade-in" })).toHaveFocus(),
+    );
+
+    await user.click(within(dialog).getByRole("button", { name: "Keep trade-in" }));
+
+    await waitFor(() => expect(confirm()).not.toBeInTheDocument());
+    expect(salesService.removeSalePayment).not.toHaveBeenCalled();
+    expect(rows()).toHaveLength(2);
+    await waitFor(() => expect(removeTradeIn()).toHaveFocus());
+    expect(onReturnFocus).not.toHaveBeenCalled();
+  });
+
+  it("Enter confirms: the trade-in hides at once, and focus goes back to the scan bar once the dialog closes", async () => {
+    salesService.removeSalePayment.mockResolvedValue();
+    salesService.getSale.mockResolvedValue({ ...saleWith([cash]), amount_paid: "1500.00" });
+    const onReturnFocus = vi.fn();
+    const user = userEvent.setup();
+    renderList([tradeIn, cash], {}, { onReturnFocus });
+
+    await user.click(removeTradeIn());
+    await screen.findByRole("dialog", { name: "Remove trade-in?" });
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: "Remove trade-in" })).toHaveFocus(),
+    );
+    await user.keyboard("{Enter}");
+
+    expect(screen.queryByRole("listitem", { name: /^Trade-in/ })).not.toBeInTheDocument();
+    await waitFor(() => expect(salesService.removeSalePayment).toHaveBeenCalledWith("sale-1", "pay-ti"));
+    await waitFor(() => expect(confirm()).not.toBeInTheDocument());
+    await waitFor(() => expect(onReturnFocus).toHaveBeenCalledTimes(1));
+  });
+
+  it("still hands focus back when the trade-in was the last payment (the list empties)", async () => {
+    salesService.removeSalePayment.mockResolvedValue();
+    salesService.getSale.mockResolvedValue(saleWith([]));
+    const onReturnFocus = vi.fn();
+    const user = userEvent.setup();
+    renderList([tradeIn], {}, { onReturnFocus });
+
+    await user.click(removeTradeIn());
+    await user.click(await screen.findByRole("button", { name: "Remove trade-in" }));
+
+    await waitFor(() => expect(screen.queryByTestId("payments-card")).not.toBeInTheDocument());
+    await waitFor(() => expect(confirm()).not.toBeInTheDocument());
+    await waitFor(() => expect(onReturnFocus).toHaveBeenCalledTimes(1));
+  });
+
+  it("removes cash and card next to a trade-in without asking", async () => {
+    salesService.removeSalePayment.mockResolvedValue();
+    salesService.getSale.mockResolvedValue(saleWith([tradeIn, cash]));
+    const user = userEvent.setup();
+    renderList([tradeIn, cash, card]);
+
+    await user.click(removeButton(/^Remove Card payment/));
+
+    expect(confirm()).not.toBeInTheDocument();
+    await waitFor(() => expect(salesService.removeSalePayment).toHaveBeenCalledWith("sale-1", "pay-card"));
   });
 });
