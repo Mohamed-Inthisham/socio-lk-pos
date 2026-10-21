@@ -115,16 +115,16 @@ export class CreateProductDto {
   )
   selling_price!: string;
 
-  // ValidateIf (not IsOptional): omitted is fine (CHECKING on create,
-  // unchanged on update), null is rejected — there is no "no warranty"
-  // besides CHECKING.
+  // ValidateIf (not IsOptional): omitted is fine (NO_WARRANTY on create),
+  // null is rejected — NO_WARRANTY is the explicit "no warranty".
   @ApiPropertyOptional({
     enum: WarrantyPeriod,
     example: WarrantyPeriod.MONTH_12,
     description:
       'The warranty a sale line of this product starts with (P5-18); the ' +
-      'cashier can change it per line. CHECKING = the customer checks it ' +
-      'in the shop, no warranty after. Defaults to CHECKING.',
+      'cashier can change it per line. NO_WARRANTY = sold without one; ' +
+      'CHECKING = the customer checks it in the shop, no warranty after. ' +
+      'Defaults to NO_WARRANTY (P5-19).',
   })
   @ValidateIf((o: CreateProductDto) => o.default_warranty !== undefined)
   @IsEnum(WarrantyPeriod, {

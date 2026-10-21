@@ -98,9 +98,9 @@ _(Phase 6.4 P5-18; replaced #32's `warranty_months_snapshot` + `checking_warrant
 Each line carries one warranty period, chosen at the till:
 
 - `warranty` (`varchar(20) NOT NULL`, CHECK — the codes in [products.md](./products.md) "One default warranty period"). `addLine` sets it to the request's `warranty` if given, otherwise the product's `default_warranty`. `PATCH /sales/:id/lines/:lineId { warranty }` changes it while the sale is a DRAFT, for every line mode (serialized included) and every role; `null` or an unknown code is a 400, a non-DRAFT sale the usual 400. A warranty-only PATCH leaves the money untouched.
-- `warranty_until` (`date`, nullable) — the last day of warranty, set by `completeSale` inside its transaction: the **Colombo** completion date plus the period (`WEEK_n` adds days; `MONTH_n` adds calendar months, clamped to the month's end, so 30 Jan + 1 month = 28 Feb). `NULL` for `CHECKING`, and on DRAFT lines.
+- `warranty_until` (`date`, nullable) — the last day of warranty, set by `completeSale` inside its transaction: the **Colombo** completion date plus the period (`WEEK_n` adds days; `MONTH_n` adds calendar months, clamped to the month's end, so 30 Jan + 1 month = 28 Feb). `NULL` for `NO_WARRANTY` and `CHECKING`, and on DRAFT lines.
 
-Both come back on every hydrated sale's lines. The receipt prints them: "Warranty: 12 months (until 20 Oct 2027)", or "Checking only, no warranty after leaving the shop".
+Both come back on every hydrated sale's lines. The receipt prints them: "Warranty: 12 months (until 20 Oct 2027)", or "Checking only"; a `NO_WARRANTY` line prints nothing.
 
 #### Why on the line, chosen at the till
 
@@ -114,23 +114,25 @@ Every money column — `unit_price`, `subtotal`, `discount_amount`, `line_total`
 
 Same reasoning as the [Products doc](./products.md#prices-as-numeric102-in-db-strings-in-code). Applying JavaScript's IEEE-754 floats to money is a rounding-bug factory. Strings force arithmetic through decimal-safe helpers or Postgres itself. All money comparisons and subtractions (e.g., "does amount_paid equal total?", "is this payment within the remaining balance?") convert to integer cents via `toCents` (`common/utils/money.ts`, `Math.round(Number(x) * 100)`) first, dodging float representation edge cases: in floats `100.30 - 50.10` is `50.199999…`, which used to reject an exact-remainder payment of `50.20`.
 
-### Half-up rounding to two decimals
+### Line money in integer cents, half-up
 
-All computed money values are rounded with:
+`discount_amount` and `line_total` are computed in integer cents (`common/utils/money.ts`): `toCents` in, `fromCents` out. A PERCENT discount is `percentOfCentsHalfUp(unit_price × qty in cents, value)`, which multiplies by the percent in hundredths with BigInt and rounds half-up on the exact result. `line_total` is `unit_price × qty − discount_amount`, in cents.
 
-```typescript
-(Math.round((value + Number.EPSILON) * 100) / 100).toFixed(2)
-```
+#### Why
 
-#### Why the `+ Number.EPSILON`
+The old float path, `Math.round((value + Number.EPSILON) * 100) / 100`, only rescued half-cents below ~1: 50% of 4.35 is exactly 2.175 but stored 2.17. Cents make every result exact, so half-up is really half-up (2.18). This changed the stored `discount_amount` (by one cent) for such inputs; existing rows are not recomputed. _(Fixed with P5-20; was FOLLOWUPS "PERCENT discounts don't always round half-up".)_
 
-Without it, a computed value like `1.005` (which is actually stored as `1.00499999...` in IEEE-754) rounds DOWN to `1.00` instead of the intended half-up `1.01`. `Number.EPSILON` is `2.22e-16` — vanishingly small next to any real LKR value, so it never affects legitimate math, but nudges float-representation edge cases the right way.
-
-Known limit: the nudge only rescues values below ~1. Larger half-cent results can still round down (50% of 4.35 stores 2.17, not 2.18) — tracked in [FOLLOWUPS.md](../../FOLLOWUPS.md) under "PERCENT discounts don't always round half-up".
+`roundToCents` (the `+ Number.EPSILON` form) still rounds the stored `discount_value` and payment amounts, which are client inputs with at most 2 decimals.
 
 ### Line-level discounts only; no sale-level discount
 
-The client sends `{ discount_type, discount_value }` per line. `discount_type` is either `AMOUNT` (LKR off the line) or `PERCENT` (0–100). The server owns the resolved `discount_amount`. Sale-level `discount_total` is `SUM(sale_lines.discount_amount)`.
+The client sends `{ discount_type, discount_value }` per line. `discount_type` is one of:
+
+- `AMOUNT` — LKR off the line, up to `unit_price × qty`.
+- `PERCENT` — 0–100 (2 decimals) of `unit_price × qty`, half-up in cents.
+- `UNIT_PRICE` (P5-20) — the final price **per unit**, `0` (free) up to `unit_price`. `discount_amount = (unit_price − value) × qty`, exact. Above `unit_price` is a 400 ("Price each X must be between 0.00 and the unit price Y"), backed by `CHK_sale_lines_discount_unit_price_range`; equal to `unit_price` is allowed and takes nothing off (the till removes the discount instead).
+
+The server owns the resolved `discount_amount`, and re-resolves it on every quantity change, so `PERCENT` and `UNIT_PRICE` follow the quantity while `AMOUNT` stays fixed. Sale-level `discount_total` is `SUM(sale_lines.discount_amount)`.
 
 #### Why no sale-level discount
 
@@ -155,6 +157,7 @@ Every domain rule that can be expressed in SQL has a matching `CHECK` constraint
 - `CHK_sales_sale_number_when_completed` — `sale_number` is set iff status is COMPLETED or VOIDED
 - `CHK_sale_lines_line_total` — line_total = ROUND(unit_price * quantity - discount_amount, 2)
 - `CHK_sale_lines_discount_bounded` — `discount_amount <= unit_price * quantity`
+- `CHK_sale_lines_discount_unit_price_range` — a `UNIT_PRICE` value is between 0 and `unit_price`
 - `CHK_payments_cash_received_only_for_cash` — cash_received is set iff payment_method = 'CASH'
 - `CHK_payments_cash_received_covers_amount` — cash_received >= amount for CASH rows
 - `CHK_payments_reversal_consistency` — reversed_at is set iff reversal_reason is set and non-blank

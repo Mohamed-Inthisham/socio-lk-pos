@@ -3,11 +3,13 @@
  * codes, in the order the shop offers them. Used by the product forms
  * (a product's default), the cart (each line's period) and the receipt.
  *
+ * NO_WARRANTY (P5-19): sold without any warranty (cables etc.); listed
+ * first, and the default for new products.
  * CHECKING: the customer checks the item in the shop; there is no
- * warranty once they leave. It also covers items sold without a warranty
- * (cables etc.) — there is no separate "No warranty".
+ * warranty once they leave.
  */
 export const WARRANTY_PERIODS = [
+  { value: "NO_WARRANTY", label: "No warranty" },
   { value: "CHECKING", label: "Checking" },
   { value: "WEEK_1", label: "1 week" },
   { value: "WEEK_2", label: "2 weeks" },
@@ -22,7 +24,7 @@ export const WARRANTY_PERIODS = [
 
 export const WARRANTY_CODES = WARRANTY_PERIODS.map((p) => p.value);
 
-export const DEFAULT_WARRANTY = "CHECKING";
+export const DEFAULT_WARRANTY = "NO_WARRANTY";
 
 /** "12 months" for "MONTH_12"; the code itself if unknown. */
 export const warrantyLabel = (code) =>

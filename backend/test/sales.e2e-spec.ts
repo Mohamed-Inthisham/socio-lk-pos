@@ -190,7 +190,8 @@ describe('Sales (e2e)', () => {
         selling_price: overrides.selling_price ?? '100000.00',
         is_active: overrides.is_active ?? true,
         is_serialized: overrides.is_serialized ?? false,
-        default_warranty: overrides.default_warranty ?? WarrantyPeriod.CHECKING,
+        default_warranty:
+          overrides.default_warranty ?? WarrantyPeriod.NO_WARRANTY,
       }),
     );
   }
@@ -1344,6 +1345,163 @@ describe('Sales (e2e)', () => {
         .expect(400);
     });
 
+    it('sets a UNIT_PRICE discount that follows qty changes, and rejects a price above the unit price (P5-20)', async () => {
+      const branch = await seedBranch();
+      const { user, password } = await seedUser(UserRole.ADMIN, 'a@t.com');
+      const sale = await seedSale({
+        branch_id: branch.id,
+        cashier_id: user.id,
+      });
+      const product = await seedProduct(branch.id, {
+        selling_price: '200.00',
+      });
+      const cookies = await loginAndGetCookies(user.email, password);
+
+      const created = await request(app.getHttpServer())
+        .post(`/api/v1/sales/${sale.id}/lines`)
+        .set('Cookie', cookies)
+        .send({ product_id: product.id, quantity: 1 })
+        .expect(201);
+      const lineId = created.body.lines[0].id;
+
+      const priced = await request(app.getHttpServer())
+        .patch(`/api/v1/sales/${sale.id}/lines/${lineId}`)
+        .set('Cookie', cookies)
+        .send({ discount_type: DiscountType.UNIT_PRICE, discount_value: 160 })
+        .expect(200);
+      expect(priced.body.lines[0]).toMatchObject({
+        discount_type: DiscountType.UNIT_PRICE,
+        discount_value: '160.00',
+        discount_amount: '40.00',
+        line_total: '160.00',
+      });
+
+      const more = await request(app.getHttpServer())
+        .patch(`/api/v1/sales/${sale.id}/lines/${lineId}`)
+        .set('Cookie', cookies)
+        .send({ quantity: 3 })
+        .expect(200);
+      expect(more.body.lines[0]).toMatchObject({
+        discount_value: '160.00',
+        discount_amount: '120.00',
+        line_total: '480.00',
+      });
+      expect(more.body.discount_total).toBe('120.00');
+      expect(more.body.total).toBe('480.00');
+
+      const above = await request(app.getHttpServer())
+        .patch(`/api/v1/sales/${sale.id}/lines/${lineId}`)
+        .set('Cookie', cookies)
+        .send({
+          discount_type: DiscountType.UNIT_PRICE,
+          discount_value: 200.01,
+        })
+        .expect(400);
+      expect(above.body.message).toBe(
+        'Price each 200.01 must be between 0.00 and the unit price 200.00',
+      );
+    });
+
+    it('rounds an exact half-cent PERCENT discount up (F3: 50% of 4.35)', async () => {
+      const branch = await seedBranch();
+      const { user, password } = await seedUser(UserRole.ADMIN, 'a@t.com');
+      const sale = await seedSale({
+        branch_id: branch.id,
+        cashier_id: user.id,
+      });
+      const product = await seedProduct(branch.id, { selling_price: '4.35' });
+      const cookies = await loginAndGetCookies(user.email, password);
+
+      const created = await request(app.getHttpServer())
+        .post(`/api/v1/sales/${sale.id}/lines`)
+        .set('Cookie', cookies)
+        .send({
+          product_id: product.id,
+          quantity: 1,
+          discount_type: DiscountType.PERCENT,
+          discount_value: 50,
+        })
+        .expect(201);
+
+      expect(created.body.lines[0]).toMatchObject({
+        discount_amount: '2.18',
+        line_total: '2.17',
+      });
+    });
+
+    it('adds a line with a UNIT_PRICE discount (P5-20)', async () => {
+      const branch = await seedBranch();
+      const { user, password } = await seedUser(UserRole.ADMIN, 'a@t.com');
+      const sale = await seedSale({
+        branch_id: branch.id,
+        cashier_id: user.id,
+      });
+      const product = await seedProduct(branch.id, {
+        selling_price: '200.00',
+      });
+      const cookies = await loginAndGetCookies(user.email, password);
+
+      const created = await request(app.getHttpServer())
+        .post(`/api/v1/sales/${sale.id}/lines`)
+        .set('Cookie', cookies)
+        .send({
+          product_id: product.id,
+          quantity: 1,
+          discount_type: DiscountType.UNIT_PRICE,
+          discount_value: 160,
+        })
+        .expect(201);
+
+      expect(created.body.lines[0]).toMatchObject({
+        discount_type: DiscountType.UNIT_PRICE,
+        discount_value: '160.00',
+        discount_amount: '40.00',
+        line_total: '160.00',
+      });
+      expect(created.body.total).toBe('160.00');
+    });
+
+    it.each([
+      ['equal to the unit price takes nothing off', 200, '0.00', '200.00'],
+      ['0 makes the line free', 0, '200.00', '0.00'],
+    ])(
+      'UNIT_PRICE %s (P5-20)',
+      async (_, priceEach, discountAmount, lineTotal) => {
+        const branch = await seedBranch();
+        const { user, password } = await seedUser(UserRole.ADMIN, 'a@t.com');
+        const sale = await seedSale({
+          branch_id: branch.id,
+          cashier_id: user.id,
+        });
+        const product = await seedProduct(branch.id, {
+          selling_price: '200.00',
+        });
+        const cookies = await loginAndGetCookies(user.email, password);
+
+        const created = await request(app.getHttpServer())
+          .post(`/api/v1/sales/${sale.id}/lines`)
+          .set('Cookie', cookies)
+          .send({ product_id: product.id, quantity: 1 })
+          .expect(201);
+        const lineId = created.body.lines[0].id;
+
+        const response = await request(app.getHttpServer())
+          .patch(`/api/v1/sales/${sale.id}/lines/${lineId}`)
+          .set('Cookie', cookies)
+          .send({
+            discount_type: DiscountType.UNIT_PRICE,
+            discount_value: priceEach,
+          })
+          .expect(200);
+
+        expect(response.body.lines[0]).toMatchObject({
+          discount_amount: discountAmount,
+          line_total: lineTotal,
+        });
+        expect(response.body.total).toBe(lineTotal);
+      },
+    );
+
     it('returns 404 when line belongs to a different sale', async () => {
       const branch = await seedBranch();
       const { user, password } = await seedUser(UserRole.ADMIN, 'a@t.com');
@@ -2107,25 +2265,81 @@ describe('Sales (e2e)', () => {
       });
     });
 
-    it('a product without a warranty sells as CHECKING, with no warranty_until (P5-18)', async () => {
+    it.each([WarrantyPeriod.NO_WARRANTY, WarrantyPeriod.CHECKING])(
+      'a %s line completes with no warranty_until (P5-18, P5-19)',
+      async (warranty) => {
+        const branch = await seedBranch();
+        const { user, password } = await seedUser(UserRole.ADMIN, 'a@t.com');
+        const cookies = await loginAndGetCookies(user.email, password);
+        const { sale } = await seedReadyToCompleteSale(
+          branch.id,
+          user.id,
+          cookies,
+          { stockQty: 5, defaultWarranty: warranty },
+        );
+
+        const response = await request(app.getHttpServer())
+          .post(`/api/v1/sales/${sale.id}/complete`)
+          .set('Cookie', cookies)
+          .expect(200);
+
+        expect(response.body.lines[0]).toMatchObject({
+          warranty,
+          warranty_until: null,
+        });
+      },
+    );
+
+    it('completes a sale with a UNIT_PRICE line and returns the discount fields the receipt needs (P5-20)', async () => {
       const branch = await seedBranch();
       const { user, password } = await seedUser(UserRole.ADMIN, 'a@t.com');
       const cookies = await loginAndGetCookies(user.email, password);
-      const { sale } = await seedReadyToCompleteSale(
-        branch.id,
-        user.id,
-        cookies,
-        { stockQty: 5 },
-      );
+      const product = await seedProduct(branch.id, {
+        selling_price: '200.00',
+      });
+      await setStockQuantity(product.id, branch.id, 5);
+      const sale = await seedSale({
+        branch_id: branch.id,
+        cashier_id: user.id,
+      });
+      await request(app.getHttpServer())
+        .post(`/api/v1/sales/${sale.id}/lines`)
+        .set('Cookie', cookies)
+        .send({
+          product_id: product.id,
+          quantity: 2,
+          discount_type: DiscountType.UNIT_PRICE,
+          discount_value: 160,
+        })
+        .expect(201);
+      await request(app.getHttpServer())
+        .post(`/api/v1/sales/${sale.id}/payments`)
+        .set('Cookie', cookies)
+        .send({
+          payment_method: PaymentMethod.CASH,
+          amount: 320,
+          cash_received: 320,
+        })
+        .expect(201);
 
       const response = await request(app.getHttpServer())
         .post(`/api/v1/sales/${sale.id}/complete`)
         .set('Cookie', cookies)
         .expect(200);
 
+      expect(response.body).toMatchObject({
+        status: SaleStatus.COMPLETED,
+        subtotal: '400.00',
+        discount_total: '80.00',
+        total: '320.00',
+      });
       expect(response.body.lines[0]).toMatchObject({
-        warranty: WarrantyPeriod.CHECKING,
-        warranty_until: null,
+        unit_price: '200.00',
+        quantity: 2,
+        discount_type: DiscountType.UNIT_PRICE,
+        discount_value: '160.00',
+        discount_amount: '80.00',
+        line_total: '320.00',
       });
     });
 

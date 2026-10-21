@@ -186,7 +186,7 @@ describe('Products (e2e)', () => {
         expect(response.body).not.toHaveProperty('checking_warranty_days');
       });
 
-      it('defaults to CHECKING when omitted', async () => {
+      it('defaults to NO_WARRANTY when omitted (P5-19)', async () => {
         const { user, password } = await seedUser(
           UserRole.ADMIN,
           'admin@t.com',
@@ -200,7 +200,7 @@ describe('Products (e2e)', () => {
           .send(body(refs))
           .expect(201);
 
-        expect(response.body.default_warranty).toBe(WarrantyPeriod.CHECKING);
+        expect(response.body.default_warranty).toBe(WarrantyPeriod.NO_WARRANTY);
       });
 
       it('rejects an unknown code with 400', async () => {
@@ -222,7 +222,7 @@ describe('Products (e2e)', () => {
         );
       });
 
-      it('changes it on PATCH, and rejects null (there is no "no warranty" but CHECKING)', async () => {
+      it('changes it on PATCH, and rejects null (NO_WARRANTY is the "no warranty")', async () => {
         const { user, password } = await seedUser(
           UserRole.ADMIN,
           'admin@t.com',
