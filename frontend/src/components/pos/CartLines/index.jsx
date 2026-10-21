@@ -1,7 +1,8 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useDispatch, useSelector } from "react-redux";
-import { AlertCircle, AlertTriangle, Loader2, Lock, Minus, Plus, ShoppingCart, Trash2 } from "lucide-react";
+import { AlertCircle, AlertTriangle, Loader2, Lock, Minus, Plus, ShieldCheck, ShoppingCart, Trash2 } from "lucide-react";
 import { formatLKR } from "../../../utils/money";
+import { DEFAULT_WARRANTY, WARRANTY_PERIODS } from "../../../constants/warranty";
 import {
   removeLine,
   selectCartLines,
@@ -9,6 +10,7 @@ import {
   selectStockErrors,
   selectStockWarnings,
   updateLineQty,
+  updateLineWarranty,
 } from "../../../store/slices/posTerminalSlice";
 
 /**
@@ -21,6 +23,9 @@ import {
  * - Non-serialized: −/+ stepper and a direct qty input (commits on Enter
  *   or blur). With a row focused, `+` / `-` change its qty.
  * - Serialized (line has an IMEI): qty locked at 1, IMEI under the name.
+ * - Warranty (P5-18): a compact select after the SKU / IMEI, starting on
+ *   the product's default; a change PATCHes the line (updateLineWarranty,
+ *   row busy until it lands).
  * - Stock warning (Q1 b): a yellow "Only N in stock" badge when the
  *   branch has fewer units than the cart needs. Warns only — the 409 at
  *   complete is the real guard.
@@ -143,6 +148,70 @@ const IssueBadge = ({ label }) => (
   </span>
 );
 
+/** Quiet time before a warranty change is saved (arrow keys on a closed select change it per press). */
+const WARRANTY_SAVE_DELAY_MS = 400;
+
+/**
+ * The line's warranty period (P5-18): a native select (Tab, arrow keys and
+ * type-ahead work as usual), defaulting to the product's. A pending row
+ * shows that default, disabled.
+ *
+ * Debounced: on Windows, ↑/↓ on a closed select change the value on every
+ * press, so the choice shows at once but is only saved after
+ * WARRANTY_SAVE_DELAY_MS of quiet — one PATCH with the final value. The
+ * row dims once that save starts; the choice stays on screen until it
+ * settles (and snaps back if it fails). While the line is busy the select
+ * keeps focus but ignores changes.
+ */
+const WarrantySelect = ({ line }) => {
+  const dispatch = useDispatch();
+  const busy = line.pending || line.busy;
+  const [choice, setChoice] = useState(null);
+  const timer = useRef(null);
+
+  useEffect(() => () => clearTimeout(timer.current), []);
+
+  const choose = (warranty) => {
+    if (busy) return;
+    setChoice(warranty);
+    clearTimeout(timer.current);
+    timer.current = setTimeout(() => {
+      if (warranty === line.warranty) {
+        setChoice(null);
+        return;
+      }
+      dispatch(updateLineWarranty({ lineId: line.id, warranty })).finally(() => setChoice(null));
+    }, WARRANTY_SAVE_DELAY_MS);
+  };
+
+  return (
+    <span className="flex-shrink-0 inline-flex items-center gap-1 text-slate-400 dark:text-slate-500">
+      <ShieldCheck size={12} aria-hidden="true" />
+      <select
+        aria-label={`Warranty for ${line.product_name_snapshot}`}
+        value={choice ?? line.warranty ?? DEFAULT_WARRANTY}
+        disabled={line.pending}
+        aria-disabled={line.busy || undefined}
+        onChange={(event) => choose(event.target.value)}
+        className="
+          h-6 pl-1.5 pr-1 rounded-md text-xs
+          border border-slate-200 dark:border-slate-700
+          bg-white dark:bg-slate-900 text-slate-700 dark:text-slate-200
+          [color-scheme:light] dark:[color-scheme:dark]
+          disabled:opacity-60
+          focus:outline-none focus-visible:ring-2 focus-visible:ring-cyan-500
+        "
+      >
+        {WARRANTY_PERIODS.map((period) => (
+          <option key={period.value} value={period.value}>
+            {period.label}
+          </option>
+        ))}
+      </select>
+    </span>
+  );
+};
+
 const CartLineRow = ({ line, index, stockWarning, stockUnknown, issue, onReturnFocus }) => {
   const dispatch = useDispatch();
   const serialized = !!line.imei_snapshot;
@@ -154,7 +223,8 @@ const CartLineRow = ({ line, index, stockWarning, stockUnknown, issue, onReturnF
   };
 
   const handleKeyDown = (event) => {
-    if (event.target.tagName === "INPUT") return;
+    // +/- belong to the qty input and the warranty select while they have focus
+    if (event.target.tagName === "INPUT" || event.target.tagName === "SELECT") return;
     if (event.key === "+" || event.key === "=") {
       event.preventDefault();
       setQty(line.quantity + 1);
@@ -190,17 +260,21 @@ const CartLineRow = ({ line, index, stockWarning, stockUnknown, issue, onReturnF
           <p className="text-sm font-medium text-slate-900 dark:text-slate-100 truncate">
             {line.product_name_snapshot}
           </p>
-          {serialized ? (
-            <p className="text-xs font-mono tabular-nums text-slate-500 dark:text-slate-400 truncate">
-              IMEI {line.imei_snapshot}
-            </p>
-          ) : (
-            line.product_sku_snapshot && (
-              <p className="text-xs text-slate-500 dark:text-slate-400 truncate">
-                {line.product_sku_snapshot}
+          {/* Second line: the IMEI or SKU, then the line's warranty (P5-18) */}
+          <div className="mt-0.5 flex items-center gap-2 min-w-0">
+            {serialized ? (
+              <p className="min-w-0 text-xs font-mono tabular-nums text-slate-500 dark:text-slate-400 truncate">
+                IMEI {line.imei_snapshot}
               </p>
-            )
-          )}
+            ) : (
+              line.product_sku_snapshot && (
+                <p className="min-w-0 text-xs text-slate-500 dark:text-slate-400 truncate">
+                  {line.product_sku_snapshot}
+                </p>
+              )
+            )}
+            <WarrantySelect line={line} />
+          </div>
           {stockWarning ? <StockBadge warning={stockWarning} /> : stockUnknown && <StockUnknown />}
           {issue && (
             <>

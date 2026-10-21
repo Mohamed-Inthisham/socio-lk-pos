@@ -47,6 +47,7 @@ import {
   selectStockWarnings,
   selectTradeInImeis,
   updateLineQty,
+  updateLineWarranty,
 } from "./posTerminalSlice";
 
 vi.mock("../../services/salesService");
@@ -189,6 +190,46 @@ describe("posTerminal line mutations", () => {
       product_id: cableProduct.id,
       quantity: 1,
     });
+  });
+
+  it("a pending row shows the warranty the line will start on (P5-18)", async () => {
+    const { store, ready } = readyStore();
+    await ready;
+    salesService.addSaleLine.mockReturnValue(new Promise(() => {}));
+
+    store.dispatch(addLine({ product: { ...cableProduct, default_warranty: "MONTH_6" } }));
+    store.dispatch(addLine({ product: cableProduct })); // no default on the row → Checking
+
+    const pending = selectCartLines(store.getState()).filter((l) => l.pending);
+    expect(pending.map((l) => l.warranty)).toEqual(["MONTH_6", "CHECKING"]);
+  });
+
+  it("changes a line's warranty through the queue, the row busy until it lands (P5-18)", async () => {
+    const { store, ready } = readyStore(draftSale({ lines: [saleLine({ warranty: "CHECKING" })] }));
+    await ready;
+    const request = deferred();
+    salesService.updateSaleLine.mockReturnValue(request.promise);
+
+    const changing = store.dispatch(updateLineWarranty({ lineId: "line-1", warranty: "MONTH_12" }));
+
+    expect(selectCartLines(store.getState())[0]).toMatchObject({ busy: true, warranty: "CHECKING" });
+    request.resolve(draftSale({ lines: [saleLine({ warranty: "MONTH_12" })] }));
+    await changing;
+
+    expect(salesService.updateSaleLine).toHaveBeenCalledWith("sale-1", "line-1", { warranty: "MONTH_12" });
+    expect(selectCartLines(store.getState())[0]).toMatchObject({ busy: false, warranty: "MONTH_12" });
+  });
+
+  it("reports a failed warranty change and frees the row (P5-18)", async () => {
+    const { store, ready } = readyStore(draftSale({ lines: [saleLine({ warranty: "CHECKING" })] }));
+    await ready;
+    salesService.updateSaleLine.mockRejectedValue(httpError(400, "warranty must be one of the following values"));
+
+    await store.dispatch(updateLineWarranty({ lineId: "line-1", warranty: "MONTH_12" }));
+
+    expect(store.getState().posTerminal.lineError.message).toMatch(/warranty must be one of/);
+    expect(selectCartLines(store.getState())[0]).toMatchObject({ busy: false, warranty: "CHECKING" });
+    expect(store.getState().posTerminal.status).toBe("ready");
   });
 
   it("rolls back the pending row and reports the error when addLine fails", async () => {
@@ -1122,6 +1163,11 @@ describe("posTerminal complete (P5)", () => {
     const mutations = [
       ["addLine (a scan)", () => addLine({ product: cableProduct }), () => salesService.addSaleLine],
       ["updateLineQty", () => updateLineQty({ lineId: "line-1", quantity: 2 }), () => salesService.updateSaleLine],
+      [
+        "updateLineWarranty",
+        () => updateLineWarranty({ lineId: "line-1", warranty: "MONTH_12" }),
+        () => salesService.updateSaleLine,
+      ],
       ["removeLine", () => removeLine({ lineId: "line-1" }), () => salesService.removeSaleLine],
       [
         "addPayment",
@@ -1417,6 +1463,20 @@ describe("posTerminal complete (P5)", () => {
       await store.dispatch(removeLine({ lineId: "line-1" }));
       expect(selectCompleteError(store.getState())).toBeNull();
       expect(selectCompleteIssue(store.getState()).lineIds).toEqual([]);
+    });
+
+    it("changing a line's warranty counts as changing the sale (P5-18)", async () => {
+      const store = await paidStore();
+      await failWith(store, {
+        message: 'Insufficient stock for "USB-C Cable 1m": requested 1, available 0',
+        product_id: "p-cable",
+        sale_line_id: "line-1",
+      });
+      salesService.updateSaleLine.mockResolvedValue(paidSale({ lines: [saleLine({ warranty: "WEEK_1" })] }));
+
+      await store.dispatch(updateLineWarranty({ lineId: "line-1", warranty: "WEEK_1" }));
+
+      expect(selectCompleteError(store.getState())).toBeNull();
     });
 
     it("saving the customer's NIC clears a missing-NIC error", async () => {

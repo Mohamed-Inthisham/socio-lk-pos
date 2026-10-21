@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useDispatch, useSelector, useStore } from "react-redux";
-import { AlertCircle, AlertTriangle, Loader2 } from "lucide-react";
+import { AlertCircle, AlertTriangle, Loader2, ShieldCheck } from "lucide-react";
 import Dialog from "../../common/Dialog";
 import Button from "../../common/Button";
 import { methodLabel, tenderDetail } from "../PaymentDialog/methods";
@@ -8,6 +8,7 @@ import TradeInCustomerPanel from "../PaymentDialog/TradeInCustomerPanel";
 import { describeCompleteError } from "./completeErrorCopy";
 import { formatLKR } from "../../../utils/money";
 import { COMPLETE_ERROR } from "../../../utils/completeErrors";
+import { warrantyLabel } from "../../../constants/warranty";
 import {
   clearCompleteError,
   completeSale,
@@ -28,7 +29,9 @@ import {
  * by the Totals panel's Complete sale button or F9 (PosTerminal), only on
  * a fully paid sale.
  *
- * - Shows the total, the tenders and the change due.
+ * - Shows the total, the change due, the items with their warranty
+ *   (P5-18; up to 3, then "+N more"; hidden while a problem shows, to
+ *   keep those states within ~640px) and the tenders.
  * - Re-checks branch stock on open (one GET /stock?branchId=, the slice's
  *   refreshCartStock). A shortfall is listed and blocks Complete, with
  *   Check again: the server would refuse it anyway (409). If the lookup
@@ -66,6 +69,9 @@ import {
 const CHECK_IDLE = "idle";
 const CHECK_DONE = "done";
 const CHECK_FAILED = "failed";
+
+// Items listed with their warranty; more show as "+N more" (fits ~640px).
+const MAX_ITEMS = 3;
 
 const CompleteSaleDialog = ({ open, onClose, afterLeave }) => {
   const dispatch = useDispatch();
@@ -164,6 +170,7 @@ const CompleteSaleDialog = ({ open, onClose, afterLeave }) => {
     }
   };
 
+  const lines = sale?.lines ?? [];
   const total = sale?.total ?? "0.00";
   const changeDue = sale?.change_due ?? "0.00";
   const payments = sale?.payments ?? [];
@@ -211,6 +218,28 @@ const CompleteSaleDialog = ({ open, onClose, afterLeave }) => {
           </div>
         )}
       </dl>
+
+      {/* Each item's warranty (P5-18), a last check before it's on the receipt.
+          Left out while a problem shows, to keep those states within ~640px. */}
+      {!issue && !shortOfStock && lines.length > 0 && (
+        <ul aria-label="Items" className="mt-3 text-sm space-y-0.5">
+          {lines.slice(0, MAX_ITEMS).map((line) => (
+            <li key={line.id} className="flex items-baseline justify-between gap-3">
+              <span className="min-w-0 truncate text-slate-700 dark:text-slate-200" title={line.product_name_snapshot}>
+                {line.quantity > 1 && <span className="tabular-nums">{line.quantity} × </span>}
+                {line.product_name_snapshot}
+              </span>
+              <span className="flex-shrink-0 inline-flex items-center gap-1 text-xs text-slate-500 dark:text-slate-400">
+                <ShieldCheck size={12} aria-hidden="true" />
+                {warrantyLabel(line.warranty)}
+              </span>
+            </li>
+          ))}
+          {lines.length > MAX_ITEMS && (
+            <li className="text-xs text-slate-500 dark:text-slate-400">+{lines.length - MAX_ITEMS} more</li>
+          )}
+        </ul>
+      )}
 
       <ul aria-label="Tenders" className="mt-3 divide-y divide-slate-100 dark:divide-slate-800 border-y border-slate-100 dark:border-slate-800 text-sm">
         {payments.map((payment) => {

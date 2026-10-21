@@ -95,6 +95,36 @@ describe("CompleteSaleDialog", () => {
     await waitFor(() => expect(within(dialog()).queryByText("Checking stock…")).not.toBeInTheDocument());
   });
 
+  it("lists the items with their warranty, up to 3 then '+N more' (P5-18)", async () => {
+    renderDialog(
+      paidSale({
+        lines: [
+          saleLine({ product_name_snapshot: "iPhone 15 128GB", warranty: "MONTH_12" }),
+          saleLine({ id: "line-2", quantity: 2, warranty: "CHECKING" }),
+          saleLine({ id: "line-3", product_name_snapshot: "Charger", warranty: "WEEK_1" }),
+          saleLine({ id: "line-4", product_name_snapshot: "Case", warranty: "MONTH_1" }),
+        ],
+      }),
+    );
+
+    const items = within(within(dialog()).getByRole("list", { name: "Items" })).getAllByRole("listitem");
+    expect(items.map((i) => i.textContent)).toEqual([
+      "iPhone 15 128GB12 months",
+      "2 × USB-C Cable 1mChecking",
+      "Charger1 week",
+      "+1 more",
+    ]);
+    await waitFor(() => expect(within(dialog()).queryByText("Checking stock…")).not.toBeInTheDocument());
+  });
+
+  it("leaves the items out while a stock shortfall shows (keeps the dialog within ~640px)", async () => {
+    stockService.listStock.mockResolvedValueOnce([stockRow(0)]);
+    renderDialog(paidSale({ lines: [saleLine({ quantity: 2, line_total: "3000.00", warranty: "CHECKING" })] }));
+
+    expect(await within(dialog()).findByRole("alert")).toHaveTextContent("Not enough stock");
+    expect(within(dialog()).queryByRole("list", { name: "Items" })).not.toBeInTheDocument();
+  });
+
   it("hides Change due when there is none", async () => {
     renderDialog(paidSale({ change_due: "0.00" }));
 

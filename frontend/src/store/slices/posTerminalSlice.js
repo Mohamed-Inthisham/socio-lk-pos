@@ -29,6 +29,7 @@ import { listStock } from "../../services/stockService";
 import useTerminalSessionStore from "../zustand/terminalSessionStore";
 import { fromCents, toCents } from "../../utils/money";
 import { COMPLETE_ERROR, classifyCompleteError } from "../../utils/completeErrors";
+import { DEFAULT_WARRANTY } from "../../constants/warranty";
 
 /**
  * POS Terminal Slice
@@ -345,6 +346,19 @@ export const updateLineQty = createAsyncThunk(
     "Couldn't change the quantity",
     (saleId, { lineId, quantity }) => updateSaleLine(saleId, lineId, { quantity }),
     ({ lineId }, sale) => sale.lines.find((l) => l.id === lineId)?.product_id,
+  ),
+  { condition: saleOpen },
+);
+
+/**
+ * arg: { lineId, warranty } — the line's warranty period (P5-18, a code
+ * from constants/warranty.js). Any line, serialized included; not
+ * optimistic: the row is busy until the server answers, like a qty edit.
+ */
+export const updateLineWarranty = createAsyncThunk(
+  "posTerminal/updateLineWarranty",
+  saleMutation("Couldn't change the warranty", (saleId, { lineId, warranty }) =>
+    updateSaleLine(saleId, lineId, { warranty }),
   ),
   { condition: saleOpen },
 );
@@ -933,6 +947,8 @@ const posTerminalSlice = createSlice({
           quantity,
           imei_snapshot: imei ?? null,
           line_total: null,
+          // What the server will start the line on (P5-18)
+          warranty: product.default_warranty ?? DEFAULT_WARRANTY,
         });
       })
       .addCase(addLine.fulfilled, (state, action) => {
@@ -960,6 +976,18 @@ const posTerminalSlice = createSlice({
       .addCase(updateLineQty.rejected, (state, action) => {
         unmarkBusy(state, action.meta.arg.lineId);
         applyRejection(state, action.payload, "Couldn't change the quantity");
+      })
+      .addCase(updateLineWarranty.pending, (state, action) => {
+        state.lineError = null;
+        markBusy(state, action.meta.arg.lineId);
+      })
+      .addCase(updateLineWarranty.fulfilled, (state, action) => {
+        unmarkBusy(state, action.meta.arg.lineId);
+        replaceSale(state, action.payload);
+      })
+      .addCase(updateLineWarranty.rejected, (state, action) => {
+        unmarkBusy(state, action.meta.arg.lineId);
+        applyRejection(state, action.payload, "Couldn't change the warranty");
       })
       .addCase(removeLine.pending, (state, action) => {
         state.lineError = null;
@@ -1158,6 +1186,7 @@ const posTerminalSlice = createSlice({
         isAnyOf(
           addLine.fulfilled,
           updateLineQty.fulfilled,
+          updateLineWarranty.fulfilled,
           removeLine.fulfilled,
           addPayment.fulfilled,
           removePayment.fulfilled,
