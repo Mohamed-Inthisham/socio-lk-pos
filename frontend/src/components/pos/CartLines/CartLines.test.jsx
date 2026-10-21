@@ -2,8 +2,9 @@ import { vi } from "vitest";
 import { screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import CartLines from ".";
-import { posTerminalState, renderWithProviders } from "../../../test/renderWithProviders";
+import { authState, posTerminalState, renderWithProviders } from "../../../test/renderWithProviders";
 import { draftSale, phoneProduct, saleLine } from "../../../test/posFixtures";
+import { cashierUser } from "../../../test/fixtures";
 import * as salesService from "../../../services/salesService";
 import * as stockService from "../../../services/stockService";
 
@@ -190,6 +191,7 @@ describe("CartLines stock warning", () => {
           .getAllByRole("option")
           .map((o) => o.textContent),
       ).toEqual([
+        "No warranty",
         "Checking",
         "1 week",
         "2 weeks",
@@ -307,6 +309,90 @@ describe("CartLines stock warning", () => {
       await user.keyboard("+-");
 
       expect(salesService.updateSaleLine).not.toHaveBeenCalled();
+    });
+  });
+
+  describe("discount (P5-20)", () => {
+    const asCashier = { auth: authState(cashierUser) };
+    const renderAs = (lines, auth = asCashier) =>
+      renderWithProviders(<CartLines />, {
+        preloadedState: { ...auth, posTerminal: posTerminalState({ draftSale: draftSale({ lines }) }) },
+      });
+
+    const percentLine = {
+      ...cableLine,
+      discount_type: "PERCENT",
+      discount_value: "20.00",
+      discount_amount: "600.00",
+      line_total: "2400.00",
+    };
+    const priceEachLine = {
+      ...phoneLine,
+      discount_type: "UNIT_PRICE",
+      discount_value: "230000.00",
+      discount_amount: "15000.00",
+      line_total: "230000.00",
+    };
+
+    it("gives a cashier a Discount button on each line", () => {
+      renderAs([cableLine, phoneLine]);
+
+      expect(within(row("USB-C Cable 1m")).getAllByRole("button", { name: "Discount USB-C Cable 1m" }).length).toBeGreaterThan(0);
+      expect(within(row(phoneProduct.name)).getAllByRole("button", { name: `Discount ${phoneProduct.name}` }).length).toBeGreaterThan(0);
+    });
+
+    it("shows no Discount button without the permission", () => {
+      renderCart([cableLine]);
+      expect(screen.queryByRole("button", { name: /Discount/ })).not.toBeInTheDocument();
+    });
+
+    it("D on a focused row opens the dialog for that line", async () => {
+      const user = userEvent.setup();
+      renderAs([cableLine, phoneLine]);
+
+      row(phoneProduct.name).focus();
+      await user.keyboard("d");
+
+      const dialog = await screen.findByRole("dialog", { name: "Discount" });
+      expect(dialog).toHaveTextContent(phoneProduct.name);
+    });
+
+    it("D in the qty input or the warranty select types / is ignored, not a dialog", async () => {
+      const user = userEvent.setup();
+      renderAs([cableLine]);
+
+      screen.getByRole("combobox", { name: "Warranty for USB-C Cable 1m" }).focus();
+      await user.keyboard("d");
+      within(row("USB-C Cable 1m")).getByLabelText(/quantity for usb-c cable/i).focus();
+      await user.keyboard("d");
+
+      expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    });
+
+    it("shows the original price struck through, the new one and the badge", () => {
+      renderAs([percentLine, priceEachLine]);
+
+      const cable = row("USB-C Cable 1m");
+      expect(within(cable).getByTestId("original-price")).toHaveTextContent("1,500.00");
+      expect(within(cable).getByTestId("discounted-price")).toHaveTextContent("1,200.00");
+      expect(within(cable).getAllByRole("button", { name: /Change discount for USB-C Cable 1m \(20%\)/ })[0]).toHaveTextContent(
+        "−20%",
+      );
+
+      const phone = row(phoneProduct.name);
+      expect(within(phone).getByTestId("original-price")).toHaveTextContent("245,000.00");
+      expect(within(phone).getByTestId("discounted-price")).toHaveTextContent("230,000.00");
+      expect(within(phone).getAllByRole("button", { name: /Change discount/ })[0]).toHaveTextContent("230,000.00 each");
+    });
+
+    it("the badge reopens the dialog on the line's discount", async () => {
+      const user = userEvent.setup();
+      renderAs([percentLine]);
+
+      await user.click(within(row("USB-C Cable 1m")).getAllByRole("button", { name: /Change discount/ })[0]);
+
+      const dialog = await screen.findByRole("dialog", { name: "Discount" });
+      expect(within(dialog).getByRole("textbox")).toHaveValue("20");
     });
   });
 });

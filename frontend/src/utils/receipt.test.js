@@ -1,6 +1,13 @@
-import { cashChange, receiptAmount, receiptDate, receiptDateTime, receiptWarranty } from "./receipt";
+import {
+  cashChange,
+  receiptAmount,
+  receiptDate,
+  receiptDateTime,
+  receiptDiscountLabel,
+  receiptWarranty,
+} from "./receipt";
 
-describe("receipt formatting (P5-11, P5-18)", () => {
+describe("receipt formatting (P5-11, P5-18, P5-19, P5-20)", () => {
   it("formats amounts with grouping and 2 decimals, no currency", () => {
     expect(receiptAmount("64990")).toBe("64,990.00");
     expect(receiptAmount("1500.5")).toBe("1,500.50");
@@ -29,10 +36,28 @@ describe("receipt formatting (P5-11, P5-18)", () => {
     );
   });
 
-  it("words Checking (and a missing warranty) as checking only", () => {
-    const text = "Checking only, no warranty after leaving the shop";
-    expect(receiptWarranty({ warranty: "CHECKING", warranty_until: null })).toBe(text);
-    expect(receiptWarranty({})).toBe(text);
+  it("words Checking as checking only (P5-19)", () => {
+    expect(receiptWarranty({ warranty: "CHECKING", warranty_until: null })).toBe("Checking only");
+  });
+
+  it("prints nothing for No warranty, or a missing warranty (P5-19)", () => {
+    expect(receiptWarranty({ warranty: "NO_WARRANTY", warranty_until: null })).toBeNull();
+    expect(receiptWarranty({})).toBeNull();
+  });
+
+  it("labels a line's discount by its kind (P5-20)", () => {
+    expect(receiptDiscountLabel({ discount_type: "PERCENT", discount_value: "20.00", discount_amount: "80.00" })).toBe(
+      "Discount (20%)",
+    );
+    expect(receiptDiscountLabel({ discount_type: "PERCENT", discount_value: "12.50", discount_amount: "5.00" })).toBe(
+      "Discount (12.5%)",
+    );
+    expect(
+      receiptDiscountLabel({ discount_type: "UNIT_PRICE", discount_value: "1600.00", discount_amount: "800.00" }),
+    ).toBe("Discount (1,600.00 each)");
+    expect(receiptDiscountLabel({ discount_type: "AMOUNT", discount_value: "1000.00", discount_amount: "1000.00" })).toBe(
+      "Discount",
+    );
   });
 
   it("leaves out the date when there is none yet", () => {

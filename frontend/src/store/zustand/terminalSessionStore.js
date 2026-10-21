@@ -18,6 +18,10 @@ import { persist, createJSONStorage } from "zustand/middleware";
  * draft, and is replaced when the next sale completes. `clear()` (logout)
  * drops it with the draft pointer; `clearDraftSaleId()` drops only the
  * pointer.
+ *
+ * lastDiscountMode (P5-20): the discount mode last applied on this till
+ * ("PERCENT" / "UNIT_PRICE"), which LineDiscountDialog opens on for a line
+ * without a discount. A till preference, not the user's: logout keeps it.
  */
 
 const STORAGE_KEY = "socio-lk-terminal-session";
@@ -27,12 +31,15 @@ const useTerminalSessionStore = create(
     (set) => ({
       draftSaleId: null,
       lastCompletedSaleId: null,
+      lastDiscountMode: null,
 
       setDraftSaleId: (id) => set({ draftSaleId: id ?? null }),
 
       clearDraftSaleId: () => set({ draftSaleId: null }),
 
       setLastCompletedSaleId: (id) => set({ lastCompletedSaleId: id ?? null }),
+
+      setLastDiscountMode: (mode) => set({ lastDiscountMode: mode ?? null }),
 
       clear: () => set({ draftSaleId: null, lastCompletedSaleId: null }),
     }),
@@ -42,6 +49,7 @@ const useTerminalSessionStore = create(
       partialize: (state) => ({
         draftSaleId: state.draftSaleId,
         lastCompletedSaleId: state.lastCompletedSaleId,
+        lastDiscountMode: state.lastDiscountMode,
       }),
     },
   ),

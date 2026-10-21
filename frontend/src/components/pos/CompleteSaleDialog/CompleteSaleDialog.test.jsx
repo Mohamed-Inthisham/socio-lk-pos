@@ -95,6 +95,17 @@ describe("CompleteSaleDialog", () => {
     await waitFor(() => expect(within(dialog()).queryByText("Checking stock…")).not.toBeInTheDocument());
   });
 
+  it("shows a Discount row under Total only when the sale has a discount (P5-20)", async () => {
+    const { unmount } = renderDialog(paidSale({ subtotal: "3600.00", discount_total: "600.00" }));
+    expect(within(dialog()).getByTestId("complete-discount")).toHaveTextContent("−LKR 600.00");
+    await waitFor(() => expect(within(dialog()).queryByText("Checking stock…")).not.toBeInTheDocument());
+    unmount();
+
+    renderDialog(paidSale({ discount_total: "0.00" }));
+    expect(within(dialog()).queryByTestId("complete-discount")).not.toBeInTheDocument();
+    await waitFor(() => expect(within(dialog()).queryByText("Checking stock…")).not.toBeInTheDocument());
+  });
+
   it("lists the items with their warranty, up to 3 then '+N more' (P5-18)", async () => {
     renderDialog(
       paidSale({

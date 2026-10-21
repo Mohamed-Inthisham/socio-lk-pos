@@ -154,3 +154,68 @@ export const completedSaleForReceipt = (overrides = {}) => ({
   ],
   ...overrides,
 });
+
+/**
+ * A COMPLETED sale with both till discount modes (P5-20) and both
+ * no-warranty kinds (P5-19): 20% off 2 cases, 2 chargers at 1,600.00
+ * each, a cable on No warranty, a screen glass on Checking. Walk-in, cash.
+ * Lines: 3,200 + 3,200 + 1,500 + 1,000 = 8,900 (10,500 − 1,600).
+ */
+export const completedSaleWithDiscounts = (overrides = {}) => ({
+  ...completedSaleForReceipt(),
+  id: "sale-discounts",
+  sale_number: "INV-20261021-0008",
+  customer: null,
+  subtotal: "10500.00",
+  discount_total: "1600.00",
+  total: "8900.00",
+  amount_paid: "8900.00",
+  change_due: "100.00",
+  lines: [
+    saleLine({
+      id: "line-case",
+      product_name_snapshot: "Silicone Case A15",
+      unit_price: "2000.00",
+      quantity: 2,
+      discount_type: "PERCENT",
+      discount_value: "20.00",
+      discount_amount: "800.00",
+      line_total: "3200.00",
+      warranty: "CHECKING",
+      warranty_until: null,
+    }),
+    saleLine({
+      id: "line-charger",
+      line_number: 2,
+      product_name_snapshot: "25W Charger",
+      unit_price: "2000.00",
+      quantity: 2,
+      discount_type: "UNIT_PRICE",
+      discount_value: "1600.00",
+      discount_amount: "800.00",
+      line_total: "3200.00",
+      warranty: "MONTH_6",
+      warranty_until: "2027-04-21",
+    }),
+    saleLine({
+      id: "line-cable",
+      line_number: 3,
+      quantity: 1,
+      line_total: "1500.00",
+      warranty: "NO_WARRANTY",
+      warranty_until: null,
+    }),
+    saleLine({
+      id: "line-glass",
+      line_number: 4,
+      product_name_snapshot: "Tempered Glass A15",
+      unit_price: "1000.00",
+      quantity: 1,
+      line_total: "1000.00",
+      warranty: "CHECKING",
+      warranty_until: null,
+    }),
+  ],
+  payments: [cashPayment({ amount: "8900.00", cash_received: "9000.00" })],
+  ...overrides,
+});

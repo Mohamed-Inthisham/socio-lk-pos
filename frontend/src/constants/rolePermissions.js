@@ -166,6 +166,8 @@ export const ROLE_PERMISSIONS = {
     // Sales - Primary function
     PERMISSIONS.VIEW_SALES,
     PERMISSIONS.CREATE_SALE,
+    // Line discounts at the till: any cashier, no limit (Q11, P5-20)
+    PERMISSIONS.APPLY_DISCOUNT,
 
     // Customers - View and create only
     PERMISSIONS.VIEW_CUSTOMERS,

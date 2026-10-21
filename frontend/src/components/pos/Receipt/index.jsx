@@ -6,6 +6,7 @@ import {
   cashChange,
   receiptAmount,
   receiptDateTime,
+  receiptDiscountLabel,
   receiptWarranty,
 } from "../../../utils/receipt";
 import {
@@ -34,7 +35,8 @@ import {
  * tagline as text (cropped out of the logo image: too small there), branch
  * name / address / phone (from the sale's branch), invoice number, date
  * and time (Colombo), cashier, customer name and full phone (no NIC), the
- * lines (IMEI, qty × price, discount, warranty), totals, each tender
+ * lines (IMEI, qty × price, "Discount (20%)" / "Discount (160.00 each)",
+ * warranty; nothing for NO_WARRANTY), totals, each tender
  * (reference; trade-in phone + IMEI; cash received and change), the
  * terms, and the footer.
  *
@@ -142,9 +144,15 @@ const Receipt = ({ sale }) => {
               value={receiptAmount(fromCents(toCents(line.unit_price) * line.quantity))}
             />
             {Number(line.discount_amount) > 0 && (
-              <Row style={styles.indent} label="Discount" value={`-${receiptAmount(line.discount_amount)}`} />
+              <Row
+                style={styles.indent}
+                label={receiptDiscountLabel(line)}
+                value={`-${receiptAmount(line.discount_amount)}`}
+              />
             )}
-            <div style={{ ...styles.indent, ...styles.small }}>{receiptWarranty(line)}</div>
+            {receiptWarranty(line) && (
+              <div style={{ ...styles.indent, ...styles.small }}>{receiptWarranty(line)}</div>
+            )}
           </div>
         ))}
 

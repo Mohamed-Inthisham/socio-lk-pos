@@ -1,7 +1,11 @@
 import { useEffect, useRef, useState } from "react";
 import { useDispatch, useSelector } from "react-redux";
-import { AlertCircle, AlertTriangle, Loader2, Lock, Minus, Plus, ShieldCheck, ShoppingCart, Trash2 } from "lucide-react";
-import { formatLKR } from "../../../utils/money";
+import { AlertCircle, AlertTriangle, Loader2, Lock, Minus, Plus, ShieldCheck, ShoppingCart, Tag, Trash2 } from "lucide-react";
+import LineDiscountDialog from "../LineDiscountDialog";
+import usePermissions from "../../../hooks/usePermissions";
+import { PERMISSIONS } from "../../../constants/rolePermissions";
+import { formatAmount, formatLKR } from "../../../utils/money";
+import { discountShortLabel, discountedUnitPrice } from "../../../utils/discount";
 import { DEFAULT_WARRANTY, WARRANTY_PERIODS } from "../../../constants/warranty";
 import {
   removeLine,
@@ -26,6 +30,12 @@ import {
  * - Warranty (P5-18): a compact select after the SKU / IMEI, starting on
  *   the product's default; a change PATCHes the line (updateLineWarranty,
  *   row busy until it lands).
+ * - Discount (P5-20, APPLY_DISCOUNT: every role): a "Discount" button
+ *   under the unit price (in the card on mobile), or D on a focused row,
+ *   opens LineDiscountDialog. A discounted line shows the original unit
+ *   price struck through and the new one in the price column, and a
+ *   "−20%" / "160.00 each" badge that reopens the dialog under the line
+ *   total (in the card on mobile) — so its row is no taller.
  * - Stock warning (Q1 b): a yellow "Only N in stock" badge when the
  *   branch has fewer units than the cart needs. Warns only — the 409 at
  *   complete is the real guard.
@@ -38,7 +48,8 @@ import {
  *
  * Focus (§6): qty Enter and delete hand focus back to the scan bar via
  * `onReturnFocus`; −/+ clicks and the row's +/- keys keep it, since
- * repeated presses are the point.
+ * repeated presses are the point. The discount dialog hands focus back to
+ * what opened it (the row or its button).
  *
  * Layout: a table-like grid at ≥ md, stacked cards below (Q6).
  */
@@ -212,10 +223,63 @@ const WarrantySelect = ({ line }) => {
   );
 };
 
-const CartLineRow = ({ line, index, stockWarning, stockUnknown, issue, onReturnFocus }) => {
+/**
+ * "Discount" on an undiscounted line; on a discounted one the badge
+ * ("−20%" / "160.00 each") is the button that reopens the dialog.
+ */
+const DiscountButton = ({ line, disabled, onOpen }) => {
+  const discounted = !!discountedUnitPrice(line);
+  const short = discountShortLabel(line, formatAmount);
+  const badge = short ? (short.endsWith("%") ? `−${short}` : short) : "Discount";
+  return (
+    <button
+      type="button"
+      aria-label={
+        discounted
+          ? `Change discount for ${line.product_name_snapshot}${short ? ` (${short})` : ""}`
+          : `Discount ${line.product_name_snapshot}`
+      }
+      aria-keyshortcuts="D"
+      aria-disabled={disabled || undefined}
+      onClick={disabled ? undefined : onOpen}
+      className={`
+        inline-flex items-center gap-1 h-5 px-1.5 rounded-md text-[11px] font-semibold whitespace-nowrap
+        focus:outline-none focus-visible:ring-2 focus-visible:ring-cyan-500
+        aria-disabled:opacity-50 aria-disabled:cursor-wait
+        ${
+          discounted
+            ? "bg-emerald-100 text-emerald-800 hover:bg-emerald-200 dark:bg-emerald-900/40 dark:text-emerald-300 dark:hover:bg-emerald-900/70"
+            : "text-cyan-700 hover:bg-cyan-50 dark:text-cyan-400 dark:hover:bg-cyan-950/40"
+        }
+      `}
+    >
+      <Tag size={11} aria-hidden="true" />
+      {discounted ? badge : "Discount"}
+    </button>
+  );
+};
+
+/** The unit price; a discounted line shows the original struck through, then the new one. */
+const UnitPrice = ({ line }) => {
+  const discounted = discountedUnitPrice(line);
+  if (!discounted) return <span>{formatLKR(line.unit_price)}</span>;
+  return (
+    <>
+      <s data-testid="original-price" className="block text-xs text-slate-400 dark:text-slate-500">
+        {formatLKR(line.unit_price)}
+      </s>
+      <span data-testid="discounted-price" className="block font-semibold text-emerald-700 dark:text-emerald-400">
+        {formatLKR(discounted)}
+      </span>
+    </>
+  );
+};
+
+const CartLineRow = ({ line, index, stockWarning, stockUnknown, issue, onReturnFocus, onDiscount }) => {
   const dispatch = useDispatch();
   const serialized = !!line.imei_snapshot;
   const locked = line.pending || line.busy;
+  const discounted = !!discountedUnitPrice(line);
 
   const setQty = (quantity) => {
     if (locked || serialized || quantity < 1) return;
@@ -231,6 +295,10 @@ const CartLineRow = ({ line, index, stockWarning, stockUnknown, issue, onReturnF
     } else if (event.key === "-") {
       event.preventDefault();
       setQty(line.quantity - 1);
+    } else if ((event.key === "d" || event.key === "D") && onDiscount && !line.pending) {
+      if (event.ctrlKey || event.metaKey || event.altKey) return;
+      event.preventDefault();
+      if (!line.busy) onDiscount();
     }
   };
 
@@ -313,12 +381,22 @@ const CartLineRow = ({ line, index, stockWarning, stockUnknown, issue, onReturnF
             />
           </>
         )}
+        {onDiscount && !line.pending && (
+          <span className="md:hidden ml-1">
+            <DiscountButton line={line} disabled={locked} onOpen={onDiscount} />
+          </span>
+        )}
       </div>
 
-      {/* Unit price (desktop column; folded into the mobile total line) */}
-      <span className="hidden md:block text-right text-sm tabular-nums text-slate-600 dark:text-slate-300">
-        {formatLKR(line.unit_price)}
-      </span>
+      {/* Unit price + Discount (desktop column; folded into the mobile total line) */}
+      <div className="hidden md:flex flex-col items-end text-right text-sm tabular-nums text-slate-600 dark:text-slate-300">
+        <UnitPrice line={line} />
+        {onDiscount && !line.pending && !discounted && (
+          <span className="mt-0.5">
+            <DiscountButton line={line} disabled={locked} onOpen={onDiscount} />
+          </span>
+        )}
+      </div>
 
       {/* Line total */}
       <div className="row-start-2 col-start-2 md:row-start-auto md:col-start-auto text-right">
@@ -329,8 +407,21 @@ const CartLineRow = ({ line, index, stockWarning, stockUnknown, issue, onReturnF
             formatLKR(line.line_total)
           )}
         </span>
+        {/* A discounted line's badge sits under its total (desktop): the price column keeps two lines, the IMEI its room */}
+        {onDiscount && discounted && (
+          <span className="hidden md:block mt-0.5">
+            <DiscountButton line={line} disabled={locked} onOpen={onDiscount} />
+          </span>
+        )}
         <span className="md:hidden block text-xs tabular-nums text-slate-500 dark:text-slate-400">
-          {line.quantity} × {formatLKR(line.unit_price)}
+          {line.quantity} ×{" "}
+          {discountedUnitPrice(line) ? (
+            <>
+              <s>{formatAmount(line.unit_price)}</s> {formatLKR(discountedUnitPrice(line))}
+            </>
+          ) : (
+            formatLKR(line.unit_price)
+          )}
         </span>
       </div>
 
@@ -364,6 +455,10 @@ const CartLines = ({ onReturnFocus }) => {
   const stockWarnings = useSelector(selectStockWarnings);
   const stockErrors = useSelector(selectStockErrors);
   const completeIssue = useSelector(selectCompleteIssue);
+  const { can } = usePermissions();
+  const canDiscount = can(PERMISSIONS.APPLY_DISCOUNT);
+  const [discountLineId, setDiscountLineId] = useState(null);
+  const discountLine = lines.find((l) => l.id === discountLineId && !l.pending) ?? null;
 
   if (lines.length === 0) {
     return (
@@ -408,9 +503,11 @@ const CartLines = ({ onReturnFocus }) => {
             stockUnknown={!line.pending && !!stockErrors[line.product_id]}
             issue={completeIssue.lineIds.includes(line.id) ? completeIssue.label : null}
             onReturnFocus={onReturnFocus}
+            onDiscount={canDiscount ? () => setDiscountLineId(line.id) : undefined}
           />
         ))}
       </ul>
+      <LineDiscountDialog line={discountLine} onClose={() => setDiscountLineId(null)} />
     </div>
   );
 };

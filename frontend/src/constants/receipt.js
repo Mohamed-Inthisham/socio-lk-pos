@@ -32,7 +32,7 @@ export const RECEIPT_TERMS = [
 
 export const RECEIPT_FOOTER = "Thank you for choosing Care That Stays";
 
-export const CHECKING_ONLY_TEXT = "Checking only, no warranty after leaving the shop";
+export const CHECKING_ONLY_TEXT = "Checking only";
 
 /** Page and content geometry, in mm (CSS mm; the driver prints ~×1.057). */
 export const RECEIPT_LAYOUT = {

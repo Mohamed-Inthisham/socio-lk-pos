@@ -1,6 +1,7 @@
 import { warrantyLabel } from "../constants/warranty";
 import { fromCents, toCents } from "./money";
 import { CHECKING_ONLY_TEXT } from "../constants/receipt";
+import { discountShortLabel } from "./discount";
 
 /**
  * Formatting for the printed receipt (P5-11). Pure functions, so the
@@ -40,13 +41,24 @@ export const receiptDate = (isoDate) =>
   isoDate ? dateFormat.format(new Date(`${String(isoDate).slice(0, 10)}T00:00:00Z`)) : "";
 
 /**
- * A sale line's warranty as printed (P5-18):
- * "Warranty: 12 months (until 21 Oct 2027)", or the Checking-only text.
+ * A sale line's warranty as printed (P5-18, P5-19):
+ * "Warranty: 12 months (until 21 Oct 2027)", "Checking only" for
+ * CHECKING, and null (nothing printed) for NO_WARRANTY.
  */
 export const receiptWarranty = (line) => {
-  if (!line.warranty || line.warranty === "CHECKING") return CHECKING_ONLY_TEXT;
+  if (!line.warranty || line.warranty === "NO_WARRANTY") return null;
+  if (line.warranty === "CHECKING") return CHECKING_ONLY_TEXT;
   const until = line.warranty_until ? ` (until ${receiptDate(line.warranty_until)})` : "";
   return `Warranty: ${warrantyLabel(line.warranty)}${until}`;
+};
+
+/**
+ * The label of a line's discount row (P5-20): "Discount (20%)",
+ * "Discount (160.00 each)", or just "Discount" (an AMOUNT discount).
+ */
+export const receiptDiscountLabel = (line) => {
+  const short = discountShortLabel(line, receiptAmount);
+  return short ? `Discount (${short})` : "Discount";
 };
 
 /** Cash handed back on one cash tender, in integer cents (P3-9) → "10.00"; "0.00" when none. */

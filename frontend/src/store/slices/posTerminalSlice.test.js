@@ -46,6 +46,7 @@ import {
   selectPayments,
   selectStockWarnings,
   selectTradeInImeis,
+  updateLineDiscount,
   updateLineQty,
   updateLineWarranty,
 } from "./posTerminalSlice";
@@ -198,10 +199,10 @@ describe("posTerminal line mutations", () => {
     salesService.addSaleLine.mockReturnValue(new Promise(() => {}));
 
     store.dispatch(addLine({ product: { ...cableProduct, default_warranty: "MONTH_6" } }));
-    store.dispatch(addLine({ product: cableProduct })); // no default on the row → Checking
+    store.dispatch(addLine({ product: cableProduct })); // no default on the row → No warranty (P5-19)
 
     const pending = selectCartLines(store.getState()).filter((l) => l.pending);
-    expect(pending.map((l) => l.warranty)).toEqual(["MONTH_6", "CHECKING"]);
+    expect(pending.map((l) => l.warranty)).toEqual(["MONTH_6", "NO_WARRANTY"]);
   });
 
   it("changes a line's warranty through the queue, the row busy until it lands (P5-18)", async () => {
@@ -229,6 +230,63 @@ describe("posTerminal line mutations", () => {
 
     expect(store.getState().posTerminal.lineError.message).toMatch(/warranty must be one of/);
     expect(selectCartLines(store.getState())[0]).toMatchObject({ busy: false, warranty: "CHECKING" });
+    expect(store.getState().posTerminal.status).toBe("ready");
+  });
+
+  it("sets a line's discount through the queue, the row busy until it lands (P5-20)", async () => {
+    const { store, ready } = readyStore(draftSale({ lines: [saleLine()] }));
+    await ready;
+    const request = deferred();
+    salesService.updateSaleLine.mockReturnValue(request.promise);
+    const discounted = saleLine({
+      discount_type: "UNIT_PRICE",
+      discount_value: "1200.00",
+      discount_amount: "300.00",
+      line_total: "1200.00",
+    });
+
+    const setting = store.dispatch(
+      updateLineDiscount({ lineId: "line-1", discount_type: "UNIT_PRICE", discount_value: 1200 }),
+    );
+
+    expect(selectCartLines(store.getState())[0]).toMatchObject({ busy: true, discount_type: null });
+    request.resolve(draftSale({ lines: [discounted] }));
+    await setting;
+
+    expect(salesService.updateSaleLine).toHaveBeenCalledWith("sale-1", "line-1", {
+      discount_type: "UNIT_PRICE",
+      discount_value: 1200,
+    });
+    expect(selectCartLines(store.getState())[0]).toMatchObject({ busy: false, line_total: "1200.00" });
+  });
+
+  it("removes a discount with both fields null (P5-20)", async () => {
+    const { store, ready } = readyStore(draftSale({ lines: [saleLine({ discount_type: "PERCENT" })] }));
+    await ready;
+    salesService.updateSaleLine.mockResolvedValue(draftSale({ lines: [saleLine()] }));
+
+    await store.dispatch(updateLineDiscount({ lineId: "line-1", discount_type: null, discount_value: null }));
+
+    expect(salesService.updateSaleLine).toHaveBeenCalledWith("sale-1", "line-1", {
+      discount_type: null,
+      discount_value: null,
+    });
+  });
+
+  it("leaves a failed discount to the dialog: no lineError, row freed (P5-20)", async () => {
+    const { store, ready } = readyStore(draftSale({ lines: [saleLine()] }));
+    await ready;
+    const message =
+      "Cannot reduce the sale total below the amount already paid. Remove or reduce payments first.";
+    salesService.updateSaleLine.mockRejectedValue(httpError(400, message));
+
+    const result = await store.dispatch(
+      updateLineDiscount({ lineId: "line-1", discount_type: "PERCENT", discount_value: 50 }),
+    );
+
+    expect(result.payload.message).toBe(message);
+    expect(store.getState().posTerminal.lineError).toBeNull();
+    expect(selectCartLines(store.getState())[0].busy).toBe(false);
     expect(store.getState().posTerminal.status).toBe("ready");
   });
 
@@ -1168,6 +1226,11 @@ describe("posTerminal complete (P5)", () => {
         () => updateLineWarranty({ lineId: "line-1", warranty: "MONTH_12" }),
         () => salesService.updateSaleLine,
       ],
+      [
+        "updateLineDiscount",
+        () => updateLineDiscount({ lineId: "line-1", discount_type: "PERCENT", discount_value: 10 }),
+        () => salesService.updateSaleLine,
+      ],
       ["removeLine", () => removeLine({ lineId: "line-1" }), () => salesService.removeSaleLine],
       [
         "addPayment",
@@ -1475,6 +1538,20 @@ describe("posTerminal complete (P5)", () => {
       salesService.updateSaleLine.mockResolvedValue(paidSale({ lines: [saleLine({ warranty: "WEEK_1" })] }));
 
       await store.dispatch(updateLineWarranty({ lineId: "line-1", warranty: "WEEK_1" }));
+
+      expect(selectCompleteError(store.getState())).toBeNull();
+    });
+
+    it("changing a line's discount counts as changing the sale (P5-20)", async () => {
+      const store = await paidStore();
+      await failWith(store, {
+        message: 'Insufficient stock for "USB-C Cable 1m": requested 1, available 0',
+        product_id: "p-cable",
+        sale_line_id: "line-1",
+      });
+      salesService.updateSaleLine.mockResolvedValue(paidSale());
+
+      await store.dispatch(updateLineDiscount({ lineId: "line-1", discount_type: "PERCENT", discount_value: 10 }));
 
       expect(selectCompleteError(store.getState())).toBeNull();
     });

@@ -37,3 +37,11 @@ export const formatLKR = (value) => {
   const n = Number(value);
   return Number.isFinite(n) ? lkr.format(n) : String(value);
 };
+
+const plain = new Intl.NumberFormat("en-LK", {
+  minimumFractionDigits: 2,
+  maximumFractionDigits: 2,
+});
+
+/** "1500" / 1500 → "1,500.00" (no currency; for compact figures like "2 × 160.00"). */
+export const formatAmount = (value) => plain.format(Number(value ?? 0));

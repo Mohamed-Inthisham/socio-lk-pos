@@ -29,7 +29,8 @@ import {
  * by the Totals panel's Complete sale button or F9 (PosTerminal), only on
  * a fully paid sale.
  *
- * - Shows the total, the change due, the items with their warranty
+ * - Shows the total, the sale's discount (P5-20, only when it has one),
+ *   the change due, the items with their warranty
  *   (P5-18; up to 3, then "+N more"; hidden while a problem shows, to
  *   keep those states within ~640px) and the tenders.
  * - Re-checks branch stock on open (one GET /stock?branchId=, the slice's
@@ -212,6 +213,14 @@ const CompleteSaleDialog = ({ open, onClose, onCompleted, afterLeave }) => {
             {formatLKR(total)}
           </dd>
         </div>
+        {Number(sale?.discount_total ?? 0) > 0 && (
+          <div className="flex items-baseline justify-between gap-4">
+            <dt className="text-slate-600 dark:text-slate-300">Discount</dt>
+            <dd data-testid="complete-discount" className="tabular-nums text-emerald-700 dark:text-emerald-400">
+              −{formatLKR(sale.discount_total)}
+            </dd>
+          </div>
+        )}
         {Number(changeDue) > 0 && (
           <div className="flex items-baseline justify-between gap-4">
             <dt className="font-semibold text-emerald-700 dark:text-emerald-300">Change due</dt>

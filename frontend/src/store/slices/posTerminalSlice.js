@@ -87,6 +87,11 @@ import { DEFAULT_WARRANTY } from "../../constants/warranty";
  * A pending TRADE_IN row carries its trade_in_* fields and the picked
  * product (P4), so it reads like the server's row.
  *
+ * LINE WARRANTY AND DISCOUNT (P5-18, P5-20):
+ * updateLineWarranty and updateLineDiscount PATCH one line through the
+ * queue; the row is busy until the server answers. A discount failure
+ * stays in LineDiscountDialog rather than lineError.
+ *
  * COMPLETE (P5):
  * completeSale moves "ready" → "completing" → "completed" (or back to
  * "ready" with completeError, or "gone"). It runs at most once at a time
@@ -359,6 +364,22 @@ export const updateLineWarranty = createAsyncThunk(
   "posTerminal/updateLineWarranty",
   saleMutation("Couldn't change the warranty", (saleId, { lineId, warranty }) =>
     updateSaleLine(saleId, lineId, { warranty }),
+  ),
+  { condition: saleOpen },
+);
+
+/**
+ * arg: { lineId, discount_type, discount_value } — set the line's discount
+ * (P5-20: PERCENT or UNIT_PRICE), or remove it with both null. Not
+ * optimistic: the row is busy until the server answers. A failure is not
+ * put in lineError: LineDiscountDialog stays open and shows it (incl. the
+ * #24 "Remove or reduce payments first" when the total would drop below
+ * what's paid).
+ */
+export const updateLineDiscount = createAsyncThunk(
+  "posTerminal/updateLineDiscount",
+  saleMutation("Couldn't change the discount", (saleId, { lineId, discount_type, discount_value }) =>
+    updateSaleLine(saleId, lineId, { discount_type, discount_value }),
   ),
   { condition: saleOpen },
 );
@@ -989,6 +1010,17 @@ const posTerminalSlice = createSlice({
         unmarkBusy(state, action.meta.arg.lineId);
         applyRejection(state, action.payload, "Couldn't change the warranty");
       })
+      .addCase(updateLineDiscount.pending, (state, action) => {
+        markBusy(state, action.meta.arg.lineId);
+      })
+      .addCase(updateLineDiscount.fulfilled, (state, action) => {
+        unmarkBusy(state, action.meta.arg.lineId);
+        replaceSale(state, action.payload);
+      })
+      .addCase(updateLineDiscount.rejected, (state, action) => {
+        unmarkBusy(state, action.meta.arg.lineId);
+        markGone(state, action.payload);
+      })
       .addCase(removeLine.pending, (state, action) => {
         state.lineError = null;
         markBusy(state, action.meta.arg.lineId);
@@ -1187,6 +1219,7 @@ const posTerminalSlice = createSlice({
           addLine.fulfilled,
           updateLineQty.fulfilled,
           updateLineWarranty.fulfilled,
+          updateLineDiscount.fulfilled,
           removeLine.fulfilled,
           addPayment.fulfilled,
           removePayment.fulfilled,

@@ -1,6 +1,6 @@
 import { render, screen, within } from "@testing-library/react";
 import Receipt from ".";
-import { completedSaleForReceipt } from "../../../test/posFixtures";
+import { completedSaleForReceipt, completedSaleWithDiscounts } from "../../../test/posFixtures";
 
 const receipt = () => screen.getByTestId("receipt");
 const text = () => receipt().textContent;
@@ -40,8 +40,39 @@ describe("Receipt (P5-11, P5-18)", () => {
         "Warranty: 12 months (until 21 Oct 2027)",
     );
     expect(cable.textContent).toBe(
-      "USB-C Cable 1m" + "2 × 1,500.003,000.00" + "Checking only, no warranty after leaving the shop",
+      "USB-C Cable 1m" + "2 × 1,500.003,000.00" + "Checking only",
     );
+  });
+
+  it("words each discount by its kind, and prints no warranty text for No warranty (P5-19, P5-20)", () => {
+    render(<Receipt sale={completedSaleWithDiscounts()} />);
+    const [case_, charger, cable, glass] = screen.getAllByTestId("receipt-line");
+
+    expect(case_.textContent).toBe(
+      "Silicone Case A15" + "2 × 2,000.004,000.00" + "Discount (20%)-800.00" + "Checking only",
+    );
+    expect(charger.textContent).toBe(
+      "25W Charger" + "2 × 2,000.004,000.00" + "Discount (1,600.00 each)-800.00" + "Warranty: 6 months (until 21 Apr 2027)",
+    );
+    // NO_WARRANTY: nothing under the price
+    expect(cable.textContent).toBe("USB-C Cable 1m" + "1 × 1,500.001,500.00");
+    expect(glass.textContent).toBe("Tempered Glass A15" + "1 × 1,000.001,000.00" + "Checking only");
+    expect(text()).toContain("Discount-1,600.00");
+  });
+
+  it("leaves out the totals' Discount row when nothing was discounted", () => {
+    render(
+      <Receipt
+        sale={completedSaleWithDiscounts({
+          subtotal: "1500.00",
+          discount_total: "0.00",
+          total: "1500.00",
+          lines: [completedSaleWithDiscounts().lines[2]],
+        })}
+      />,
+    );
+
+    expect(text()).not.toContain("Discount");
   });
 
   it("prints the totals", () => {
