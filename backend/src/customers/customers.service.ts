@@ -24,7 +24,7 @@ import {
  *   decision for PhonePurchase's dedup flow — reusing the same shape
  *   here for consistency).
  * - Search is a simple case-insensitive substring match across
- *   name / phone / nic. Not full-text; not needed at current scale.
+ *   name / phone / nic / email. Not full-text; not needed at current scale.
  * - Sort order: newest first (matches Phase 6.3 sale list convention).
  *
  * What this service does NOT do (deferred to later slices):
@@ -60,6 +60,7 @@ export class CustomersService {
       name: dto.name,
       phone: dto.phone,
       nic: dto.nic ?? null,
+      email: dto.email ?? null,
       notes: dto.notes ?? null,
     });
 
@@ -79,17 +80,19 @@ export class CustomersService {
     }
 
     if (query.search) {
-      // ILIKE across the three identifying fields. NIC compare is also
+      // ILIKE across the identifying fields. NIC compare is also
       // case-insensitive because we uppercase on ingest (see DTO
       // Transform) — the query still uses ILIKE for consistency and to
-      // handle legacy lowercase rows if any ever sneak in.
+      // handle legacy lowercase rows if any ever sneak in. Email is
+      // stored lowercase; ILIKE matches a mixed-case query too.
       const pattern = `%${query.search}%`;
       qb.andWhere(
         new Brackets((sub) => {
           sub
             .where('customer.name ILIKE :pattern', { pattern })
             .orWhere('customer.phone ILIKE :pattern', { pattern })
-            .orWhere('customer.nic ILIKE :pattern', { pattern });
+            .orWhere('customer.nic ILIKE :pattern', { pattern })
+            .orWhere('customer.email ILIKE :pattern', { pattern });
         }),
       );
     }
@@ -145,6 +148,7 @@ export class CustomersService {
     if (dto.name !== undefined) customer.name = dto.name;
     if (dto.phone !== undefined) customer.phone = dto.phone;
     if (dto.nic !== undefined) customer.nic = dto.nic;
+    if (dto.email !== undefined) customer.email = dto.email;
     if (dto.notes !== undefined) customer.notes = dto.notes;
 
     return this.customerRepo.save(customer);

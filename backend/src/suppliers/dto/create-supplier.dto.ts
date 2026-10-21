@@ -9,6 +9,7 @@ import {
 } from 'class-validator';
 import { Transform } from 'class-transformer';
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
+import { IsOptionalNotNull } from '../../common/validators/is-optional-not-null.decorator';
 
 /**
  * Normalize a string field: trim whitespace, convert empty strings to null
@@ -93,7 +94,7 @@ export class CreateSupplierDto {
     example: true,
     description: 'Whether the supplier is active — defaults to true if omitted',
   })
-  @IsOptional()
+  @IsOptionalNotNull()
   @IsBoolean()
   is_active?: boolean;
 }

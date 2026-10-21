@@ -17,7 +17,9 @@ import {
  * creates the customer and attaches it to the draft (createAndAttachCustomer).
  *
  * Validation mirrors CreateCustomerDto: name 1–200, phone must normalize
- * to a Sri Lankan number, NIC optional (5–20 when given).
+ * to a Sri Lankan number, NIC optional (5–20 when given), email optional
+ * (an address shape, max 254; the server trims and lowercases it and has
+ * the final say on the format).
  *
  * Failure paths keep the form open:
  * - NIC already on file (409): shows who has it, with "Use existing
@@ -29,13 +31,17 @@ import {
  * appear on the CustomerCard.
  *
  * PROPS:
- * - initialValues: { name, phone } prefilled from the search query
+ * - initialValues: { name, phone, email } prefilled from the search query
  * - onBack: return to search
  * - onDone: close the dialog (customer attached)
  * - onBusyChange: (busy) => void — the dialog can't be dismissed mid-request
  */
 
-const validate = ({ name, phone, nic }) => {
+// A light shape check; the server's IsEmail is the real rule.
+const EMAIL_SHAPE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+export const EMAIL_MAX_LENGTH = 254;
+
+const validate = ({ name, phone, nic, email }) => {
   const errors = {};
   if (!name.trim()) errors.name = "Name is required.";
   else if (name.trim().length > 200) errors.name = "Name must be 200 characters or fewer.";
@@ -45,12 +51,24 @@ const validate = ({ name, phone, nic }) => {
   if (nicValue && (nicValue.length < 5 || nicValue.length > 20)) {
     errors.nic = "NIC must be 5–20 characters.";
   }
+  const emailValue = email.trim();
+  if (emailValue.length > EMAIL_MAX_LENGTH) {
+    errors.email = `Email must be ${EMAIL_MAX_LENGTH} characters or fewer.`;
+  } else if (emailValue && !EMAIL_SHAPE.test(emailValue)) {
+    errors.email = "Enter an email like name@example.com.";
+  }
   return errors;
 };
 
 const CustomerCreateForm = ({ initialValues, onBack, onDone, onBusyChange }) => {
   const dispatch = useDispatch();
-  const [values, setValues] = useState({ name: "", phone: "", nic: "", ...initialValues });
+  const [values, setValues] = useState({
+    name: "",
+    phone: "",
+    nic: "",
+    email: "",
+    ...initialValues,
+  });
   const [errors, setErrors] = useState({});
   const [submitError, setSubmitError] = useState(null);
   // Created by an earlier submit whose attach failed — retry attaches it.
@@ -99,6 +117,7 @@ const CustomerCreateForm = ({ initialValues, onBack, onDone, onBusyChange }) => 
         name: values.name.trim(),
         phone: normalizeSlPhone(values.phone),
         nic: values.nic.trim() || null,
+        email: values.email.trim().toLowerCase() || null,
       }),
     );
     if (!err) return;
@@ -157,6 +176,19 @@ const CustomerCreateForm = ({ initialValues, onBack, onDone, onBusyChange }) => 
           disabled={submitting || !!created}
           autoComplete="off"
           spellCheck={false}
+        />
+        <InputField
+          label="Email"
+          name="customer-email"
+          type="email"
+          value={values.email}
+          onChange={setField("email")}
+          error={errors.email}
+          hint="Optional"
+          disabled={submitting || !!created}
+          autoComplete="off"
+          spellCheck={false}
+          inputMode="email"
         />
       </div>
 

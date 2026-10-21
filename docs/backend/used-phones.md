@@ -88,6 +88,8 @@ IMEI X:  U1  new SKU   cost 85000  SOLD      ← sale A line
 
 - **Phone required, NIC optional.** Walk-in customers often have no NIC on hand. NIC has a partial unique index when non-null; a clash returns 409 with `existing_customer_id` so the frontend can offer the existing record. Taking a phone in from a customer (a phone purchase or a trade-in) does need the NIC: see Intake and Trade-ins.
 - **SL phone normalization** at the DTO layer (`normalizeSlPhone`) — local, international, and cosmetic formats all store as `0XXXXXXXXX`.
+- **Email optional, not unique.** `customers.email` (`varchar(254)`, nullable): a valid address, trimmed and stored lowercase; an empty string is stored as null, and `null` on PATCH clears it. Not unique, because family members may share one address. Included in the customer search; not printed on the receipt.
+- **Name and phone can't be cleared.** `null` for either on PATCH is a 400 ("name must not be null").
 - **Soft delete + reactivate.** Delete/reactivate are admin/manager only (supervisor action); all roles can create and edit (the register needs walk-in creation).
 - **`sales.customer_id`** gets a real FK (`RESTRICT`) plus service validation: nonexistent and soft-deleted customers are rejected with 400. Clearing to `null` is always allowed.
 
@@ -151,7 +153,7 @@ All endpoints are prefixed with `/api/v1` and require the `access_token` cookie.
 
 | Method | Path | Role | Purpose |
 |--------|------|------|---------|
-| GET | `/customers` | any | List (paginated; search across name/phone/NIC; `include_deleted`) |
+| GET | `/customers` | any | List (paginated; search across name/phone/NIC/email; `include_deleted`) |
 | GET | `/customers/:id` | any | Get one (includes soft-deleted, for restore flows) |
 | POST | `/customers` | any | Create (409 + `existing_customer_id` on NIC clash) |
 | PATCH | `/customers/:id` | any | Partial update |

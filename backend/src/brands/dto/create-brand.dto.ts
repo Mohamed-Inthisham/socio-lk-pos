@@ -1,11 +1,6 @@
-import {
-  IsString,
-  MaxLength,
-  MinLength,
-  IsOptional,
-  IsBoolean,
-} from 'class-validator';
+import { IsString, MaxLength, MinLength, IsBoolean } from 'class-validator';
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
+import { IsOptionalNotNull } from '../../common/validators/is-optional-not-null.decorator';
 
 export class CreateBrandDto {
   @ApiProperty({
@@ -23,7 +18,7 @@ export class CreateBrandDto {
     example: true,
     description: 'Whether the brand is active — defaults to true if omitted',
   })
-  @IsOptional()
+  @IsOptionalNotNull()
   @IsBoolean()
   is_active?: boolean;
 }

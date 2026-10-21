@@ -1,6 +1,7 @@
 import { ApiPropertyOptional } from '@nestjs/swagger';
 import { Transform } from 'class-transformer';
 import {
+  IsEmail,
   IsOptional,
   IsString,
   Length,
@@ -8,6 +9,11 @@ import {
   ValidateIf,
 } from 'class-validator';
 import { normalizeSlPhone } from '../../common/utils/sl-phone';
+import { IsOptionalNotNull } from '../../common/validators/is-optional-not-null.decorator';
+import {
+  CUSTOMER_EMAIL_MAX_LENGTH,
+  normalizeCustomerEmail,
+} from './customer-email';
 
 /**
  * Payload for PATCH /customers/:id.
@@ -18,7 +24,8 @@ import { normalizeSlPhone } from '../../common/utils/sl-phone';
  * - Field with value → set.
  *
  * name and phone are non-nullable in the DB, so they can be updated but
- * not cleared. nic and notes are nullable and support null-to-clear.
+ * not cleared: null is a 400 (IsOptionalNotNull). nic, email and notes
+ * are nullable and support null-to-clear.
  *
  * Hand-written rather than PartialType(CreateCustomerDto) because
  * PartialType would carry the "required" nature of name/phone into
@@ -36,7 +43,7 @@ export class UpdateCustomerDto {
   @Transform(({ value }): unknown =>
     typeof value === 'string' ? value.trim() : value,
   )
-  @IsOptional()
+  @IsOptionalNotNull()
   @IsString()
   @Length(1, 200)
   name?: string;
@@ -51,7 +58,7 @@ export class UpdateCustomerDto {
     const normalized = normalizeSlPhone(value);
     return normalized ?? value.trim();
   })
-  @IsOptional()
+  @IsOptionalNotNull()
   @IsString()
   @Length(10, 10, {
     message:
@@ -76,6 +83,19 @@ export class UpdateCustomerDto {
   @IsString()
   @Length(5, 20)
   nic?: string | null;
+
+  @ApiPropertyOptional({
+    description:
+      'Email address; trimmed and stored lowercase. Pass null (or an empty string) to clear.',
+    example: 'kamal.perera@example.com',
+    nullable: true,
+    maxLength: CUSTOMER_EMAIL_MAX_LENGTH,
+  })
+  @Transform(normalizeCustomerEmail)
+  @IsOptional()
+  @IsEmail({}, { message: 'email must be a valid email address' })
+  @MaxLength(CUSTOMER_EMAIL_MAX_LENGTH)
+  email?: string | null;
 
   @ApiPropertyOptional({
     description: 'Free-form notes. Pass null to clear.',

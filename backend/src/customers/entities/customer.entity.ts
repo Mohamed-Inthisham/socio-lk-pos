@@ -23,6 +23,7 @@ import {
  * - NIC is nullable but unique when set. Partial unique index in DB
  *   (idx_customers_nic_unique) enforces this. Nullable because walk-ins
  *   don't always have their NIC handy at intake.
+ * - Email is optional and NOT unique (family members may share one).
  * - No address column: this codebase identifies customers by NIC + phone.
  *   Delivery address is a future Order/Delivery concern, not a Customer
  *   attribute.
@@ -51,6 +52,11 @@ export class Customer {
   // (NULLs distinct) but wouldn't match the DB reality.
   @Column({ type: 'varchar', length: 20, nullable: true })
   nic!: string | null;
+
+  // Optional, stored trimmed and lowercase (see the DTOs). Not unique:
+  // family members may share one address.
+  @Column({ type: 'varchar', length: 254, nullable: true })
+  email!: string | null;
 
   @Column({ type: 'text', nullable: true })
   notes!: string | null;

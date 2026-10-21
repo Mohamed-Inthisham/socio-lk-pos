@@ -64,6 +64,7 @@ describe('CustomersService', () => {
         name: 'Kamal Perera',
         phone: '0771234567',
         nic: '199012345678',
+        email: 'kamal@example.com',
         notes: 'Regular customer',
       });
 
@@ -71,6 +72,7 @@ describe('CustomersService', () => {
         name: 'Kamal Perera',
         phone: '0771234567',
         nic: '199012345678',
+        email: 'kamal@example.com',
         notes: 'Regular customer',
       });
       expect(result.id).toBe('cust-1');
@@ -92,7 +94,7 @@ describe('CustomersService', () => {
       expect(result.id).toBe('cust-2');
     });
 
-    it('normalizes nullish nic/notes to null on the entity', async () => {
+    it('normalizes nullish nic/email/notes to null on the entity', async () => {
       mockRepo.create.mockImplementation((e) => e);
       mockRepo.save.mockImplementation((e) => Promise.resolve(e));
 
@@ -105,6 +107,7 @@ describe('CustomersService', () => {
         name: 'X',
         phone: '0771111111',
         nic: null,
+        email: null,
         notes: null,
       });
     });
@@ -256,6 +259,18 @@ describe('CustomersService', () => {
       const result = await service.update('cust-1', { nic: null });
 
       expect(result.nic).toBeNull();
+    });
+
+    it('sets and clears the email', async () => {
+      mockRepo.findOne.mockResolvedValue({ ...activeCustomer, email: null });
+      mockRepo.save.mockImplementation((e) => Promise.resolve(e));
+
+      const set = await service.update('cust-1', { email: 'k@example.com' });
+      expect(set.email).toBe('k@example.com');
+
+      mockRepo.findOne.mockResolvedValue({ ...set });
+      const cleared = await service.update('cust-1', { email: null });
+      expect(cleared.email).toBeNull();
     });
 
     it('does not touch fields left undefined', async () => {

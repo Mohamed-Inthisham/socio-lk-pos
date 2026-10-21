@@ -156,6 +156,23 @@ describe('Customers (e2e)', () => {
       expect(byNic.body.data[0].name).toBe('Sunil');
     });
 
+    it('also finds a customer by email, case-insensitively', async () => {
+      const { user, password } = await seedUser(UserRole.ADMIN, 'admin@t.com');
+      await seedCustomer({ name: 'Kamal Perera', email: 'kamal.p@gmail.com' });
+      await seedCustomer({ name: 'Nimal Silva', phone: '0772222222' });
+      const cookies = await loginAndGetCookies(user.email, password);
+
+      const byEmail = await request(app.getHttpServer())
+        .get('/api/v1/customers?search=Kamal.P@')
+        .set('Cookie', cookies)
+        .expect(200);
+      expect(byEmail.body.data).toHaveLength(1);
+      expect(byEmail.body.data[0]).toMatchObject({
+        name: 'Kamal Perera',
+        email: 'kamal.p@gmail.com',
+      });
+    });
+
     it('excludes soft-deleted rows by default', async () => {
       const { user, password } = await seedUser(UserRole.ADMIN, 'admin@t.com');
       const active = await seedCustomer({
@@ -299,7 +316,66 @@ describe('Customers (e2e)', () => {
       expect(response.body.name).toBe('Walk-in');
       expect(response.body.phone).toBe('0771234567');
       expect(response.body.nic).toBeNull();
+      expect(response.body.email).toBeNull();
       expect(response.body.notes).toBeNull();
+    });
+
+    it('trims and lowercases the email; an empty email is none', async () => {
+      const { user, password } = await seedUser(UserRole.CASHIER, 'c@t.com');
+      const cookies = await loginAndGetCookies(user.email, password);
+
+      const withEmail = await request(app.getHttpServer())
+        .post('/api/v1/customers')
+        .set('Cookie', cookies)
+        .send({
+          name: 'Kamal',
+          phone: '0771234567',
+          email: '  Kamal.Perera@Example.COM ',
+        })
+        .expect(201);
+      expect(withEmail.body.email).toBe('kamal.perera@example.com');
+
+      const blank = await request(app.getHttpServer())
+        .post('/api/v1/customers')
+        .set('Cookie', cookies)
+        .send({ name: 'Nimal', phone: '0772222222', email: '   ' })
+        .expect(201);
+      expect(blank.body.email).toBeNull();
+    });
+
+    it('lets two customers share an email (family members)', async () => {
+      const { user, password } = await seedUser(UserRole.ADMIN, 'admin@t.com');
+      const cookies = await loginAndGetCookies(user.email, password);
+
+      for (const [name, phone] of [
+        ['Kamal Perera', '0771234567'],
+        ['Nadeesha Perera', '0779876543'],
+      ]) {
+        await request(app.getHttpServer())
+          .post('/api/v1/customers')
+          .set('Cookie', cookies)
+          .send({ name, phone, email: 'perera.family@gmail.com' })
+          .expect(201);
+      }
+    });
+
+    it.each([
+      ['an invalid email', 'kamal@', 'email must be a valid email address'],
+      [
+        'an email over 254 characters',
+        `${'a'.repeat(64)}@${'b'.repeat(63)}.${'c'.repeat(63)}.${'d'.repeat(63)}.com`,
+        'email must be shorter than or equal to 254 characters',
+      ],
+    ])('rejects %s with 400', async (_, email, message) => {
+      const { user, password } = await seedUser(UserRole.ADMIN, 'admin@t.com');
+      const cookies = await loginAndGetCookies(user.email, password);
+
+      const response = await request(app.getHttpServer())
+        .post('/api/v1/customers')
+        .set('Cookie', cookies)
+        .send({ name: 'Kamal', phone: '0771234567', email })
+        .expect(400);
+      expect(JSON.stringify(response.body.message)).toContain(message);
     });
 
     it('normalizes international phone to local format', async () => {
@@ -437,6 +513,26 @@ describe('Customers (e2e)', () => {
         .getRepository(Customer)
         .findOne({ where: { id: customer.id } });
       expect(fromDb?.nic).toBeNull();
+    });
+
+    it('sets the email (lowercased), then clears it with null', async () => {
+      const { user, password } = await seedUser(UserRole.ADMIN, 'admin@t.com');
+      const customer = await seedCustomer();
+      const cookies = await loginAndGetCookies(user.email, password);
+
+      const set = await request(app.getHttpServer())
+        .patch(`/api/v1/customers/${customer.id}`)
+        .set('Cookie', cookies)
+        .send({ email: 'Kamal@Example.com' })
+        .expect(200);
+      expect(set.body.email).toBe('kamal@example.com');
+
+      const cleared = await request(app.getHttpServer())
+        .patch(`/api/v1/customers/${customer.id}`)
+        .set('Cookie', cookies)
+        .send({ email: null })
+        .expect(200);
+      expect(cleared.body.email).toBeNull();
     });
 
     it('returns 409 on NIC clash with another customer', async () => {

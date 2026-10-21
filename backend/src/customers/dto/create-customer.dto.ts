@@ -1,6 +1,7 @@
 import { ApiProperty } from '@nestjs/swagger';
 import { Transform } from 'class-transformer';
 import {
+  IsEmail,
   IsOptional,
   IsString,
   Length,
@@ -8,6 +9,10 @@ import {
   ValidateIf,
 } from 'class-validator';
 import { normalizeSlPhone } from '../../common/utils/sl-phone';
+import {
+  CUSTOMER_EMAIL_MAX_LENGTH,
+  normalizeCustomerEmail,
+} from './customer-email';
 
 /**
  * Payload for POST /customers.
@@ -28,6 +33,8 @@ import { normalizeSlPhone } from '../../common/utils/sl-phone';
  *   new 12-digit) because format edge cases (foreigners, temporary IDs)
  *   would create false rejections at intake. Format-strict validation
  *   can land later as a followup if needed.
+ * - email optional, a valid address, max 254; trimmed and lowercased;
+ *   not unique (family members may share one).
  * - notes optional, max 1000 chars.
  */
 export class CreateCustomerDto {
@@ -81,6 +88,20 @@ export class CreateCustomerDto {
   @IsString()
   @Length(5, 20)
   nic?: string | null;
+
+  @ApiProperty({
+    description:
+      'Email address. Optional; trimmed and stored lowercase; an empty string means none. Not unique (family members may share one).',
+    example: 'kamal.perera@example.com',
+    required: false,
+    nullable: true,
+    maxLength: CUSTOMER_EMAIL_MAX_LENGTH,
+  })
+  @Transform(normalizeCustomerEmail)
+  @IsOptional()
+  @IsEmail({}, { message: 'email must be a valid email address' })
+  @MaxLength(CUSTOMER_EMAIL_MAX_LENGTH)
+  email?: string | null;
 
   @ApiProperty({
     description: 'Free-form notes about the customer (preferences, history).',

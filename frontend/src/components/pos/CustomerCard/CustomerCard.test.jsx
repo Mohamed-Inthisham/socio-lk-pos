@@ -55,6 +55,27 @@ describe("CustomerCard", () => {
     expect(screen.queryByTestId("customer-nic")).not.toBeInTheDocument();
   });
 
+  it("shows the email on the NIC line when present", () => {
+    renderCard(attachedSale({ customer: customer({ email: "kamal@example.com" }) }));
+
+    const email = screen.getByTestId("customer-email");
+    expect(email).toHaveTextContent("kamal@example.com");
+    expect(email.parentElement).toHaveTextContent("NIC 199012345678 · kamal@example.com");
+    expect(email.parentElement).toHaveAttribute("title", "NIC 199012345678 · kamal@example.com");
+  });
+
+  it("shows the email alone when there is no NIC, and nothing when there is neither", () => {
+    const { unmount } = renderCard(
+      attachedSale({ customer: customer({ nic: null, email: "kamal@example.com" }) }),
+    );
+    expect(screen.getByTestId("customer-email").parentElement).toHaveTextContent(/^kamal@example\.com$/);
+    unmount();
+
+    renderCard(attachedSale({ customer: customer({ nic: null, email: null }) }));
+    expect(screen.queryByTestId("customer-email")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("customer-nic")).not.toBeInTheDocument();
+  });
+
   it("detaches optimistically, back to walk-in", async () => {
     const request = Promise.withResolvers();
     salesService.updateSale.mockReturnValue(request.promise);

@@ -8,6 +8,7 @@ import {
 } from 'class-validator';
 import { Transform } from 'class-transformer';
 import { ApiPropertyOptional } from '@nestjs/swagger';
+import { IsOptionalNotNull } from '../../common/validators/is-optional-not-null.decorator';
 
 /**
  * Normalize an optional string field: trim whitespace, convert empty
@@ -64,7 +65,7 @@ export class UpdatePaymentDto {
       'balance (Sale.total - other payments). Must be > 0.',
     minimum: 0.01,
   })
-  @IsOptional()
+  @IsOptionalNotNull()
   @IsNumber({ maxDecimalPlaces: 2 })
   @Min(0.01)
   amount?: number;

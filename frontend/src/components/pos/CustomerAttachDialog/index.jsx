@@ -15,7 +15,7 @@ import { attachCustomer } from "../../../store/slices/posTerminalSlice";
  * create one inline (CustomerCreateForm).
  *
  * SEARCH: 2+ chars, debounced 250 ms, GET /customers?search=&limit=10
- * (matches name, phone or NIC). ↑/↓ move the highlight, Enter or a click
+ * (matches name, phone, NIC or email). ↑/↓ move the highlight, Enter or a click
  * picks. Picking dispatches attachCustomer and closes at once — the
  * attach is optimistic, and a failure shows (and rolls back) on the
  * CustomerCard.
@@ -25,7 +25,8 @@ import { attachCustomer } from "../../../store/slices/posTerminalSlice";
  * dropped by request sequence.
  *
  * "Create new customer" switches to the form, prefilled from the query —
- * a phone-looking query fills Phone, anything else fills Name.
+ * a phone-looking query fills Phone, a query with "@" fills Email,
+ * anything else fills Name.
  *
  * Esc / backdrop close it (Headless UI Dialog), except mid-create. The
  * search input is auto-focused on open and on "Back to search"
@@ -45,6 +46,13 @@ const MIN_SEARCH = 2;
 export const CUSTOMER_SEARCH_LIMIT = 10;
 
 const isPhoneLike = (value) => /^\+?[\d\s-]+$/.test(value);
+const isEmailLike = (value) => value.includes("@");
+
+const initialValuesFor = (query) => {
+  if (isPhoneLike(query)) return { phone: query };
+  if (isEmailLike(query)) return { email: query };
+  return { name: query };
+};
 
 const CustomerAttachDialog = ({ open, onClose, onAttached, afterLeave }) => {
   const dispatch = useDispatch();
@@ -130,10 +138,10 @@ const CustomerAttachDialog = ({ open, onClose, onAttached, afterLeave }) => {
     }
   };
 
-  const createInitialValues = isPhoneLike(query) ? { phone: query } : { name: query };
+  const createInitialValues = initialValuesFor(query);
   const activeId = resultsCurrent && results[active] ? `${listId}-opt-${active}` : undefined;
 
-  let status = "Type at least 2 characters — name, phone or NIC.";
+  let status = "Type at least 2 characters — name, phone, NIC or email.";
   if (searchError) status = null;
   else if (canSearch && !resultsCurrent) status = "Searching…";
   else if (resultsCurrent && !results.length) status = `No customers match “${query}”`;
@@ -179,7 +187,7 @@ const CustomerAttachDialog = ({ open, onClose, onAttached, afterLeave }) => {
               value={value}
               onChange={(e) => setValue(e.target.value)}
               onKeyDown={handleKeyDown}
-              placeholder="Name, phone or NIC"
+              placeholder="Name, phone, NIC or email"
               className="
                 w-full h-12 pl-11 pr-11 rounded-xl text-base
                 bg-white dark:bg-slate-950
@@ -236,6 +244,11 @@ const CustomerAttachDialog = ({ open, onClose, onAttached, afterLeave }) => {
                       {formatSlPhone(customer.phone)}
                       {customer.nic ? ` · NIC ${customer.nic}` : ""}
                     </p>
+                    {customer.email && (
+                      <p className="text-xs text-slate-500 dark:text-slate-400 truncate" data-testid="customer-result-email">
+                        {customer.email}
+                      </p>
+                    )}
                   </li>
                 ))}
               </ul>

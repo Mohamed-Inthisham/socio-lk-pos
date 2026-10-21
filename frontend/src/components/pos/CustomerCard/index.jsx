@@ -21,7 +21,8 @@ import {
  *
  * - No customer: muted "Walk-in sale" + "Attach customer", with an "F3"
  *   key chip on fine-pointer devices (same chip as the scan bar's F2).
- * - Customer: name, phone (077 123 4567), NIC when present, with
+ * - Customer: name, phone (077 123 4567), NIC and email when present (one
+ *   line, truncated, full text in the tooltip), with
  *   "Change" (reopens the attach dialog) and "Detach" (PATCH
  *   customer_id: null, optimistic).
  *
@@ -96,9 +97,15 @@ const CustomerCard = ({ onAttach, disabled = false }) => {
                 {formatSlPhone(customer.phone)}
               </p>
             )}
-            {customer.nic && (
-              <p className="text-xs tabular-nums text-slate-500 dark:text-slate-400" data-testid="customer-nic">
-                NIC {customer.nic}
+            {/* NIC and email share one line, so an email adds no height when there's a NIC */}
+            {(customer.nic || customer.email) && (
+              <p
+                className="text-xs tabular-nums text-slate-500 dark:text-slate-400 truncate"
+                title={[customer.nic && `NIC ${customer.nic}`, customer.email].filter(Boolean).join(" · ")}
+              >
+                {customer.nic && <span data-testid="customer-nic">NIC {customer.nic}</span>}
+                {customer.nic && customer.email && " · "}
+                {customer.email && <span data-testid="customer-email">{customer.email}</span>}
               </p>
             )}
           </div>
