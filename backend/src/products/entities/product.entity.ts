@@ -13,6 +13,7 @@ import {
 import { ProductType } from '../enums/product-type.enum';
 import { BarcodeType } from '../enums/barcode-type.enum';
 import { PhoneCondition } from '../enums/phone-condition.enum';
+import { WarrantyPeriod } from '../enums/warranty-period.enum';
 import { Brand } from '../../brands/entities/brand.entity';
 import { Category } from '../../categories/entities/category.entity';
 import { Branch } from '../../branches/entities/branch.entity';
@@ -29,10 +30,9 @@ import { Branch } from '../../branches/entities/branch.entity';
 )
 @Check('CHK_products_buying_price_nonneg', `buying_price >= 0`)
 @Check('CHK_products_selling_price_nonneg', `selling_price >= 0`)
-@Check('CHK_products_warranty_months_nonneg', `warranty_months >= 0`)
 @Check(
-  'CHK_products_checking_warranty_days_nonneg',
-  `checking_warranty_days >= 0`,
+  'CHK_products_default_warranty',
+  `default_warranty IN ('CHECKING', 'WEEK_1', 'WEEK_2', 'MONTH_1', 'MONTH_2', 'MONTH_3', 'MONTH_6', 'MONTH_12', 'MONTH_18', 'MONTH_24')`,
 )
 export class Product {
   @PrimaryGeneratedColumn('uuid')
@@ -90,11 +90,17 @@ export class Product {
   @Column({ type: 'decimal', precision: 10, scale: 2, name: 'selling_price' })
   selling_price!: string;
 
-  @Column({ type: 'integer', default: 0, name: 'warranty_months' })
-  warranty_months!: number;
-
-  @Column({ type: 'integer', default: 0, name: 'checking_warranty_days' })
-  checking_warranty_days!: number;
+  /**
+   * The warranty a sale line of this product starts with (P5-18); the
+   * cashier can change it per line while the sale is a DRAFT.
+   */
+  @Column({
+    type: 'varchar',
+    length: 20,
+    default: WarrantyPeriod.CHECKING,
+    name: 'default_warranty',
+  })
+  default_warranty!: WarrantyPeriod;
 
   @Column({ type: 'boolean', default: false, name: 'is_serialized' })
   is_serialized!: boolean;

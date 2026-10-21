@@ -11,6 +11,7 @@ import { Branch } from '../src/branches/entities/branch.entity';
 import { Product } from '../src/products/entities/product.entity';
 import { SkuBarcodeCounter } from '../src/sku-barcode-counters/entities/sku-barcode-counter.entity';
 import { ProductType } from '../src/products/enums/product-type.enum';
+import { WarrantyPeriod } from '../src/products/enums/warranty-period.enum';
 
 describe('Products (e2e)', () => {
   let app: INestApplication;
@@ -149,6 +150,104 @@ describe('Products (e2e)', () => {
       expect(response.body.barcode).toBe('194252056387');
       // SKU still auto-generated
       expect(response.body.sku).toBe('SKU-000001');
+    });
+
+    describe('default_warranty (P5-18)', () => {
+      const body = (
+        refs: Awaited<ReturnType<typeof seedReferences>>,
+        extra = {},
+      ) => ({
+        product_type: ProductType.PHONE,
+        name: 'iPhone 15',
+        brand_id: refs.brand.id,
+        category_id: refs.category.id,
+        branch_id: refs.branch.id,
+        buying_price: '100',
+        selling_price: '200',
+        ...extra,
+      });
+
+      it('stores the given default warranty, and no longer returns the old warranty fields', async () => {
+        const { user, password } = await seedUser(
+          UserRole.ADMIN,
+          'admin@t.com',
+        );
+        const refs = await seedReferences();
+        const cookies = await loginAndGetCookies(user.email, password);
+
+        const response = await request(app.getHttpServer())
+          .post('/api/v1/products')
+          .set('Cookie', cookies)
+          .send(body(refs, { default_warranty: WarrantyPeriod.MONTH_12 }))
+          .expect(201);
+
+        expect(response.body.default_warranty).toBe(WarrantyPeriod.MONTH_12);
+        expect(response.body).not.toHaveProperty('warranty_months');
+        expect(response.body).not.toHaveProperty('checking_warranty_days');
+      });
+
+      it('defaults to CHECKING when omitted', async () => {
+        const { user, password } = await seedUser(
+          UserRole.ADMIN,
+          'admin@t.com',
+        );
+        const refs = await seedReferences();
+        const cookies = await loginAndGetCookies(user.email, password);
+
+        const response = await request(app.getHttpServer())
+          .post('/api/v1/products')
+          .set('Cookie', cookies)
+          .send(body(refs))
+          .expect(201);
+
+        expect(response.body.default_warranty).toBe(WarrantyPeriod.CHECKING);
+      });
+
+      it('rejects an unknown code with 400', async () => {
+        const { user, password } = await seedUser(
+          UserRole.ADMIN,
+          'admin@t.com',
+        );
+        const refs = await seedReferences();
+        const cookies = await loginAndGetCookies(user.email, password);
+
+        const response = await request(app.getHttpServer())
+          .post('/api/v1/products')
+          .set('Cookie', cookies)
+          .send(body(refs, { default_warranty: 'MONTH_5' }))
+          .expect(400);
+
+        expect(JSON.stringify(response.body.message)).toMatch(
+          /default_warranty must be one of/,
+        );
+      });
+
+      it('changes it on PATCH, and rejects null (there is no "no warranty" but CHECKING)', async () => {
+        const { user, password } = await seedUser(
+          UserRole.ADMIN,
+          'admin@t.com',
+        );
+        const refs = await seedReferences();
+        const cookies = await loginAndGetCookies(user.email, password);
+        const created = await request(app.getHttpServer())
+          .post('/api/v1/products')
+          .set('Cookie', cookies)
+          .send(body(refs))
+          .expect(201);
+
+        const patched = await request(app.getHttpServer())
+          .patch(`/api/v1/products/${created.body.id}`)
+          .set('Cookie', cookies)
+          .send({ default_warranty: WarrantyPeriod.WEEK_2 })
+          .expect(200);
+        expect(patched.body.default_warranty).toBe(WarrantyPeriod.WEEK_2);
+
+        await request(app.getHttpServer())
+          .patch(`/api/v1/products/${created.body.id}`)
+          .set('Cookie', cookies)
+          .send({ default_warranty: null })
+          .expect(400);
+      });
     });
 
     it('rejects with 409 when provided barcode is duplicate', async () => {

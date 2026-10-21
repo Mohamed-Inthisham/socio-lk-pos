@@ -147,16 +147,25 @@ Postgres stores prices as `numeric(10,2)`. TypeScript treats them as `string` th
 
 `0.1 + 0.2 !== 0.3` in every IEEE-754 language. Applying floating-point math to money is a bug factory — rounding errors accumulate across sale lines, tax calculations, and change due. Strings force every arithmetic operation to go through a decimal-safe helper (or Postgres itself). Slightly more ceremony; zero rounding bugs.
 
-### Warranty split into two fields
+### One default warranty period
 
-Products carry both:
+_(Phase 6.4 P5-18; replaced `warranty_months` + `checking_warranty_days`.)_
 
-- `warranty_months` (integer, default 0) — full manufacturer warranty duration.
-- `checking_warranty_days` (integer, default 0) — short "defect check" window, mostly used for used phones sold with a 7-day return guarantee.
+`default_warranty` (`varchar(20)`, CHECK, default `CHECKING`) is one code from a fixed list (`WarrantyPeriod`, `products/enums/warranty-period.enum.ts`):
 
-#### Why not one field
+| Code | Means |
+|---|---|
+| `CHECKING` | The customer checks the item in the shop; no warranty once they leave. Also used for items sold without a warranty (cables etc.) |
+| `WEEK_1`, `WEEK_2` | 7 / 14 days |
+| `MONTH_1`, `MONTH_2`, `MONTH_3`, `MONTH_6`, `MONTH_12`, `MONTH_18`, `MONTH_24` | That many calendar months |
 
-They mean different things and print differently on receipts. Merging them would force conditional logic on every read to decide which to display.
+It is the period a sale line of this product **starts** with. The cashier can change it per line while the sale is a DRAFT; the line's own `warranty` is what the sale records and the receipt prints (see [sales.md](./sales.md) "Warranty per line"). `null` is rejected on create and update (400): `CHECKING` already means "no warranty".
+
+#### Why a code, not numbers
+
+The shop sells in weeks and months, and "Checking" isn't a length at all. A months integer couldn't express weeks; two numbers (the old months + checking days) needed rules for which one wins and printed awkwardly. A closed list also stops values the business didn't choose (e.g. 5 months).
+
+The old values were mapped by rounding **down** to the nearest listed period (never promising more than before): months 4–5 → `MONTH_3`, 6–11 → `MONTH_6`, 12–17 → `MONTH_12`, 18–23 → `MONTH_18`, 24+ → `MONTH_24`; with 0 months, checking days 7–13 → `WEEK_1`, 14–29 → `WEEK_2`, 30+ → `MONTH_1`, otherwise `CHECKING`. Months won when both were set.
 
 ### `phone_condition` enum on all products
 

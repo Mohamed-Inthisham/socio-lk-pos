@@ -6,15 +6,14 @@ import {
   IsBoolean,
   IsUUID,
   IsEnum,
-  IsInt,
   IsNumberString,
-  Min,
-  Max,
+  ValidateIf,
 } from 'class-validator';
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 import { ProductType } from '../enums/product-type.enum';
 import { BarcodeType } from '../enums/barcode-type.enum';
 import { PhoneCondition } from '../enums/phone-condition.enum';
+import { WarrantyPeriod } from '../enums/warranty-period.enum';
 
 export class CreateProductDto {
   @ApiProperty({
@@ -116,29 +115,22 @@ export class CreateProductDto {
   )
   selling_price!: string;
 
+  // ValidateIf (not IsOptional): omitted is fine (CHECKING on create,
+  // unchanged on update), null is rejected — there is no "no warranty"
+  // besides CHECKING.
   @ApiPropertyOptional({
-    example: 12,
-    description: 'Full warranty period in months. Defaults to 0 (no warranty).',
-    minimum: 0,
-  })
-  @IsOptional()
-  @IsInt()
-  @Min(0)
-  @Max(120) // 10 years — sane upper bound; adjust later if needed
-  warranty_months?: number;
-
-  @ApiPropertyOptional({
-    example: 14,
+    enum: WarrantyPeriod,
+    example: WarrantyPeriod.MONTH_12,
     description:
-      'Checking warranty in days — the short "defective on arrival" ' +
-      'window mostly used for used phones. Defaults to 0.',
-    minimum: 0,
+      'The warranty a sale line of this product starts with (P5-18); the ' +
+      'cashier can change it per line. CHECKING = the customer checks it ' +
+      'in the shop, no warranty after. Defaults to CHECKING.',
   })
-  @IsOptional()
-  @IsInt()
-  @Min(0)
-  @Max(365)
-  checking_warranty_days?: number;
+  @ValidateIf((o: CreateProductDto) => o.default_warranty !== undefined)
+  @IsEnum(WarrantyPeriod, {
+    message: `default_warranty must be one of: ${Object.values(WarrantyPeriod).join(', ')}`,
+  })
+  default_warranty?: WarrantyPeriod;
 
   @ApiPropertyOptional({
     example: true,

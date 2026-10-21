@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { DEFAULT_WARRANTY, WARRANTY_CODES } from "../constants/warranty";
 
 /**
  * Product Schemas (Zod)
@@ -63,12 +64,6 @@ const priceString = z
   .refine((v) => Number(v) >= 0, "Price can't be negative")
   .refine((v) => Number(v) < 10_000_000_000, "Price is too large");
 
-// Optional positive integer. Empty string is treated as null/undefined.
-const optionalPositiveInt = z
-  .union([z.string().length(0), z.coerce.number().int().nonnegative()])
-  .transform((v) => (v === "" ? undefined : v))
-  .optional();
-
 // UUID from the reference-data selects
 const uuidString = z.string().uuid("Please select an option");
 
@@ -115,9 +110,10 @@ const productBaseSchema = z.object({
   buying_price: priceString,
   selling_price: priceString,
 
-  // Warranty
-  warranty_months: optionalPositiveInt,
-  checking_warranty_days: optionalPositiveInt,
+  // Warranty (P5-18): the period a sale line starts with
+  default_warranty: z.enum(WARRANTY_CODES, {
+    errorMap: () => ({ message: "Select a warranty" }),
+  }),
 
   // Serialization
   is_serialized: z.boolean().default(false),
@@ -223,12 +219,6 @@ export const buildCreatePayload = (data) => {
     if (payload[f] === "" || payload[f] == null) delete payload[f];
   });
 
-  // Drop unset warranty numbers (schema already transforms "" -> undefined,
-  // but delete for a cleaner JSON payload)
-  if (payload.warranty_months === undefined) delete payload.warranty_months;
-  if (payload.checking_warranty_days === undefined)
-    delete payload.checking_warranty_days;
-
   // If not a phone, strip all phone fields
   if (payload.product_type !== "PHONE") {
     delete payload.phone_condition;
@@ -236,7 +226,6 @@ export const buildCreatePayload = (data) => {
     delete payload.phone_storage;
     delete payload.phone_color;
     delete payload.phone_ram;
-    delete payload.checking_warranty_days;
   }
 
   // Default barcode_type only if barcode is present
@@ -261,9 +250,6 @@ export const buildCreatePayload = (data) => {
  *   flat brand_id / category_id / branch_id.
  * - Backend returns null for unset optionals; form inputs need "" so the
  *   controlled components stay controlled.
- *
- * Number fields (warranty_months, checking_warranty_days) are stringified
- * because InputField type="number" still stores strings in RHF.
  */
 export const mapProductToFormValues = (product) => ({
   name: product.name ?? "",
@@ -276,12 +262,7 @@ export const mapProductToFormValues = (product) => ({
   barcode_type: product.barcode_type ?? "CODE_128",
   buying_price: product.buying_price ?? "",
   selling_price: product.selling_price ?? "",
-  warranty_months:
-    product.warranty_months != null ? String(product.warranty_months) : "",
-  checking_warranty_days:
-    product.checking_warranty_days != null
-      ? String(product.checking_warranty_days)
-      : "",
+  default_warranty: product.default_warranty ?? DEFAULT_WARRANTY,
   is_serialized: product.is_serialized ?? false,
   phone_condition: product.phone_condition ?? "",
   phone_model: product.phone_model ?? "",
@@ -334,13 +315,6 @@ export const buildUpdatePayload = (formData, dirtyFields) => {
     if (payload[f] === "") payload[f] = null;
   });
 
-  // Nullable number fields: "" or undefined means "clear it"
-  ["warranty_months", "checking_warranty_days"].forEach((f) => {
-    if (f in payload && (payload[f] === "" || payload[f] === undefined)) {
-      payload[f] = null;
-    }
-  });
-
   // Barcode type is only meaningful if barcode is present
   if (payload.barcode === null) {
     payload.barcode_type = null;
@@ -364,8 +338,7 @@ export const productFormDefaults = {
   barcode_type: "CODE_128",
   buying_price: "",
   selling_price: "",
-  warranty_months: "",
-  checking_warranty_days: "",
+  default_warranty: DEFAULT_WARRANTY,
   is_serialized: false,
   phone_condition: "",
   phone_model: "",

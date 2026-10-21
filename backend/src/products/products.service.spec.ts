@@ -14,6 +14,7 @@ import { BranchesService } from '../branches/branches.service';
 import { SkuBarcodeCountersService } from '../sku-barcode-counters/sku-barcode-counters.service';
 import { CounterType } from '../sku-barcode-counters/enums/counter-type.enum';
 import { ProductType } from './enums/product-type.enum';
+import { WarrantyPeriod } from './enums/warranty-period.enum';
 import { StockService } from '../stock/stock.service';
 
 describe('ProductsService', () => {
@@ -102,6 +103,25 @@ describe('ProductsService', () => {
       );
       expect(result.sku).toBe('SKU-000001');
       expect(result.barcode).toBe('SLP-000001');
+    });
+
+    it('passes the default warranty through, or leaves it to the column default (P5-18)', async () => {
+      await service.create({
+        ...validDto,
+        default_warranty: WarrantyPeriod.MONTH_12,
+      });
+      expect(mockRepo.create).toHaveBeenLastCalledWith(
+        expect.objectContaining({ default_warranty: WarrantyPeriod.MONTH_12 }),
+      );
+
+      mockCountersService.next
+        .mockResolvedValueOnce('SKU-000002')
+        .mockResolvedValueOnce('SLP-000002');
+      await service.create(validDto);
+      // undefined → TypeORM omits it → DB default CHECKING
+      expect(mockRepo.create).toHaveBeenLastCalledWith(
+        expect.objectContaining({ default_warranty: undefined }),
+      );
     });
 
     it('uses provided barcode when given, only auto-generates SKU', async () => {
@@ -383,6 +403,21 @@ describe('ProductsService', () => {
       const result = await service.update('p1', { name: 'iPhone 15 Renamed' });
 
       expect(result.name).toBe('iPhone 15 Renamed');
+      // Not in the DTO → not touched
+      expect(mockRepo.save).toHaveBeenCalledWith(
+        expect.not.objectContaining({ default_warranty: expect.anything() }),
+      );
+    });
+
+    it('changes the default warranty (P5-18)', async () => {
+      // A copy: update() assigns onto the product it loads
+      mockRepo.findOne.mockResolvedValueOnce({ ...existingProduct });
+
+      await service.update('p1', { default_warranty: WarrantyPeriod.WEEK_2 });
+
+      expect(mockRepo.save).toHaveBeenCalledWith(
+        expect.objectContaining({ default_warranty: WarrantyPeriod.WEEK_2 }),
+      );
     });
 
     it('does not re-validate brand/category/branch when they do not change', async () => {

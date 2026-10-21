@@ -256,8 +256,7 @@ The catalog. Every product belongs to one brand, one category, and one branch.
 | `phone_condition` | `varchar(10)` nullable | Enum (CHECK): `NEW`, `USED`; only meaningful when `product_type = 'PHONE'` |
 | `cost_price` | `numeric(10,2)` | Purchase cost <!-- 🔍 verify column name -->|
 | `selling_price` | `numeric(10,2)` | Retail price <!-- 🔍 verify column name -->|
-| `warranty_months` | `integer` | Default `0`. Full manufacturer warranty duration. |
-| `checking_warranty_days` | `integer` | Default `0`. Short defect-check window (mostly used phones). |
+| `default_warranty` | `varchar(20)` | Default `CHECKING`. CHECK: `CHECKING`, `WEEK_1`, `WEEK_2`, `MONTH_1`, `MONTH_2`, `MONTH_3`, `MONTH_6`, `MONTH_12`, `MONTH_18`, `MONTH_24`. The period a sale line starts with (P5-18; replaced `warranty_months` + `checking_warranty_days`). |
 | `is_serialized` | `boolean` | Default `false`. When `true`, POS prompts cashier for IMEI at sale. |
 | `brand_id` | `uuid` | FK → `brands.id` |
 | `category_id` | `uuid` | FK → `categories.id` |
