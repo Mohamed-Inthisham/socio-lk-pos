@@ -7,6 +7,7 @@ import { ArrowLeft, Package, AlertCircle } from "lucide-react";
 import Button from "../../components/common/Button";
 import InputField from "../../components/common/InputField";
 import Select from "../../components/common/Select";
+import { WARRANTY_PERIODS } from "../../constants/warranty";
 import {
   productCreateSchema,
   productFormDefaults,
@@ -392,33 +393,25 @@ const ProductCreate = () => {
 
           <FormSection
             title="Warranty"
-            description={
-              isPhone
-                ? "Full warranty in months. Checking warranty (defect window) in days — for used phones."
-                : "Full warranty in months. Optional."
-            }
+            description="The warranty a sale of this product starts with. The cashier can change it per item at the till."
           >
             <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-              <InputField
-                type="number"
-                label="Warranty (months)"
-                placeholder="e.g. 12"
-                min={0}
-                step={1}
-                error={errors.warranty_months?.message}
-                {...register("warranty_months")}
+              <Controller
+                name="default_warranty"
+                control={control}
+                render={({ field, fieldState }) => (
+                  <Select
+                    label="Default warranty"
+                    required
+                    name={field.name}
+                    value={field.value}
+                    onChange={field.onChange}
+                    options={WARRANTY_PERIODS}
+                    error={fieldState.error?.message}
+                    hint="Checking = the customer checks it in the shop; no warranty after they leave."
+                  />
+                )}
               />
-              {isPhone && (
-                <InputField
-                  type="number"
-                  label="Checking warranty (days)"
-                  placeholder="e.g. 14"
-                  min={0}
-                  step={1}
-                  error={errors.checking_warranty_days?.message}
-                  {...register("checking_warranty_days")}
-                />
-              )}
             </div>
           </FormSection>
 

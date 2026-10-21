@@ -15,6 +15,7 @@ import { Product } from '../../products/entities/product.entity';
 import { Supplier } from '../../suppliers/entities/supplier.entity';
 import { ProductUnit } from '../../product-units/entities/product-unit.entity';
 import { DiscountType } from '../enums/discount-type.enum';
+import { WarrantyPeriod } from '../../products/enums/warranty-period.enum';
 
 /**
  * A single line on a Sale — one product, one quantity, one optional discount.
@@ -84,6 +85,10 @@ import { DiscountType } from '../enums/discount-type.enum';
 @Check(
   'CHK_sale_lines_product_unit_snapshot',
   `product_unit_id IS NULL OR imei_snapshot IS NOT NULL`,
+)
+@Check(
+  'CHK_sale_lines_warranty',
+  `warranty IN ('CHECKING', 'WEEK_1', 'WEEK_2', 'MONTH_1', 'MONTH_2', 'MONTH_3', 'MONTH_6', 'MONTH_12', 'MONTH_18', 'MONTH_24')`,
 )
 export class SaleLine {
   @PrimaryGeneratedColumn('uuid')
@@ -184,20 +189,21 @@ export class SaleLine {
   imei_snapshot!: string | null;
 
   /**
-   * The product's warranty_months / checking_warranty_days, copied when
-   * the sale is completed (Phase 6.4 P5-1) so the receipt shows the
-   * warranty that applied at sale time. NULL on DRAFT lines and on sales
-   * completed before the snapshot existed (no backfill).
+   * The warranty this line is sold with (Phase 6.4 P5-18): the product's
+   * default_warranty when the line is added, changeable by the cashier
+   * while the sale is a DRAFT, frozen once it completes. The receipt
+   * prints it.
    */
-  @Column({ type: 'integer', nullable: true, name: 'warranty_months_snapshot' })
-  warranty_months_snapshot!: number | null;
+  @Column({ type: 'varchar', length: 20, name: 'warranty' })
+  warranty!: WarrantyPeriod;
 
-  @Column({
-    type: 'integer',
-    nullable: true,
-    name: 'checking_warranty_days_snapshot',
-  })
-  checking_warranty_days_snapshot!: number | null;
+  /**
+   * The last day of warranty, set when the sale completes: the Colombo
+   * completion date plus the period (products/warranty.ts). NULL for
+   * CHECKING, and while the sale is a DRAFT.
+   */
+  @Column({ type: 'date', nullable: true, name: 'warranty_until' })
+  warranty_until!: string | null;
 
   /**
    * Link to the specific ProductUnit sold on this line, for serialized

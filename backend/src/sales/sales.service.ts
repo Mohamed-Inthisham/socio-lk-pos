@@ -50,6 +50,7 @@ import {
   paginate,
 } from '../common/dto/paginated-response.dto';
 import { toCents } from '../common/utils/money';
+import { warrantyUntilSql } from '../products/warranty';
 
 /**
  * completeSale's collaborators know the product or IMEI behind a 409 but
@@ -550,6 +551,8 @@ export class SalesService {
         external_supplier_id: dto.external_supplier_id ?? null,
         imei_snapshot: imeiSnapshot,
         product_unit_id: productUnitId,
+        // P5-18: the product's default unless the cashier chose one
+        warranty: dto.warranty ?? product.default_warranty,
       });
       const saved = await manager.save(line);
 
@@ -746,6 +749,8 @@ export class SalesService {
       if (dto.imei_snapshot !== undefined) {
         line.imei_snapshot = dto.imei_snapshot;
       }
+      // P5-18: any line mode, serialized included; DRAFT-only via the guard above
+      if (dto.warranty !== undefined) line.warranty = dto.warranty;
       line.discount_amount = nextDiscountAmount;
       line.line_total = nextLineTotal;
 
@@ -1118,8 +1123,8 @@ export class SalesService {
    *   4. Issue sale_number via SaleNumberCountersService.generateNext,
    *      enlisted in this transaction. A rollback after this rolls the
    *      counter increment back too, so a failed complete leaves no gap.
-   *   5. Snapshot each line's warranty (warranty_months,
-   *      checking_warranty_days) from its product onto the line.
+   *   5. Set each line's warranty_until from its warranty period (P5-18):
+   *      the Colombo completion date plus the period; NULL for CHECKING.
    *   6. UPDATE sales SET status=COMPLETED, completed_at=now(),
    *      sale_number=<issued>.
    *
@@ -1282,19 +1287,15 @@ export class SalesService {
         manager,
       );
 
-      // 5. Snapshot the warranty that applies at sale time (P5-1), so a
-      // receipt reprinted later doesn't pick up a changed product. One
-      // set-based UPDATE for all lines. A line whose product row is gone
-      // has nothing to join and stays NULL (products are soft-deleted,
-      // so in practice every line matches).
+      // 5. Each line's last day of warranty (P5-18): the Colombo
+      // completion date plus the line's period. now() is the transaction
+      // time, the same instant step 6 stamps as completed_at. CHECKING
+      // lines get NULL. One set-based UPDATE for all lines.
       await manager.query(
-        `UPDATE sale_lines AS line
-         SET warranty_months_snapshot = product.warranty_months,
-             checking_warranty_days_snapshot = product.checking_warranty_days,
+        `UPDATE sale_lines
+         SET warranty_until = ${warrantyUntilSql(`(now() AT TIME ZONE 'Asia/Colombo')::date`)},
              updated_at = now()
-         FROM products AS product
-         WHERE line.sale_id = $1
-           AND product.id = line.product_id`,
+         WHERE sale_id = $1`,
         [saleId],
       );
 
