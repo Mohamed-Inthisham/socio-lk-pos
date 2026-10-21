@@ -4,9 +4,11 @@ import Button from "../../common/Button";
 import { formatLKR } from "../../../utils/money";
 import {
   selectBalanceDue,
+  selectCanComplete,
   selectCanPay,
   selectCartSyncing,
   selectDraftSale,
+  selectIsCompleting,
   selectPaidTotal,
   selectReadyToComplete,
 } from "../../../store/slices/posTerminalSlice";
@@ -36,15 +38,32 @@ import {
  * with an empty cart, nothing left to pay, or a mutation in flight — the
  * button keeps the last known balance and no spinner of its own.
  *
- * READY (P3-7): once the last confirmed server sale is fully paid, the
- * button gives way to a calm "Ready to complete" state (complete arrives
- * with P5). Ready vs Pay never flips mid-mutation: while syncing, the
- * Ready box dims like the totals, and Pay is disabled (its own disabled
- * styling is the same 50% dim).
+ * COMPLETE (P5-3, revised from P3-7's Ready box): once the last
+ * confirmed server sale is fully paid, Pay gives way to a "Paid in full ·
+ * change due X" line and a **Complete sale** button in the same place
+ * (F9 does the same, PosTerminal). The button follows selectCanComplete:
+ * disabled while a mutation is in flight (the line dims like the totals),
+ * spinning while the sale completes. Complete vs Pay never flips
+ * mid-mutation, so a settling payment never shows "Pay LKR 0.00".
  *
  * PROPS:
  * - onPay: () => void — open the PaymentDialog
+ * - onComplete: () => void — open the CompleteSaleDialog
  */
+
+const ShortcutChip = ({ label }) => (
+  <kbd
+    aria-hidden="true"
+    className="
+      hidden [@media(hover:hover)_and_(pointer:fine)]:inline-flex
+      items-center px-1.5 h-6 rounded-md
+      text-[11px] font-semibold font-sans text-white/90
+      border border-white/30 bg-white/10
+    "
+  >
+    {label}
+  </kbd>
+);
 
 const isZero = (value) => !Number(value);
 
@@ -62,13 +81,16 @@ const Row = ({ label, value, testId, strong = false }) => (
   </div>
 );
 
-const TotalsPanel = ({ onPay }) => {
+const TotalsPanel = ({ onPay, onComplete }) => {
   const sale = useSelector(selectDraftSale);
   const syncing = useSelector(selectCartSyncing);
   const paid = useSelector(selectPaidTotal);
   const balance = useSelector(selectBalanceDue);
   const canPay = useSelector(selectCanPay);
-  const ready = useSelector(selectReadyToComplete);
+  const canComplete = useSelector(selectCanComplete);
+  const completing = useSelector(selectIsCompleting);
+  // "completing" keeps the Complete button (spinning) instead of falling back to Pay
+  const ready = useSelector(selectReadyToComplete) || completing;
 
   if (!sale) return null;
 
@@ -117,21 +139,14 @@ const TotalsPanel = ({ onPay }) => {
 
       <div className="mt-4">
         {ready ? (
-          <div
-            role="status"
-            data-testid="totals-ready"
-            className={`flex items-center gap-3 rounded-xl border border-emerald-200 dark:border-emerald-900 bg-emerald-50 dark:bg-emerald-950/40 px-4 py-3 transition-opacity ${syncing ? "opacity-50" : ""}`}
-          >
-            <CheckCircle2
-              size={20}
-              aria-hidden="true"
-              className="flex-shrink-0 text-emerald-600 dark:text-emerald-400"
-            />
-            <div className="min-w-0">
-              <p className="text-sm font-semibold text-emerald-800 dark:text-emerald-200">
-                Ready to complete
-              </p>
-              <p className="text-xs text-emerald-700/80 dark:text-emerald-300/80">
+          <div className="space-y-2">
+            <p
+              role="status"
+              data-testid="totals-ready"
+              className={`flex items-center gap-1.5 text-sm text-emerald-700 dark:text-emerald-300 transition-opacity ${syncing ? "opacity-50" : ""}`}
+            >
+              <CheckCircle2 size={16} aria-hidden="true" className="flex-shrink-0" />
+              <span>
                 Paid in full
                 {!isZero(sale.change_due) && (
                   <>
@@ -141,8 +156,20 @@ const TotalsPanel = ({ onPay }) => {
                     </span>
                   </>
                 )}
-              </p>
-            </div>
+              </span>
+            </p>
+            <Button
+              variant="accent"
+              fullWidth
+              className="h-12 text-base"
+              aria-keyshortcuts="F9"
+              disabled={!canComplete}
+              loading={completing}
+              onClick={onComplete}
+            >
+              Complete sale
+              <ShortcutChip label="F9" />
+            </Button>
           </div>
         ) : (
           <Button
@@ -154,17 +181,7 @@ const TotalsPanel = ({ onPay }) => {
             onClick={onPay}
           >
             <span className="tabular-nums">Pay {formatLKR(balance)}</span>
-            <kbd
-              aria-hidden="true"
-              className="
-                hidden [@media(hover:hover)_and_(pointer:fine)]:inline-flex
-                items-center px-1.5 h-6 rounded-md
-                text-[11px] font-semibold font-sans text-white/90
-                border border-white/30 bg-white/10
-              "
-            >
-              F4
-            </kbd>
+            <ShortcutChip label="F4" />
           </Button>
         )}
       </div>

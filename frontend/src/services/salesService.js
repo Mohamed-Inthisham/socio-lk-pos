@@ -123,6 +123,30 @@ export const addSalePayment = async (saleId, payload) => {
   return response.data;
 };
 
+/** POST /sales/:id/complete gives up after this long (P5-7). */
+export const COMPLETE_TIMEOUT_MS = 30000;
+
+/**
+ * Complete a fully paid DRAFT sale: stock, trade-ins and the sale number
+ * in one server transaction (docs/backend/sales.md).
+ *
+ * At most once: a repeated call gets 400 "Cannot complete a COMPLETED
+ * sale…". Never retry it blindly after a lost response — re-fetch the
+ * sale and check its status (the posTerminal completeSale thunk does).
+ * The only request with its own timeout (COMPLETE_TIMEOUT_MS); there is
+ * no global one.
+ *
+ * @param {string} saleId
+ * @returns {Promise<Object>} The hydrated COMPLETED sale (sale_number,
+ *   completed_at, lines with warranty snapshots, payments)
+ */
+export const completeSale = async (saleId) => {
+  const response = await api.post(`/sales/${saleId}/complete`, undefined, {
+    timeout: COMPLETE_TIMEOUT_MS,
+  });
+  return response.data;
+};
+
 /**
  * Remove a payment from a DRAFT sale.
  *

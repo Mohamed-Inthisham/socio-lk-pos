@@ -1,24 +1,31 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useHotkeys } from "react-hotkeys-hook";
 import { useDispatch, useSelector } from "react-redux";
-import { AlertTriangle, FilePlus2 } from "lucide-react";
+import { AlertTriangle, FilePlus2, Printer } from "lucide-react";
 import Button from "../../components/common/Button";
 import CartLines from "../../components/pos/CartLines";
+import CompleteSaleDialog from "../../components/pos/CompleteSaleDialog";
 import CustomerAttachDialog from "../../components/pos/CustomerAttachDialog";
 import CustomerCard from "../../components/pos/CustomerCard";
 import NewSaleDialog from "../../components/pos/NewSaleDialog";
 import PaymentDialog from "../../components/pos/PaymentDialog";
 import PaymentsList from "../../components/pos/PaymentsList";
+import SaleCompletePanel from "../../components/pos/SaleCompletePanel";
 import ScanBar from "../../components/pos/ScanBar";
 import TotalsPanel from "../../components/pos/TotalsPanel";
 import useTerminalBranch from "../../hooks/useTerminalBranch";
 import { isTouchOnly } from "../../utils/device";
+import { printReceipt } from "../../utils/printReceipt";
+import { getSale } from "../../services/salesService";
+import useTerminalSessionStore from "../../store/zustand/terminalSessionStore";
 import {
   discardDraftSale,
   ensureDraftSale,
+  selectCanComplete,
   selectCanPay,
   selectCartLines,
   selectDraftSale,
+  selectLastCompletedSale,
   selectPosError,
   selectPosStatus,
   selectAttachedCustomer,
@@ -49,6 +56,22 @@ import { CASH, TRADE_IN } from "../../schemas/paymentSchema";
  *   instead. A page can intercept F6 (Chrome/Edge would otherwise move
  *   focus to the address bar): every F6 is preventDefault-ed, also when
  *   it does nothing.
+ * - F9 (P5-4) opens the CompleteSaleDialog when the Complete sale button
+ *   is enabled (both read selectCanComplete) and no other dialog is open.
+ *   Every F9 is preventDefault-ed too: Edge opens Immersive Reader on F9.
+ *
+ * RECEIPTS (P5-12): a completed sale's receipt prints by itself once the
+ * confirm has closed (utils/printReceipt.js); Reprint on the Sale complete
+ * panel prints it again, and "Last receipt" on the Current sale card
+ * reprints the last completed sale, also after a reload (its id is
+ * persisted; the sale is re-read with GET /sales/:id when it isn't in
+ * memory).
+ *
+ * SALE COMPLETE (P5-9, P5-10): once a sale completes, the
+ * SaleCompletePanel takes the place of the cart, the payments and the
+ * right-hand column; the scan bar stays above it, live and focused. Next
+ * sale, Enter on the empty bar, or a scan returns to the terminal on the
+ * next draft (already opened in the background).
  *
  * TRADE-IN ATTACH-THEN-RETURN (P4-2): the PaymentDialog's "Attach
  * customer" (or F6 with no customer) closes the PaymentDialog, opens the
@@ -96,12 +119,21 @@ const PosTerminal = () => {
   const sale = useSelector(selectDraftSale);
   const lines = useSelector(selectCartLines);
   const canPay = useSelector(selectCanPay);
+  const canComplete = useSelector(selectCanComplete);
   const customer = useSelector(selectAttachedCustomer);
   const hasTradeIn = useSelector(selectHasTradeInPayment);
   const [confirmNewSale, setConfirmNewSale] = useState(false);
   const [attachOpen, setAttachOpen] = useState(false);
   const [paymentOpen, setPaymentOpen] = useState(false);
   const [paymentMethod, setPaymentMethod] = useState(CASH);
+  const [completeOpen, setCompleteOpen] = useState(false);
+  // Receipts (P5-12): the completed sale waiting for the confirm to close,
+  // and "Reprint last receipt" (works after a reload: the id is persisted).
+  const receiptToPrint = useRef(null);
+  const lastCompletedSale = useSelector(selectLastCompletedSale);
+  const lastCompletedSaleId = useTerminalSessionStore((s) => s.lastCompletedSaleId);
+  const [reprintingLast, setReprintingLast] = useState(false);
+  const [reprintError, setReprintError] = useState(null);
   // Attach-then-return (P4-2): the attach is for a trade-in, and whether
   // a customer was actually attached (vs cancelled).
   const tradeInAttach = useRef({ active: false, attached: false, afterPayment: false });
@@ -109,6 +141,24 @@ const PosTerminal = () => {
   useEffect(() => {
     if (branchId) dispatch(ensureDraftSale({ branchId }));
   }, [dispatch, branchId]);
+
+  const reprint = (completedSale) => printReceipt(completedSale).catch(() => {});
+
+  const reprintLast = async () => {
+    setReprintingLast(true);
+    setReprintError(null);
+    try {
+      const completedSale =
+        lastCompletedSale?.id === lastCompletedSaleId
+          ? lastCompletedSale
+          : await getSale(lastCompletedSaleId);
+      await printReceipt(completedSale);
+    } catch {
+      setReprintError("Couldn't load the last receipt. Try again.");
+    } finally {
+      setReprintingLast(false);
+    }
+  };
 
   const focusScan = useCallback(() => scanRef.current?.focus(), []);
   // Automatic hand-off: skipped on touch-only devices.
@@ -184,6 +234,14 @@ const PosTerminal = () => {
     [canPay, customer],
   );
   useHotkeys(
+    "f9",
+    () => {
+      if (canComplete && !dialogOpen()) setCompleteOpen(true);
+    },
+    { enableOnFormTags: true, preventDefault: true },
+    [canComplete],
+  );
+  useHotkeys(
     "esc",
     () => {
       if (!inDialog()) focusScan();
@@ -230,6 +288,7 @@ const PosTerminal = () => {
     );
   }
 
+  const completed = status === "completed";
   const started = formatStarted(sale?.created_at);
   // Units, not lines — stays visible while the search dropdown covers the cart.
   const itemCount = lines.reduce((sum, line) => sum + line.quantity, 0);
@@ -258,14 +317,24 @@ const PosTerminal = () => {
             </div>
           )}
 
-          <ScanBar branchId={branchId} disabled={status !== "ready"} inputRef={scanRef} />
+          <ScanBar
+            branchId={branchId}
+            disabled={status !== "ready" && !completed}
+            inputRef={scanRef}
+          />
 
-          {/* lg:min-h-40 leaves room for 3 payment rows at a ~640px viewport */}
-          <Card className="flex-1 min-h-[16rem] lg:min-h-40 flex flex-col overflow-hidden">
-            <CartLines onReturnFocus={returnFocus} />
-          </Card>
+          {completed ? (
+            <SaleCompletePanel onReturnFocus={returnFocus} onReprint={reprint} />
+          ) : (
+            <>
+              {/* lg:min-h-40 leaves room for 3 payment rows at a ~640px viewport */}
+              <Card className="flex-1 min-h-[16rem] lg:min-h-40 flex flex-col overflow-hidden">
+                <CartLines onReturnFocus={returnFocus} />
+              </Card>
 
-          <PaymentsList onReturnFocus={returnFocus} />
+              <PaymentsList onReturnFocus={returnFocus} />
+            </>
+          )}
         </section>
 
         {/*
@@ -274,7 +343,11 @@ const PosTerminal = () => {
           laptop). Safety net: if it can't fit, the column scrolls and
           Totals (Pay / Ready) stays pinned at the bottom.
         */}
-        <aside className="lg:w-[24rem] xl:w-[28rem] flex-shrink-0 flex flex-col gap-3 lg:gap-2 lg:min-h-0 lg:overflow-y-auto">
+        {/* Hidden (not unmounted) under the Sale complete panel */}
+        <aside
+          hidden={completed}
+          className="lg:w-[24rem] xl:w-[28rem] flex-shrink-0 flex flex-col gap-3 lg:gap-2 lg:min-h-0 lg:overflow-y-auto"
+        >
           <Card className="px-4 py-3">
             <div className="flex items-start justify-between gap-3">
               <div className="min-w-0">
@@ -286,15 +359,34 @@ const PosTerminal = () => {
                   {started ? ` · started ${started}` : ""}
                 </p>
               </div>
-              <Button
-                size="sm"
-                variant="secondary"
-                icon={FilePlus2}
-                label="New sale"
-                disabled={status !== "ready" || lines.length === 0}
-                onClick={() => setConfirmNewSale(true)}
-              />
+              <div className="flex flex-shrink-0 items-center gap-2">
+                {lastCompletedSaleId && (
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    icon={Printer}
+                    label="Last receipt"
+                    title="Reprint last receipt"
+                    aria-label="Reprint last receipt"
+                    loading={reprintingLast}
+                    onClick={reprintLast}
+                  />
+                )}
+                <Button
+                  size="sm"
+                  variant="secondary"
+                  icon={FilePlus2}
+                  label="New sale"
+                  disabled={status !== "ready" || lines.length === 0}
+                  onClick={() => setConfirmNewSale(true)}
+                />
+              </div>
             </div>
+            {reprintError && (
+              <p role="alert" className="mt-2 text-xs text-red-600 dark:text-red-400">
+                {reprintError}
+              </p>
+            )}
           </Card>
 
           <CustomerCard
@@ -303,7 +395,10 @@ const PosTerminal = () => {
           />
 
           <div data-testid="totals-dock" className="lg:sticky lg:bottom-0">
-            <TotalsPanel onPay={() => openPayment(CASH)} />
+            <TotalsPanel
+              onPay={() => openPayment(CASH)}
+              onComplete={() => setCompleteOpen(true)}
+            />
           </div>
         </aside>
       </div>
@@ -333,6 +428,24 @@ const PosTerminal = () => {
         onClose={() => setPaymentOpen(false)}
         onAttachCustomer={attachFromPayment}
         afterLeave={afterPaymentLeave}
+      />
+
+      <CompleteSaleDialog
+        open={completeOpen}
+        onClose={() => setCompleteOpen(false)}
+        onCompleted={(completedSale) => {
+          receiptToPrint.current = completedSale;
+        }}
+        // Deferred: Headless UI restores focus to the opener after afterLeave.
+        // Print once the dialog has gone, then hand focus back (P5-12).
+        afterLeave={() =>
+          setTimeout(() => {
+            const completedSale = receiptToPrint.current;
+            receiptToPrint.current = null;
+            if (completedSale) printReceipt(completedSale).catch(() => {}).finally(returnFocus);
+            else returnFocus();
+          }, 0)
+        }
       />
     </div>
   );

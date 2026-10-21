@@ -2,8 +2,9 @@ import { vi } from "vitest";
 import { screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import CartLines from ".";
-import { posTerminalState, renderWithProviders } from "../../../test/renderWithProviders";
+import { authState, posTerminalState, renderWithProviders } from "../../../test/renderWithProviders";
 import { draftSale, phoneProduct, saleLine } from "../../../test/posFixtures";
+import { cashierUser } from "../../../test/fixtures";
 import * as salesService from "../../../services/salesService";
 import * as stockService from "../../../services/stockService";
 
@@ -150,5 +151,248 @@ describe("CartLines stock warning", () => {
     const unknown = screen.getByRole("status", { name: /stock lookup failed/i });
     expect(unknown).toHaveTextContent("?");
     expect(unknown).toHaveAttribute("title", "Stock lookup failed, try reloading");
+  });
+
+  it("highlights the line a refused complete points at (P5-8)", () => {
+    renderCart([cableLine, phoneLine], {
+      completeError: {
+        kind: "unit_sold",
+        message: "Cannot sell IMEI '356938035643809'",
+        status: 409,
+        reconcile: false,
+        imei: "356938035643809",
+        sale_line_id: "line-2",
+      },
+    });
+
+    const phone = row(phoneProduct.name);
+    expect(phone).toHaveAttribute("aria-invalid", "true");
+    expect(phone).toHaveClass("ring-red-500");
+    expect(within(phone).getByText("Sold on another sale")).toBeInTheDocument();
+
+    const cable = row("USB-C Cable 1m");
+    expect(cable).not.toHaveAttribute("aria-invalid");
+    expect(within(cable).queryByText("Sold on another sale")).not.toBeInTheDocument();
+  });
+
+  describe("warranty select (P5-18)", () => {
+    const warranty = (name) => screen.getByRole("combobox", { name: `Warranty for ${name}` });
+
+    it("shows each line's warranty, with every period on offer, serialized lines too", () => {
+      renderCart([
+        { ...cableLine, warranty: "CHECKING" },
+        { ...phoneLine, warranty: "MONTH_12" },
+      ]);
+
+      expect(warranty("USB-C Cable 1m")).toHaveValue("CHECKING");
+      expect(warranty(phoneProduct.name)).toHaveValue("MONTH_12");
+      expect(
+        within(warranty(phoneProduct.name))
+          .getAllByRole("option")
+          .map((o) => o.textContent),
+      ).toEqual([
+        "No warranty",
+        "Checking",
+        "1 week",
+        "2 weeks",
+        "1 month",
+        "2 months",
+        "3 months",
+        "6 months",
+        "12 months",
+        "18 months",
+        "24 months",
+      ]);
+    });
+
+    it("changing it PATCHes the line's warranty", async () => {
+      const user = userEvent.setup();
+      salesService.updateSaleLine.mockResolvedValue(draftSale({ lines: [{ ...cableLine, warranty: "WEEK_2" }] }));
+      const { store } = renderCart([{ ...cableLine, warranty: "CHECKING" }]);
+
+      await user.selectOptions(warranty("USB-C Cable 1m"), "2 weeks");
+
+      await waitFor(() =>
+        expect(salesService.updateSaleLine).toHaveBeenCalledWith("sale-1", "line-1", { warranty: "WEEK_2" }),
+      );
+      await waitFor(() => expect(warranty("USB-C Cable 1m")).toHaveValue("WEEK_2"));
+      expect(store.getState().posTerminal.busyLineIds).toEqual([]);
+    });
+
+    it("arrowing through periods saves only the final one, once, after a pause", async () => {
+      const user = userEvent.setup();
+      salesService.updateSaleLine.mockResolvedValue(draftSale({ lines: [{ ...cableLine, warranty: "MONTH_1" }] }));
+      const { store } = renderCart([{ ...cableLine, warranty: "CHECKING" }]);
+      const select = warranty("USB-C Cable 1m");
+
+      // Like ↓ ↓ ↓ on a closed select: one change per press
+      await user.selectOptions(select, "1 week");
+      await user.selectOptions(select, "2 weeks");
+      await user.selectOptions(select, "1 month");
+
+      // Shown at once, not saved yet, row not dimmed
+      expect(select).toHaveValue("MONTH_1");
+      expect(salesService.updateSaleLine).not.toHaveBeenCalled();
+      expect(store.getState().posTerminal.busyLineIds).toEqual([]);
+
+      await waitFor(() => expect(salesService.updateSaleLine).toHaveBeenCalledTimes(1));
+      expect(salesService.updateSaleLine).toHaveBeenCalledWith("sale-1", "line-1", { warranty: "MONTH_1" });
+      await waitFor(() => expect(store.getState().posTerminal.busyLineIds).toEqual([]));
+      expect(select).toHaveValue("MONTH_1");
+    });
+
+    it("going back to the saved value before the pause sends nothing", async () => {
+      const user = userEvent.setup();
+      renderCart([{ ...cableLine, warranty: "CHECKING" }]);
+      const select = warranty("USB-C Cable 1m");
+
+      await user.selectOptions(select, "1 week");
+      await user.selectOptions(select, "Checking");
+      await new Promise((r) => setTimeout(r, 600));
+
+      expect(salesService.updateSaleLine).not.toHaveBeenCalled();
+      expect(select).toHaveValue("CHECKING");
+    });
+
+    it("a failed save shows the line's saved warranty again", async () => {
+      const user = userEvent.setup();
+      salesService.updateSaleLine.mockRejectedValue(
+        Object.assign(new Error("Network Error"), { response: undefined }),
+      );
+      renderCart([{ ...cableLine, warranty: "CHECKING" }]);
+      const select = warranty("USB-C Cable 1m");
+
+      await user.selectOptions(select, "12 months");
+
+      await waitFor(() => expect(salesService.updateSaleLine).toHaveBeenCalledTimes(1));
+      await waitFor(() => expect(select).toHaveValue("CHECKING"));
+    });
+
+    it("ignores a change while the line is busy, keeping focus in the select", async () => {
+      const user = userEvent.setup();
+      renderCart([{ ...cableLine, warranty: "CHECKING" }], { busyLineIds: ["line-1"] });
+
+      const select = warranty("USB-C Cable 1m");
+      expect(select).toBeEnabled();
+      expect(select).toHaveAttribute("aria-disabled", "true");
+      await user.selectOptions(select, "12 months");
+
+      expect(salesService.updateSaleLine).not.toHaveBeenCalled();
+      expect(select).toHaveValue("CHECKING");
+    });
+
+    it("a pending row shows the product's default, disabled", () => {
+      renderCart([], {
+        pendingLines: [
+          {
+            id: "pending-1",
+            product_id: "p-x",
+            product_name_snapshot: "Pending Item",
+            quantity: 1,
+            unit_price: "100.00",
+            imei_snapshot: null,
+            line_total: null,
+            warranty: "MONTH_6",
+          },
+        ],
+      });
+
+      expect(warranty("Pending Item")).toHaveValue("MONTH_6");
+      expect(warranty("Pending Item")).toBeDisabled();
+    });
+
+    it("+ and - in the select don't change the quantity", async () => {
+      const user = userEvent.setup();
+      renderCart([{ ...cableLine, warranty: "CHECKING" }]);
+
+      warranty("USB-C Cable 1m").focus();
+      await user.keyboard("+-");
+
+      expect(salesService.updateSaleLine).not.toHaveBeenCalled();
+    });
+  });
+
+  describe("discount (P5-20)", () => {
+    const asCashier = { auth: authState(cashierUser) };
+    const renderAs = (lines, auth = asCashier) =>
+      renderWithProviders(<CartLines />, {
+        preloadedState: { ...auth, posTerminal: posTerminalState({ draftSale: draftSale({ lines }) }) },
+      });
+
+    const percentLine = {
+      ...cableLine,
+      discount_type: "PERCENT",
+      discount_value: "20.00",
+      discount_amount: "600.00",
+      line_total: "2400.00",
+    };
+    const priceEachLine = {
+      ...phoneLine,
+      discount_type: "UNIT_PRICE",
+      discount_value: "230000.00",
+      discount_amount: "15000.00",
+      line_total: "230000.00",
+    };
+
+    it("gives a cashier a Discount button on each line", () => {
+      renderAs([cableLine, phoneLine]);
+
+      expect(within(row("USB-C Cable 1m")).getAllByRole("button", { name: "Discount USB-C Cable 1m" }).length).toBeGreaterThan(0);
+      expect(within(row(phoneProduct.name)).getAllByRole("button", { name: `Discount ${phoneProduct.name}` }).length).toBeGreaterThan(0);
+    });
+
+    it("shows no Discount button without the permission", () => {
+      renderCart([cableLine]);
+      expect(screen.queryByRole("button", { name: /Discount/ })).not.toBeInTheDocument();
+    });
+
+    it("D on a focused row opens the dialog for that line", async () => {
+      const user = userEvent.setup();
+      renderAs([cableLine, phoneLine]);
+
+      row(phoneProduct.name).focus();
+      await user.keyboard("d");
+
+      const dialog = await screen.findByRole("dialog", { name: "Discount" });
+      expect(dialog).toHaveTextContent(phoneProduct.name);
+    });
+
+    it("D in the qty input or the warranty select types / is ignored, not a dialog", async () => {
+      const user = userEvent.setup();
+      renderAs([cableLine]);
+
+      screen.getByRole("combobox", { name: "Warranty for USB-C Cable 1m" }).focus();
+      await user.keyboard("d");
+      within(row("USB-C Cable 1m")).getByLabelText(/quantity for usb-c cable/i).focus();
+      await user.keyboard("d");
+
+      expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    });
+
+    it("shows the original price struck through, the new one and the badge", () => {
+      renderAs([percentLine, priceEachLine]);
+
+      const cable = row("USB-C Cable 1m");
+      expect(within(cable).getByTestId("original-price")).toHaveTextContent("1,500.00");
+      expect(within(cable).getByTestId("discounted-price")).toHaveTextContent("1,200.00");
+      expect(within(cable).getAllByRole("button", { name: /Change discount for USB-C Cable 1m \(20%\)/ })[0]).toHaveTextContent(
+        "−20%",
+      );
+
+      const phone = row(phoneProduct.name);
+      expect(within(phone).getByTestId("original-price")).toHaveTextContent("245,000.00");
+      expect(within(phone).getByTestId("discounted-price")).toHaveTextContent("230,000.00");
+      expect(within(phone).getAllByRole("button", { name: /Change discount/ })[0]).toHaveTextContent("230,000.00 each");
+    });
+
+    it("the badge reopens the dialog on the line's discount", async () => {
+      const user = userEvent.setup();
+      renderAs([percentLine]);
+
+      await user.click(within(row("USB-C Cable 1m")).getAllByRole("button", { name: /Change discount/ })[0]);
+
+      const dialog = await screen.findByRole("dialog", { name: "Discount" });
+      expect(within(dialog).getByRole("textbox")).toHaveValue("20");
+    });
   });
 });

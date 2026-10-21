@@ -8,7 +8,14 @@ import {
   renderWithProviders,
 } from "../../test/renderWithProviders";
 import { cashierUser, mainShop } from "../../test/fixtures";
-import { customer, draftSale, phoneProduct, saleLine, tradeInPayment } from "../../test/posFixtures";
+import {
+  completedSaleForReceipt,
+  customer,
+  draftSale,
+  phoneProduct,
+  saleLine,
+  tradeInPayment,
+} from "../../test/posFixtures";
 import useTerminalSessionStore from "../../store/zustand/terminalSessionStore";
 import * as salesService from "../../services/salesService";
 import * as stockService from "../../services/stockService";
@@ -312,7 +319,8 @@ describe("PosTerminal F4 payment hotkey", () => {
       amount: 2990,
       cash_received: 3000,
     });
-    expect(screen.getByTestId("totals-ready")).toHaveTextContent("Ready to complete");
+    expect(screen.getByTestId("totals-ready")).toHaveTextContent("Paid in full");
+    expect(screen.getByRole("button", { name: /Complete sale/ })).toBeEnabled();
     expect(screen.getByTestId("totals-change")).toHaveTextContent("10.00");
     expect(screen.getByTestId("totals-balance")).toHaveTextContent("0.00");
     expect(screen.queryByRole("button", { name: /^Pay / })).not.toBeInTheDocument();
@@ -362,6 +370,277 @@ describe("PosTerminal F4 payment hotkey", () => {
 
     await waitFor(() => expect(paymentDialog()).not.toBeInTheDocument());
     await waitFor(() => expect(scanBar()).toHaveFocus());
+  });
+});
+
+describe("PosTerminal F9 complete hotkey (P5-3, P5-4)", () => {
+  const completeDialog = () => screen.queryByRole("dialog", { name: "Complete this sale?" });
+  const cash = { id: "pay-1", payment_method: "CASH", amount: "3990.00", cash_received: "4000.00", reference_number: null };
+  // `lines` total 3990.00, paid in full in cash
+  const paidSale = () =>
+    draftSale({ lines, subtotal: "3990.00", total: "3990.00", amount_paid: "3990.00", change_due: "10.00", payments: [cash] });
+
+  it("F9 opens the confirm from the scan bar on a fully paid sale", async () => {
+    salesService.createSale.mockResolvedValue(paidSale());
+    const user = userEvent.setup();
+    await renderTerminal();
+    expect(scanBar()).toHaveFocus();
+
+    await user.keyboard("[F9]");
+
+    const dialog = await screen.findByRole("dialog", { name: "Complete this sale?" });
+    expect(within(dialog).getByTestId("complete-total")).toHaveTextContent("3,990.00");
+  });
+
+  it("the Complete sale button opens the same confirm", async () => {
+    salesService.createSale.mockResolvedValue(paidSale());
+    const user = userEvent.setup();
+    await renderTerminal();
+
+    await user.click(screen.getByRole("button", { name: /Complete sale/ }));
+
+    expect(await screen.findByRole("dialog", { name: "Complete this sale?" })).toBeInTheDocument();
+  });
+
+  it("F9 cancels the browser's own F9 (Edge: Immersive Reader) even when it does nothing", async () => {
+    // Not paid: Pay shows, Complete doesn't, F9 must do nothing
+    salesService.createSale.mockResolvedValue(draftSale({ lines, subtotal: "3990.00", total: "3990.00" }));
+    await renderTerminal();
+
+    expect(fireEvent.keyDown(scanBar(), { key: "F9", code: "F9" })).toBe(false);
+    expect(completeDialog()).not.toBeInTheDocument();
+  });
+
+  it("F9 is ignored while another dialog is open", async () => {
+    salesService.createSale.mockResolvedValue(paidSale());
+    const user = userEvent.setup();
+    await renderTerminal();
+
+    await user.click(screen.getByRole("button", { name: "New sale" }));
+    await screen.findByRole("dialog", { name: "Start a new sale?" });
+    await user.keyboard("[F9]");
+
+    expect(completeDialog()).not.toBeInTheDocument();
+    expect(screen.getAllByRole("dialog")).toHaveLength(1);
+  });
+
+  it("Back closes the confirm and hands focus back to the scan bar", async () => {
+    salesService.createSale.mockResolvedValue(paidSale());
+    const user = userEvent.setup();
+    await renderTerminal();
+
+    await user.keyboard("[F9]");
+    const dialog = await screen.findByRole("dialog", { name: "Complete this sale?" });
+    await user.click(within(dialog).getByRole("button", { name: "Back" }));
+
+    await waitFor(() => expect(completeDialog()).not.toBeInTheDocument());
+    await waitFor(() => expect(scanBar()).toHaveFocus());
+    expect(salesService.completeSale).not.toHaveBeenCalled();
+  });
+
+  it("F9 then Enter completes the sale", async () => {
+    salesService.createSale.mockResolvedValue(paidSale());
+    salesService.completeSale.mockResolvedValue({ ...paidSale(), status: "COMPLETED", sale_number: "INV-20261020-0001" });
+    stockService.listStock.mockResolvedValue([
+      { product_id: lines[0].product_id, branch_id: "branch-main", quantity: 10, manage_stock: true },
+      { product_id: lines[1].product_id, branch_id: "branch-main", quantity: 10, manage_stock: true },
+    ]);
+    const user = userEvent.setup();
+    await renderTerminal();
+
+    await user.keyboard("[F9]");
+    const dialog = await screen.findByRole("dialog", { name: "Complete this sale?" });
+    await waitFor(() => expect(within(dialog).queryByText("Checking stock…")).not.toBeInTheDocument());
+    await waitFor(() => expect(within(dialog).getByRole("button", { name: /Complete sale/ })).toHaveFocus());
+    await user.keyboard("{Enter}");
+
+    await waitFor(() => expect(completeDialog()).not.toBeInTheDocument());
+    expect(salesService.completeSale).toHaveBeenCalledWith("sale-1");
+  });
+});
+
+describe("PosTerminal Sale complete panel (P5-9, P5-10)", () => {
+  const cash = { id: "pay-1", payment_method: "CASH", amount: "3990.00", cash_received: "4000.00", reference_number: null };
+  const paidSale = () =>
+    draftSale({ lines, subtotal: "3990.00", total: "3990.00", amount_paid: "3990.00", change_due: "10.00", payments: [cash] });
+  const completed = () => ({
+    ...paidSale(),
+    status: "COMPLETED",
+    sale_number: "INV-20261020-0001",
+    completed_at: "2026-10-20T09:15:00.000Z",
+  });
+  const nextDraft = () => draftSale({ id: "sale-2" });
+  const panel = () => screen.queryByRole("region", { name: "Sale complete" });
+
+  // F9 → Enter on a paid sale; returns once the panel shows.
+  const completeTheSale = async (user) => {
+    await user.keyboard("[F9]");
+    const dialog = await screen.findByRole("dialog", { name: "Complete this sale?" });
+    await waitFor(() => expect(within(dialog).queryByText("Checking stock…")).not.toBeInTheDocument());
+    await waitFor(() => expect(within(dialog).getByRole("button", { name: /Complete sale/ })).toHaveFocus());
+    await user.keyboard("{Enter}");
+    await screen.findByRole("region", { name: "Sale complete" });
+    await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
+  };
+
+  beforeEach(() => {
+    salesService.createSale.mockResolvedValueOnce(paidSale()).mockResolvedValueOnce(nextDraft());
+    salesService.completeSale.mockResolvedValue(completed());
+  });
+
+  it("replaces the cart and the right column; the scan bar stays live and focused", async () => {
+    const user = userEvent.setup();
+    await renderTerminal();
+
+    await completeTheSale(user);
+
+    expect(within(panel()).getByTestId("sale-number")).toHaveTextContent("INV-20261020-0001");
+    expect(within(panel()).getByTestId("sale-complete-change")).toHaveTextContent("10.00");
+    expect(screen.queryByRole("list", { name: "Cart" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("region", { name: "Sale totals" })).not.toBeInTheDocument();
+    expect(scanBar()).toBeEnabled();
+    await waitFor(() => expect(scanBar()).toHaveFocus());
+    // The next draft is opened in the background, behind the panel
+    await waitFor(() => expect(salesService.createSale).toHaveBeenCalledTimes(2));
+  });
+
+  it("Enter on the empty scan bar starts the next sale", async () => {
+    const user = userEvent.setup();
+    await renderTerminal();
+    await completeTheSale(user);
+    await waitFor(() => expect(scanBar()).toHaveFocus());
+
+    await user.keyboard("{Enter}");
+
+    await waitFor(() => expect(panel()).not.toBeInTheDocument());
+    expect(await screen.findByText("Cart is empty")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /^Pay / })).toBeDisabled();
+    expect(scanBar()).toHaveFocus();
+  });
+
+  it("a scan on the panel starts the next sale and adds the item to it", async () => {
+    productsService.getProductByBarcode.mockResolvedValue({
+      id: "p-cable", name: "USB-C Cable 1m", sku: "ACC-0001", selling_price: "1500.00", is_serialized: false,
+    });
+    salesService.addSaleLine.mockResolvedValue(draftSale({ id: "sale-2", lines: [saleLine()] }));
+    const user = userEvent.setup();
+    await renderTerminal();
+    await completeTheSale(user);
+
+    await user.type(scanBar(), "4006381333931{Enter}");
+
+    await waitFor(() =>
+      expect(salesService.addSaleLine).toHaveBeenCalledWith("sale-2", { product_id: "p-cable", quantity: 1 }),
+    );
+    await waitFor(() => expect(panel()).not.toBeInTheDocument());
+    expect(screen.getByRole("listitem", { name: "USB-C Cable 1m" })).toBeInTheDocument();
+  });
+
+  describe("receipts (P5-12)", () => {
+    const receiptRoot = () => document.getElementById("receipt-root");
+    let print;
+
+    beforeEach(() => {
+      print = vi.spyOn(window, "print").mockImplementation(() => {});
+    });
+
+    afterEach(() => {
+      print.mockRestore();
+    });
+
+    it("prints the receipt by itself once the confirm has closed, then focus returns to the scan bar", async () => {
+      const user = userEvent.setup();
+      await renderTerminal();
+
+      await completeTheSale(user);
+
+      await waitFor(() => expect(print).toHaveBeenCalledTimes(1));
+      expect(receiptRoot().textContent).toContain("INV-20261020-0001");
+      await waitFor(() => expect(scanBar()).toHaveFocus());
+    });
+
+    it("Reprint on the Sale complete panel prints it again", async () => {
+      const user = userEvent.setup();
+      await renderTerminal();
+      await completeTheSale(user);
+      await waitFor(() => expect(print).toHaveBeenCalledTimes(1));
+
+      await user.click(within(panel()).getByRole("button", { name: /Reprint receipt/ }));
+
+      await waitFor(() => expect(print).toHaveBeenCalledTimes(2));
+    });
+
+    it("'Last receipt' on the next sale reprints the sale just completed, without a request", async () => {
+      const user = userEvent.setup();
+      await renderTerminal();
+      await completeTheSale(user);
+      await user.click(within(panel()).getByRole("button", { name: /Next sale/ }));
+      await waitFor(() => expect(panel()).not.toBeInTheDocument());
+      print.mockClear();
+      salesService.getSale.mockClear();
+
+      await user.click(screen.getByRole("button", { name: "Reprint last receipt" }));
+
+      await waitFor(() => expect(print).toHaveBeenCalledTimes(1));
+      expect(salesService.getSale).not.toHaveBeenCalled();
+      expect(receiptRoot().textContent).toContain("INV-20261020-0001");
+    });
+  });
+
+  it("the Next sale button does the same", async () => {
+    const user = userEvent.setup();
+    await renderTerminal();
+    await completeTheSale(user);
+
+    await user.click(within(panel()).getByRole("button", { name: /Next sale/ }));
+
+    await waitFor(() => expect(panel()).not.toBeInTheDocument());
+    await waitFor(() => expect(scanBar()).toHaveFocus());
+  });
+});
+
+describe("PosTerminal 'Last receipt' after a reload (P5-12)", () => {
+  let print;
+
+  beforeEach(() => {
+    print = vi.spyOn(window, "print").mockImplementation(() => {});
+    useTerminalSessionStore.getState().setLastCompletedSaleId("sale-done");
+  });
+
+  afterEach(() => {
+    print.mockRestore();
+  });
+
+  it("isn't offered before any sale has completed on this till", async () => {
+    useTerminalSessionStore.getState().setLastCompletedSaleId(null);
+    await renderTerminal();
+
+    expect(screen.queryByRole("button", { name: "Reprint last receipt" })).not.toBeInTheDocument();
+  });
+
+  it("re-reads the last completed sale by its persisted id and prints it", async () => {
+    salesService.getSale.mockImplementation((id) =>
+      Promise.resolve(id === "sale-done" ? completedSaleForReceipt() : draftSale({ lines: [lines[1]] })),
+    );
+    const user = userEvent.setup();
+    await renderTerminal();
+
+    await user.click(screen.getByRole("button", { name: "Reprint last receipt" }));
+
+    await waitFor(() => expect(print).toHaveBeenCalledTimes(1));
+    expect(salesService.getSale).toHaveBeenCalledWith("sale-done");
+    expect(document.getElementById("receipt-root").textContent).toContain("INV-20261021-0007");
+  });
+
+  it("says so when the last sale can't be loaded", async () => {
+    salesService.getSale.mockRejectedValue(new Error("Network Error"));
+    const user = userEvent.setup();
+    await renderTerminal();
+
+    await user.click(screen.getByRole("button", { name: "Reprint last receipt" }));
+
+    expect(await screen.findByRole("alert")).toHaveTextContent("Couldn't load the last receipt. Try again.");
+    expect(print).not.toHaveBeenCalled();
   });
 });
 

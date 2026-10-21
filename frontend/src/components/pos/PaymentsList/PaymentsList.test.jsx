@@ -295,4 +295,26 @@ describe("PaymentsList — Trade-in (P4-8 – P4-10)", () => {
     expect(confirm()).not.toBeInTheDocument();
     await waitFor(() => expect(salesService.removeSalePayment).toHaveBeenCalledWith("sale-1", "pay-card"));
   });
+
+  it("highlights the trade-in a refused complete points at, without changing the row height (P5-8)", () => {
+    const tradeIn = tradeInPayment({ trade_in_product: { id: "p-phone", name: "Used iPhone 12" } });
+    renderList([cash, tradeIn], {
+      completeError: {
+        kind: "trade_in_imei_in_stock",
+        message: "IMEI already exists in inventory",
+        status: 409,
+        reconcile: false,
+        imei: "354789102345678",
+        payment_id: "pay-ti",
+        existing_unit: null,
+      },
+    });
+
+    const flagged = row(/^Trade-in/);
+    expect(flagged).toHaveAttribute("aria-invalid", "true");
+    expect(flagged).toHaveClass("ring-red-500", "h-18");
+    expect(within(flagged).getByText("Already in stock")).toHaveClass("sr-only");
+    expect(within(flagged).getByTitle("Already in stock")).toBeInTheDocument();
+    expect(row(/^Cash/)).not.toHaveAttribute("aria-invalid");
+  });
 });

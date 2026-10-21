@@ -2,10 +2,12 @@ import {
   createSlice,
   createAsyncThunk,
   createSelector,
+  isAnyOf,
 } from "@reduxjs/toolkit";
 import {
   addSaleLine,
   addSalePayment,
+  completeSale as completeSaleRequest,
   createSale,
   discardSale,
   getSale,
@@ -26,6 +28,8 @@ import {
 import { listStock } from "../../services/stockService";
 import useTerminalSessionStore from "../zustand/terminalSessionStore";
 import { fromCents, toCents } from "../../utils/money";
+import { COMPLETE_ERROR, classifyCompleteError } from "../../utils/completeErrors";
+import { DEFAULT_WARRANTY } from "../../constants/warranty";
 
 /**
  * POS Terminal Slice
@@ -83,6 +87,26 @@ import { fromCents, toCents } from "../../utils/money";
  * A pending TRADE_IN row carries its trade_in_* fields and the picked
  * product (P4), so it reads like the server's row.
  *
+ * LINE WARRANTY AND DISCOUNT (P5-18, P5-20):
+ * updateLineWarranty and updateLineDiscount PATCH one line through the
+ * queue; the row is busy until the server answers. A discount failure
+ * stays in LineDiscountDialog rather than lineError.
+ *
+ * COMPLETE (P5):
+ * completeSale moves "ready" → "completing" → "completed" (or back to
+ * "ready" with completeError, or "gone"). It runs at most once at a time
+ * and resolves a lost answer by re-fetching the sale (planning doc P5-7);
+ * failures are classified into kinds (utils/completeErrors.js, P5-8). On
+ * success the draft pointer is cleared and the sale is kept as
+ * lastCompletedSale, its id persisted for "Reprint last receipt" (P5-12).
+ *
+ * NEXT SALE (P5-10):
+ * The next DRAFT is opened in the background as soon as a sale completes
+ * (openNextDraft; progress in `nextDraft`, not `status`), while the Sale
+ * complete panel shows. startNextSale (Next sale, Enter, or a scan) waits
+ * for it — or retries a failed create — and then returns the terminal to
+ * "ready" on it.
+ *
  * ORDERING:
  * Line, customer and payment mutations run one at a time through
  * `enqueue`, so fast consecutive scans reach the server in order and an
@@ -102,9 +126,19 @@ const enqueue = (task) => {
   return run;
 };
 
-/** Tests only: drop the queue so a request one test leaves unsettled can't stall the next. */
+// The in-flight background create of the next draft (P5-10), and the
+// in-flight "start the next sale", so concurrent callers share them.
+let nextDraftRequest = null;
+let nextSaleStart = null;
+
+/**
+ * Tests only: drop the queue (and the next-sale promises) so a request one
+ * test leaves unsettled can't stall the next.
+ */
 export const resetMutationQueue = () => {
   mutationQueue = Promise.resolve();
+  nextDraftRequest = null;
+  nextSaleStart = null;
 };
 
 const toError = (error, fallback) => {
@@ -128,6 +162,16 @@ const toError = (error, fallback) => {
 const hydrate = (sale) => ({ lines: [], payments: [], ...sale });
 
 const session = () => useTerminalSessionStore.getState();
+
+// While the sale is being completed, and after it is (until the next
+// draft opens), no edit may reach it: a request against a COMPLETED sale
+// would come back "Only DRAFT sales are mutable" and drop the terminal
+// into "gone". Every sale mutation thunk uses this as its `condition`, so
+// the dispatch is refused at once — no request, no pending row, no
+// rejected action. (P5 step A review)
+const SALE_LOCKED = ["completing", "completed"];
+const saleOpen = (_, { getState }) =>
+  !SALE_LOCKED.includes(getState().posTerminal.status);
 
 // ---------------------------------------------------------------------------
 // Thunks — draft lifecycle
@@ -161,7 +205,7 @@ export const ensureDraftSale = createAsyncThunk(
           // silently start a second draft.
           if (error?.response?.status !== 404) throw error;
         }
-        session().clear();
+        session().clearDraftSaleId();
       }
       return await createDraft(branchId);
     } catch (error) {
@@ -197,7 +241,7 @@ export const discardDraftSale = createAsyncThunk(
       });
     }
     try {
-      session().clear();
+      session().clearDraftSaleId();
       return await createDraft(branchId);
     } catch (error) {
       return rejectWithValue({
@@ -208,7 +252,7 @@ export const discardDraftSale = createAsyncThunk(
   },
   {
     condition: (_, { getState }) =>
-      !["loading", "discarding"].includes(getState().posTerminal.status),
+      !["loading", "discarding", ...SALE_LOCKED].includes(getState().posTerminal.status),
   },
 );
 
@@ -277,7 +321,7 @@ const saleMutation = (fallback, run, stockProductId) => async (arg, { dispatch, 
     return sale;
   } catch (error) {
     const err = toError(error, fallback);
-    if (err.gone) session().clear();
+    if (err.gone) session().clearDraftSaleId();
     return rejectWithValue(err);
   }
 };
@@ -297,6 +341,7 @@ export const addLine = createAsyncThunk(
     }),
     ({ product }) => product.id,
   ),
+  { condition: saleOpen },
 );
 
 /** arg: { lineId, quantity } */
@@ -307,6 +352,36 @@ export const updateLineQty = createAsyncThunk(
     (saleId, { lineId, quantity }) => updateSaleLine(saleId, lineId, { quantity }),
     ({ lineId }, sale) => sale.lines.find((l) => l.id === lineId)?.product_id,
   ),
+  { condition: saleOpen },
+);
+
+/**
+ * arg: { lineId, warranty } — the line's warranty period (P5-18, a code
+ * from constants/warranty.js). Any line, serialized included; not
+ * optimistic: the row is busy until the server answers, like a qty edit.
+ */
+export const updateLineWarranty = createAsyncThunk(
+  "posTerminal/updateLineWarranty",
+  saleMutation("Couldn't change the warranty", (saleId, { lineId, warranty }) =>
+    updateSaleLine(saleId, lineId, { warranty }),
+  ),
+  { condition: saleOpen },
+);
+
+/**
+ * arg: { lineId, discount_type, discount_value } — set the line's discount
+ * (P5-20: PERCENT or UNIT_PRICE), or remove it with both null. Not
+ * optimistic: the row is busy until the server answers. A failure is not
+ * put in lineError: LineDiscountDialog stays open and shows it (incl. the
+ * #24 "Remove or reduce payments first" when the total would drop below
+ * what's paid).
+ */
+export const updateLineDiscount = createAsyncThunk(
+  "posTerminal/updateLineDiscount",
+  saleMutation("Couldn't change the discount", (saleId, { lineId, discount_type, discount_value }) =>
+    updateSaleLine(saleId, lineId, { discount_type, discount_value }),
+  ),
+  { condition: saleOpen },
 );
 
 /** arg: { lineId } — DELETE is 204, so re-fetch the sale. */
@@ -316,6 +391,7 @@ export const removeLine = createAsyncThunk(
     await removeSaleLine(saleId, lineId);
     return getSale(saleId);
   }),
+  { condition: saleOpen },
 );
 
 // ---------------------------------------------------------------------------
@@ -339,6 +415,7 @@ export const attachCustomer = createAsyncThunk(
   saleMutation("Couldn't attach the customer", (saleId, { customer }) =>
     updateSale(saleId, { customer_id: customer.id }),
   ),
+  { condition: saleOpen },
 );
 
 /**
@@ -351,7 +428,8 @@ export const detachCustomer = createAsyncThunk(
     updateSale(saleId, { customer_id: null }),
   ),
   {
-    condition: (_, { getState }) => !hasTradeInPayment(getState().posTerminal),
+    condition: (arg, api) =>
+      saleOpen(arg, api) && !hasTradeInPayment(api.getState().posTerminal),
   },
 );
 
@@ -386,6 +464,8 @@ export const createAndAttachCustomer = createAsyncThunk(
     }
     return result.payload;
   },
+  // Refused before the customer is created, not just before the attach.
+  { condition: saleOpen },
 );
 
 /**
@@ -409,6 +489,7 @@ export const saveCustomerNic = createAsyncThunk(
       });
     }
   },
+  { condition: saleOpen },
 );
 
 // ---------------------------------------------------------------------------
@@ -429,6 +510,7 @@ export const addPayment = createAsyncThunk(
     delete body.trade_in_product;
     return addSalePayment(saleId, body);
   }),
+  { condition: saleOpen },
 );
 
 /** arg: { paymentId } — DELETE is 204, so re-fetch the sale. */
@@ -438,7 +520,160 @@ export const removePayment = createAsyncThunk(
     await removeSalePayment(saleId, paymentId);
     return getSale(saleId);
   }),
+  { condition: saleOpen },
 );
+
+/**
+ * Re-read the draft from the server (P5-8: a complete refused because the
+ * sale no longer matches what the terminal shows — no lines, or paid ≠
+ * total). Queued like any edit; refused while completing / completed.
+ */
+export const reloadDraftSale = createAsyncThunk(
+  "posTerminal/reloadDraftSale",
+  saleMutation("Couldn't reload the sale", (saleId) => getSale(saleId)),
+  { condition: saleOpen },
+);
+
+// ---------------------------------------------------------------------------
+// Thunks — complete (P5)
+// ---------------------------------------------------------------------------
+
+// E6 names the phone's unit; the line selling that unit is the one to point at.
+const withLineForUnit = (err, sale) => {
+  if (err.kind !== COMPLETE_ERROR.UNIT_SOLD || !err.existing_unit) return err;
+  const line = sale?.lines?.find((l) => l.product_unit_id === err.existing_unit.id);
+  return { ...err, sale_line_id: line?.id ?? null };
+};
+
+/**
+ * Complete the draft (P5-7). No arg.
+ *
+ * Runs once at a time: the `condition` only lets it start from "ready",
+ * so a second dispatch while "completing" (double click, F9 + Enter) is
+ * refused without a request. It is queued behind any line / payment edit
+ * still in flight, and the recovery below runs inside the same queued
+ * task, so nothing can change the sale in between.
+ *
+ * The backend completes at most once, so a lost answer is resolved by
+ * asking: on no response, a timeout, a 5xx or E2 ("Cannot complete a
+ * COMPLETED sale") it re-fetches the sale —
+ * - COMPLETED → fulfilled with that sale, as if the answer had arrived
+ * - DRAFT → rejected with the error; completing again is safe
+ * - VOIDED or 404 → rejected with `gone: true` (as for any vanished draft)
+ * - the re-fetch fails too → rejected with `unconfirmed: true`; completing
+ *   again is still safe (it either completes or gets E2 and recovers)
+ *
+ * Rejections carry the classified error (utils/completeErrors.js). On
+ * success the draft pointer is cleared and the sale becomes
+ * `lastCompletedSale` (its id persisted for "Reprint last receipt");
+ * opening the next draft is the terminal's job (P5-10).
+ */
+export const completeSale = createAsyncThunk(
+  "posTerminal/completeSale",
+  async (_, { dispatch, getState, rejectWithValue }) => {
+    const saleId = getState().posTerminal.draftSaleId;
+    const outcome = await enqueue(async () => {
+      try {
+        return { sale: await completeSaleRequest(saleId) };
+      } catch (error) {
+        const err = withLineForUnit(
+          classifyCompleteError(error),
+          getState().posTerminal.draftSale,
+        );
+        if (err.kind === COMPLETE_ERROR.NOT_FOUND) return { error: { ...err, gone: true } };
+        if (!err.reconcile) return { error: err };
+        try {
+          const sale = await getSale(saleId);
+          if (sale.status === "COMPLETED") return { sale };
+          if (sale.status === "DRAFT") return { error: err };
+          return { error: { ...err, gone: true } };
+        } catch (fetchError) {
+          if (fetchError?.response?.status === 404) return { error: { ...err, gone: true } };
+          return { error: { ...err, unconfirmed: true } };
+        }
+      }
+    });
+
+    if (outcome.error) {
+      if (outcome.error.gone) session().clearDraftSaleId();
+      return rejectWithValue(outcome.error);
+    }
+    session().clearDraftSaleId();
+    session().setLastCompletedSaleId(outcome.sale.id);
+    // P5-10: open the next draft now, in the background, so the first
+    // scan of the next customer never waits on a create.
+    requestNextDraft(dispatch, outcome.sale.branch_id);
+    return outcome.sale;
+  },
+  {
+    condition: (_, { getState }) => {
+      const { status, draftSaleId } = getState().posTerminal;
+      return status === "ready" && !!draftSaleId;
+    },
+  },
+);
+
+// ---------------------------------------------------------------------------
+// Thunks — next sale (P5-10)
+// ---------------------------------------------------------------------------
+
+/**
+ * Create the next DRAFT behind the Sale complete panel. Its progress is
+ * `nextDraft.status` (creating | ready | failed), never the page-level
+ * `status`, so the panel stays up meanwhile. On success the draft pointer
+ * moves to it, but `status` stays "completed": edits are still refused
+ * until startNextSale.
+ */
+export const openNextDraft = createAsyncThunk(
+  "posTerminal/openNextDraft",
+  async ({ branchId }, { rejectWithValue }) => {
+    try {
+      return await createDraft(branchId);
+    } catch (error) {
+      return rejectWithValue(toError(error, "Couldn't open the next sale"));
+    }
+  },
+);
+
+const requestNextDraft = (dispatch, branchId) => {
+  nextDraftRequest ??= dispatch(openNextDraft({ branchId })).finally(() => {
+    nextDraftRequest = null;
+  });
+  return nextDraftRequest;
+};
+
+const startNextSaleThunk = createAsyncThunk(
+  "posTerminal/startNextSale",
+  async (_, { dispatch, getState, rejectWithValue }) => {
+    const pos = () => getState().posTerminal;
+    if (pos().nextDraft.status === "creating") await nextDraftRequest;
+    if (pos().nextDraft.status !== "ready") {
+      await requestNextDraft(dispatch, pos().lastCompletedSale?.branch_id);
+    }
+    if (pos().nextDraft.status !== "ready") {
+      return rejectWithValue(pos().nextDraft.error ?? { message: "Couldn't open the next sale" });
+    }
+    return true;
+  },
+);
+
+/**
+ * Leave the Sale complete panel for the next draft (Next sale, Enter on
+ * the empty scan bar, or a scan). Waits for the background create, or
+ * retries it if it failed. Resolves true once the terminal is "ready" on
+ * the next draft (also when it already was), false if the draft couldn't
+ * be opened (the panel shows why). Concurrent calls share one attempt.
+ */
+export const startNextSale = () => (dispatch, getState) => {
+  if (getState().posTerminal.status !== "completed") {
+    return Promise.resolve(getState().posTerminal.status === "ready");
+  }
+  nextSaleStart ??= dispatch(startNextSaleThunk()).then((result) => {
+    nextSaleStart = null;
+    return startNextSaleThunk.fulfilled.match(result);
+  });
+  return nextSaleStart;
+};
 
 // ---------------------------------------------------------------------------
 // Thunks — scanning
@@ -494,7 +729,8 @@ export const searchProducts = createAsyncThunk(
 const initialState = {
   draftSaleId: null,
   draftSale: null,
-  // Draft lifecycle: idle | loading | ready | discarding | error | gone
+  // Draft lifecycle: idle | loading | ready | discarding | completing |
+  // completed | error | gone
   status: "idle",
   // Draft lifecycle error: { message, status } | null
   error: null,
@@ -530,6 +766,13 @@ const initialState = {
   removingPaymentIds: [],
   // Last payment mutation error: { message, status } | null
   paymentError: null,
+  // The sale this terminal last completed (P5-9, P5-12)
+  lastCompletedSale: null,
+  // Last complete failure, classified (utils/completeErrors.js) | null
+  completeError: null,
+  // The draft opened behind the Sale complete panel (P5-10):
+  // { status: idle | creating | ready | failed, error }
+  nextDraft: { status: "idle", error: null },
 };
 
 const markBusy = (state, lineId) => {
@@ -657,6 +900,9 @@ const posTerminalSlice = createSlice({
     clearPaymentError: (state) => {
       state.paymentError = null;
     },
+    clearCompleteError: (state) => {
+      state.completeError = null;
+    },
     clearScan: (state) => {
       state.scanState = "idle";
       state.scanResults = [];
@@ -683,6 +929,7 @@ const posTerminalSlice = createSlice({
       state.pendingPayments = [];
       state.removingPaymentIds = [];
       state.paymentError = null;
+      state.completeError = null;
     };
     const lifecycleRejected = (state, action) => {
       state.status = "error";
@@ -721,6 +968,8 @@ const posTerminalSlice = createSlice({
           quantity,
           imei_snapshot: imei ?? null,
           line_total: null,
+          // What the server will start the line on (P5-18)
+          warranty: product.default_warranty ?? DEFAULT_WARRANTY,
         });
       })
       .addCase(addLine.fulfilled, (state, action) => {
@@ -748,6 +997,29 @@ const posTerminalSlice = createSlice({
       .addCase(updateLineQty.rejected, (state, action) => {
         unmarkBusy(state, action.meta.arg.lineId);
         applyRejection(state, action.payload, "Couldn't change the quantity");
+      })
+      .addCase(updateLineWarranty.pending, (state, action) => {
+        state.lineError = null;
+        markBusy(state, action.meta.arg.lineId);
+      })
+      .addCase(updateLineWarranty.fulfilled, (state, action) => {
+        unmarkBusy(state, action.meta.arg.lineId);
+        replaceSale(state, action.payload);
+      })
+      .addCase(updateLineWarranty.rejected, (state, action) => {
+        unmarkBusy(state, action.meta.arg.lineId);
+        applyRejection(state, action.payload, "Couldn't change the warranty");
+      })
+      .addCase(updateLineDiscount.pending, (state, action) => {
+        markBusy(state, action.meta.arg.lineId);
+      })
+      .addCase(updateLineDiscount.fulfilled, (state, action) => {
+        unmarkBusy(state, action.meta.arg.lineId);
+        replaceSale(state, action.payload);
+      })
+      .addCase(updateLineDiscount.rejected, (state, action) => {
+        unmarkBusy(state, action.meta.arg.lineId);
+        markGone(state, action.payload);
       })
       .addCase(removeLine.pending, (state, action) => {
         state.lineError = null;
@@ -826,6 +1098,65 @@ const posTerminalSlice = createSlice({
         applyPaymentRejection(state, action.payload, "Couldn't remove the payment");
       })
 
+      // Complete (P5-7) — the cart stays on screen while "completing"
+      .addCase(completeSale.pending, (state) => {
+        state.status = "completing";
+        state.completeError = null;
+        state.nextDraft = { status: "idle", error: null };
+      })
+      .addCase(completeSale.fulfilled, (state, action) => {
+        state.status = "completed";
+        state.lastCompletedSale = action.payload;
+        state.draftSale = null;
+        state.draftSaleId = null;
+        state.pendingLines = [];
+        state.busyLineIds = [];
+        state.lineError = null;
+        state.pendingPayments = [];
+        state.removingPaymentIds = [];
+        state.paymentError = null;
+      })
+      .addCase(completeSale.rejected, (state, action) => {
+        state.completeError = action.payload || {
+          kind: COMPLETE_ERROR.REJECTED,
+          message: "Couldn't complete the sale",
+          status: null,
+          reconcile: false,
+        };
+        state.status = "ready";
+        markGone(state, action.payload);
+      })
+
+      // Next sale (P5-10) — the panel stays up ("completed") throughout
+      .addCase(openNextDraft.pending, (state) => {
+        state.nextDraft = { status: "creating", error: null };
+      })
+      .addCase(openNextDraft.fulfilled, (state, action) => {
+        // A late answer (e.g. after a logout reset) must not revive a draft.
+        if (state.status !== "completed") return;
+        state.nextDraft = { status: "ready", error: null };
+        state.draftSale = action.payload;
+        state.draftSaleId = action.payload.id;
+      })
+      .addCase(openNextDraft.rejected, (state, action) => {
+        state.nextDraft = {
+          status: "failed",
+          error: action.payload || { message: "Couldn't open the next sale" },
+        };
+      })
+      .addCase(startNextSaleThunk.fulfilled, (state) => {
+        state.status = "ready";
+        state.nextDraft = { status: "idle", error: null };
+        state.completeError = null;
+      })
+
+      .addCase(reloadDraftSale.fulfilled, (state, action) => {
+        replaceSale(state, action.payload);
+      })
+      .addCase(reloadDraftSale.rejected, (state, action) => {
+        applyRejection(state, action.payload, "Couldn't reload the sale");
+      })
+
       // Stock
       .addCase(refreshStock.fulfilled, (state, action) => {
         const { productId } = action.meta.arg;
@@ -879,7 +1210,27 @@ const posTerminalSlice = createSlice({
         state.scanState = "idle";
         state.scanResults = [];
         state.scanError = action.payload || { message: "Search failed" };
-      });
+      })
+
+      // P5-8: a complete error (and the line / payment it highlights)
+      // stands until the cashier changes the sale.
+      .addMatcher(
+        isAnyOf(
+          addLine.fulfilled,
+          updateLineQty.fulfilled,
+          updateLineWarranty.fulfilled,
+          updateLineDiscount.fulfilled,
+          removeLine.fulfilled,
+          addPayment.fulfilled,
+          removePayment.fulfilled,
+          attachCustomer.fulfilled,
+          detachCustomer.fulfilled,
+          saveCustomerNic.fulfilled,
+        ),
+        (state) => {
+          state.completeError = null;
+        },
+      );
   },
 });
 
@@ -888,6 +1239,7 @@ export const {
   clearLineError,
   clearCustomerError,
   clearPaymentError,
+  clearCompleteError,
   clearScan,
 } = posTerminalSlice.actions;
 
@@ -1030,5 +1382,83 @@ export const selectCanPay = (state) =>
  */
 export const selectReadyToComplete = (state) =>
   state.posTerminal.status === "ready" && selectIsFullyPaid(state);
+
+/**
+ * The Complete sale button and F9 (P5-3, P5-4): fully paid per the
+ * server, and no line / payment mutation in flight (the totals are about
+ * to change).
+ */
+export const selectCanComplete = (state) =>
+  selectReadyToComplete(state) && !selectCartSyncing(state);
+
+export const selectIsCompleting = (state) =>
+  state.posTerminal.status === "completing";
+
+/** Classified complete failure (utils/completeErrors.js), or null. */
+export const selectCompleteError = (state) => state.posTerminal.completeError;
+
+const ISSUE_LABELS = {
+  [COMPLETE_ERROR.OUT_OF_STOCK]: "Not enough stock",
+  [COMPLETE_ERROR.UNIT_SOLD]: "Sold on another sale",
+  [COMPLETE_ERROR.TRADE_IN_IMEI_IN_STOCK]: "Already in stock",
+  [COMPLETE_ERROR.TRADE_IN_PRODUCT_INACTIVE]: "Product inactive",
+};
+
+const NO_ISSUE = { lineIds: [], paymentIds: [], label: null };
+
+/**
+ * What the last complete error points at (P5-8): the cart lines and
+ * payments to highlight, and a short label for them. Empty when there is
+ * no complete error, or it isn't about a particular line or payment.
+ *
+ * - out of stock: the line from #32's sale_line_id (or every line of the
+ *   product, from an older server without it)
+ * - a line's phone sold elsewhere: the line selling that unit
+ * - trade-in IMEI in stock: the payment from payment_id (or the trade-in
+ *   with that IMEI)
+ * - inactive trade-in product: the trade-ins on that product (the 400
+ *   names the product, not the payment)
+ */
+export const selectCompleteIssue = createSelector(
+  [selectCompleteError, selectDraftSale],
+  (err, sale) => {
+    if (!err || !sale) return NO_ISSUE;
+    const lines = sale.lines ?? [];
+    const tradeIns = (sale.payments ?? []).filter(isTradeIn);
+    let lineIds = [];
+    let paymentIds = [];
+    switch (err.kind) {
+      case COMPLETE_ERROR.OUT_OF_STOCK:
+        lineIds = lines
+          .filter((l) => (err.sale_line_id ? l.id === err.sale_line_id : l.product_id === err.product_id))
+          .map((l) => l.id);
+        break;
+      case COMPLETE_ERROR.UNIT_SOLD:
+        lineIds = err.sale_line_id ? [err.sale_line_id] : [];
+        break;
+      case COMPLETE_ERROR.TRADE_IN_IMEI_IN_STOCK:
+        paymentIds = tradeIns
+          .filter((p) => (err.payment_id ? p.id === err.payment_id : p.trade_in_imei === err.imei))
+          .map((p) => p.id);
+        break;
+      case COMPLETE_ERROR.TRADE_IN_PRODUCT_INACTIVE:
+        paymentIds = tradeIns
+          .filter((p) => !err.product_name || p.trade_in_product?.name === err.product_name)
+          .map((p) => p.id);
+        break;
+      default:
+        return NO_ISSUE;
+    }
+    if (!lineIds.length && !paymentIds.length) return NO_ISSUE;
+    return { lineIds, paymentIds, label: ISSUE_LABELS[err.kind] };
+  },
+);
+
+/** The next draft behind the Sale complete panel: { status, error } (P5-10). */
+export const selectNextDraft = (state) => state.posTerminal.nextDraft;
+
+/** The sale this terminal last completed (hydrated), or null. */
+export const selectLastCompletedSale = (state) =>
+  state.posTerminal.lastCompletedSale;
 
 export default posTerminalSlice.reducer;
