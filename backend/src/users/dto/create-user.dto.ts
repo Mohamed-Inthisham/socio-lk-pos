@@ -9,6 +9,7 @@ import {
 } from 'class-validator';
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 import { UserRole } from '../enums/user-role.enum';
+import { IsOptionalNotNull } from '../../common/validators/is-optional-not-null.decorator';
 
 export class CreateUserDto {
   @ApiProperty({
@@ -47,7 +48,7 @@ export class CreateUserDto {
     example: UserRole.CASHIER,
     description: 'User role — defaults to CASHIER if omitted',
   })
-  @IsOptional()
+  @IsOptionalNotNull()
   @IsEnum(UserRole, {
     message: `Role must be one of: ${Object.values(UserRole).join(', ')}`,
   })

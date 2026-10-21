@@ -95,8 +95,67 @@ describe("CustomerAttachDialog", () => {
       name: "Sunil Silva",
       phone: "0779998888",
       nic: null,
+      email: null,
     });
     expect(salesService.updateSale).toHaveBeenCalledWith("sale-1", { customer_id: "cust-new" });
+  });
+
+  it("shows a result's email under its phone", async () => {
+    customersService.listCustomers.mockResolvedValue({
+      data: [customer({ email: "kamal.p@gmail.com" })],
+      meta: {},
+    });
+    const user = userEvent.setup();
+    renderDialog();
+
+    await user.type(searchInput(), "kamal.p@");
+    const list = await screen.findByRole("listbox");
+
+    expect(within(list).getByTestId("customer-result-email")).toHaveTextContent("kamal.p@gmail.com");
+    expect(searchInput()).toHaveAttribute("placeholder", "Name, phone, NIC or email");
+  });
+
+  it("prefills Email from a query with @, and sends it lowercased", async () => {
+    const created = customer({ id: "cust-new", name: "Sunil Silva", phone: "0779998888", nic: null });
+    customersService.listCustomers.mockResolvedValue({ data: [], meta: {} });
+    customersService.createCustomer.mockResolvedValue(created);
+    const user = userEvent.setup();
+    renderDialog();
+
+    await user.type(searchInput(), "Sunil@Example.com");
+    await user.click(await screen.findByRole("button", { name: /create new customer/i }));
+
+    const form = screen.getByRole("form", { name: /new customer/i });
+    expect(within(form).getByLabelText(/email/i)).toHaveValue("Sunil@Example.com");
+    expect(within(form).getByLabelText(/^name/i)).toHaveValue("");
+
+    await user.type(within(form).getByLabelText(/^name/i), "Sunil Silva");
+    await user.type(within(form).getByLabelText(/phone/i), "0779998888");
+    await user.click(within(form).getByRole("button", { name: /save and attach/i }));
+
+    await waitFor(() =>
+      expect(customersService.createCustomer).toHaveBeenCalledWith({
+        name: "Sunil Silva",
+        phone: "0779998888",
+        nic: null,
+        email: "sunil@example.com",
+      }),
+    );
+  });
+
+  it("checks the email's shape before sending", async () => {
+    const user = userEvent.setup();
+    renderDialog();
+
+    await user.type(searchInput(), "Sunil Silva");
+    await user.click(screen.getByRole("button", { name: /create new customer/i }));
+    const form = screen.getByRole("form", { name: /new customer/i });
+    await user.type(within(form).getByLabelText(/phone/i), "0779998888");
+    await user.type(within(form).getByLabelText(/email/i), "sunil@");
+    await user.click(within(form).getByRole("button", { name: /save and attach/i }));
+
+    expect(within(form).getByText("Enter an email like name@example.com.")).toBeInTheDocument();
+    expect(customersService.createCustomer).not.toHaveBeenCalled();
   });
 
   it("offers the existing customer on a NIC clash and attaches them", async () => {

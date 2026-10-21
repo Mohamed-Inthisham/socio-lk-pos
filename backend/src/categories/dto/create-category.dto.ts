@@ -9,6 +9,7 @@ import {
   Min,
 } from 'class-validator';
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
+import { IsOptionalNotNull } from '../../common/validators/is-optional-not-null.decorator';
 
 export class CreateCategoryDto {
   @ApiProperty({
@@ -40,7 +41,7 @@ export class CreateCategoryDto {
       'Sort order (ascending). Defaults to 0. Ties broken alphabetically by name.',
     minimum: 0,
   })
-  @IsOptional()
+  @IsOptionalNotNull()
   @IsInt()
   @Min(0)
   sort_order?: number;
@@ -49,7 +50,7 @@ export class CreateCategoryDto {
     example: true,
     description: 'Whether the category is active — defaults to true if omitted',
   })
-  @IsOptional()
+  @IsOptionalNotNull()
   @IsBoolean()
   is_active?: boolean;
 }

@@ -34,6 +34,11 @@ Applied consistently across the codebase:
 - `@ApiProperty` on required fields, `@ApiPropertyOptional` on optional ones.
 - Always include `example` (realistic value shown in Try It Out), `description` (short one-liner), and constraints (`minLength`, `maxLength`, `enum`) where relevant.
 - For DTOs derived via `PartialType`/`OmitType`, always import from `@nestjs/swagger`, not `@nestjs/mapped-types` — the swagger versions preserve `@ApiProperty` metadata.
+- **`null` on a NOT NULL field is a 400, never a 500 or a silent no-op.** PATCH semantics: omitted = don't touch, `null` = clear (nullable fields only), value = set. `@IsOptional()` skips validation for `null` as well as `undefined`, so:
+  - Update DTOs built with `PartialType` pass `{ skipNullProperties: false }`: an omitted field is skipped, but `null` runs the field's own validators (e.g. "name must be a string").
+  - A field that is optional but NOT NULL in the table (`is_active`, `barcode`, `sort_order`, a quantity…) uses `@IsOptionalNotNull()` (`common/validators`) instead of `@IsOptional()`: omitted is fine, `null` is "`<field>` must not be null". Put it on the create DTO; the update DTO inherits it.
+  - A nullable field keeps `@IsOptional()` (or `@IsOptional() @ValidateIf((_, v) => v !== null)`), so `null` clears it.
+  - `test/null-fields.e2e-spec.ts` checks this per entity.
 
 **Controllers:**
 - `@ApiTags('...')` at the class level — groups endpoints in the UI. Use human-readable names ("Audit Logs", "Health").

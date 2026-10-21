@@ -523,7 +523,7 @@ const ProductEdit = () => {
               <div className="md:col-span-2">
                 <InputField
                   label="Barcode"
-                  placeholder="Leave blank to unset"
+                  required
                   error={errors.barcode?.message}
                   {...register("barcode")}
                 />

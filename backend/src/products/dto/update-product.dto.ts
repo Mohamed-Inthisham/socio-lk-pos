@@ -1,15 +1,8 @@
-import { OmitType, PartialType } from '@nestjs/swagger';
-import {
-  IsEnum,
-  IsOptional,
-  IsString,
-  MinLength,
-  MaxLength,
-  ValidateIf,
-} from 'class-validator';
+import { PartialType } from '@nestjs/swagger';
+import { IsString, MinLength, MaxLength } from 'class-validator';
 import { ApiPropertyOptional } from '@nestjs/swagger';
 import { CreateProductDto } from './create-product.dto';
-import { WarrantyPeriod } from '../enums/warranty-period.enum';
+import { IsOptionalNotNull } from '../../common/validators/is-optional-not-null.decorator';
 
 /**
  * All fields from CreateProductDto are optional in update, PLUS `sku`
@@ -17,26 +10,17 @@ import { WarrantyPeriod } from '../enums/warranty-period.enum';
  * See decision doc: SKU is always auto-generated on create, but admin
  * can rename it on update for corrections/migrations.
  *
- * default_warranty is re-declared rather than inherited: PartialType adds
- * @IsOptional to every field, which lets null skip validation and reach
- * the NOT NULL column (a 500). Here null is a 400 (P5-18).
+ * skipNullProperties: false — an omitted field is left alone, but null
+ * runs the field's validators, so null on a NOT NULL column is a 400
+ * rather than a 500 (or, for brand_id / category_id / branch_id, a silent
+ * no-op). Fields optional on create but NOT NULL in the table (barcode,
+ * barcode_type, default_warranty, is_serialized, is_active) carry
+ * @IsOptionalNotNull in CreateProductDto; nullable ones (description,
+ * phone_*) keep @IsOptional, so null still clears them.
  */
-export class UpdateProductDto extends PartialType(
-  OmitType(CreateProductDto, ['default_warranty'] as const),
-) {
-  @ApiPropertyOptional({
-    enum: WarrantyPeriod,
-    example: WarrantyPeriod.MONTH_12,
-    description:
-      'The warranty a sale line of this product starts with (P5-18). ' +
-      'Omit to leave it unchanged; null is rejected.',
-  })
-  @ValidateIf((o: UpdateProductDto) => o.default_warranty !== undefined)
-  @IsEnum(WarrantyPeriod, {
-    message: `default_warranty must be one of: ${Object.values(WarrantyPeriod).join(', ')}`,
-  })
-  default_warranty?: WarrantyPeriod;
-
+export class UpdateProductDto extends PartialType(CreateProductDto, {
+  skipNullProperties: false,
+}) {
   @ApiPropertyOptional({
     example: 'SKU-000047',
     description:
@@ -46,7 +30,7 @@ export class UpdateProductDto extends PartialType(
     minLength: 1,
     maxLength: 30,
   })
-  @IsOptional()
+  @IsOptionalNotNull()
   @IsString()
   @MinLength(1)
   @MaxLength(30)

@@ -180,6 +180,13 @@ export const productCreateSchema = productBaseSchema.superRefine(
  */
 export const productEditSchema = productBaseSchema
   .extend({
+    // Every saved product has a barcode (NOT NULL; auto-generated when left
+    // blank on create), so the edit form can change it but not clear it.
+    barcode: z
+      .string()
+      .trim()
+      .min(1, "Barcode is required")
+      .max(64, "Barcode is too long"),
     sku: z
       .string()
       .min(1, "SKU is required")
@@ -287,9 +294,11 @@ export const mapProductToFormValues = (product) => ({
  * - No accidental overwrites of concurrent edits
  *
  * WHY EMPTY STRINGS → null (NOT "delete field"):
- * If admin clears the barcode input, they mean "remove the barcode" —
- * we need to send null so the backend clears it. Compare to create,
- * where empty string means "never set it in the first place."
+ * If admin clears an optional text input (description, phone details),
+ * they mean "remove it" — we need to send null so the backend clears it.
+ * Compare to create, where empty string means "never set it in the first
+ * place." Only nullable columns get null: the API rejects null on NOT
+ * NULL ones (400), so barcode is required by productEditSchema instead.
  */
 export const buildUpdatePayload = (formData, dirtyFields) => {
   const payload = {};
@@ -304,7 +313,6 @@ export const buildUpdatePayload = (formData, dirtyFields) => {
   // Nullable string fields: "" means "clear it"
   const nullableStringFields = [
     "description",
-    "barcode",
     "phone_model",
     "phone_storage",
     "phone_color",
@@ -314,11 +322,6 @@ export const buildUpdatePayload = (formData, dirtyFields) => {
   nullableStringFields.forEach((f) => {
     if (payload[f] === "") payload[f] = null;
   });
-
-  // Barcode type is only meaningful if barcode is present
-  if (payload.barcode === null) {
-    payload.barcode_type = null;
-  }
 
   return payload;
 };

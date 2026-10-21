@@ -7,13 +7,13 @@ import {
   IsUUID,
   IsEnum,
   IsNumberString,
-  ValidateIf,
 } from 'class-validator';
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 import { ProductType } from '../enums/product-type.enum';
 import { BarcodeType } from '../enums/barcode-type.enum';
 import { PhoneCondition } from '../enums/phone-condition.enum';
 import { WarrantyPeriod } from '../enums/warranty-period.enum';
+import { IsOptionalNotNull } from '../../common/validators/is-optional-not-null.decorator';
 
 export class CreateProductDto {
   @ApiProperty({
@@ -44,7 +44,7 @@ export class CreateProductDto {
       'is auto-generated. If provided, must be unique across the catalog.',
     maxLength: 100,
   })
-  @IsOptional()
+  @IsOptionalNotNull()
   @IsString()
   @MinLength(1)
   @MaxLength(100)
@@ -55,7 +55,7 @@ export class CreateProductDto {
     example: BarcodeType.CODE_128,
     description: 'Barcode symbology. Defaults to CODE_128.',
   })
-  @IsOptional()
+  @IsOptionalNotNull()
   @IsEnum(BarcodeType)
   barcode_type?: BarcodeType;
 
@@ -115,8 +115,8 @@ export class CreateProductDto {
   )
   selling_price!: string;
 
-  // ValidateIf (not IsOptional): omitted is fine (NO_WARRANTY on create),
-  // null is rejected — NO_WARRANTY is the explicit "no warranty".
+  // Omitted is fine (NO_WARRANTY on create); null is rejected — NO_WARRANTY
+  // is the explicit "no warranty".
   @ApiPropertyOptional({
     enum: WarrantyPeriod,
     example: WarrantyPeriod.MONTH_12,
@@ -126,7 +126,7 @@ export class CreateProductDto {
       'CHECKING = the customer checks it in the shop, no warranty after. ' +
       'Defaults to NO_WARRANTY (P5-19).',
   })
-  @ValidateIf((o: CreateProductDto) => o.default_warranty !== undefined)
+  @IsOptionalNotNull()
   @IsEnum(WarrantyPeriod, {
     message: `default_warranty must be one of: ${Object.values(WarrantyPeriod).join(', ')}`,
   })
@@ -138,7 +138,7 @@ export class CreateProductDto {
       'If true, the cashier must enter an IMEI/serial per unit at sale time. ' +
       'Typical for phones. Defaults to false.',
   })
-  @IsOptional()
+  @IsOptionalNotNull()
   @IsBoolean()
   is_serialized?: boolean;
 
@@ -146,7 +146,7 @@ export class CreateProductDto {
     example: true,
     description: 'Whether the product is active. Defaults to true.',
   })
-  @IsOptional()
+  @IsOptionalNotNull()
   @IsBoolean()
   is_active?: boolean;
 

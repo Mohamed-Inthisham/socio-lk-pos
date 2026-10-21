@@ -7,6 +7,7 @@ import {
   Matches,
 } from 'class-validator';
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
+import { IsOptionalNotNull } from '../../common/validators/is-optional-not-null.decorator';
 
 export class CreateBranchDto {
   @ApiProperty({
@@ -45,7 +46,7 @@ export class CreateBranchDto {
     example: true,
     description: 'Whether the branch is active — defaults to true if omitted',
   })
-  @IsOptional()
+  @IsOptionalNotNull()
   @IsBoolean()
   is_active?: boolean;
 }

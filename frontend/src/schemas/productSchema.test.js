@@ -3,6 +3,7 @@ import {
   buildUpdatePayload,
   mapProductToFormValues,
   productCreateSchema,
+  productEditSchema,
   productFormDefaults,
 } from "./productSchema";
 
@@ -62,5 +63,39 @@ describe("productSchema — default warranty (P5-18)", () => {
   it("leaves the default out of the update when it wasn't changed", () => {
     const payload = buildUpdatePayload(form({ name: "Renamed" }), { name: true });
     expect(payload).toEqual({ name: "Renamed" });
+  });
+});
+
+describe("productSchema — null only on nullable fields (the API rejects null elsewhere)", () => {
+  const editForm = (overrides = {}) =>
+    form({ sku: "SKU-000001", barcode: "SLP-000001", barcode_type: "CODE_128", ...overrides });
+
+  it("requires a barcode on edit (a saved product always has one)", () => {
+    const result = productEditSchema.safeParse(editForm({ barcode: "  " }));
+    expect(result.success).toBe(false);
+    expect(result.error.issues.find((i) => i.path[0] === "barcode").message).toBe("Barcode is required");
+    expect(productEditSchema.safeParse(editForm()).success).toBe(true);
+  });
+
+  it("still lets create leave the barcode blank (auto-generated)", () => {
+    expect(productCreateSchema.safeParse(form({ barcode: "" })).success).toBe(true);
+    expect(buildCreatePayload(form({ barcode: "" }))).not.toHaveProperty("barcode");
+  });
+
+  it("never sends barcode or barcode_type as null on update", () => {
+    const payload = buildUpdatePayload(editForm({ barcode: "", barcode_type: "EAN_13" }), {
+      barcode: true,
+      barcode_type: true,
+    });
+    expect(payload.barcode).not.toBeNull();
+    expect(payload.barcode_type).toBe("EAN_13");
+  });
+
+  it("sends null to clear the nullable text fields", () => {
+    const payload = buildUpdatePayload(editForm({ description: "", phone_model: "" }), {
+      description: true,
+      phone_model: true,
+    });
+    expect(payload).toEqual({ description: null, phone_model: null });
   });
 });

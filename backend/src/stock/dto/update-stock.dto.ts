@@ -1,5 +1,6 @@
-import { IsInt, Min, IsOptional, IsBoolean } from 'class-validator';
+import { IsInt, Min, IsBoolean } from 'class-validator';
 import { ApiPropertyOptional } from '@nestjs/swagger';
+import { IsOptionalNotNull } from '../../common/validators/is-optional-not-null.decorator';
 
 /**
  * Stock updates in R1. Deliberately excludes product_id and branch_id —
@@ -12,7 +13,7 @@ export class UpdateStockDto {
     description: 'New absolute quantity. Set this when receiving new stock.',
     minimum: 0,
   })
-  @IsOptional()
+  @IsOptionalNotNull()
   @IsInt()
   @Min(0)
   quantity?: number;
@@ -22,7 +23,7 @@ export class UpdateStockDto {
     description: 'New low-stock alert threshold.',
     minimum: 0,
   })
-  @IsOptional()
+  @IsOptionalNotNull()
   @IsInt()
   @Min(0)
   min_quantity?: number;
@@ -31,7 +32,7 @@ export class UpdateStockDto {
     example: false,
     description: 'Enable or disable stock tracking for this product+branch.',
   })
-  @IsOptional()
+  @IsOptionalNotNull()
   @IsBoolean()
   manage_stock?: boolean;
 }

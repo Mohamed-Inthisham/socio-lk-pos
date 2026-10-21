@@ -13,6 +13,7 @@ import { Transform } from 'class-transformer';
 import { ApiPropertyOptional } from '@nestjs/swagger';
 import { DiscountType } from '../enums/discount-type.enum';
 import { WarrantyPeriod } from '../../products/enums/warranty-period.enum';
+import { IsOptionalNotNull } from '../../common/validators/is-optional-not-null.decorator';
 
 /**
  * Normalize an optional string field: trim whitespace, convert empty
@@ -55,7 +56,7 @@ export class UpdateSaleLineDto {
     description: 'New quantity for this line. Must be a positive integer.',
     minimum: 1,
   })
-  @IsOptional()
+  @IsOptionalNotNull()
   @IsInt()
   @Min(1)
   quantity?: number;
@@ -117,8 +118,8 @@ export class UpdateSaleLineDto {
   @MaxLength(50)
   imei_snapshot?: string | null;
 
-  // Not nullable: NO_WARRANTY is the explicit "no warranty". ValidateIf
-  // (not IsOptional) so that null is rejected rather than skipped.
+  // Not nullable: NO_WARRANTY is the explicit "no warranty", so null is a
+  // 400 (IsOptionalNotNull) rather than skipped.
   @ApiPropertyOptional({
     enum: WarrantyPeriod,
     example: WarrantyPeriod.MONTH_12,
@@ -127,7 +128,7 @@ export class UpdateSaleLineDto {
       'NO_WARRANTY = sold without one (P5-19); CHECKING = the customer ' +
       'checks it in the shop, no warranty after.',
   })
-  @ValidateIf((o: UpdateSaleLineDto) => o.warranty !== undefined)
+  @IsOptionalNotNull()
   @IsEnum(WarrantyPeriod)
   warranty?: WarrantyPeriod;
 }
