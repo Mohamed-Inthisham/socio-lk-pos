@@ -25,6 +25,17 @@ if (!window.ResizeObserver) {
   };
 }
 
+// jsdom doesn't implement printing (it only logs "Not implemented").
+// Receipts call window.print() (utils/printReceipt.js); tests spy on it.
+window.print = () => {};
+
+// jsdom never loads images, so an <img> never becomes `complete` and
+// printReceipt would wait out its 2s cap for the logo on every print.
+Object.defineProperty(HTMLImageElement.prototype, "complete", {
+  configurable: true,
+  get: () => true,
+});
+
 afterEach(() => {
   cleanup();
 });

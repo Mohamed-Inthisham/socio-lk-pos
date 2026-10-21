@@ -60,6 +60,8 @@ import {
  * PROPS:
  * - open
  * - onClose: back without completing (Esc, backdrop, Back) and after success
+ * - onCompleted: (sale) => void — the sale completed (the terminal prints
+ *   its receipt once the dialog has gone, P5-12)
  * - afterLeave: runs once the close transition ends (focus hand-off)
  */
 
@@ -73,7 +75,7 @@ const CHECK_FAILED = "failed";
 // Items listed with their warranty; more show as "+N more" (fits ~640px).
 const MAX_ITEMS = 3;
 
-const CompleteSaleDialog = ({ open, onClose, afterLeave }) => {
+const CompleteSaleDialog = ({ open, onClose, onCompleted, afterLeave }) => {
   const dispatch = useDispatch();
   const store = useStore();
   const draft = useSelector(selectDraftSale);
@@ -166,6 +168,7 @@ const CompleteSaleDialog = ({ open, onClose, afterLeave }) => {
     if (completeSale.fulfilled.match(result) || result.payload?.gone) {
       checkRequest.current = null;
       setCheck(CHECK_IDLE);
+      if (completeSale.fulfilled.match(result)) onCompleted?.(result.payload);
       onClose();
     }
   };

@@ -21,3 +21,32 @@
     color-scheme: dark;
   }
 }
+
+/*
+ * Printed receipt (Phase 6.4 P5-13, utils/printReceipt.js). On screen the
+ * receipt root is laid out off-screen (so it can be measured) and never
+ * seen; when printing it is the only thing on the page, black on white
+ * even in dark mode. The page size comes from the @page rule printReceipt
+ * sets for each receipt.
+ */
+#receipt-root {
+  position: fixed;
+  top: 0;
+  left: -10000px;
+  pointer-events: none;
+}
+
+@media print {
+  html,
+  body {
+    background: #fff !important;
+    color-scheme: light;
+  }
+  body > *:not(#receipt-root) {
+    display: none !important;
+  }
+  #receipt-root {
+    position: static;
+    left: auto;
+  }
+}

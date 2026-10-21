@@ -8,7 +8,14 @@ import {
   renderWithProviders,
 } from "../../test/renderWithProviders";
 import { cashierUser, mainShop } from "../../test/fixtures";
-import { customer, draftSale, phoneProduct, saleLine, tradeInPayment } from "../../test/posFixtures";
+import {
+  completedSaleForReceipt,
+  customer,
+  draftSale,
+  phoneProduct,
+  saleLine,
+  tradeInPayment,
+} from "../../test/posFixtures";
 import useTerminalSessionStore from "../../store/zustand/terminalSessionStore";
 import * as salesService from "../../services/salesService";
 import * as stockService from "../../services/stockService";
@@ -529,6 +536,57 @@ describe("PosTerminal Sale complete panel (P5-9, P5-10)", () => {
     expect(screen.getByRole("listitem", { name: "USB-C Cable 1m" })).toBeInTheDocument();
   });
 
+  describe("receipts (P5-12)", () => {
+    const receiptRoot = () => document.getElementById("receipt-root");
+    let print;
+
+    beforeEach(() => {
+      print = vi.spyOn(window, "print").mockImplementation(() => {});
+    });
+
+    afterEach(() => {
+      print.mockRestore();
+    });
+
+    it("prints the receipt by itself once the confirm has closed, then focus returns to the scan bar", async () => {
+      const user = userEvent.setup();
+      await renderTerminal();
+
+      await completeTheSale(user);
+
+      await waitFor(() => expect(print).toHaveBeenCalledTimes(1));
+      expect(receiptRoot().textContent).toContain("INV-20261020-0001");
+      await waitFor(() => expect(scanBar()).toHaveFocus());
+    });
+
+    it("Reprint on the Sale complete panel prints it again", async () => {
+      const user = userEvent.setup();
+      await renderTerminal();
+      await completeTheSale(user);
+      await waitFor(() => expect(print).toHaveBeenCalledTimes(1));
+
+      await user.click(within(panel()).getByRole("button", { name: /Reprint receipt/ }));
+
+      await waitFor(() => expect(print).toHaveBeenCalledTimes(2));
+    });
+
+    it("'Last receipt' on the next sale reprints the sale just completed, without a request", async () => {
+      const user = userEvent.setup();
+      await renderTerminal();
+      await completeTheSale(user);
+      await user.click(within(panel()).getByRole("button", { name: /Next sale/ }));
+      await waitFor(() => expect(panel()).not.toBeInTheDocument());
+      print.mockClear();
+      salesService.getSale.mockClear();
+
+      await user.click(screen.getByRole("button", { name: "Reprint last receipt" }));
+
+      await waitFor(() => expect(print).toHaveBeenCalledTimes(1));
+      expect(salesService.getSale).not.toHaveBeenCalled();
+      expect(receiptRoot().textContent).toContain("INV-20261020-0001");
+    });
+  });
+
   it("the Next sale button does the same", async () => {
     const user = userEvent.setup();
     await renderTerminal();
@@ -538,6 +596,51 @@ describe("PosTerminal Sale complete panel (P5-9, P5-10)", () => {
 
     await waitFor(() => expect(panel()).not.toBeInTheDocument());
     await waitFor(() => expect(scanBar()).toHaveFocus());
+  });
+});
+
+describe("PosTerminal 'Last receipt' after a reload (P5-12)", () => {
+  let print;
+
+  beforeEach(() => {
+    print = vi.spyOn(window, "print").mockImplementation(() => {});
+    useTerminalSessionStore.getState().setLastCompletedSaleId("sale-done");
+  });
+
+  afterEach(() => {
+    print.mockRestore();
+  });
+
+  it("isn't offered before any sale has completed on this till", async () => {
+    useTerminalSessionStore.getState().setLastCompletedSaleId(null);
+    await renderTerminal();
+
+    expect(screen.queryByRole("button", { name: "Reprint last receipt" })).not.toBeInTheDocument();
+  });
+
+  it("re-reads the last completed sale by its persisted id and prints it", async () => {
+    salesService.getSale.mockImplementation((id) =>
+      Promise.resolve(id === "sale-done" ? completedSaleForReceipt() : draftSale({ lines: [lines[1]] })),
+    );
+    const user = userEvent.setup();
+    await renderTerminal();
+
+    await user.click(screen.getByRole("button", { name: "Reprint last receipt" }));
+
+    await waitFor(() => expect(print).toHaveBeenCalledTimes(1));
+    expect(salesService.getSale).toHaveBeenCalledWith("sale-done");
+    expect(document.getElementById("receipt-root").textContent).toContain("INV-20261021-0007");
+  });
+
+  it("says so when the last sale can't be loaded", async () => {
+    salesService.getSale.mockRejectedValue(new Error("Network Error"));
+    const user = userEvent.setup();
+    await renderTerminal();
+
+    await user.click(screen.getByRole("button", { name: "Reprint last receipt" }));
+
+    expect(await screen.findByRole("alert")).toHaveTextContent("Couldn't load the last receipt. Try again.");
+    expect(print).not.toHaveBeenCalled();
   });
 });
 
