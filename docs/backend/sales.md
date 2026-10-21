@@ -91,16 +91,20 @@ Product prices change. A phone's `selling_price` might rise tomorrow. If the sal
 
 Snapshotting is the standard e-commerce pattern for this exact reason. The cost of doubling ~40 bytes per line is negligible; the alternative (time-travelling the products table on every historical query) is unaffordable.
 
-### Warranty is snapshotted at complete-time
+### Warranty per line
 
-`warranty_months_snapshot` and `checking_warranty_days_snapshot` (nullable integers) are copied from the line's `Product` (`warranty_months`, `checking_warranty_days`) **inside `completeSale`**, not at add-time, in one set-based `UPDATE sale_lines … FROM products` just before the sale is flipped to COMPLETED. They come back on every hydrated sale's lines.
+_(Phase 6.4 P5-18; replaced #32's `warranty_months_snapshot` + `checking_warranty_days_snapshot`.)_
 
-- `null`: not snapshotted — a DRAFT line, or a sale completed before the snapshot existed (Phase 6.4 P5; no backfill, because today's product values may not be what applied then).
-- `0`: snapshotted, and the product had no warranty.
+Each line carries one warranty period, chosen at the till:
 
-#### Why complete-time, not add-time
+- `warranty` (`varchar(20) NOT NULL`, CHECK — the codes in [products.md](./products.md) "One default warranty period"). `addLine` sets it to the request's `warranty` if given, otherwise the product's `default_warranty`. `PATCH /sales/:id/lines/:lineId { warranty }` changes it while the sale is a DRAFT, for every line mode (serialized included) and every role; `null` or an unknown code is a 400, a non-DRAFT sale the usual 400. A warranty-only PATCH leaves the money untouched.
+- `warranty_until` (`date`, nullable) — the last day of warranty, set by `completeSale` inside its transaction: the **Colombo** completion date plus the period (`WEEK_n` adds days; `MONTH_n` adds calendar months, clamped to the month's end, so 30 Jan + 1 month = 28 Feb). `NULL` for `CHECKING`, and on DRAFT lines.
 
-The receipt is printed at complete, and the warranty it promises should be the one in force at that moment. A draft can sit for a while (and drafts created before this change have no snapshot), so add-time would either miss lines or record a value older than the sale. Once completed, later product edits don't touch the line: a receipt reprinted months later shows the warranty the customer bought.
+Both come back on every hydrated sale's lines. The receipt prints them: "Warranty: 12 months (until 20 Oct 2027)", or "Checking only, no warranty after leaving the shop".
+
+#### Why on the line, chosen at the till
+
+The shop gives different warranties for the same product depending on the deal, so the product only supplies the starting point. Because the line can only change while it's a DRAFT, the value is fixed the moment the sale completes; later product edits never touch it, and a receipt reprinted months later shows what the customer bought. `warranty_until` is stored rather than recomputed so the receipt (and any later warranty lookup) reads one saved date, computed once on the server clock that also stamps `completed_at`.
 
 ### Money as `numeric(N,2)` in DB, strings in TypeScript
 
@@ -236,7 +240,7 @@ Inside one Postgres transaction with the sale row `pessimistic_write`-locked:
 4. For each in-house line (`external_supplier_id IS NULL`): decrement stock via `StockService.decrementForSale`, enlisted in the same transaction. A serialized in-house line also flips its ProductUnit to SOLD.
 5. For each TRADE_IN payment: check the customer and their NIC, then materialize the trade-in (see [used-phones.md](./used-phones.md#trade-ins-slice-g)).
 6. Issue the invoice number via `SaleNumberCountersService.generateNext`, also enlisted.
-7. Snapshot each line's warranty from its product (see above).
+7. Set each line's `warranty_until` from its warranty period (see "Warranty per line").
 8. UPDATE the sale: `status = COMPLETED, sale_number = <issued>, completed_at = now()`.
 
 If any step fails — insufficient stock, DB error, anything — the whole transaction rolls back. No partial completion is possible.
@@ -421,7 +425,7 @@ Six migrations shipped in Phase 6.3, one per major schema unit, in dependency or
 
 All six run cleanly on an empty DB and revert cleanly in reverse order. Verified end-to-end during Phase 6.3.
 
-Later sales migrations: Phase 6.4 P5 adds `AddSaleLinesWarrantySnapshot` (`sale_lines.warranty_months_snapshot` and `checking_warranty_days_snapshot`, nullable integers, no backfill; see "Warranty is snapshotted at complete-time").
+Later sales migrations: Phase 6.4 P5 added `AddSaleLinesWarrantySnapshot` (`sale_lines.warranty_months_snapshot` and `checking_warranty_days_snapshot`), then P5-18's `WarrantyPeriodPerLine` replaced them with `sale_lines.warranty` + `warranty_until` and `products.default_warranty` (dropping `warranty_months` / `checking_warranty_days`). It maps the old values to codes and backfills existing lines; `down()` restores the old columns from the codes. See "Warranty per line".
 
 ## Test Coverage
 

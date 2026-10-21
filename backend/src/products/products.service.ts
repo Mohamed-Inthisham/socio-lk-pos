@@ -76,8 +76,7 @@ export class ProductsService {
       description: dto.description ?? null,
       buying_price: dto.buying_price,
       selling_price: dto.selling_price,
-      warranty_months: dto.warranty_months,
-      checking_warranty_days: dto.checking_warranty_days,
+      default_warranty: dto.default_warranty,
       is_serialized: dto.is_serialized,
       is_active: dto.is_active,
       phone_condition: dto.phone_condition ?? null,
@@ -209,11 +208,8 @@ export class ProductsService {
       ...(dto.selling_price !== undefined && {
         selling_price: dto.selling_price,
       }),
-      ...(dto.warranty_months !== undefined && {
-        warranty_months: dto.warranty_months,
-      }),
-      ...(dto.checking_warranty_days !== undefined && {
-        checking_warranty_days: dto.checking_warranty_days,
+      ...(dto.default_warranty !== undefined && {
+        default_warranty: dto.default_warranty,
       }),
       ...(dto.is_serialized !== undefined && {
         is_serialized: dto.is_serialized,

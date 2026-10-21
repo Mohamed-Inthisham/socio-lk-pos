@@ -13,6 +13,8 @@ import { Brand } from '../src/brands/entities/brand.entity';
 import { Category } from '../src/categories/entities/category.entity';
 import { Product } from '../src/products/entities/product.entity';
 import { ProductType } from '../src/products/enums/product-type.enum';
+import { WarrantyPeriod } from '../src/products/enums/warranty-period.enum';
+import { DateTime } from 'luxon';
 import { SkuBarcodeCounter } from '../src/sku-barcode-counters/entities/sku-barcode-counter.entity';
 import { Supplier } from '../src/suppliers/entities/supplier.entity';
 import { SaleLine } from '../src/sales/entities/sale-line.entity';
@@ -149,8 +151,7 @@ describe('Sales (e2e)', () => {
       buying_price?: string;
       is_active?: boolean;
       is_serialized?: boolean;
-      warranty_months?: number;
-      checking_warranty_days?: number;
+      default_warranty?: WarrantyPeriod;
     } = {},
   ): Promise<Product> {
     const brandRepo = dataSource.getRepository(Brand);
@@ -189,8 +190,7 @@ describe('Sales (e2e)', () => {
         selling_price: overrides.selling_price ?? '100000.00',
         is_active: overrides.is_active ?? true,
         is_serialized: overrides.is_serialized ?? false,
-        warranty_months: overrides.warranty_months ?? 0,
-        checking_warranty_days: overrides.checking_warranty_days ?? 0,
+        default_warranty: overrides.default_warranty ?? WarrantyPeriod.CHECKING,
       }),
     );
   }
@@ -1964,16 +1964,14 @@ describe('Sales (e2e)', () => {
         stockQty?: number;
         externalSupplierId?: string;
         skipPayment?: boolean;
-        warrantyMonths?: number;
-        checkingWarrantyDays?: number;
+        defaultWarranty?: WarrantyPeriod;
       } = {},
     ) {
       const price = opts.productPrice ?? '100.00';
       const product = await seedProduct(branchId, {
         name: opts.productName ?? 'Test Product',
         selling_price: price,
-        warranty_months: opts.warrantyMonths,
-        checking_warranty_days: opts.checkingWarrantyDays,
+        default_warranty: opts.defaultWarranty,
       });
       // Give it stock (Phase 6.1 auto-creates the row at qty=0)
       if (opts.stockQty !== undefined) {
@@ -2044,7 +2042,11 @@ describe('Sales (e2e)', () => {
       expect(stock?.quantity).toBe(4);
     });
 
-    it("snapshots the product's warranty onto the line at complete (P5-1)", async () => {
+    // P5-18: the Colombo date the server stamps warranty_until from
+    const colomboDatePlus = (length: { days?: number; months?: number }) =>
+      DateTime.now().setZone('Asia/Colombo').plus(length).toISODate();
+
+    it("starts the line on the product's default warranty; completing sets warranty_until (P5-18)", async () => {
       const branch = await seedBranch();
       const { user, password } = await seedUser(UserRole.ADMIN, 'a@t.com');
       const cookies = await loginAndGetCookies(user.email, password);
@@ -2052,17 +2054,17 @@ describe('Sales (e2e)', () => {
         branch.id,
         user.id,
         cookies,
-        { stockQty: 5, warrantyMonths: 12, checkingWarrantyDays: 7 },
+        { stockQty: 5, defaultWarranty: WarrantyPeriod.MONTH_12 },
       );
 
-      // A DRAFT line has no snapshot yet
+      // A DRAFT line has its period but no last day yet
       const draft = await request(app.getHttpServer())
         .get(`/api/v1/sales/${sale.id}`)
         .set('Cookie', cookies)
         .expect(200);
       expect(draft.body.lines[0]).toMatchObject({
-        warranty_months_snapshot: null,
-        checking_warranty_days_snapshot: null,
+        warranty: WarrantyPeriod.MONTH_12,
+        warranty_until: null,
       });
 
       const response = await request(app.getHttpServer())
@@ -2071,12 +2073,12 @@ describe('Sales (e2e)', () => {
         .expect(200);
 
       expect(response.body.lines[0]).toMatchObject({
-        warranty_months_snapshot: 12,
-        checking_warranty_days_snapshot: 7,
+        warranty: WarrantyPeriod.MONTH_12,
+        warranty_until: colomboDatePlus({ months: 12 }),
       });
     });
 
-    it("keeps a completed sale's warranty snapshot when the product changes later", async () => {
+    it("keeps a completed line's warranty when the product's default changes later (P5-18)", async () => {
       const branch = await seedBranch();
       const { user, password } = await seedUser(UserRole.ADMIN, 'a@t.com');
       const cookies = await loginAndGetCookies(user.email, password);
@@ -2084,29 +2086,28 @@ describe('Sales (e2e)', () => {
         branch.id,
         user.id,
         cookies,
-        { stockQty: 5, warrantyMonths: 12, checkingWarrantyDays: 7 },
+        { stockQty: 5, defaultWarranty: WarrantyPeriod.MONTH_12 },
       );
       await request(app.getHttpServer())
         .post(`/api/v1/sales/${sale.id}/complete`)
         .set('Cookie', cookies)
         .expect(200);
 
-      await dataSource.getRepository(Product).update(product.id, {
-        warranty_months: 24,
-        checking_warranty_days: 14,
-      });
+      await dataSource
+        .getRepository(Product)
+        .update(product.id, { default_warranty: WarrantyPeriod.MONTH_24 });
 
       const after = await request(app.getHttpServer())
         .get(`/api/v1/sales/${sale.id}`)
         .set('Cookie', cookies)
         .expect(200);
       expect(after.body.lines[0]).toMatchObject({
-        warranty_months_snapshot: 12,
-        checking_warranty_days_snapshot: 7,
+        warranty: WarrantyPeriod.MONTH_12,
+        warranty_until: colomboDatePlus({ months: 12 }),
       });
     });
 
-    it('records 0, not null, for a product without a warranty', async () => {
+    it('a product without a warranty sells as CHECKING, with no warranty_until (P5-18)', async () => {
       const branch = await seedBranch();
       const { user, password } = await seedUser(UserRole.ADMIN, 'a@t.com');
       const cookies = await loginAndGetCookies(user.email, password);
@@ -2123,12 +2124,124 @@ describe('Sales (e2e)', () => {
         .expect(200);
 
       expect(response.body.lines[0]).toMatchObject({
-        warranty_months_snapshot: 0,
-        checking_warranty_days_snapshot: 0,
+        warranty: WarrantyPeriod.CHECKING,
+        warranty_until: null,
       });
     });
 
-    it('names the product and line in the insufficient-stock 409, and leaves the snapshot null (P5-2)', async () => {
+    it("the cashier can change a line's warranty on the DRAFT; completing uses it (P5-18)", async () => {
+      const branch = await seedBranch();
+      const { user, password } = await seedUser(UserRole.CASHIER, 'c@t.com');
+      const cookies = await loginAndGetCookies(user.email, password);
+      const { sale } = await seedReadyToCompleteSale(
+        branch.id,
+        user.id,
+        cookies,
+        { stockQty: 5, defaultWarranty: WarrantyPeriod.MONTH_12 },
+      );
+      const draft = await request(app.getHttpServer())
+        .get(`/api/v1/sales/${sale.id}`)
+        .set('Cookie', cookies)
+        .expect(200);
+      const line = draft.body.lines[0] as { id: string; line_total: string };
+
+      const patched = await request(app.getHttpServer())
+        .patch(`/api/v1/sales/${sale.id}/lines/${line.id}`)
+        .set('Cookie', cookies)
+        .send({ warranty: WarrantyPeriod.WEEK_1 })
+        .expect(200);
+      expect(patched.body.lines[0]).toMatchObject({
+        warranty: WarrantyPeriod.WEEK_1,
+        line_total: line.line_total,
+      });
+
+      const completed = await request(app.getHttpServer())
+        .post(`/api/v1/sales/${sale.id}/complete`)
+        .set('Cookie', cookies)
+        .expect(200);
+      expect(completed.body.lines[0]).toMatchObject({
+        warranty: WarrantyPeriod.WEEK_1,
+        warranty_until: colomboDatePlus({ days: 7 }),
+      });
+    });
+
+    it.each([
+      ['null', null],
+      ['an unknown code', 'MONTH_5'],
+    ])(
+      'rejects %s as a line warranty with 400 (P5-18)',
+      async (_, warranty) => {
+        const branch = await seedBranch();
+        const { user, password } = await seedUser(UserRole.ADMIN, 'a@t.com');
+        const cookies = await loginAndGetCookies(user.email, password);
+        const { sale } = await seedReadyToCompleteSale(
+          branch.id,
+          user.id,
+          cookies,
+          { stockQty: 5 },
+        );
+        const draft = await request(app.getHttpServer())
+          .get(`/api/v1/sales/${sale.id}`)
+          .set('Cookie', cookies)
+          .expect(200);
+
+        await request(app.getHttpServer())
+          .patch(`/api/v1/sales/${sale.id}/lines/${draft.body.lines[0].id}`)
+          .set('Cookie', cookies)
+          .send({ warranty })
+          .expect(400);
+      },
+    );
+
+    it('refuses to change the warranty once the sale is completed (P5-18)', async () => {
+      const branch = await seedBranch();
+      const { user, password } = await seedUser(UserRole.ADMIN, 'a@t.com');
+      const cookies = await loginAndGetCookies(user.email, password);
+      const { sale } = await seedReadyToCompleteSale(
+        branch.id,
+        user.id,
+        cookies,
+        { stockQty: 5 },
+      );
+      const done = await request(app.getHttpServer())
+        .post(`/api/v1/sales/${sale.id}/complete`)
+        .set('Cookie', cookies)
+        .expect(200);
+
+      const response = await request(app.getHttpServer())
+        .patch(`/api/v1/sales/${sale.id}/lines/${done.body.lines[0].id}`)
+        .set('Cookie', cookies)
+        .send({ warranty: WarrantyPeriod.MONTH_24 })
+        .expect(400);
+      expect(response.body.message).toMatch(/Only DRAFT sales are mutable/);
+    });
+
+    it('takes a warranty given when the line is added (P5-18)', async () => {
+      const branch = await seedBranch();
+      const { user, password } = await seedUser(UserRole.ADMIN, 'a@t.com');
+      const cookies = await loginAndGetCookies(user.email, password);
+      const product = await seedProduct(branch.id, {
+        default_warranty: WarrantyPeriod.MONTH_12,
+      });
+      const sale = await seedSale({
+        branch_id: branch.id,
+        cashier_id: user.id,
+      });
+
+      const response = await request(app.getHttpServer())
+        .post(`/api/v1/sales/${sale.id}/lines`)
+        .set('Cookie', cookies)
+        .send({
+          product_id: product.id,
+          quantity: 1,
+          warranty: WarrantyPeriod.MONTH_3,
+        })
+        .expect(201);
+
+      expect(response.body.lines[0].warranty).toBe(WarrantyPeriod.MONTH_3);
+    });
+
+    it('names the product and line in the insufficient-stock 409, and leaves warranty_until null (P5-2)', async () => {
       const branch = await seedBranch();
       const { user, password } = await seedUser(UserRole.ADMIN, 'a@t.com');
       const cookies = await loginAndGetCookies(user.email, password);
@@ -2136,7 +2249,7 @@ describe('Sales (e2e)', () => {
         branch.id,
         user.id,
         cookies,
-        { stockQty: 0, warrantyMonths: 12, checkingWarrantyDays: 7 },
+        { stockQty: 0, defaultWarranty: WarrantyPeriod.MONTH_12 },
       );
       const draft = await request(app.getHttpServer())
         .get(`/api/v1/sales/${sale.id}`)
@@ -2156,14 +2269,14 @@ describe('Sales (e2e)', () => {
         sale_line_id: lineId,
       });
 
-      // Rolled back: the line still has no snapshot
+      // Rolled back: the line keeps its period but has no last day
       const refreshed = await request(app.getHttpServer())
         .get(`/api/v1/sales/${sale.id}`)
         .set('Cookie', cookies)
         .expect(200);
       expect(refreshed.body.lines[0]).toMatchObject({
-        warranty_months_snapshot: null,
-        checking_warranty_days_snapshot: null,
+        warranty: WarrantyPeriod.MONTH_12,
+        warranty_until: null,
       });
     });
 

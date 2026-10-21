@@ -15,6 +15,7 @@ import usePermissions from "../../hooks/usePermissions";
 import { PERMISSIONS } from "../../constants/rolePermissions";
 import { getProduct } from "../../services/productsService";
 import { getStockByProduct } from "../../services/stockService";
+import { warrantyLabel } from "../../constants/warranty";
 import DeactivateProductDialog from "../../components/products/DeactivateProductDialog";
 import AdjustStockDialog from "../../components/products/AdjustStockDialog";
 
@@ -392,23 +393,9 @@ const ProductDetail = () => {
               mono
             />
             <Field
-              label="Warranty"
-              value={
-                product.warranty_months
-                  ? `${product.warranty_months} months`
-                  : null
-              }
+              label="Default warranty"
+              value={product.default_warranty ? warrantyLabel(product.default_warranty) : null}
             />
-            {isPhone && (
-              <Field
-                label="Checking warranty"
-                value={
-                  product.checking_warranty_days
-                    ? `${product.checking_warranty_days} days`
-                    : null
-                }
-              />
-            )}
           </Section>
 
           {isPhone && (

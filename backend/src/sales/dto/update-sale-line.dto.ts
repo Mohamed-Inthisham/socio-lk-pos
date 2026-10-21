@@ -12,6 +12,7 @@ import {
 import { Transform } from 'class-transformer';
 import { ApiPropertyOptional } from '@nestjs/swagger';
 import { DiscountType } from '../enums/discount-type.enum';
+import { WarrantyPeriod } from '../../products/enums/warranty-period.enum';
 
 /**
  * Normalize an optional string field: trim whitespace, convert empty
@@ -114,4 +115,18 @@ export class UpdateSaleLineDto {
   @IsString()
   @MaxLength(50)
   imei_snapshot?: string | null;
+
+  // Not nullable: CHECKING already means "no warranty after leaving the
+  // shop". ValidateIf (not IsOptional) so that null is rejected rather
+  // than skipped.
+  @ApiPropertyOptional({
+    enum: WarrantyPeriod,
+    example: WarrantyPeriod.MONTH_12,
+    description:
+      "The line's warranty period (P5-18). Any period from the list; " +
+      'CHECKING = the customer checks it in the shop, no warranty after.',
+  })
+  @ValidateIf((o: UpdateSaleLineDto) => o.warranty !== undefined)
+  @IsEnum(WarrantyPeriod)
+  warranty?: WarrantyPeriod;
 }

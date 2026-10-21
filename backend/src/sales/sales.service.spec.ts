@@ -28,6 +28,7 @@ import { ProductUnitsService } from '../product-units/product-units.service';
 import { ProductUnitStatus } from '../product-units/enums/product-unit-status.enum';
 import { ProductUnit } from '../product-units/entities/product-unit.entity';
 import { PhonePurchasesService } from '../phone-purchases/phone-purchases.service';
+import { WarrantyPeriod } from '../products/enums/warranty-period.enum';
 
 describe('SalesService', () => {
   let service: SalesService;
@@ -833,6 +834,7 @@ describe('SalesService', () => {
       branch_id: string;
       is_active: boolean;
       is_serialized: boolean;
+      default_warranty: WarrantyPeriod;
     }> = {},
   ) => ({
     id: 'prod-1',
@@ -885,6 +887,8 @@ describe('SalesService', () => {
       line_total: string;
       external_supplier_id: string | null;
       imei_snapshot: string | null;
+      product_unit_id: string | null;
+      warranty: WarrantyPeriod;
     }> = {},
   ) => ({
     id: 'line-1',
@@ -935,6 +939,48 @@ describe('SalesService', () => {
       );
       expect(result.id).toBe('line-new');
       expect(mockManager.query).toHaveBeenCalled(); // recompute totals
+    });
+
+    it("starts the line on the product's default warranty (P5-18)", async () => {
+      mockQueryBuilder.getOne.mockResolvedValue(seedDraftSale());
+      mockQueryBuilder.getRawOne.mockResolvedValue({ max: '0' });
+      mockProductsService.findOne.mockResolvedValue(
+        seedProduct({ default_warranty: WarrantyPeriod.MONTH_12 }),
+      );
+      mockManager.create.mockImplementation((_entity, data) => data);
+      mockManager.save.mockImplementation((e) => Promise.resolve(e));
+
+      await service.addLine(
+        'sale-1',
+        { product_id: 'prod-1', quantity: 1 },
+        'cashier-1',
+      );
+
+      expect(mockManager.create).toHaveBeenCalledWith(
+        SaleLine,
+        expect.objectContaining({ warranty: WarrantyPeriod.MONTH_12 }),
+      );
+    });
+
+    it('takes the warranty the cashier chose over the default (P5-18)', async () => {
+      mockQueryBuilder.getOne.mockResolvedValue(seedDraftSale());
+      mockQueryBuilder.getRawOne.mockResolvedValue({ max: '0' });
+      mockProductsService.findOne.mockResolvedValue(
+        seedProduct({ default_warranty: WarrantyPeriod.MONTH_12 }),
+      );
+      mockManager.create.mockImplementation((_entity, data) => data);
+      mockManager.save.mockImplementation((e) => Promise.resolve(e));
+
+      await service.addLine(
+        'sale-1',
+        { product_id: 'prod-1', quantity: 1, warranty: WarrantyPeriod.WEEK_1 },
+        'cashier-1',
+      );
+
+      expect(mockManager.create).toHaveBeenCalledWith(
+        SaleLine,
+        expect.objectContaining({ warranty: WarrantyPeriod.WEEK_1 }),
+      );
     });
 
     it('assigns line_number as max + 1 when other lines exist', async () => {
@@ -1313,6 +1359,51 @@ describe('SalesService', () => {
       expect(result.discount_value).toBeNull();
       expect(result.discount_amount).toBe('0.00');
       expect(result.line_total).toBe('200.00');
+    });
+
+    it('changes only the warranty, leaving the money as it was (P5-18)', async () => {
+      mockQueryBuilder.getOne.mockResolvedValue(seedDraftSale());
+      mockManager.findOne.mockResolvedValue(
+        seedLine({
+          unit_price: '100.00',
+          quantity: 2,
+          discount_amount: '0.00',
+          line_total: '200.00',
+          warranty: WarrantyPeriod.CHECKING,
+        }),
+      );
+      mockManager.save.mockImplementation((e) => Promise.resolve(e));
+
+      const result = await service.updateLine('sale-1', 'line-1', {
+        warranty: WarrantyPeriod.MONTH_6,
+      });
+
+      expect(result.warranty).toBe(WarrantyPeriod.MONTH_6);
+      expect(result.quantity).toBe(2);
+      expect(result.line_total).toBe('200.00');
+    });
+
+    it('changes the warranty on a serialized line too (P5-18)', async () => {
+      mockQueryBuilder.getOne.mockResolvedValue(seedDraftSale());
+      mockManager.findOne.mockResolvedValue(
+        seedLine({
+          unit_price: '250000.00',
+          quantity: 1,
+          discount_amount: '0.00',
+          line_total: '250000.00',
+          product_unit_id: 'unit-1',
+          imei_snapshot: '354789102345678',
+          warranty: WarrantyPeriod.MONTH_12,
+        }),
+      );
+      mockManager.save.mockImplementation((e) => Promise.resolve(e));
+
+      const result = await service.updateLine('sale-1', 'line-1', {
+        warranty: WarrantyPeriod.MONTH_24,
+      });
+
+      expect(result.warranty).toBe(WarrantyPeriod.MONTH_24);
+      expect(result.imei_snapshot).toBe('354789102345678');
     });
 
     it('throws BadRequestException when only discount_type is touched', async () => {
@@ -3665,7 +3756,7 @@ describe('SalesService', () => {
           sql.includes('UPDATE payments')
             ? 'stamp'
             : sql.includes('UPDATE sale_lines')
-              ? 'snapshot'
+              ? 'warranty'
               : 'sale',
         );
         return Promise.resolve();
@@ -3683,7 +3774,7 @@ describe('SalesService', () => {
         'trade-in',
         'stamp',
         'number',
-        'snapshot',
+        'warranty',
         'sale',
       ]);
     });
@@ -3705,10 +3796,10 @@ describe('SalesService', () => {
     });
 
     // ============================================================
-    // Phase 6.4 P5 — warranty snapshot (P5-1), 409 details (P5-2)
+    // Phase 6.4 P5 — warranty_until (P5-18), 409 details (P5-2)
     // ============================================================
 
-    it("snapshots each line's warranty from its product in one UPDATE", async () => {
+    it("sets each line's warranty_until from its period in one UPDATE", async () => {
       mockQueryBuilder.getOne.mockResolvedValueOnce(seedCompletableSale());
       arrangeManagerFind([
         seedCompletableLine(),
@@ -3721,22 +3812,21 @@ describe('SalesService', () => {
 
       await service.completeSale('sale-1');
 
-      const snapshotCalls = mockManager.query.mock.calls.filter(
+      const warrantyCalls = mockManager.query.mock.calls.filter(
         ([sql]: [string]) => sql.includes('UPDATE sale_lines'),
       );
-      expect(snapshotCalls).toHaveLength(1);
-      const [sql, params] = snapshotCalls[0] as [string, unknown[]];
-      expect(sql).toContain(
-        'warranty_months_snapshot = product.warranty_months',
-      );
-      expect(sql).toContain(
-        'checking_warranty_days_snapshot = product.checking_warranty_days',
-      );
-      expect(sql).toContain('product.id = line.product_id');
+      expect(warrantyCalls).toHaveLength(1);
+      const [sql, params] = warrantyCalls[0] as [string, unknown[]];
+      expect(sql).toContain('SET warranty_until = CASE warranty');
+      // The Colombo completion date: the same now() completed_at gets
+      expect(sql).toContain("(now() AT TIME ZONE 'Asia/Colombo')::date");
+      expect(sql).toContain("WHEN 'WEEK_1' THEN");
+      expect(sql).toContain("interval '12 months'");
+      expect(sql).toContain('ELSE NULL END');
       expect(params).toEqual(['sale-1']);
     });
 
-    it('does not snapshot when the complete fails (insufficient stock)', async () => {
+    it('does not set warranty_until when the complete fails (insufficient stock)', async () => {
       mockQueryBuilder.getOne.mockResolvedValueOnce(seedCompletableSale());
       arrangeManagerFind([seedCompletableLine()]);
       mockStockService.decrementForSale.mockRejectedValueOnce(
