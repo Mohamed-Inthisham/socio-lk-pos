@@ -2,12 +2,13 @@ import { WarrantyPeriod } from './enums/warranty-period.enum';
 
 /**
  * How long each warranty period lasts (P5-18). `null` = no warranty after
- * the customer leaves the shop (CHECKING).
+ * the customer leaves the shop (NO_WARRANTY, CHECKING): no warranty_until.
  */
 export const WARRANTY_LENGTHS: Record<
   WarrantyPeriod,
   { days: number } | { months: number } | null
 > = {
+  [WarrantyPeriod.NO_WARRANTY]: null,
   [WarrantyPeriod.CHECKING]: null,
   [WarrantyPeriod.WEEK_1]: { days: 7 },
   [WarrantyPeriod.WEEK_2]: { days: 14 },
@@ -25,7 +26,7 @@ export const WARRANTY_LENGTHS: Record<
  * date expression: the completion day). Reads the line's `warranty`
  * column. Days are added as days; months as calendar months, which
  * Postgres clamps to the month's end (31 Jan + 1 month = 28/29 Feb).
- * CHECKING (or anything unknown) gives NULL.
+ * NO_WARRANTY and CHECKING (or anything unknown) give NULL.
  */
 export const warrantyUntilSql = (baseDate: string): string => {
   const whens: string[] = [];

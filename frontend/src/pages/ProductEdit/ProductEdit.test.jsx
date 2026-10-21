@@ -86,6 +86,7 @@ describe("ProductEdit — default warranty (P5-18)", () => {
     const options = within(await screen.findByRole("listbox")).getAllByRole("option");
 
     expect(options.map((o) => o.textContent.trim())).toEqual([
+      "No warranty",
       "Checking",
       "1 week",
       "2 weeks",

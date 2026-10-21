@@ -151,21 +151,24 @@ Postgres stores prices as `numeric(10,2)`. TypeScript treats them as `string` th
 
 _(Phase 6.4 P5-18; replaced `warranty_months` + `checking_warranty_days`.)_
 
-`default_warranty` (`varchar(20)`, CHECK, default `CHECKING`) is one code from a fixed list (`WarrantyPeriod`, `products/enums/warranty-period.enum.ts`):
+`default_warranty` (`varchar(20)`, CHECK, default `NO_WARRANTY`) is one code from a fixed list (`WarrantyPeriod`, `products/enums/warranty-period.enum.ts`):
 
 | Code | Means |
 |---|---|
-| `CHECKING` | The customer checks the item in the shop; no warranty once they leave. Also used for items sold without a warranty (cables etc.) |
+| `NO_WARRANTY` | Sold without any warranty (cables etc.). Listed first; the default for new products (P5-19) |
+| `CHECKING` | The customer checks the item in the shop; no warranty once they leave |
 | `WEEK_1`, `WEEK_2` | 7 / 14 days |
 | `MONTH_1`, `MONTH_2`, `MONTH_3`, `MONTH_6`, `MONTH_12`, `MONTH_18`, `MONTH_24` | That many calendar months |
 
-It is the period a sale line of this product **starts** with. The cashier can change it per line while the sale is a DRAFT; the line's own `warranty` is what the sale records and the receipt prints (see [sales.md](./sales.md) "Warranty per line"). `null` is rejected on create and update (400): `CHECKING` already means "no warranty".
+It is the period a sale line of this product **starts** with. The cashier can change it per line while the sale is a DRAFT; the line's own `warranty` is what the sale records and the receipt prints (see [sales.md](./sales.md) "Warranty per line"). `null` is rejected on create and update (400): `NO_WARRANTY` is the explicit "no warranty".
 
 #### Why a code, not numbers
 
 The shop sells in weeks and months, and "Checking" isn't a length at all. A months integer couldn't express weeks; two numbers (the old months + checking days) needed rules for which one wins and printed awkwardly. A closed list also stops values the business didn't choose (e.g. 5 months).
 
 The old values were mapped by rounding **down** to the nearest listed period (never promising more than before): months 4–5 → `MONTH_3`, 6–11 → `MONTH_6`, 12–17 → `MONTH_12`, 18–23 → `MONTH_18`, 24+ → `MONTH_24`; with 0 months, checking days 7–13 → `WEEK_1`, 14–29 → `WEEK_2`, 30+ → `MONTH_1`, otherwise `CHECKING`. Months won when both were set.
+
+`NO_WARRANTY` came later (P5-19): before it, `CHECKING` doubled as "no warranty". Only the column default changed; existing products kept their code, so a product that really has no warranty is switched to `NO_WARRANTY` by editing it. Down-migrating turns `NO_WARRANTY` back into `CHECKING`.
 
 ### `phone_condition` enum on all products
 

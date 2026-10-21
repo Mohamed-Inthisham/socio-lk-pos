@@ -55,11 +55,14 @@ describe("ProductDetail — default warranty (P5-18)", () => {
     expect(screen.queryByText("Checking warranty")).not.toBeInTheDocument();
   });
 
-  it("shows Checking for a product without a warranty", async () => {
-    productsService.getProduct.mockResolvedValue(product({ default_warranty: "CHECKING" }));
+  it.each([
+    ["NO_WARRANTY", "No warranty"],
+    ["CHECKING", "Checking"],
+  ])("shows %s as %s", async (code, label) => {
+    productsService.getProduct.mockResolvedValue(product({ default_warranty: code }));
     renderDetail();
 
     expect(await screen.findByText("Default warranty")).toBeInTheDocument();
-    expect(screen.getByText("Checking")).toBeInTheDocument();
+    expect(screen.getByText(label)).toBeInTheDocument();
   });
 });

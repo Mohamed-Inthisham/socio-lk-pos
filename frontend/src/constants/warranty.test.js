@@ -1,8 +1,9 @@
 import { DEFAULT_WARRANTY, WARRANTY_CODES, WARRANTY_PERIODS, warrantyLabel } from "./warranty";
 
-describe("warranty periods (P5-18)", () => {
-  it("lists the backend's codes in the shop's order, Checking first", () => {
+describe("warranty periods (P5-18, P5-19)", () => {
+  it("lists the backend's codes in the shop's order, No warranty first", () => {
     expect(WARRANTY_CODES).toEqual([
+      "NO_WARRANTY",
       "CHECKING",
       "WEEK_1",
       "WEEK_2",
@@ -14,11 +15,12 @@ describe("warranty periods (P5-18)", () => {
       "MONTH_18",
       "MONTH_24",
     ]);
-    expect(DEFAULT_WARRANTY).toBe("CHECKING");
+    expect(DEFAULT_WARRANTY).toBe("NO_WARRANTY");
   });
 
   it("has a cashier-facing label for each", () => {
     expect(WARRANTY_PERIODS.map((p) => p.label)).toEqual([
+      "No warranty",
       "Checking",
       "1 week",
       "2 weeks",
@@ -35,6 +37,7 @@ describe("warranty periods (P5-18)", () => {
   it("warrantyLabel maps a code, and falls back to the code itself", () => {
     expect(warrantyLabel("MONTH_12")).toBe("12 months");
     expect(warrantyLabel("CHECKING")).toBe("Checking");
+    expect(warrantyLabel("NO_WARRANTY")).toBe("No warranty");
     expect(warrantyLabel("MONTH_5")).toBe("MONTH_5");
   });
 });

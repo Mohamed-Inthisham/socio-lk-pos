@@ -20,8 +20,8 @@ const form = (overrides = {}) => ({
 });
 
 describe("productSchema — default warranty (P5-18)", () => {
-  it("starts new products on Checking", () => {
-    expect(productFormDefaults.default_warranty).toBe("CHECKING");
+  it("starts new products on No warranty (P5-19)", () => {
+    expect(productFormDefaults.default_warranty).toBe("NO_WARRANTY");
     expect(productFormDefaults).not.toHaveProperty("warranty_months");
     expect(productFormDefaults).not.toHaveProperty("checking_warranty_days");
   });
@@ -49,9 +49,9 @@ describe("productSchema — default warranty (P5-18)", () => {
     ).toBe("MONTH_3");
   });
 
-  it("loads a product's default into the edit form, Checking when missing", () => {
+  it("loads a product's default into the edit form, No warranty when missing", () => {
     expect(mapProductToFormValues({ default_warranty: "MONTH_24" }).default_warranty).toBe("MONTH_24");
-    expect(mapProductToFormValues({}).default_warranty).toBe("CHECKING");
+    expect(mapProductToFormValues({}).default_warranty).toBe("NO_WARRANTY");
   });
 
   it("sends a changed default on update as the code, never null", () => {

@@ -32,7 +32,7 @@ import { Branch } from '../../branches/entities/branch.entity';
 @Check('CHK_products_selling_price_nonneg', `selling_price >= 0`)
 @Check(
   'CHK_products_default_warranty',
-  `default_warranty IN ('CHECKING', 'WEEK_1', 'WEEK_2', 'MONTH_1', 'MONTH_2', 'MONTH_3', 'MONTH_6', 'MONTH_12', 'MONTH_18', 'MONTH_24')`,
+  `default_warranty IN ('NO_WARRANTY', 'CHECKING', 'WEEK_1', 'WEEK_2', 'MONTH_1', 'MONTH_2', 'MONTH_3', 'MONTH_6', 'MONTH_12', 'MONTH_18', 'MONTH_24')`,
 )
 export class Product {
   @PrimaryGeneratedColumn('uuid')
@@ -92,12 +92,13 @@ export class Product {
 
   /**
    * The warranty a sale line of this product starts with (P5-18); the
-   * cashier can change it per line while the sale is a DRAFT.
+   * cashier can change it per line while the sale is a DRAFT. New products
+   * default to NO_WARRANTY (P5-19).
    */
   @Column({
     type: 'varchar',
     length: 20,
-    default: WarrantyPeriod.CHECKING,
+    default: WarrantyPeriod.NO_WARRANTY,
     name: 'default_warranty',
   })
   default_warranty!: WarrantyPeriod;

@@ -1,16 +1,19 @@
 /**
- * The warranty periods the shop offers (Phase 6.4 P5-18). One per sale
- * line, chosen at the till; each product has a default from the same list.
+ * The warranty periods the shop offers (Phase 6.4 P5-18, P5-19). One per
+ * sale line, chosen at the till; each product has a default from the same
+ * list.
  *
+ * - NO_WARRANTY: sold without any warranty (P5-19). The default for new
+ *   products; nothing about warranty prints on the receipt.
  * - CHECKING: the customer checks the item in the shop; there is no
- *   warranty once they leave. Also used for items sold without a
- *   warranty (cables etc.) — there is no separate "no warranty".
+ *   warranty once they leave. Prints "Checking only".
  * - WEEK_n: n × 7 days. MONTH_n: n calendar months.
  *
  * Stored as varchar(20) with a CHECK (CHK_products_default_warranty,
  * CHK_sale_lines_warranty); keep the migrations' lists in step.
  */
 export enum WarrantyPeriod {
+  NO_WARRANTY = 'NO_WARRANTY',
   CHECKING = 'CHECKING',
   WEEK_1 = 'WEEK_1',
   WEEK_2 = 'WEEK_2',

@@ -1,4 +1,4 @@
-import { toCents } from './money';
+import { fromCents, percentOfCentsHalfUp, toCents } from './money';
 
 describe('toCents', () => {
   it('converts numeric strings from Postgres', () => {
@@ -35,4 +35,35 @@ describe('toCents', () => {
       expect(toCents(total) - toCents(paid)).toBe(remaining);
     },
   );
+});
+
+describe('fromCents', () => {
+  it.each([
+    [0, '0.00'],
+    [5, '0.05'],
+    [123450, '1234.50'],
+    [999999999999, '9999999999.99'],
+    [-250, '-2.50'],
+  ])('%i → %s', (cents, text) => {
+    expect(fromCents(cents)).toBe(text);
+  });
+});
+
+describe('percentOfCentsHalfUp (FOLLOWUP F3)', () => {
+  it.each([
+    // the F3 case: the float path gave 2.17
+    [435, 50, 218],
+    // 10% of 333.33 = 33.333 → 33.33
+    [33333, 10, 3333],
+    // 12.5% of 0.20 = 0.025 → 0.03 (half-up)
+    [20, 12.5, 3],
+    // 33.33% of 100.00 = 33.33
+    [10000, 33.33, 3333],
+    [10000, 100, 10000],
+    [10000, 0, 0],
+    // a huge line stays exact (BigInt)
+    [999999999999, 99.99, 999899999999],
+  ])('%i cents × %s%% = %i cents', (base, percent, expected) => {
+    expect(percentOfCentsHalfUp(base, percent)).toBe(expected);
+  });
 });

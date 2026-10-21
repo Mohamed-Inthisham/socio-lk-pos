@@ -7,7 +7,7 @@ import { adminUser, mainShop } from "../../test/fixtures";
 vi.mock("../../services/productsService");
 
 describe("ProductCreate — default warranty (P5-18)", () => {
-  it("starts on Checking, for every product type, with no old warranty number fields", () => {
+  it("starts on No warranty (P5-19), with no old warranty number fields", () => {
     renderWithProviders(<ProductCreate />, {
       route: "/products/new",
       preloadedState: {
@@ -19,7 +19,7 @@ describe("ProductCreate — default warranty (P5-18)", () => {
     });
 
     expect(screen.getByText("Default warranty")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Checking" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "No warranty" })).toBeInTheDocument();
     expect(screen.queryByLabelText(/Warranty \(months\)/)).not.toBeInTheDocument();
     expect(screen.queryByLabelText(/Checking warranty \(days\)/)).not.toBeInTheDocument();
   });
