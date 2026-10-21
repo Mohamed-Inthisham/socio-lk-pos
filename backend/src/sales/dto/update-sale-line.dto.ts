@@ -81,7 +81,8 @@ export class UpdateSaleLineDto {
     nullable: true,
     description:
       'Raw discount value. Pass null (together with discount_type: null) ' +
-      'to clear the line discount. See AddSaleLineDto for units.',
+      'to clear the line discount. See AddSaleLineDto for units (AMOUNT, ' +
+      'PERCENT, UNIT_PRICE).',
     minimum: 0,
   })
   @IsOptional()
@@ -116,15 +117,15 @@ export class UpdateSaleLineDto {
   @MaxLength(50)
   imei_snapshot?: string | null;
 
-  // Not nullable: CHECKING already means "no warranty after leaving the
-  // shop". ValidateIf (not IsOptional) so that null is rejected rather
-  // than skipped.
+  // Not nullable: NO_WARRANTY is the explicit "no warranty". ValidateIf
+  // (not IsOptional) so that null is rejected rather than skipped.
   @ApiPropertyOptional({
     enum: WarrantyPeriod,
     example: WarrantyPeriod.MONTH_12,
     description:
       "The line's warranty period (P5-18). Any period from the list; " +
-      'CHECKING = the customer checks it in the shop, no warranty after.',
+      'NO_WARRANTY = sold without one (P5-19); CHECKING = the customer ' +
+      'checks it in the shop, no warranty after.',
   })
   @ValidateIf((o: UpdateSaleLineDto) => o.warranty !== undefined)
   @IsEnum(WarrantyPeriod)

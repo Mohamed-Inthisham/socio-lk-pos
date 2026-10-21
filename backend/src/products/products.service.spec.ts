@@ -118,7 +118,7 @@ describe('ProductsService', () => {
         .mockResolvedValueOnce('SKU-000002')
         .mockResolvedValueOnce('SLP-000002');
       await service.create(validDto);
-      // undefined → TypeORM omits it → DB default CHECKING
+      // undefined → TypeORM omits it → DB default NO_WARRANTY
       expect(mockRepo.create).toHaveBeenLastCalledWith(
         expect.objectContaining({ default_warranty: undefined }),
       );

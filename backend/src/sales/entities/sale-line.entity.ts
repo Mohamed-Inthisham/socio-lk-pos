@@ -68,7 +68,11 @@ import { WarrantyPeriod } from '../../products/enums/warranty-period.enum';
 )
 @Check(
   'CHK_sale_lines_discount_type',
-  `discount_type IS NULL OR discount_type IN ('AMOUNT', 'PERCENT')`,
+  `discount_type IS NULL OR discount_type IN ('AMOUNT', 'PERCENT', 'UNIT_PRICE')`,
+)
+@Check(
+  'CHK_sale_lines_discount_unit_price_range',
+  `discount_type != 'UNIT_PRICE' OR (discount_value >= 0 AND discount_value <= unit_price)`,
 )
 @Check(
   'CHK_sale_lines_discount_percent_range',
@@ -88,7 +92,7 @@ import { WarrantyPeriod } from '../../products/enums/warranty-period.enum';
 )
 @Check(
   'CHK_sale_lines_warranty',
-  `warranty IN ('CHECKING', 'WEEK_1', 'WEEK_2', 'MONTH_1', 'MONTH_2', 'MONTH_3', 'MONTH_6', 'MONTH_12', 'MONTH_18', 'MONTH_24')`,
+  `warranty IN ('NO_WARRANTY', 'CHECKING', 'WEEK_1', 'WEEK_2', 'MONTH_1', 'MONTH_2', 'MONTH_3', 'MONTH_6', 'MONTH_12', 'MONTH_18', 'MONTH_24')`,
 )
 export class SaleLine {
   @PrimaryGeneratedColumn('uuid')
@@ -200,7 +204,7 @@ export class SaleLine {
   /**
    * The last day of warranty, set when the sale completes: the Colombo
    * completion date plus the period (products/warranty.ts). NULL for
-   * CHECKING, and while the sale is a DRAFT.
+   * NO_WARRANTY and CHECKING, and while the sale is a DRAFT.
    */
   @Column({ type: 'date', nullable: true, name: 'warranty_until' })
   warranty_until!: string | null;

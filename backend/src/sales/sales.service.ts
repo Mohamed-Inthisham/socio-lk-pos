@@ -49,7 +49,11 @@ import {
   PaginatedResponse,
   paginate,
 } from '../common/dto/paginated-response.dto';
-import { toCents } from '../common/utils/money';
+import {
+  fromCents,
+  percentOfCentsHalfUp,
+  toCents,
+} from '../common/utils/money';
 import { warrantyUntilSql } from '../products/warranty';
 
 /**
@@ -1124,7 +1128,8 @@ export class SalesService {
    *      enlisted in this transaction. A rollback after this rolls the
    *      counter increment back too, so a failed complete leaves no gap.
    *   5. Set each line's warranty_until from its warranty period (P5-18):
-   *      the Colombo completion date plus the period; NULL for CHECKING.
+   *      the Colombo completion date plus the period; NULL for NO_WARRANTY
+   *      and CHECKING.
    *   6. UPDATE sales SET status=COMPLETED, completed_at=now(),
    *      sale_number=<issued>.
    *
@@ -1289,8 +1294,8 @@ export class SalesService {
 
       // 5. Each line's last day of warranty (P5-18): the Colombo
       // completion date plus the line's period. now() is the transaction
-      // time, the same instant step 6 stamps as completed_at. CHECKING
-      // lines get NULL. One set-based UPDATE for all lines.
+      // time, the same instant step 6 stamps as completed_at. NO_WARRANTY
+      // and CHECKING lines get NULL. One set-based UPDATE for all lines.
       await manager.query(
         `UPDATE sale_lines
          SET warranty_until = ${warrantyUntilSql(`(now() AT TIME ZONE 'Asia/Colombo')::date`)},
@@ -1582,13 +1587,21 @@ export class SalesService {
    * CHK_sale_lines_discount_consistency at the DB, but surfaces a clean
    * 400 rather than a 500.
    *
+   * All in integer cents (FOLLOWUP F3: the float path rounded some exact
+   * half-cents down).
+   *
    * AMOUNT: value is LKR off the line, must not exceed unit_price * qty.
    * Overrunning throws 400 rather than silently clamping — clamping would
    * hide UI bugs and produce charges the cashier didn't intend.
    *
-   * PERCENT: value is 0–100, applied to unit_price * qty. DTO already
-   * enforces the 0–100 range; the redundant guard here protects against
-   * service-level callers that skip the DTO (tests, future internal APIs).
+   * PERCENT: value is 0–100 (2 decimals), applied to unit_price * qty and
+   * rounded half-up exactly (percentOfCentsHalfUp). The range guard
+   * protects against service-level callers that skip the DTO.
+   *
+   * UNIT_PRICE (P5-20): value is the final price per unit, 0 (free) up to
+   * unit_price; the discount is (unit_price − value) × qty, exact, so it
+   * follows quantity changes. A price above unit_price is a 400 — this
+   * isn't for raising prices.
    */
   private resolveDiscountAmount(
     unitPrice: string,
@@ -1609,19 +1622,26 @@ export class SalesService {
 
     const value =
       typeof discountValue === 'string' ? Number(discountValue) : discountValue;
-    const lineSubtotal = Number(unitPrice) * quantity;
+    const unitCents = toCents(unitPrice);
+    const lineSubtotalCents = unitCents * quantity;
 
     if (discountType === DiscountType.AMOUNT) {
-      // Compared in cents: the float product can land just under the
-      // true subtotal (100.10 * 3 = 300.29999...), which would reject a
-      // discount equal to the full line.
-      const lineSubtotalCents = toCents(unitPrice) * quantity;
       if (toCents(value) > lineSubtotalCents) {
         throw new BadRequestException(
-          `Discount amount ${value.toFixed(2)} exceeds line subtotal ${(lineSubtotalCents / 100).toFixed(2)}`,
+          `Discount amount ${value.toFixed(2)} exceeds line subtotal ${fromCents(lineSubtotalCents)}`,
         );
       }
-      return this.roundToCents(value);
+      return fromCents(toCents(value));
+    }
+
+    if (discountType === DiscountType.UNIT_PRICE) {
+      const priceCents = toCents(value);
+      if (priceCents < 0 || priceCents > unitCents) {
+        throw new BadRequestException(
+          `Price each ${value.toFixed(2)} must be between 0.00 and the unit price ${fromCents(unitCents)}`,
+        );
+      }
+      return fromCents((unitCents - priceCents) * quantity);
     }
 
     // PERCENT
@@ -1630,22 +1650,20 @@ export class SalesService {
         `Percent discount value must be between 0 and 100 (got ${value})`,
       );
     }
-    return this.roundToCents((lineSubtotal * value) / 100);
+    return fromCents(percentOfCentsHalfUp(lineSubtotalCents, value));
   }
 
   /**
-   * Compute line_total = (unit_price * quantity) - discount_amount,
-   * rounded half-up to 2 decimals. Must match the formula enforced by
-   * CHK_sale_lines_line_total exactly, or inserts/updates will fail.
+   * Compute line_total = (unit_price * quantity) - discount_amount, in
+   * integer cents (exact). Must match CHK_sale_lines_line_total, or
+   * inserts/updates fail.
    */
   private computeLineTotal(
     unitPrice: string,
     quantity: number,
     discountAmount: string,
   ): string {
-    return this.roundToCents(
-      Number(unitPrice) * quantity - Number(discountAmount),
-    );
+    return fromCents(toCents(unitPrice) * quantity - toCents(discountAmount));
   }
 
   /**

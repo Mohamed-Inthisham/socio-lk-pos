@@ -77,8 +77,9 @@ export class AddSaleLineDto {
     example: 10,
     description:
       'Raw discount value. For AMOUNT: LKR off the line (e.g. 500 = ' +
-      'Rs. 500 off). For PERCENT: percentage 0–100. If provided, ' +
-      'discount_type must also be provided. Server-computed ' +
+      'Rs. 500 off). For PERCENT: percentage 0–100 (2 decimals). For ' +
+      'UNIT_PRICE: the final price per unit, 0 to unit_price (P5-20). If ' +
+      'provided, discount_type must also be provided. Server-computed ' +
       'discount_amount is capped at unit_price × quantity.',
     minimum: 0,
   })

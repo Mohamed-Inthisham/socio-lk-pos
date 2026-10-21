@@ -1065,6 +1065,116 @@ describe('SalesService', () => {
       );
     });
 
+    // F3: 50% of 4.35 = 2.175 exactly; the float path gave 2.17.
+    it('rounds an exact half-cent PERCENT discount up (F3: 50% of 4.35)', async () => {
+      mockQueryBuilder.getOne.mockResolvedValue(seedDraftSale());
+      mockQueryBuilder.getRawOne.mockResolvedValue({ max: '0' });
+      mockProductsService.findOne.mockResolvedValue(
+        seedProduct({ selling_price: '4.35' }),
+      );
+      mockManager.create.mockImplementation((_e, data) => data);
+      mockManager.save.mockImplementation((e) => Promise.resolve(e));
+
+      await service.addLine(
+        'sale-1',
+        {
+          product_id: 'prod-1',
+          quantity: 1,
+          discount_type: DiscountType.PERCENT,
+          discount_value: 50,
+        },
+        'cashier-1',
+      );
+
+      expect(mockManager.create).toHaveBeenCalledWith(
+        SaleLine,
+        expect.objectContaining({
+          discount_amount: '2.18',
+          line_total: '2.17',
+        }),
+      );
+    });
+
+    describe('UNIT_PRICE discount (P5-20)', () => {
+      const addAtPrice = (priceEach: number, quantity = 3) => {
+        mockQueryBuilder.getOne.mockResolvedValue(seedDraftSale());
+        mockQueryBuilder.getRawOne.mockResolvedValue({ max: '0' });
+        mockProductsService.findOne.mockResolvedValue(
+          seedProduct({ selling_price: '200.00' }),
+        );
+        mockManager.create.mockImplementation((_e, data) => data);
+        mockManager.save.mockImplementation((e) => Promise.resolve(e));
+        return service.addLine(
+          'sale-1',
+          {
+            product_id: 'prod-1',
+            quantity,
+            discount_type: DiscountType.UNIT_PRICE,
+            discount_value: priceEach,
+          },
+          'cashier-1',
+        );
+      };
+
+      it('takes (unit price − price each) × qty off the line', async () => {
+        await addAtPrice(160);
+
+        // (200 − 160) × 3 = 120 off; 160 × 3 = 480
+        expect(mockManager.create).toHaveBeenCalledWith(
+          SaleLine,
+          expect.objectContaining({
+            discount_type: DiscountType.UNIT_PRICE,
+            discount_value: '160.00',
+            discount_amount: '120.00',
+            line_total: '480.00',
+          }),
+        );
+      });
+
+      it('is exact in cents (199.99 each × 3)', async () => {
+        await addAtPrice(199.99);
+
+        expect(mockManager.create).toHaveBeenCalledWith(
+          SaleLine,
+          expect.objectContaining({
+            discount_amount: '0.03',
+            line_total: '599.97',
+          }),
+        );
+      });
+
+      it('allows a price of 0 (free)', async () => {
+        await addAtPrice(0);
+
+        expect(mockManager.create).toHaveBeenCalledWith(
+          SaleLine,
+          expect.objectContaining({
+            discount_amount: '600.00',
+            line_total: '0.00',
+          }),
+        );
+      });
+
+      it('takes nothing off when the price equals the unit price', async () => {
+        await addAtPrice(200);
+
+        expect(mockManager.create).toHaveBeenCalledWith(
+          SaleLine,
+          expect.objectContaining({
+            discount_amount: '0.00',
+            line_total: '600.00',
+          }),
+        );
+      });
+
+      it('rejects a price above the unit price', async () => {
+        await expect(addAtPrice(200.01)).rejects.toThrow(
+          'Price each 200.01 must be between 0.00 and the unit price 200.00',
+        );
+        expect(mockManager.save).not.toHaveBeenCalled();
+      });
+    });
+
     it('accepts an AMOUNT discount up to line subtotal', async () => {
       mockQueryBuilder.getOne.mockResolvedValue(seedDraftSale());
       mockQueryBuilder.getRawOne.mockResolvedValue({ max: '0' });
@@ -1334,6 +1444,48 @@ describe('SalesService', () => {
       expect(result.quantity).toBe(5);
       expect(result.discount_amount).toBe('50.00');
       expect(result.line_total).toBe('450.00');
+    });
+
+    it('keeps a UNIT_PRICE line at its price each when qty changes (P5-20)', async () => {
+      mockQueryBuilder.getOne.mockResolvedValue(seedDraftSale());
+      mockManager.findOne.mockResolvedValue(
+        seedLine({
+          unit_price: '200.00',
+          quantity: 1,
+          discount_type: DiscountType.UNIT_PRICE,
+          discount_value: '160.00',
+          discount_amount: '40.00',
+          line_total: '160.00',
+        }),
+      );
+      mockManager.save.mockImplementation((e) => Promise.resolve(e));
+
+      const result = await service.updateLine('sale-1', 'line-1', {
+        quantity: 4,
+      });
+
+      // still 160 each: (200 − 160) × 4 = 160 off, 640 total
+      expect(result.discount_value).toBe('160.00');
+      expect(result.discount_amount).toBe('160.00');
+      expect(result.line_total).toBe('640.00');
+    });
+
+    it('sets a UNIT_PRICE discount on an existing line (P5-20)', async () => {
+      mockQueryBuilder.getOne.mockResolvedValue(seedDraftSale());
+      mockManager.findOne.mockResolvedValue(
+        seedLine({ unit_price: '100.00', quantity: 2 }),
+      );
+      mockManager.save.mockImplementation((e) => Promise.resolve(e));
+
+      const result = await service.updateLine('sale-1', 'line-1', {
+        discount_type: DiscountType.UNIT_PRICE,
+        discount_value: 75.5,
+      });
+
+      expect(result.discount_type).toBe(DiscountType.UNIT_PRICE);
+      expect(result.discount_value).toBe('75.50');
+      expect(result.discount_amount).toBe('49.00');
+      expect(result.line_total).toBe('151.00');
     });
 
     it('clears the discount when both type and value are null', async () => {
