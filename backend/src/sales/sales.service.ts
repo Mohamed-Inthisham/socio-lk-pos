@@ -56,6 +56,24 @@ import {
   toCents,
 } from '../common/utils/money';
 import { warrantyUntilSql } from '../products/warranty';
+import {
+  ApprovalCaller,
+  ApprovalsService,
+  Approver,
+} from '../approvals/approvals.service';
+import { UserRole } from '../users/enums/user-role.enum';
+import { AuditAction } from '../audit-log/enums/audit-action.enum';
+import { writeAuditEntry } from '../audit-log/utils/write-audit-entry';
+
+/** The session user asking for a void (the AuthenticatedUser fields used). */
+export type VoidRequester = ApprovalCaller & { role: UserRole };
+
+/** Who authorized a void and whose session asked for it (P6-17). */
+export interface VoidApproval {
+  approver: Approver;
+  requestedBy: VoidRequester;
+  ip?: string | null;
+}
 
 /**
  * completeSale's collaborators know the product or IMEI behind a 409 but
@@ -95,6 +113,7 @@ export class SalesService {
     private readonly customersService: CustomersService,
     private readonly productUnitsService: ProductUnitsService,
     private readonly phonePurchasesService: PhonePurchasesService,
+    private readonly approvalsService: ApprovalsService,
   ) {}
 
   /**
@@ -324,12 +343,14 @@ export class SalesService {
       where: { id },
       // payments.trade_in_product: TRADE_IN rows show the traded-in
       // phone's product name (POS payments list, sale detail).
-      // voider: who voided a VOIDED sale (sale detail, P6-6).
+      // voider: who approved the void of a VOIDED sale (sale detail,
+      // P6-6); void_requester: whose session asked for it (P6-17).
       relations: [
         'branch',
         'cashier',
         'customer',
         'voider',
+        'void_requester',
         'lines',
         'payments',
         'payments.trade_in_product',
@@ -1426,19 +1447,24 @@ export class SalesService {
    *      than a loop — payments don't need per-row logic, and this
    *      keeps the round trip count down.
    *   7. UPDATE sales SET status=VOIDED, voided_at=now(),
-   *      voided_by=<userId>, void_reason=<trimmed>. Direct UPDATE so
-   *      timestamps come from the DB clock, same pattern as completeSale.
+   *      voided_by=<approver>, void_requested_by=<session user>,
+   *      void_reason=<trimmed>. Direct UPDATE so timestamps come from the
+   *      DB clock, same pattern as completeSale.
+   *   8. The VOID audit row, written in this transaction so it commits
+   *      with the void (Phase 6.4 P6-17): actor = the session user, and
+   *      it names the approver. The AuditLogInterceptor can't: it records
+   *      no changes for VOID and doesn't know the approver.
+   *
+   * The approver's PIN was already checked by voidWithApproval, in its own
+   * committed transaction; this method trusts `approval`.
    *
    * Returns void. Controller re-fetches via findOne to get the
    * fully-hydrated response.
-   *
-   * @Auditable('Sale', AuditAction.VOID) lands on the controller endpoint
-   * in Step 7, not here (audit decorators are controller-level).
    */
   async voidSale(
     saleId: string,
-    voidedById: string,
-    dto: VoidSaleDto,
+    approval: VoidApproval,
+    dto: Pick<VoidSaleDto, 'void_reason'>,
   ): Promise<void> {
     // Defense-in-depth trim + non-blank check. DTO already does this,
     // but internal callers (future queues, admin scripts) may skip the
@@ -1582,12 +1608,88 @@ export class SalesService {
          SET status = $1,
              voided_at = now(),
              voided_by = $2,
-             void_reason = $3,
+             void_requested_by = $3,
+             void_reason = $4,
              updated_at = now()
-         WHERE id = $4`,
-        [SaleStatus.VOIDED, voidedById, trimmedReason, saleId],
+         WHERE id = $5`,
+        [
+          SaleStatus.VOIDED,
+          approval.approver.id,
+          approval.requestedBy.id,
+          trimmedReason,
+          saleId,
+        ],
       );
+
+      // 8. The VOID audit row, with the void (P6-17).
+      const { approver, requestedBy } = approval;
+      await writeAuditEntry(manager, {
+        actor: requestedBy,
+        action: AuditAction.VOID,
+        entityType: 'Sale',
+        entityId: saleId,
+        description:
+          `Voided with approval by ${approver.full_name} (${approver.id}); ` +
+          `requested by ${requestedBy.full_name} (${requestedBy.id}). ` +
+          `Reason: ${trimmedReason}`,
+        changes: {
+          status: { old: SaleStatus.COMPLETED, new: SaleStatus.VOIDED },
+          voided_by: { old: null, new: approver.id },
+          void_requested_by: { old: null, new: requestedBy.id },
+        },
+        ip: approval.ip,
+      });
     });
+  }
+
+  /**
+   * POST /sales/:id/void (Phase 6.4 P6-17): every void is approved with a
+   * manager's or admin's PIN, a manager's own session included.
+   *
+   * 1. Pre-check, no locks: the sale exists (404), is COMPLETED (400), and
+   *    the session user is at its branch (403; admins anywhere). A void
+   *    that can't happen never uses up a PIN attempt.
+   * 2. ApprovalsService.verify: the PIN, in its own committed transaction
+   *    (a wrong PIN's count survives whatever happens next).
+   * 3. voidSale: the void's transaction, which re-checks COMPLETED under
+   *    its lock; voided_by = the approver, void_requested_by = the session
+   *    user (the same person when a manager approves their own).
+   */
+  async voidWithApproval(
+    saleId: string,
+    requestedBy: VoidRequester,
+    dto: VoidSaleDto,
+    ip?: string | null,
+  ): Promise<void> {
+    const sale = await this.salesRepository.findOne({ where: { id: saleId } });
+    if (!sale) {
+      throw new NotFoundException('Sale not found');
+    }
+    if (sale.status !== SaleStatus.COMPLETED) {
+      throw new BadRequestException(
+        `Cannot void a ${sale.status} sale. Only COMPLETED sales can be voided.`,
+      );
+    }
+    if (
+      requestedBy.role !== UserRole.ADMIN &&
+      requestedBy.branch_id !== sale.branch_id
+    ) {
+      throw new ForbiddenException({
+        message: 'You can only void sales at your own branch.',
+        code: 'VOID_WRONG_BRANCH',
+      });
+    }
+
+    const approver = await this.approvalsService.verify({
+      approverId: dto.approval.approver_id,
+      pin: dto.approval.pin,
+      action: 'SALE_VOID',
+      branchId: sale.branch_id,
+      requestedBy,
+      ip,
+    });
+
+    await this.voidSale(saleId, { approver, requestedBy, ip }, dto);
   }
 
   /**

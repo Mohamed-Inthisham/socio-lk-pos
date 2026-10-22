@@ -18,6 +18,7 @@ import { SaleType } from '../src/sales/enums/sale-type.enum';
 import { SaleLine } from '../src/sales/entities/sale-line.entity';
 import { Stock } from '../src/stock/entities/stock.entity';
 import { PaymentMethod } from '../src/sales/enums/payment-method.enum';
+import { approvalFor, giveApprovalPin } from './approval-pin.helper';
 
 describe('Suppliers (e2e)', () => {
   let app: INestApplication;
@@ -77,6 +78,10 @@ describe('Suppliers (e2e)', () => {
         branch_id: resolvedBranchId,
       }),
     );
+    // Every void needs an approval PIN (P6-17): admins and managers get one.
+    if (role !== UserRole.CASHIER) {
+      await giveApprovalPin(dataSource, user.id);
+    }
     return { user, password };
   }
 
@@ -245,7 +250,10 @@ describe('Suppliers (e2e)', () => {
       await request(app.getHttpServer())
         .post(`/api/v1/sales/${sale.id}/void`)
         .set('Cookie', cookies)
-        .send({ void_reason: 'Test void for count-exclusion verification' })
+        .send({
+          void_reason: 'Test void for count-exclusion verification',
+          approval: approvalFor(cashierId),
+        })
         .expect(200);
     }
 

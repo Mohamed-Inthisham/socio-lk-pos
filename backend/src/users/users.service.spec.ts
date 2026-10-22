@@ -132,6 +132,27 @@ describe('UsersService', () => {
       });
     });
 
+    it('strips the approval PIN hash, count and lock, keeping approval_pin_set_at (P6-15)', async () => {
+      const setAt = new Date();
+      mockUsersRepo.findOne.mockResolvedValue({
+        id: 'u1',
+        password_hash: 'secret',
+        approval_pin_hash: '$2b$04$pin',
+        approval_pin_set_at: setAt,
+        approval_pin_failed_attempts: 3,
+        approval_pin_locked_until: null,
+        role: UserRole.MANAGER,
+      });
+
+      const result = await service.findById('u1');
+
+      expect(result).toEqual({
+        id: 'u1',
+        approval_pin_set_at: setAt,
+        role: UserRole.MANAGER,
+      });
+    });
+
     it('strips password_hash from the returned user', async () => {
       const user = {
         id: 'u1',
@@ -402,11 +423,15 @@ describe('UsersService', () => {
   });
 
   describe('deactivate', () => {
-    it('flips is_active to false', async () => {
+    it('flips is_active to false and clears the approval PIN, its count and lock (P6-15)', async () => {
       mockUsersRepo.update.mockResolvedValue({ affected: 1 });
       await service.deactivate('u1');
       expect(mockUsersRepo.update).toHaveBeenCalledWith('u1', {
         is_active: false,
+        approval_pin_hash: null,
+        approval_pin_set_at: null,
+        approval_pin_failed_attempts: 0,
+        approval_pin_locked_until: null,
       });
     });
 

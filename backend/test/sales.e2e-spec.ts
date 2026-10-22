@@ -26,6 +26,7 @@ import { Customer } from '../src/customers/entities/customer.entity';
 import { ProductUnit } from '../src/product-units/entities/product-unit.entity';
 import { ProductUnitStatus } from '../src/product-units/enums/product-unit-status.enum';
 import { PhonePurchase } from '../src/phone-purchases/entities/phone-purchase.entity';
+import { approvalFor, giveApprovalPin } from './approval-pin.helper';
 
 describe('Sales (e2e)', () => {
   let app: INestApplication;
@@ -100,6 +101,10 @@ describe('Sales (e2e)', () => {
         branch_id: resolvedBranchId,
       }),
     );
+    // Every void needs an approval PIN (P6-17): admins and managers get one.
+    if (role !== UserRole.CASHIER) {
+      await giveApprovalPin(dataSource, user.id);
+    }
     return { user, password };
   }
 
@@ -1052,6 +1057,8 @@ describe('Sales (e2e)', () => {
         completed_at: new Date('2026-10-21T10:00:00+05:30'),
         voided_at: new Date('2026-10-21T11:00:00+05:30'),
         voided_by: manager.id,
+        // CHK_sales_void_requested_consistency (P6-17)
+        void_requested_by: manager.id,
         void_reason: 'Wrong price',
       });
       const cookies = await loginAndGetCookies(user.email, password);
@@ -3290,7 +3297,7 @@ describe('Sales (e2e)', () => {
       const response = await request(app.getHttpServer())
         .post(`/api/v1/sales/${sale.id}/void`)
         .set('Cookie', cookies)
-        .send({ void_reason: validReason })
+        .send({ void_reason: validReason, approval: approvalFor(user.id) })
         .expect(200);
 
       // Response is fully-hydrated voided sale
@@ -3336,7 +3343,10 @@ describe('Sales (e2e)', () => {
       const response = await request(app.getHttpServer())
         .post(`/api/v1/sales/${sale.id}/void`)
         .set('Cookie', cookies)
-        .send({ void_reason: '   Duplicate transaction   ' })
+        .send({
+          void_reason: '   Duplicate transaction   ',
+          approval: approvalFor(user.id),
+        })
         .expect(200);
 
       expect(response.body.void_reason).toBe('Duplicate transaction');
@@ -3372,7 +3382,7 @@ describe('Sales (e2e)', () => {
       await request(app.getHttpServer())
         .post(`/api/v1/sales/${sale.id}/void`)
         .set('Cookie', cookies)
-        .send({ void_reason: validReason })
+        .send({ void_reason: validReason, approval: approvalFor(user.id) })
         .expect(200);
 
       const stockRepo = dataSource.getRepository(Stock);
@@ -3403,7 +3413,7 @@ describe('Sales (e2e)', () => {
       const response = await request(app.getHttpServer())
         .post(`/api/v1/sales/${sale.id}/void`)
         .set('Cookie', cookies)
-        .send({ void_reason: validReason })
+        .send({ void_reason: validReason, approval: approvalFor(user.id) })
         .expect(200);
 
       // Invoice number stays — audit trail integrity
@@ -3470,7 +3480,7 @@ describe('Sales (e2e)', () => {
       const response = await request(app.getHttpServer())
         .post(`/api/v1/sales/${sale.id}/void`)
         .set('Cookie', cookies)
-        .send({ void_reason: validReason })
+        .send({ void_reason: validReason, approval: approvalFor(user.id) })
         .expect(200);
 
       // Both payments stamped with same reversal_reason
@@ -3503,7 +3513,7 @@ describe('Sales (e2e)', () => {
       await request(app.getHttpServer())
         .post(`/api/v1/sales/${sale.id}/void`)
         .set('Cookie', cookies)
-        .send({})
+        .send({ approval: approvalFor(user.id) })
         .expect(400);
     });
 
@@ -3518,7 +3528,7 @@ describe('Sales (e2e)', () => {
       await request(app.getHttpServer())
         .post(`/api/v1/sales/${sale.id}/void`)
         .set('Cookie', cookies)
-        .send({ void_reason: '     ' })
+        .send({ void_reason: '     ', approval: approvalFor(user.id) })
         .expect(400);
     });
 
@@ -3533,7 +3543,7 @@ describe('Sales (e2e)', () => {
       await request(app.getHttpServer())
         .post(`/api/v1/sales/${sale.id}/void`)
         .set('Cookie', cookies)
-        .send({ void_reason: 'no' })
+        .send({ void_reason: 'no', approval: approvalFor(user.id) })
         .expect(400);
     });
 
@@ -3549,7 +3559,7 @@ describe('Sales (e2e)', () => {
       await request(app.getHttpServer())
         .post(`/api/v1/sales/${sale.id}/void`)
         .set('Cookie', cookies)
-        .send({ void_reason: validReason })
+        .send({ void_reason: validReason, approval: approvalFor(user.id) })
         .expect(400);
     });
 
@@ -3565,18 +3575,20 @@ describe('Sales (e2e)', () => {
       await request(app.getHttpServer())
         .post(`/api/v1/sales/${sale.id}/void`)
         .set('Cookie', cookies)
-        .send({ void_reason: validReason })
+        .send({ void_reason: validReason, approval: approvalFor(user.id) })
         .expect(200);
 
       // Second void — VOIDED is terminal
       await request(app.getHttpServer())
         .post(`/api/v1/sales/${sale.id}/void`)
         .set('Cookie', cookies)
-        .send({ void_reason: 'Trying again' })
+        .send({ void_reason: 'Trying again', approval: approvalFor(user.id) })
         .expect(400);
     });
 
-    it('returns 403 when cashier attempts to void (admin/manager only)', async () => {
+    // ---- Phase 6.4 P6-17: every void is approved with a manager's PIN ----
+
+    it("returns 400 when a cashier's void has no approval (a manager's PIN is required)", async () => {
       const branch = await seedBranch();
       const cashier = await seedUser(UserRole.CASHIER, 'c@t.com', branch.id);
       const cookies = await loginAndGetCookies(
@@ -3591,12 +3603,110 @@ describe('Sales (e2e)', () => {
         { stockQty: 5 },
       );
 
-      // But they can't void it — supervisor swipe required
+      // Without a manager's approval there is no void
+      const response = await request(app.getHttpServer())
+        .post(`/api/v1/sales/${sale.id}/void`)
+        .set('Cookie', cookies)
+        .send({ void_reason: validReason })
+        .expect(400);
+      expect(JSON.stringify(response.body.message)).toMatch(
+        /approval is required/,
+      );
+    });
+
+    it("a cashier's session voids with a manager's PIN: voided_by = manager, void_requested_by = cashier", async () => {
+      const branch = await seedBranch();
+      const cashier = await seedUser(UserRole.CASHIER, 'c@t.com', branch.id);
+      const manager = await seedUser(UserRole.MANAGER, 'm@t.com', branch.id);
+      const cookies = await loginAndGetCookies(
+        cashier.user.email,
+        cashier.password,
+      );
+      const { sale } = await seedCompletedSale(
+        branch.id,
+        cashier.user.id,
+        cookies,
+        { stockQty: 5 },
+      );
+
+      const response = await request(app.getHttpServer())
+        .post(`/api/v1/sales/${sale.id}/void`)
+        .set('Cookie', cookies)
+        .send({
+          void_reason: validReason,
+          approval: approvalFor(manager.user.id),
+        })
+        .expect(200);
+
+      expect(response.body).toMatchObject({
+        status: SaleStatus.VOIDED,
+        voided_by: manager.user.id,
+        void_requested_by: cashier.user.id,
+        voider: { id: manager.user.id },
+        void_requester: { id: cashier.user.id },
+      });
+    });
+
+    it("returns 400 when a manager's own-session void has no approval (no PIN-free voids)", async () => {
+      const branch = await seedBranch();
+      const manager = await seedUser(UserRole.MANAGER, 'm@t.com', branch.id);
+      const cookies = await loginAndGetCookies(
+        manager.user.email,
+        manager.password,
+      );
+      const { sale } = await seedCompletedSale(
+        branch.id,
+        manager.user.id,
+        cookies,
+        { stockQty: 5 },
+      );
+
       await request(app.getHttpServer())
         .post(`/api/v1/sales/${sale.id}/void`)
         .set('Cookie', cookies)
         .send({ void_reason: validReason })
+        .expect(400);
+      expect(
+        (await dataSource.getRepository(Sale).findOneByOrFail({ id: sale.id }))
+          .status,
+      ).toBe(SaleStatus.COMPLETED);
+    });
+
+    it('returns 403 VOID_WRONG_BRANCH when the session user is at another branch, without using a PIN attempt', async () => {
+      const branchA = await seedBranch({ name: 'Branch A' });
+      const branchB = await seedBranch({ name: 'Branch B' });
+      const cashierA = await seedUser(UserRole.CASHIER, 'ca@t.com', branchA.id);
+      const cashierB = await seedUser(UserRole.CASHIER, 'cb@t.com', branchB.id);
+      const managerA = await seedUser(UserRole.MANAGER, 'ma@t.com', branchA.id);
+      const cookiesA = await loginAndGetCookies(
+        cashierA.user.email,
+        cashierA.password,
+      );
+      const { sale } = await seedCompletedSale(
+        branchA.id,
+        cashierA.user.id,
+        cookiesA,
+        { stockQty: 5 },
+      );
+      const cookiesB = await loginAndGetCookies(
+        cashierB.user.email,
+        cashierB.password,
+      );
+
+      const response = await request(app.getHttpServer())
+        .post(`/api/v1/sales/${sale.id}/void`)
+        .set('Cookie', cookiesB)
+        .send({
+          void_reason: validReason,
+          approval: approvalFor(managerA.user.id, '000001'),
+        })
         .expect(403);
+
+      expect(response.body.code).toBe('VOID_WRONG_BRANCH');
+      const stored = await dataSource
+        .getRepository(User)
+        .findOneByOrFail({ id: managerA.user.id });
+      expect(stored.approval_pin_failed_attempts).toBe(0);
     });
 
     it('manager can void a sale', async () => {
@@ -3624,12 +3734,17 @@ describe('Sales (e2e)', () => {
       const response = await request(app.getHttpServer())
         .post(`/api/v1/sales/${sale.id}/void`)
         .set('Cookie', managerCookies)
-        .send({ void_reason: validReason })
+        .send({
+          void_reason: validReason,
+          approval: approvalFor(manager.user.id),
+        })
         .expect(200);
 
       // voided_by attributed to the manager, not the original cashier
       expect(response.body.voided_by).toBe(manager.user.id);
       expect(response.body.status).toBe(SaleStatus.VOIDED);
+      // Self-approval on a manager's session: the same person both ways
+      expect(response.body.void_requested_by).toBe(manager.user.id);
     });
 
     it('returns 404 when sale does not exist', async () => {
@@ -3640,7 +3755,7 @@ describe('Sales (e2e)', () => {
       await request(app.getHttpServer())
         .post(`/api/v1/sales/${fakeId}/void`)
         .set('Cookie', cookies)
-        .send({ void_reason: validReason })
+        .send({ void_reason: validReason, approval: approvalFor(user.id) })
         .expect(404);
     });
 
@@ -3654,7 +3769,7 @@ describe('Sales (e2e)', () => {
 
       await request(app.getHttpServer())
         .post(`/api/v1/sales/${sale.id}/void`)
-        .send({ void_reason: validReason })
+        .send({ void_reason: validReason, approval: approvalFor(user.id) })
         .expect(401);
     });
 
@@ -3671,7 +3786,7 @@ describe('Sales (e2e)', () => {
       await request(app.getHttpServer())
         .post(`/api/v1/sales/${sale.id}/void`)
         .set('Cookie', cookies)
-        .send({ void_reason: validReason })
+        .send({ void_reason: validReason, approval: approvalFor(user.id) })
         .expect(200);
 
       const saleRepo = dataSource.getRepository(Sale);
@@ -4708,7 +4823,10 @@ describe('Sales (e2e)', () => {
       await request(app.getHttpServer())
         .post(`/api/v1/sales/${sale.id}/void`)
         .set('Cookie', cookies)
-        .send({ void_reason: 'Customer changed mind' })
+        .send({
+          void_reason: 'Customer changed mind',
+          approval: approvalFor(user.id),
+        })
         .expect(200);
 
       // PU back to IN_STOCK; stock restored
@@ -4803,7 +4921,10 @@ describe('Sales (e2e)', () => {
       await request(app.getHttpServer())
         .post(`/api/v1/sales/${sale.id}/void`)
         .set('Cookie', cookies)
-        .send({ void_reason: 'Full refund requested' })
+        .send({
+          void_reason: 'Full refund requested',
+          approval: approvalFor(user.id),
+        })
         .expect(200);
 
       // Serialized in-house PU flipped back to IN_STOCK
@@ -4880,7 +5001,10 @@ describe('Sales (e2e)', () => {
       await request(app.getHttpServer())
         .post(`/api/v1/sales/${saleA.id}/void`)
         .set('Cookie', cookies)
-        .send({ void_reason: 'Customer changed mind' })
+        .send({
+          void_reason: 'Customer changed mind',
+          approval: approvalFor(user.id),
+        })
         .expect(200);
 
       // PU is back to IN_STOCK
@@ -5042,7 +5166,10 @@ describe('Sales (e2e)', () => {
       return request(app.getHttpServer())
         .post(`/api/v1/sales/${saleId}/void`)
         .set('Cookie', ctx.cookies)
-        .send({ void_reason: 'Customer changed mind' })
+        .send({
+          void_reason: 'Customer changed mind',
+          approval: approvalFor(ctx.user.id),
+        })
         .expect(expected);
     }
 
@@ -5645,6 +5772,33 @@ describe('Sales (e2e)', () => {
           (await saleRepo.findOne({ where: { id: saleB.id } }))?.status,
         ).toBe(SaleStatus.COMPLETED);
         expect((await unitByImei(IMEI_A))?.status).toBe(ProductUnitStatus.SOLD);
+      });
+
+      it('P6-19: a correct PIN on a void that then rolls back (409) still resets the wrong-PIN count', async () => {
+        const ctx = await setupTradeIn();
+        const saleA = await draftWithLine(ctx);
+        await addTradeIn(ctx, saleA.id, IMEI_A, 60000);
+        await addCash(ctx, saleA.id, 40000);
+        await completeReq(ctx, saleA.id);
+        await resellTradeIn(ctx, IMEI_A);
+        // Four wrong PINs already on record
+        const userRepo = dataSource.getRepository(User);
+        await userRepo.update(ctx.user.id, { approval_pin_failed_attempts: 4 });
+
+        // The PIN checks out (own committed transaction), then the void's
+        // transaction fails on the resold trade-in and rolls back.
+        await voidReq(ctx, saleA.id, 409);
+
+        const approver = await userRepo.findOneByOrFail({ id: ctx.user.id });
+        expect(approver.approval_pin_failed_attempts).toBe(0);
+        expect(approver.approval_pin_locked_until).toBeNull();
+        expect(
+          (
+            await dataSource
+              .getRepository(Sale)
+              .findOneByOrFail({ id: saleA.id })
+          ).status,
+        ).toBe(SaleStatus.COMPLETED);
       });
 
       it('reverses both directions on a sale with a serialized outgoing line and a TRADE_IN', async () => {

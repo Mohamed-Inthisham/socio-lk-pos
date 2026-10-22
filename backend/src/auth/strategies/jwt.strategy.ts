@@ -22,6 +22,11 @@ export interface AuthenticatedUser {
   role: UserRole;
   branch_id: string | null;
   branch: Branch | null;
+  // Approval PIN state (Phase 6.4 P6-15). Read from the database on every
+  // request, never put in the JWT, so it's right straight after a PIN is
+  // set or cleared. Never the PIN or its hash.
+  has_approval_pin: boolean;
+  approval_pin_set_at: Date | null;
 }
 
 const ACCESS_TOKEN_COOKIE = 'access_token';
@@ -57,6 +62,8 @@ export class JwtStrategy extends PassportStrategy(Strategy, 'jwt') {
       role: user.role,
       branch_id: user.branch_id,
       branch: user.branch ?? null,
+      has_approval_pin: user.approval_pin_set_at !== null,
+      approval_pin_set_at: user.approval_pin_set_at,
     };
   }
 }

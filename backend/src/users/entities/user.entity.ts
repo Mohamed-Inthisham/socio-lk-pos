@@ -17,6 +17,18 @@ import { Branch } from '../../branches/entities/branch.entity';
 @Entity('users')
 @Check('CHK_users_role', `role IN ('admin', 'manager', 'cashier')`)
 @Check('CHK_users_branch_role', `role = 'admin' OR branch_id IS NOT NULL`)
+// Approval PIN (Phase 6.4 P6-15): only admins and managers hold one, its
+// set time is present exactly when the hash is, and the count is never
+// negative. A route that makes a user a cashier must clear the PIN first.
+@Check(
+  'CHK_users_approval_pin_role',
+  `approval_pin_hash IS NULL OR role IN ('admin', 'manager')`,
+)
+@Check(
+  'CHK_users_approval_pin_set_at',
+  `(approval_pin_hash IS NULL) = (approval_pin_set_at IS NULL)`,
+)
+@Check('CHK_users_approval_pin_attempts', `approval_pin_failed_attempts >= 0`)
 export class User {
   @PrimaryGeneratedColumn('uuid')
   id!: string;
@@ -39,6 +51,41 @@ export class User {
 
   @Column({ type: 'varchar', length: 100, name: 'full_name' })
   full_name!: string;
+
+  // Manager approval PIN (Phase 6.4 P6-15), bcrypt like password_hash and
+  // guarded the same way: never loaded by default (select: false), never
+  // serialized (@Exclude). ApprovalsService opts in with addSelect.
+  @Exclude()
+  @Column({
+    type: 'varchar',
+    length: 255,
+    name: 'approval_pin_hash',
+    nullable: true,
+    select: false,
+  })
+  approval_pin_hash!: string | null;
+
+  // When the PIN was set ("Set on <date>"); null when there is none.
+  @Column({ type: 'timestamptz', name: 'approval_pin_set_at', nullable: true })
+  approval_pin_set_at!: Date | null;
+
+  // Wrong PINs in a row and the lock they lead to (P6-19). Kept out of
+  // every response: the PIN check reports them in its own error bodies.
+  @Exclude()
+  @Column({
+    type: 'smallint',
+    name: 'approval_pin_failed_attempts',
+    default: 0,
+  })
+  approval_pin_failed_attempts!: number;
+
+  @Exclude()
+  @Column({
+    type: 'timestamptz',
+    name: 'approval_pin_locked_until',
+    nullable: true,
+  })
+  approval_pin_locked_until!: Date | null;
 
   @Column({
     type: 'varchar',

@@ -57,6 +57,10 @@ import { Payment } from './payment.entity';
   `(status IN ('COMPLETED', 'VOIDED')) = (sale_number IS NOT NULL)`,
 )
 @Check('CHK_sales_amount_paid_bounded', `amount_paid <= total`)
+@Check(
+  'CHK_sales_void_requested_consistency',
+  `(status = 'VOIDED') = (void_requested_by IS NOT NULL)`,
+)
 // Recent sales: one branch's sales completed on one day (Phase 6.4 P6-2).
 @Index('idx_sales_branch_completed_at', ['branch_id', 'completed_at'])
 export class Sale {
@@ -156,6 +160,20 @@ export class Sale {
   @ManyToOne(() => User, { onDelete: 'RESTRICT', nullable: true })
   @JoinColumn({ name: 'voided_by' })
   voider?: User;
+
+  // Every void is approved with a manager's PIN (Phase 6.4 P6-17):
+  // voided_by is the approver, void_requested_by the user whose session
+  // asked for it (the same person when a manager approves their own).
+  @Column({ type: 'uuid', nullable: true, name: 'void_requested_by' })
+  void_requested_by!: string | null;
+
+  @ManyToOne(() => User, { onDelete: 'RESTRICT', nullable: true })
+  // Named as in the migration, so the metadata adds no schema drift.
+  @JoinColumn({
+    name: 'void_requested_by',
+    foreignKeyConstraintName: 'FK_sales_void_requested_by',
+  })
+  void_requester?: User;
 
   @Column({ type: 'text', nullable: true, name: 'void_reason' })
   void_reason!: string | null;

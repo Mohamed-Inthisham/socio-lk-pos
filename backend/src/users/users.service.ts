@@ -14,6 +14,33 @@ import { CreateUserDto } from './dto/create-user.dto';
 import { UpdateUserDto } from './dto/update-user.dto';
 import { TypedConfigService } from '../config/typed-config.service';
 
+/** User fields never returned to a client. */
+type SecretUserField =
+  | 'password_hash'
+  | 'approval_pin_hash'
+  | 'approval_pin_failed_attempts'
+  | 'approval_pin_locked_until';
+
+/** A user safe to return: no password hash, no approval PIN hash, count or lock. */
+export type SafeUser = Omit<User, SecretUserField>;
+
+/**
+ * Strip the secret fields. The result is a plain object, which the global
+ * ClassSerializerInterceptor doesn't process, so the entity's @Exclude
+ * doesn't apply to it: every field to hide is dropped here (Phase 6.4
+ * P6-15 added the approval PIN's).
+ */
+function toSafeUser(user: User): SafeUser {
+  const {
+    password_hash: _passwordHash,
+    approval_pin_hash: _pinHash,
+    approval_pin_failed_attempts: _pinAttempts,
+    approval_pin_locked_until: _pinLockedUntil,
+    ...safeUser
+  } = user;
+  return safeUser;
+}
+
 @Injectable()
 export class UsersService {
   private readonly bcryptRounds: number;
@@ -53,24 +80,24 @@ export class UsersService {
   }
 
   /**
-   * Find a user by id — EXCLUDES password_hash.
+   * Find a user by id — EXCLUDES password_hash and the approval PIN's
+   * hash, count and lock (toSafeUser).
    * Safe to return to clients. Includes nested branch (may be null for admins).
    */
-  async findById(id: string): Promise<Omit<User, 'password_hash'> | null> {
+  async findById(id: string): Promise<SafeUser | null> {
     const user = await this.usersRepository.findOne({
       where: { id },
       relations: { branch: true },
     });
     if (!user) return null;
-    const { password_hash: _password_hash, ...safeUser } = user;
-    return safeUser;
+    return toSafeUser(user);
   }
 
   /**
    * Create a new user. Hashes password, enforces email uniqueness,
    * enforces the branch/role invariant (admin: no branch; staff: required).
    */
-  async create(dto: CreateUserDto): Promise<Omit<User, 'password_hash'>> {
+  async create(dto: CreateUserDto): Promise<SafeUser> {
     const normalizedEmail = dto.email.toLowerCase();
 
     const existing = await this.usersRepository.findOne({
@@ -101,8 +128,7 @@ export class UsersService {
     });
 
     const saved = await this.usersRepository.save(user);
-    const { password_hash: _password_hash, ...safeUser } = saved;
-    return safeUser;
+    return toSafeUser(saved);
   }
 
   /**
@@ -111,10 +137,7 @@ export class UsersService {
    * Role is IMMUTABLE post-creation (enforced at both DTO and service layers).
    * Branch transfers are allowed for staff; admins cannot be given a branch.
    */
-  async update(
-    id: string,
-    dto: UpdateUserDto,
-  ): Promise<Omit<User, 'password_hash'>> {
+  async update(id: string, dto: UpdateUserDto): Promise<SafeUser> {
     const user = await this.usersRepository.findOne({ where: { id } });
     if (!user) {
       throw new NotFoundException('User not found');
@@ -145,16 +168,24 @@ export class UsersService {
     }
 
     const saved = await this.usersRepository.save(user);
-    const { password_hash: _password_hash, ...safeUser } = saved;
-    return safeUser;
+    return toSafeUser(saved);
   }
 
   /**
    * Deactivate a user — they keep existing but cannot log in.
    * This is the everyday "remove user" operation in a POS.
+   *
+   * Also clears their approval PIN, its count and lock (Phase 6.4 P6-15):
+   * an inactive user never approves anything.
    */
   async deactivate(id: string): Promise<void> {
-    const result = await this.usersRepository.update(id, { is_active: false });
+    const result = await this.usersRepository.update(id, {
+      is_active: false,
+      approval_pin_hash: null,
+      approval_pin_set_at: null,
+      approval_pin_failed_attempts: 0,
+      approval_pin_locked_until: null,
+    });
     if (result.affected === 0) {
       throw new NotFoundException('User not found');
     }

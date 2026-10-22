@@ -84,6 +84,9 @@ export class AuthController {
         role: enriched.role,
         branch_id: enriched.branch_id,
         branch: enriched.branch ?? null,
+        // From the database, as /auth/me (P6-15); never the JWT.
+        has_approval_pin: enriched.approval_pin_set_at !== null,
+        approval_pin_set_at: enriched.approval_pin_set_at,
       },
     };
   }

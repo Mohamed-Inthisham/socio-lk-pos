@@ -319,13 +319,17 @@ Unlike stock (which needs per-line branching on `external_supplier_id`), every p
 
 Different callers hit different layers, and each layer has one job. A silent void is how fraud happens. Every void lands in the audit log with a stated reason.
 
-### Void restricted to admin + manager
+### Every void is approved with a manager's PIN
 
-Cashiers can `POST /sales/:id/complete` (routine) but not `POST /sales/:id/void`. Voids require admin or manager authorization.
+_(Revised Phase 6.4 P6-17; was "Void restricted to admin + manager".)_ `POST /sales/:id/void` takes `{ void_reason, approval: { approver_id, pin } }`, and `approval` is required on **every** void, a manager's or admin's own session included. Any role may call it, but only for a sale at their own branch (admins: any branch; otherwise 403 `VOID_WRONG_BRANCH`). The approver must be an active admin, or an active manager of the sale's branch, with an approval PIN; they may be the session user. The PIN check, its lockout and its error codes are in [approvals.md](./approvals.md).
+
+Order of work: a pre-check without locks (404, not COMPLETED 400, the branch check), so a void that can't happen never uses a PIN attempt; then the PIN check in **its own committed transaction**; then the void's transaction as before.
+
+Recorded: `voided_by` = the **approver** (the admin or manager who authorized it, as before), `void_requested_by` = the **session user** (the same person when a manager approves their own). `CHK_sales_void_requested_consistency` requires `void_requested_by` exactly on VOIDED sales; the migration backfilled it with `voided_by` on earlier voids. `findOne` loads both (`voider`, `void_requester`). The VOID audit row is written **inside the void's transaction** (not by the `AuditLogInterceptor`, which has no changes for VOID and doesn't know the approver): actor = the session user, `changes` with `voided_by` and `void_requested_by`, and a description naming both.
 
 #### Why
 
-Standard POS control pattern — the "supervisor swipe" for reversals. A cashier who accidentally rang up the wrong item on a completed sale calls a manager over to void it. This aligns the system with the real-world control the shop already has and prevents casual reversal of transactions.
+Standard POS control pattern — the "supervisor swipe" for reversals, done at the till: a manager enters their PIN on the cashier's screen instead of logging in. Requiring the PIN on a manager's own session too means a till left logged in as a manager can't void on its own.
 
 ## Cross-Entity Flows
 
@@ -406,7 +410,7 @@ All endpoints are prefixed with `/api/v1` and require authentication via the `ac
 | Method | Path | Role | Purpose |
 |--------|------|------|---------|
 | POST | `/sales/:id/complete` | any | DRAFT → COMPLETED. Decrements stock, issues invoice number, sets completed_at. Auditable. |
-| POST | `/sales/:id/void` | admin, manager | COMPLETED → VOIDED. Re-increments stock, stamps payments reversed, sets voided_at/by/reason. Auditable. |
+| POST | `/sales/:id/void` | any, at the sale's branch | COMPLETED → VOIDED with a manager's approval PIN (`approval: { approver_id, pin }`, required). Re-increments stock, stamps payments reversed, sets voided_at/by (approver)/reason and void_requested_by (session user). Audited in the void's transaction. |
 
 ## RBAC Matrix
 
@@ -419,11 +423,11 @@ All endpoints are prefixed with `/api/v1` and require authentication via the `ac
 | Add/update/remove lines on DRAFT sales | ✅ | ✅ | ✅ |
 | Add/update/remove payments on DRAFT sales | ✅ | ✅ | ✅ |
 | Complete a DRAFT sale | ✅ | ✅ | ✅ |
-| Void a COMPLETED sale | ✅ | ✅ | ❌ |
+| Void a COMPLETED sale (with an admin's or manager's PIN, every time) | ✅ | ✅ | ✅ |
 
 Two design intentions codified in the matrix:
 
-- **Cashiers can do the routine day-to-day**: build carts, take payments, complete sales. They cannot manage suppliers (admin-only) or void sales (supervisor swipe).
+- **Cashiers can do the routine day-to-day**: build carts, take payments, complete sales. They cannot manage suppliers (admin-only), and they void only with a manager's PIN entered at the till (Phase 6.4 P6-17; before that, cashiers could not void at all).
 - **Multi-branch scoping is deferred**: today, all reads are unscoped by branch. When multi-branch launch happens (planned R9), staff will see only their own branch's sales by default.
 
 ## Migration Notes
@@ -441,7 +445,7 @@ Six migrations shipped in Phase 6.3, one per major schema unit, in dependency or
 
 All six run cleanly on an empty DB and revert cleanly in reverse order. Verified end-to-end during Phase 6.3.
 
-Later sales migrations: Phase 6.4 P5 added `AddSaleLinesWarrantySnapshot` (`sale_lines.warranty_months_snapshot` and `checking_warranty_days_snapshot`), then P5-18's `WarrantyPeriodPerLine` replaced them with `sale_lines.warranty` + `warranty_until` and `products.default_warranty` (dropping `warranty_months` / `checking_warranty_days`). It maps the old values to codes and backfills existing lines; `down()` restores the old columns from the codes. See "Warranty per line". Phase 6.4 P6 added `AddSalesBranchCompletedAtIndex` (`idx_sales_branch_completed_at` on `(branch_id, completed_at)`, for the till's recent-sales list).
+Later sales migrations: Phase 6.4 P5 added `AddSaleLinesWarrantySnapshot` (`sale_lines.warranty_months_snapshot` and `checking_warranty_days_snapshot`), then P5-18's `WarrantyPeriodPerLine` replaced them with `sale_lines.warranty` + `warranty_until` and `products.default_warranty` (dropping `warranty_months` / `checking_warranty_days`). It maps the old values to codes and backfills existing lines; `down()` restores the old columns from the codes. See "Warranty per line". Phase 6.4 P6 added `AddSalesBranchCompletedAtIndex` (`idx_sales_branch_completed_at` on `(branch_id, completed_at)`, for the till's recent-sales list) and `AddApprovalPinAndVoidRequestedBy` (the approval PIN columns on `users`, and `sales.void_requested_by` backfilled from `voided_by`; see [approvals.md](./approvals.md)).
 
 ## Test Coverage
 
