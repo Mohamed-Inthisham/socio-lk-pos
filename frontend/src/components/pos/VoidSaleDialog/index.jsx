@@ -285,10 +285,17 @@ const VoidSaleDialog = ({ open, onClose, sale, onVoided, afterLeave }) => {
               <label htmlFor="void-detail" className="text-xs font-semibold text-slate-500 dark:text-slate-400">
                 Detail {preset === OTHER ? "(required)" : "(optional)"}
               </label>
+              {/* Never a username: Chrome ignores autocomplete="off" here,
+                  so the real guard is the PIN field not being a saved-
+                  password field (PinField's one-time-code). The data-*
+                  attributes opt out of other password managers. */}
               <input
                 id="void-detail"
                 type="text"
                 autoComplete="off"
+                data-lpignore="true"
+                data-1p-ignore=""
+                data-form-type="other"
                 maxLength={500}
                 {...register("reason_detail")}
                 aria-invalid={errors.reason_detail ? "true" : undefined}

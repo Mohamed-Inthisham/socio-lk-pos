@@ -8,7 +8,19 @@ import { filterPinInput } from "../../../utils/pin";
  * ApprovalPinDialog (setting your own PIN) and ManagerApprovalFields
  * (approving a void; P7 returns next). Registered with react-hook-form.
  *
- * - type="password", inputMode="numeric", autoComplete="off", maxLength 6
+ * - type="password" (masked, P6-20), inputMode="numeric", maxLength 6
+ * - autoComplete="one-time-code", not "off": Chrome's password manager
+ *   ignores "off" and treated a password-type PIN next to a text field as
+ *   a login form, filling the saved username into the text field (the
+ *   void reason's Detail) and the saved password into the PIN. A
+ *   one-time-code field is a code typed in by hand, which the password
+ *   manager leaves out of login forms ("new-password" would also stop the
+ *   fill, but makes Chrome offer to generate a password here). Checked in
+ *   a real Chrome with a saved password.
+ * - only user input is taken: typing, deleting, IME, drop (a paste has its
+ *   own handler). An input event without a user input type (a browser or
+ *   extension filling the field) is cleared and shows no hint, so a saved
+ *   password can never sit in a PIN field
  * - digits only: other scripts' digits are converted to 0–9, anything else
  *   is dropped (utils/pin.js filterPinInput)
  * - a dropped key or paste shows "Digits only" under the field until the
@@ -25,18 +37,29 @@ import { filterPinInput } from "../../../utils/pin";
  * - registration: register("…") from react-hook-form
  */
 
+// InputEvent.inputType values a person produces: typing, IME composition,
+// deleting, drag-and-drop. Autofill sends none (or insertReplacementText).
+const USER_INPUT = /^(insertText|insertCompositionText|insertFromDrop|delete)/;
+
 const PinField = ({ id, label, error, registration }) => {
   const [droppedHint, setDroppedHint] = useState(false);
   const describedBy = error ? `${id}-error` : droppedHint ? `${id}-hint` : undefined;
 
   const handleChange = (e) => {
+    const inputType = e.nativeEvent?.inputType ?? "";
+    const typed = USER_INPUT.test(inputType);
+    if (!typed) {
+      // Not the user: autofill or an extension. Never keep it, never hint.
+      e.target.value = "";
+      registration.onChange(e);
+      return;
+    }
     const { value, dropped } = filterPinInput(e.target.value);
     e.target.value = value;
     // Shown on a dropped key or paste; cleared by the next insert that
     // drops nothing (a digit typed or pasted). Deleting leaves it as it is.
-    const inserted = (e.nativeEvent?.inputType ?? "insert").startsWith("insert");
     if (dropped) setDroppedHint(true);
-    else if (inserted) setDroppedHint(false);
+    else if (inputType.startsWith("insert")) setDroppedHint(false);
     registration.onChange(e);
   };
 
@@ -64,7 +87,10 @@ const PinField = ({ id, label, error, registration }) => {
         id={id}
         type="password"
         inputMode="numeric"
-        autoComplete="off"
+        autoComplete="one-time-code"
+        data-lpignore="true"
+        data-1p-ignore=""
+        data-form-type="other"
         maxLength={6}
         spellCheck={false}
         aria-invalid={error ? "true" : undefined}

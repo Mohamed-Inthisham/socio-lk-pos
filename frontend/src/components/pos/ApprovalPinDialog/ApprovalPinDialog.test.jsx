@@ -96,9 +96,12 @@ describe("ApprovalPinDialog: the form (P6-18)", () => {
     for (const field of [pin(), confirm()]) {
       expect(field).toHaveAttribute("type", "password");
       expect(field).toHaveAttribute("inputmode", "numeric");
-      expect(field).toHaveAttribute("autocomplete", "off");
+      // A typed-in code, never a saved password (Chrome ignores "off")
+      expect(field).toHaveAttribute("autocomplete", "one-time-code");
+      expect(field).toHaveValue("");
       expect(field).toHaveAttribute("maxlength", "6");
     }
+    expect(within(dialog()).queryByText("Digits only")).not.toBeInTheDocument();
   });
 
   it("says Change, with the date it was set, when there is a PIN", async () => {

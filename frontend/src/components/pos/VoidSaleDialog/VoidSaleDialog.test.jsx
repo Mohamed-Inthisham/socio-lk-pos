@@ -128,6 +128,38 @@ describe("Void on the sale detail page (P6-8)", () => {
   });
 });
 
+describe("VoidSaleDialog: no browser autofill (P6 fix)", () => {
+  it("Detail and the PIN open empty, with no hint, and opt out of password managers", async () => {
+    const user = userEvent.setup();
+    renderDetail();
+    await openVoid(user);
+    await user.click(inDialog().getByLabelText("Other"));
+
+    const detail = inDialog().getByLabelText(/^Detail/);
+    expect(detail).toHaveValue("");
+    expect(detail).toHaveAttribute("autocomplete", "off");
+    expect(detail).toHaveAttribute("data-lpignore", "true");
+    expect(detail).toHaveAttribute("data-1p-ignore");
+    expect(detail).toHaveAttribute("data-form-type", "other");
+    expect(detail.getAttribute("name")).not.toMatch(/user|email|login/i);
+
+    expect(pin()).toHaveValue("");
+    expect(pin()).toHaveAttribute("autocomplete", "one-time-code");
+    expect(inDialog().queryByText("Digits only")).not.toBeInTheDocument();
+  });
+
+  it("a PIN filled by something other than the user is thrown away, without a hint", async () => {
+    const user = userEvent.setup();
+    renderDetail();
+    await openVoid(user);
+
+    fireEvent.input(pin(), { target: { value: "HarnessPass1" } });
+
+    expect(pin()).toHaveValue("");
+    expect(inDialog().queryByText("Digits only")).not.toBeInTheDocument();
+  });
+});
+
 describe("VoidSaleDialog: the reason (P6-9)", () => {
   it("keys 1–6 pick a preset while the reasons have focus; digits in Detail are just typed", async () => {
     const user = userEvent.setup();
