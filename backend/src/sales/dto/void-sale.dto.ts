@@ -1,6 +1,13 @@
 import { ApiProperty } from '@nestjs/swagger';
-import { Transform } from 'class-transformer';
-import { IsString, MinLength, MaxLength } from 'class-validator';
+import { Transform, Type } from 'class-transformer';
+import {
+  IsDefined,
+  IsString,
+  MinLength,
+  MaxLength,
+  ValidateNested,
+} from 'class-validator';
+import { ApprovalDto } from '../../approvals/dto/approval.dto';
 
 /**
  * Request body for POST /sales/:id/void.
@@ -29,9 +36,11 @@ import { IsString, MinLength, MaxLength } from 'class-validator';
  * in an incident report, not a POS field. Prevents accidental
  * multi-megabyte pastes from bricking a receipt render later.
  *
- * voided_by is NOT in this DTO — it comes from @CurrentUser in the
- * controller. Same pattern as cashier_id on sale creation. A cashier
- * (or manager) cannot attribute a void to someone else.
+ * approval (Phase 6.4 P6-17) is required on every void, a manager's or
+ * admin's own session included: an admin or manager (approver_id) and
+ * their PIN. voided_by is that approver once the PIN checks out;
+ * void_requested_by is the session user (@CurrentUser), so nobody can
+ * attribute a void to someone else without that person's PIN.
  */
 export class VoidSaleDto {
   @ApiProperty({
@@ -50,4 +59,17 @@ export class VoidSaleDto {
   })
   @MaxLength(500, { message: 'void_reason must be at most 500 characters' })
   void_reason!: string;
+
+  @ApiProperty({
+    description:
+      "Required on every void: the approving admin or manager and their PIN (may be the session user's own).",
+    type: ApprovalDto,
+  })
+  @IsDefined({
+    message:
+      "approval is required: a manager's or admin's PIN approves every void",
+  })
+  @ValidateNested()
+  @Type(() => ApprovalDto)
+  approval!: ApprovalDto;
 }

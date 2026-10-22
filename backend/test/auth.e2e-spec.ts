@@ -76,6 +76,9 @@ describe('Auth (e2e)', () => {
           role: user.role,
           branch_id: null,
           branch: null,
+          // Approval PIN state, from the DB (Phase 6.4 P6-15)
+          has_approval_pin: false,
+          approval_pin_set_at: null,
         },
       });
 
@@ -154,6 +157,9 @@ describe('Auth (e2e)', () => {
           role: user.role,
           branch_id: null,
           branch: null,
+          // Approval PIN state, from the DB (Phase 6.4 P6-15)
+          has_approval_pin: false,
+          approval_pin_set_at: null,
         },
       });
     });

@@ -28,6 +28,9 @@ import { ProductUnitsService } from '../product-units/product-units.service';
 import { ProductUnitStatus } from '../product-units/enums/product-unit-status.enum';
 import { ProductUnit } from '../product-units/entities/product-unit.entity';
 import { PhonePurchasesService } from '../phone-purchases/phone-purchases.service';
+import { ApprovalsService } from '../approvals/approvals.service';
+import { UserRole } from '../users/enums/user-role.enum';
+import { AuditAction } from '../audit-log/enums/audit-action.enum';
 import { WarrantyPeriod } from '../products/enums/warranty-period.enum';
 
 describe('SalesService', () => {
@@ -80,6 +83,9 @@ describe('SalesService', () => {
   // Manager mock used inside dataSource.transaction() callbacks. addLine,
   // updateLine, removeLine all use it. Reuses mockQueryBuilder for the
   // sale-lock query and the MAX(line_number) query.
+  // The VOID audit row (P6-17) goes through manager.getRepository(AuditLog)
+  const mockAuditRepo = { save: jest.fn() };
+
   const mockManager = {
     createQueryBuilder: jest.fn(() => mockQueryBuilder),
     findOne: jest.fn(),
@@ -88,6 +94,23 @@ describe('SalesService', () => {
     save: jest.fn(),
     remove: jest.fn(),
     query: jest.fn(),
+    getRepository: jest.fn(() => mockAuditRepo),
+  };
+
+  const mockApprovalsService = {
+    verify: jest.fn(),
+  };
+
+  /** An admin approving their own void with their PIN (P6-17). */
+  const voidApproval = {
+    approver: { id: 'admin-1', full_name: 'Test Admin', role: UserRole.ADMIN },
+    requestedBy: {
+      id: 'admin-1',
+      full_name: 'Test Admin',
+      role: UserRole.ADMIN,
+      branch_id: null,
+    },
+    ip: '127.0.0.1',
   };
 
   const mockDataSource = {
@@ -195,6 +218,7 @@ describe('SalesService', () => {
           provide: PhonePurchasesService,
           useValue: mockPhonePurchasesService,
         },
+        { provide: ApprovalsService, useValue: mockApprovalsService },
       ],
     }).compile();
 
@@ -558,7 +582,7 @@ describe('SalesService', () => {
   });
 
   describe('findOne', () => {
-    it('returns the sale with nested branch, cashier, customer, voider, lines, and payments (including soft-deleted relations)', async () => {
+    it('returns the sale with nested branch, cashier, customer, voider, void requester, lines, and payments (including soft-deleted relations)', async () => {
       const sale = {
         id: 's1',
         branch: {},
@@ -578,6 +602,7 @@ describe('SalesService', () => {
           'cashier',
           'customer',
           'voider',
+          'void_requester',
           'lines',
           'payments',
           'payments.trade_in_product',
@@ -4209,7 +4234,7 @@ describe('SalesService', () => {
       mockStockService.incrementForReversal.mockResolvedValue(undefined);
       mockManager.query.mockResolvedValue(undefined);
 
-      await service.voidSale('sale-1', 'admin-1', validDto);
+      await service.voidSale('sale-1', voidApproval, validDto);
 
       // Stock re-incremented for each in-house line
       expect(mockStockService.incrementForReversal).toHaveBeenCalledTimes(2);
@@ -4232,15 +4257,70 @@ describe('SalesService', () => {
         ['Customer returned defective phone', 'sale-1'],
       );
 
-      // Sale UPDATE fires with VOIDED status, voidedBy, and reason
+      // Sale UPDATE fires with VOIDED status, the approver (voided_by),
+      // the session user (void_requested_by) and the reason
       expect(mockManager.query).toHaveBeenCalledWith(
         expect.stringContaining('UPDATE sales'),
         [
           SaleStatus.VOIDED,
           'admin-1',
+          'admin-1',
           'Customer returned defective phone',
           'sale-1',
         ],
+      );
+    });
+
+    it('records the approver as voided_by and the session user as void_requested_by, and audits both in the transaction (P6-17)', async () => {
+      mockQueryBuilder.getOne.mockResolvedValueOnce(seedVoidableSale());
+      arrangeManagerFind([seedVoidableLine()]);
+
+      await service.voidSale(
+        'sale-1',
+        {
+          approver: {
+            id: 'manager-1',
+            full_name: 'Shop Manager',
+            role: UserRole.MANAGER,
+          },
+          requestedBy: {
+            id: 'cashier-1',
+            full_name: 'Till Cashier',
+            role: UserRole.CASHIER,
+            branch_id: 'branch-1',
+          },
+          ip: '10.0.0.5',
+        },
+        validDto,
+      );
+
+      expect(mockManager.query).toHaveBeenCalledWith(
+        expect.stringContaining('void_requested_by = $3'),
+        [
+          SaleStatus.VOIDED,
+          'manager-1',
+          'cashier-1',
+          'Customer returned defective phone',
+          'sale-1',
+        ],
+      );
+      expect(mockAuditRepo.save).toHaveBeenCalledWith(
+        expect.objectContaining({
+          user_id: 'cashier-1',
+          user_name: 'Till Cashier',
+          user_role: UserRole.CASHIER,
+          action: AuditAction.VOID,
+          entity_type: 'Sale',
+          entity_id: 'sale-1',
+          ip_address: '10.0.0.5',
+          changes: expect.objectContaining({
+            voided_by: { old: null, new: 'manager-1' },
+            void_requested_by: { old: null, new: 'cashier-1' },
+          }),
+          description: expect.stringContaining(
+            'Voided with approval by Shop Manager (manager-1); requested by Till Cashier (cashier-1)',
+          ),
+        }),
       );
     });
 
@@ -4259,7 +4339,7 @@ describe('SalesService', () => {
       ]);
       mockStockService.incrementForReversal.mockResolvedValue(undefined);
 
-      await service.voidSale('sale-1', 'admin-1', validDto);
+      await service.voidSale('sale-1', voidApproval, validDto);
 
       expect(mockStockService.incrementForReversal).toHaveBeenCalledTimes(1);
       expect(mockStockService.incrementForReversal).toHaveBeenCalledWith(
@@ -4282,7 +4362,7 @@ describe('SalesService', () => {
       arrangeManagerFind([seedVoidableLine()]);
       mockStockService.incrementForReversal.mockResolvedValue(undefined);
 
-      await service.voidSale('sale-1', 'admin-1', {
+      await service.voidSale('sale-1', voidApproval, {
         void_reason: '   Duplicate transaction   ',
       });
 
@@ -4293,7 +4373,13 @@ describe('SalesService', () => {
       );
       expect(mockManager.query).toHaveBeenCalledWith(
         expect.stringContaining('UPDATE sales'),
-        [SaleStatus.VOIDED, 'admin-1', 'Duplicate transaction', 'sale-1'],
+        [
+          SaleStatus.VOIDED,
+          'admin-1',
+          'admin-1',
+          'Duplicate transaction',
+          'sale-1',
+        ],
       );
     });
 
@@ -4301,7 +4387,7 @@ describe('SalesService', () => {
       mockQueryBuilder.getOne.mockResolvedValueOnce(null);
 
       await expect(
-        service.voidSale('missing', 'admin-1', validDto),
+        service.voidSale('missing', voidApproval, validDto),
       ).rejects.toThrow(NotFoundException);
 
       // Nothing downstream ran
@@ -4316,7 +4402,7 @@ describe('SalesService', () => {
       );
 
       await expect(
-        service.voidSale('sale-1', 'admin-1', validDto),
+        service.voidSale('sale-1', voidApproval, validDto),
       ).rejects.toThrow(BadRequestException);
       expect(mockStockService.incrementForReversal).not.toHaveBeenCalled();
     });
@@ -4327,7 +4413,7 @@ describe('SalesService', () => {
       );
 
       await expect(
-        service.voidSale('sale-1', 'admin-1', validDto),
+        service.voidSale('sale-1', voidApproval, validDto),
       ).rejects.toThrow(BadRequestException);
       expect(mockStockService.incrementForReversal).not.toHaveBeenCalled();
     });
@@ -4335,7 +4421,7 @@ describe('SalesService', () => {
     it('throws BadRequestException when void_reason is missing', async () => {
       // Fails at the pre-transaction guard — sale is never even fetched
       await expect(
-        service.voidSale('sale-1', 'admin-1', {
+        service.voidSale('sale-1', voidApproval, {
           void_reason: undefined as unknown as string,
         }),
       ).rejects.toThrow(BadRequestException);
@@ -4346,14 +4432,14 @@ describe('SalesService', () => {
       // Defense-in-depth: DTO should catch this, but internal callers
       // that bypass the DTO shouldn't be able to slip a blank reason.
       await expect(
-        service.voidSale('sale-1', 'admin-1', { void_reason: '     ' }),
+        service.voidSale('sale-1', voidApproval, { void_reason: '     ' }),
       ).rejects.toThrow(BadRequestException);
       expect(mockDataSource.transaction).not.toHaveBeenCalled();
     });
 
     it('throws BadRequestException when void_reason is too short after trim', async () => {
       await expect(
-        service.voidSale('sale-1', 'admin-1', { void_reason: 'no' }),
+        service.voidSale('sale-1', voidApproval, { void_reason: 'no' }),
       ).rejects.toThrow(BadRequestException);
       expect(mockDataSource.transaction).not.toHaveBeenCalled();
     });
@@ -4366,7 +4452,7 @@ describe('SalesService', () => {
       );
 
       await expect(
-        service.voidSale('sale-1', 'admin-1', validDto),
+        service.voidSale('sale-1', voidApproval, validDto),
       ).rejects.toThrow(/Stock row missing/);
 
       // Sale UPDATE was NOT executed — nothing flipped to VOIDED
@@ -4386,7 +4472,7 @@ describe('SalesService', () => {
       arrangeManagerFind([seedVoidableLine()]);
       mockStockService.incrementForReversal.mockResolvedValue(undefined);
 
-      await service.voidSale('sale-1', 'admin-1', validDto);
+      await service.voidSale('sale-1', voidApproval, validDto);
 
       expect(mockQueryBuilder.setLock).toHaveBeenCalledWith(
         'pessimistic_write',
@@ -4405,7 +4491,7 @@ describe('SalesService', () => {
         .mockRejectedValueOnce(new Error('Stock row missing'));
 
       await expect(
-        service.voidSale('sale-1', 'admin-1', validDto),
+        service.voidSale('sale-1', voidApproval, validDto),
       ).rejects.toThrow();
 
       // Third line was never attempted — sequential loop bails on first throw
@@ -4417,7 +4503,7 @@ describe('SalesService', () => {
       arrangeManagerFind([seedVoidableLine()]);
       mockStockService.incrementForReversal.mockResolvedValue(undefined);
 
-      await service.voidSale('sale-1', 'admin-1', validDto);
+      await service.voidSale('sale-1', voidApproval, validDto);
 
       // Extract only the query() calls, not any other mock.query invocations
       const calls = mockManager.query.mock.calls;
@@ -4454,7 +4540,7 @@ describe('SalesService', () => {
         },
       ]);
 
-      await service.voidSale('sale-1', 'user-1', {
+      await service.voidSale('sale-1', voidApproval, {
         void_reason: 'customer changed mind',
       });
 
@@ -4486,7 +4572,7 @@ describe('SalesService', () => {
         },
       ]);
 
-      await service.voidSale('sale-1', 'user-1', {
+      await service.voidSale('sale-1', voidApproval, {
         void_reason: 'customer changed mind',
       });
 
@@ -4527,7 +4613,7 @@ describe('SalesService', () => {
         },
       ]);
 
-      await service.voidSale('sale-1', 'user-1', {
+      await service.voidSale('sale-1', voidApproval, {
         void_reason: 'customer changed mind',
       });
 
@@ -4563,7 +4649,7 @@ describe('SalesService', () => {
       );
 
       await expect(
-        service.voidSale('sale-1', 'user-1', {
+        service.voidSale('sale-1', voidApproval, {
           void_reason: 'customer changed mind',
         }),
       ).rejects.toThrow(/expected SOLD/);
@@ -4598,7 +4684,7 @@ describe('SalesService', () => {
         },
       );
 
-      await service.voidSale('sale-1', 'user-1', {
+      await service.voidSale('sale-1', voidApproval, {
         void_reason: 'customer changed mind',
       });
 
@@ -4653,7 +4739,7 @@ describe('SalesService', () => {
         'unit-of-pp-1': { product_id: 'prod-used', branch_id: 'branch-1' },
       });
 
-      await service.voidSale('sale-1', 'admin-1', validDto);
+      await service.voidSale('sale-1', voidApproval, validDto);
 
       expect(mockManager.find).toHaveBeenCalledWith(Payment, {
         where: { sale_id: 'sale-1', payment_method: PaymentMethod.TRADE_IN },
@@ -4697,7 +4783,7 @@ describe('SalesService', () => {
         'unit-of-pp-2': { product_id: 'prod-used-2', branch_id: 'branch-1' },
       });
 
-      await service.voidSale('sale-1', 'admin-1', validDto);
+      await service.voidSale('sale-1', voidApproval, validDto);
 
       expect(
         mockProductUnitsService.markReturnedForVoid,
@@ -4732,7 +4818,7 @@ describe('SalesService', () => {
       );
 
       await expect(
-        service.voidSale('sale-1', 'admin-1', validDto),
+        service.voidSale('sale-1', voidApproval, validDto),
       ).rejects.toThrow(ConflictException);
 
       // Nothing after the failed flip ran
@@ -4755,7 +4841,7 @@ describe('SalesService', () => {
         'unit-of-pp-1': { product_id: 'prod-used', branch_id: 'branch-1' },
       });
 
-      await service.voidSale('sale-1', 'admin-1', validDto);
+      await service.voidSale('sale-1', voidApproval, validDto);
 
       // Outgoing side restored
       expect(mockStockService.incrementForReversal).toHaveBeenCalledWith(
@@ -4784,7 +4870,7 @@ describe('SalesService', () => {
       mockQueryBuilder.getOne.mockResolvedValueOnce(seedVoidableSale());
       arrangeManagerFind([seedVoidableLine()]);
 
-      await service.voidSale('sale-1', 'admin-1', validDto);
+      await service.voidSale('sale-1', voidApproval, validDto);
 
       expect(mockManager.findOne).not.toHaveBeenCalled();
       expect(
@@ -4835,7 +4921,7 @@ describe('SalesService', () => {
         return Promise.resolve();
       });
 
-      await service.voidSale('sale-1', 'admin-1', validDto);
+      await service.voidSale('sale-1', voidApproval, validDto);
 
       expect(callOrder).toEqual([
         'stock-in',
@@ -4856,7 +4942,7 @@ describe('SalesService', () => {
         'unit-of-pp-1': { product_id: 'prod-from-pu', branch_id: 'branch-pu' },
       });
 
-      await service.voidSale('sale-1', 'admin-1', validDto);
+      await service.voidSale('sale-1', voidApproval, validDto);
 
       expect(mockStockService.decrementForVoidedTradeIn).toHaveBeenCalledWith(
         mockManager,
@@ -4872,7 +4958,7 @@ describe('SalesService', () => {
       mockManager.findOne.mockResolvedValue(null);
 
       await expect(
-        service.voidSale('sale-1', 'admin-1', validDto),
+        service.voidSale('sale-1', voidApproval, validDto),
       ).rejects.toThrow(/No ProductUnit linked to phone purchase pp-1/);
       expect(
         mockProductUnitsService.markReturnedForVoid,
@@ -4888,10 +4974,128 @@ describe('SalesService', () => {
       );
 
       await expect(
-        service.voidSale('sale-1', 'admin-1', validDto),
+        service.voidSale('sale-1', voidApproval, validDto),
       ).rejects.toThrow(/has no trade_in_phone_purchase_id/);
       // Never queried with a null condition
       expect(mockManager.findOne).not.toHaveBeenCalled();
+    });
+
+    // ---- voidWithApproval: pre-check, PIN, then the void (P6-17) ----
+
+    describe('voidWithApproval', () => {
+      const approvalDto = {
+        void_reason: 'Wrong price',
+        approval: { approver_id: 'manager-1', pin: '482916' },
+      };
+      const cashierAtBranch1 = {
+        id: 'cashier-1',
+        full_name: 'Till Cashier',
+        role: UserRole.CASHIER,
+        branch_id: 'branch-1',
+      };
+      const manager = {
+        id: 'manager-1',
+        full_name: 'Shop Manager',
+        role: UserRole.MANAGER,
+      };
+
+      it('checks the PIN for SALE_VOID at the sale branch, then voids with approver and requester', async () => {
+        mockSalesRepo.findOne.mockResolvedValue(seedVoidableSale());
+        mockApprovalsService.verify.mockResolvedValue(manager);
+        mockQueryBuilder.getOne.mockResolvedValueOnce(seedVoidableSale());
+        arrangeManagerFind([seedVoidableLine()]);
+
+        await service.voidWithApproval(
+          'sale-1',
+          cashierAtBranch1,
+          approvalDto,
+          '10.0.0.5',
+        );
+
+        expect(mockApprovalsService.verify).toHaveBeenCalledWith({
+          approverId: 'manager-1',
+          pin: '482916',
+          action: 'SALE_VOID',
+          branchId: 'branch-1',
+          requestedBy: cashierAtBranch1,
+          ip: '10.0.0.5',
+        });
+        expect(mockManager.query).toHaveBeenCalledWith(
+          expect.stringContaining('UPDATE sales'),
+          [
+            SaleStatus.VOIDED,
+            'manager-1',
+            'cashier-1',
+            'Wrong price',
+            'sale-1',
+          ],
+        );
+      });
+
+      it('404 before any PIN check when the sale does not exist', async () => {
+        mockSalesRepo.findOne.mockResolvedValue(null);
+
+        await expect(
+          service.voidWithApproval('missing', cashierAtBranch1, approvalDto),
+        ).rejects.toThrow(NotFoundException);
+        expect(mockApprovalsService.verify).not.toHaveBeenCalled();
+      });
+
+      it('400 before any PIN check when the sale is not COMPLETED', async () => {
+        mockSalesRepo.findOne.mockResolvedValue(
+          seedVoidableSale({ status: SaleStatus.VOIDED }),
+        );
+
+        await expect(
+          service.voidWithApproval('sale-1', cashierAtBranch1, approvalDto),
+        ).rejects.toThrow('Cannot void a VOIDED sale');
+        expect(mockApprovalsService.verify).not.toHaveBeenCalled();
+      });
+
+      it('403 VOID_WRONG_BRANCH before any PIN check when the session user is at another branch', async () => {
+        mockSalesRepo.findOne.mockResolvedValue(seedVoidableSale());
+
+        const err = await service
+          .voidWithApproval(
+            'sale-1',
+            { ...cashierAtBranch1, branch_id: 'branch-2' },
+            approvalDto,
+          )
+          .catch((e: unknown) => e);
+
+        expect(err).toBeInstanceOf(ForbiddenException);
+        expect((err as ForbiddenException).getResponse()).toMatchObject({
+          code: 'VOID_WRONG_BRANCH',
+        });
+        expect(mockApprovalsService.verify).not.toHaveBeenCalled();
+      });
+
+      it('lets an admin session ask at any branch', async () => {
+        mockSalesRepo.findOne.mockResolvedValue(seedVoidableSale());
+        mockApprovalsService.verify.mockResolvedValue(manager);
+        mockQueryBuilder.getOne.mockResolvedValueOnce(seedVoidableSale());
+        arrangeManagerFind([seedVoidableLine()]);
+
+        await service.voidWithApproval(
+          'sale-1',
+          { ...voidApproval.requestedBy },
+          approvalDto,
+        );
+
+        expect(mockApprovalsService.verify).toHaveBeenCalled();
+      });
+
+      it('never opens the void transaction when the PIN check refuses', async () => {
+        mockSalesRepo.findOne.mockResolvedValue(seedVoidableSale());
+        mockApprovalsService.verify.mockRejectedValue(
+          new ForbiddenException({ message: 'Wrong PIN.', code: 'WRONG_PIN' }),
+        );
+
+        await expect(
+          service.voidWithApproval('sale-1', cashierAtBranch1, approvalDto),
+        ).rejects.toThrow(ForbiddenException);
+        expect(mockDataSource.transaction).not.toHaveBeenCalled();
+      });
     });
   });
 

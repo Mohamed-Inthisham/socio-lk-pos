@@ -10,6 +10,7 @@ import {
   ParseUUIDPipe,
   HttpCode,
   HttpStatus,
+  Ip,
 } from '@nestjs/common';
 import {
   ApiTags,
@@ -462,10 +463,12 @@ export class SalesController {
     return this.salesService.findOne(id);
   }
 
+  // Every role may call it: the approver's PIN is the authority (P6-17).
+  // Not @Auditable: voidSale writes the VOID audit row in its own
+  // transaction, naming both the approver and the session user.
   @Post(':id/void')
   @HttpCode(HttpStatus.OK)
-  @Roles(UserRole.ADMIN, UserRole.MANAGER)
-  @Auditable('Sale', AuditAction.VOID)
+  @Roles(UserRole.ADMIN, UserRole.MANAGER, UserRole.CASHIER)
   @ApiOperation({
     summary:
       'Void a COMPLETED sale (transactional: stock reversal + payment reversal)',
@@ -477,12 +480,18 @@ export class SalesController {
       'each TRADE_IN payment, flips the traded-in unit to RETURNED and ' +
       'decrements its stock; the PhonePurchase stays as history. Stamps ' +
       'reversed_at and reversal_reason on every payment ' +
-      'on this sale. Sets status=VOIDED, voided_at=now(), voided_by=<caller>, ' +
-      'and void_reason=<trimmed reason>. If any step fails, the whole ' +
+      'on this sale. Sets status=VOIDED, voided_at=now(), ' +
+      'voided_by=<approver>, void_requested_by=<session user>, and ' +
+      'void_reason=<trimmed reason>. If any step fails, the whole ' +
       'transaction rolls back and nothing changes.\n\n' +
-      'Restricted to ADMIN and MANAGER — voiding a sale is a financial ' +
-      'reversal that requires supervisor authority. Cashiers can complete ' +
-      'sales but not void them (standard "supervisor swipe" pattern).\n\n' +
+      'Every void needs a manager approval PIN (Phase 6.4 P6-17), on every ' +
+      "session, a manager's or admin's own included: approval = " +
+      "{ approver_id, pin }. Any role at the sale's branch may ask (admins " +
+      'at any branch); the approver is an active admin, or a manager of the ' +
+      "sale's branch, with a PIN, and may be the session user. The PIN is " +
+      'checked in its own committed transaction first, so a wrong PIN is ' +
+      'counted even though nothing is voided; 5 wrong in a row lock that ' +
+      'PIN for 15 minutes. The VOID audit row names both people.\n\n' +
       'VOIDED is TERMINAL. There is no un-void endpoint — if a void was ' +
       'itself a mistake, create a new sale. The original sale_number, ' +
       'completed_at, lines, and payment amounts are all preserved on the ' +
@@ -504,13 +513,23 @@ export class SalesController {
   @ApiResponse({
     status: 400,
     description:
-      'Sale is not in COMPLETED status (DRAFT or VOIDED), or void_reason ' +
-      'is missing/blank/too short',
+      'Sale is not in COMPLETED status (DRAFT or VOIDED), void_reason ' +
+      'is missing/blank/too short, or approval is missing or malformed',
   })
   @ApiResponse({ status: 401, description: 'Not authenticated' })
   @ApiResponse({
     status: 403,
-    description: 'Cashier attempted to void a sale (admin or manager only)',
+    description:
+      '{ message, code }: VOID_WRONG_BRANCH (the session user is at another ' +
+      'branch), WRONG_PIN (with attempts_left), or the approver is refused: ' +
+      'APPROVER_NOT_FOUND, APPROVER_INACTIVE, APPROVER_NOT_MANAGER, ' +
+      'APPROVER_WRONG_BRANCH, APPROVER_NO_PIN. Never the PIN.',
+  })
+  @ApiResponse({
+    status: 423,
+    description:
+      "{ message, code: PIN_LOCKED, locked_until }: the approver's PIN is " +
+      'locked (also on the 5th wrong PIN in a row).',
   })
   @ApiResponse({ status: 404, description: 'Sale not found' })
   @ApiResponse({
@@ -529,8 +548,9 @@ export class SalesController {
     @Param('id', ParseUUIDPipe) id: string,
     @Body() dto: VoidSaleDto,
     @CurrentUser() user: AuthenticatedUser,
+    @Ip() ip: string,
   ) {
-    await this.salesService.voidSale(id, user.id, dto);
+    await this.salesService.voidWithApproval(id, user, dto, ip);
     return this.salesService.findOne(id);
   }
 }

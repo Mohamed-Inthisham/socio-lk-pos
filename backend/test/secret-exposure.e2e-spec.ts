@@ -43,6 +43,24 @@ describe('Secret exposure (e2e)', () => {
   const http = () => request(app.getHttpServer());
   const pause = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
+  /**
+   * Keys no response may carry: password and refresh-token hashes, and the
+   * approval PIN's hash, wrong-PIN count and lock (Phase 6.4 P6-15), and
+   * the PIN or password a request sent.
+   */
+  const SECRET_KEYS = new Set([
+    'password_hash',
+    'token_hash',
+    'approval_pin_hash',
+    'approval_pin_failed_attempts',
+    'approval_pin_locked_until',
+    'pin',
+    'current_password',
+  ]);
+
+  /** The manager's approval PIN, set through the API below. */
+  const MANAGER_PIN = '730415';
+
   /** Every path in `node` that names or holds a secret. */
   function secretPaths(node: unknown, path = '$'): string[] {
     if (Array.isArray(node)) {
@@ -50,9 +68,7 @@ describe('Secret exposure (e2e)', () => {
     }
     if (node && typeof node === 'object') {
       return Object.entries(node).flatMap(([k, v]) => [
-        ...(k === 'password_hash' || k === 'token_hash'
-          ? [`${path}.${k}`]
-          : []),
+        ...(SECRET_KEYS.has(k) ? [`${path}.${k}`] : []),
         ...secretPaths(v, `${path}.${k}`),
       ]);
     }
@@ -64,6 +80,10 @@ describe('Secret exposure (e2e)', () => {
 
   function expectNoSecrets(res: Response): void {
     expect(secretPaths(res.body)).toEqual([]);
+    // Nor the PIN or the password as a value, anywhere in the body
+    const text = JSON.stringify(res.body ?? {});
+    expect(text).not.toContain(MANAGER_PIN);
+    expect(text).not.toContain(PASSWORD);
   }
 
   async function seedUser(
@@ -316,25 +336,111 @@ describe('Secret exposure (e2e)', () => {
       expectNoSecrets(res);
     });
 
-    it('POST /sales/:id/void (manager)', async () => {
+    // ---- Approval PIN (P6-15 – P6-19): set, refused, locked, approved ----
+
+    it('PUT /auth/me/approval-pin (manager sets their own PIN)', async () => {
       const res = await http()
-        .post(`/api/v1/sales/${saleId}/void`)
+        .put('/api/v1/auth/me/approval-pin')
         .set('Cookie', managerCookies)
-        .send({ void_reason: 'secret-exposure probe' })
+        .send({ current_password: PASSWORD, pin: MANAGER_PIN })
         .expect(200);
-      expect(res.body.cashier).toMatchObject({ id: cashier.id });
-      expect(res.body.voided_by).toBe(manager.id);
-      // The voider relation (P6-6) is loaded on every hydrated sale
-      expect(res.body.voider).toMatchObject({ id: manager.id });
+      expect(res.body).toMatchObject({ has_approval_pin: true });
       expectNoSecrets(res);
     });
 
-    it('GET /sales/:id on the voided sale (voider loaded)', async () => {
+    it('PUT /auth/me/approval-pin with a wrong password (403 body)', async () => {
+      const res = await http()
+        .put('/api/v1/auth/me/approval-pin')
+        .set('Cookie', managerCookies)
+        .send({ current_password: 'not-the-password', pin: '193728' })
+        .expect(403);
+      expect(res.body.code).toBe('WRONG_PASSWORD');
+      expectNoSecrets(res);
+      expect(JSON.stringify(res.body)).not.toContain('not-the-password');
+      expect(JSON.stringify(res.body)).not.toContain('193728');
+    });
+
+    it('GET /auth/me (manager) shows the PIN state, not the PIN', async () => {
+      const res = await http()
+        .get('/api/v1/auth/me')
+        .set('Cookie', managerCookies)
+        .expect(200);
+      expect(res.body.user).toMatchObject({ has_approval_pin: true });
+      expectNoSecrets(res);
+    });
+
+    it('GET /approvers (id and full_name only)', async () => {
+      const res = await http()
+        .get('/api/v1/approvers')
+        .query({ branchId: branch.id })
+        .set('Cookie', cashierCookies)
+        .expect(200);
+      expect(res.body).toEqual([
+        { id: manager.id, full_name: manager.full_name },
+      ]);
+      expectNoSecrets(res);
+    });
+
+    it('POST /sales/:id/void with a wrong PIN (403 body)', async () => {
+      const res = await http()
+        .post(`/api/v1/sales/${saleId}/void`)
+        .set('Cookie', cashierCookies)
+        .send({
+          void_reason: 'secret-exposure probe',
+          approval: { approver_id: manager.id, pin: '193728' },
+        })
+        .expect(403);
+      expect(res.body).toMatchObject({ code: 'WRONG_PIN', attempts_left: 4 });
+      expectNoSecrets(res);
+      expect(JSON.stringify(res.body)).not.toContain('193728');
+    });
+
+    it('POST /sales/:id/void while the PIN is locked (423 body)', async () => {
+      await dataSource.query(
+        `UPDATE users SET approval_pin_locked_until = now() + interval '1 hour' WHERE id = $1`,
+        [manager.id],
+      );
+      const res = await http()
+        .post(`/api/v1/sales/${saleId}/void`)
+        .set('Cookie', cashierCookies)
+        .send({
+          void_reason: 'secret-exposure probe',
+          approval: { approver_id: manager.id, pin: MANAGER_PIN },
+        })
+        .expect(423);
+      expect(res.body.code).toBe('PIN_LOCKED');
+      expectNoSecrets(res);
+      await dataSource.query(
+        `UPDATE users SET approval_pin_locked_until = NULL WHERE id = $1`,
+        [manager.id],
+      );
+    });
+
+    it("POST /sales/:id/void (cashier's session, manager's PIN)", async () => {
+      const res = await http()
+        .post(`/api/v1/sales/${saleId}/void`)
+        .set('Cookie', cashierCookies)
+        .send({
+          void_reason: 'secret-exposure probe',
+          approval: { approver_id: manager.id, pin: MANAGER_PIN },
+        })
+        .expect(200);
+      expect(res.body.cashier).toMatchObject({ id: cashier.id });
+      expect(res.body.voided_by).toBe(manager.id);
+      // The voider (P6-6) and the void requester (P6-17) are loaded on
+      // every hydrated sale
+      expect(res.body.voider).toMatchObject({ id: manager.id });
+      expect(res.body.void_requester).toMatchObject({ id: cashier.id });
+      expectNoSecrets(res);
+    });
+
+    it('GET /sales/:id on the voided sale (voider and void requester loaded)', async () => {
       const res = await http()
         .get(`/api/v1/sales/${saleId}`)
         .set('Cookie', cashierCookies)
         .expect(200);
       expect(res.body.voider).toMatchObject({ id: manager.id });
+      expect(res.body.void_requester).toMatchObject({ id: cashier.id });
       expectNoSecrets(res);
     });
 
@@ -467,6 +573,33 @@ describe('Secret exposure (e2e)', () => {
       expect(secretPaths(entry.changes)).toEqual([]);
     });
 
+    it('GET /users/:id of a PIN holder returns no PIN hash, count or lock', async () => {
+      const res = await http()
+        .get(`/api/v1/users/${manager.id}`)
+        .set('Cookie', adminCookies)
+        .expect(200);
+      expect(res.body.approval_pin_set_at).toBeTruthy();
+      expectNoSecrets(res);
+    });
+
+    it('PATCH /users/:id of a PIN holder returns no secrets', async () => {
+      const res = await http()
+        .patch(`/api/v1/users/${manager.id}`)
+        .set('Cookie', adminCookies)
+        .send({ full_name: 'Manager Renamed' })
+        .expect(200);
+      expectNoSecrets(res);
+    });
+
+    it('DELETE /users/:id/approval-pin (admin) returns no body', async () => {
+      const res = await http()
+        .delete(`/api/v1/users/${manager.id}/approval-pin`)
+        .set('Cookie', adminCookies)
+        .expect(204);
+      expect(res.text).toBe('');
+      expectNoSecrets(res);
+    });
+
     it('GET /audit-logs returns no secrets', async () => {
       const res = await http()
         .get('/api/v1/audit-logs')
@@ -474,6 +607,31 @@ describe('Secret exposure (e2e)', () => {
         .expect(200);
       expect(res.body.data.length).toBeGreaterThan(0);
       expectNoSecrets(res);
+    });
+
+    it('no audit row holds a PIN, a password or a hash (P6-18, P6-19)', async () => {
+      await pause(200); // fire-and-forget interceptor writes
+      const rows = await dataSource.getRepository(AuditLog).find();
+      const actions = rows.map((r) => r.action);
+      expect(actions).toEqual(
+        expect.arrayContaining([
+          AuditAction.APPROVAL_PIN_SET,
+          AuditAction.APPROVAL_PIN_SET_REJECTED,
+          AuditAction.APPROVAL_PIN_FAILED,
+          AuditAction.APPROVAL_PIN_CLEARED,
+          AuditAction.VOID,
+        ]),
+      );
+      const text = JSON.stringify(rows);
+      for (const secret of [
+        MANAGER_PIN,
+        '193728',
+        PASSWORD,
+        'not-the-password',
+      ]) {
+        expect(text).not.toContain(secret);
+      }
+      expect(text).not.toMatch(/\$2[aby]\$\d\d\$/);
     });
   });
 });
