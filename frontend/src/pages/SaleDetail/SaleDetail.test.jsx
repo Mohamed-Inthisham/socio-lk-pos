@@ -152,6 +152,26 @@ describe("SaleDetail: Reprint (P6-7)", () => {
     expect(print).not.toHaveBeenCalled();
   });
 
+  it("P is ignored while a dialog is open (e.g. the user menu's Approval PIN)", async () => {
+    salesService.getSale.mockResolvedValue(saleEntity());
+    const user = userEvent.setup();
+    renderWithProviders(
+      <>
+        <div role="dialog" aria-label="Set approval PIN" />
+        <Routes>
+          <Route path="/pos/sales/:id" element={<SaleDetail />} />
+        </Routes>
+      </>,
+      { route: "/pos/sales/sale-7", preloadedState: { auth: authState(cashierUser), branches: branchesState([mainShop]) } },
+    );
+    await heading();
+
+    await user.keyboard("p");
+
+    expect(print).not.toHaveBeenCalled();
+    expect(salesService.getSale).toHaveBeenCalledTimes(1); // the page load only
+  });
+
   it("P is ignored while a reprint is still loading", async () => {
     let release;
     salesService.getSale

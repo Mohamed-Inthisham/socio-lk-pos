@@ -16,6 +16,7 @@ import TotalsPanel from "../../components/pos/TotalsPanel";
 import useTerminalBranch from "../../hooks/useTerminalBranch";
 import { isTouchOnly } from "../../utils/device";
 import { printReceipt } from "../../utils/printReceipt";
+import { POS_RETURN_FOCUS_EVENT } from "../../utils/posFocus";
 import { getSale } from "../../services/salesService";
 import useTerminalSessionStore from "../../store/zustand/terminalSessionStore";
 import {
@@ -164,6 +165,13 @@ const PosTerminal = () => {
   const returnFocus = useCallback(() => {
     if (!isTouchOnly()) focusScan();
   }, [focusScan]);
+
+  // Dialogs outside the terminal (the user menu's Approval PIN) hand focus
+  // back through this event when they close (utils/posFocus.js).
+  useEffect(() => {
+    window.addEventListener(POS_RETURN_FOCUS_EVENT, returnFocus);
+    return () => window.removeEventListener(POS_RETURN_FOCUS_EVENT, returnFocus);
+  }, [returnFocus]);
 
   useHotkeys(
     "f2",

@@ -1,4 +1,4 @@
-import { Fragment } from "react";
+import { Fragment, useState } from "react";
 import {
   Menu,
   MenuButton,
@@ -7,9 +7,11 @@ import {
   Transition,
 } from "@headlessui/react";
 import { useDispatch, useSelector } from "react-redux";
-import { LogOut, ChevronDown } from "lucide-react";
+import { LogOut, ChevronDown, KeyRound } from "lucide-react";
 import { logoutUser } from "../../../store/slices/authSlice";
-import { ROLE_INFO } from "../../../constants/rolePermissions";
+import { PERMISSIONS, ROLE_INFO, hasPermission } from "../../../constants/rolePermissions";
+import ApprovalPinDialog from "../../pos/ApprovalPinDialog";
+import { receiptDateTime } from "../../../utils/receipt";
 
 /**
  * UserMenu Component
@@ -25,6 +27,9 @@ import { ROLE_INFO } from "../../../constants/rolePermissions";
  * DROPDOWN CONTENT:
  * - Header block: full name + email + role badge
  * - Divider
+ * - Approval PIN (admins and managers, P6-18): "Set on <date>" or "Not
+ *   set"; opens ApprovalPinDialog. Hidden for cashiers, who never hold a
+ *   PIN (the backend's CHK_users_approval_pin_role).
  * - Logout action
  */
 
@@ -43,11 +48,13 @@ const getInitials = (name, email) => {
 const UserMenu = () => {
   const dispatch = useDispatch();
   const user = useSelector((state) => state.auth.user);
+  const [pinOpen, setPinOpen] = useState(false);
 
   if (!user) return null;
 
   const initials = getInitials(user.name, user.email);
   const roleInfo = ROLE_INFO[user.role] || {};
+  const canSetPin = hasPermission(user.role, PERMISSIONS.SET_APPROVAL_PIN);
 
   const handleLogout = () => {
     dispatch(logoutUser());
@@ -125,6 +132,33 @@ const UserMenu = () => {
           </div>
 
           <div className="py-1">
+            {canSetPin && (
+              <MenuItem>
+                <button
+                  type="button"
+                  onClick={() => setPinOpen(true)}
+                  className="
+                    w-full flex items-start gap-2.5
+                    px-3 py-2 rounded-md text-left
+                    text-sm text-slate-700 dark:text-slate-200
+                    data-[focus]:bg-slate-100 dark:data-[focus]:bg-slate-800
+                    transition-colors
+                  "
+                >
+                  <KeyRound size={16} className="shrink-0 mt-0.5" aria-hidden="true" />
+                  <span className="min-w-0">
+                    <span className="block">Approval PIN</span>
+                    {user.has_approval_pin ? (
+                      <span className="block text-xs text-slate-500 dark:text-slate-400">
+                        Set on {receiptDateTime(user.approval_pin_set_at)}
+                      </span>
+                    ) : (
+                      <span className="block text-xs font-medium text-amber-700 dark:text-amber-400">Not set</span>
+                    )}
+                  </span>
+                </button>
+              </MenuItem>
+            )}
             <MenuItem>
               <button
                 type="button"
@@ -145,6 +179,9 @@ const UserMenu = () => {
           </div>
         </MenuItems>
       </Transition>
+
+      {/* Rendered in a portal; here only so it shares the menu's lifetime. */}
+      {canSetPin && <ApprovalPinDialog open={pinOpen} onClose={() => setPinOpen(false)} />}
     </Menu>
   );
 };

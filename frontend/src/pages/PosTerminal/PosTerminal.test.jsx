@@ -3,6 +3,8 @@ import { fireEvent, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { Link, Route, Routes } from "react-router-dom";
 import PosTerminal from ".";
+import UserMenu from "../../components/layout/UserMenu";
+import { managerSessionUser } from "../../test/authEntities";
 import {
   authState,
   branchesState,
@@ -802,6 +804,47 @@ describe("PosTerminal trade-in: F6, attach-then-return, F3 guard (P4-2, P4-11)",
 
     expect(attachDialog()).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Change" })).toHaveAttribute("aria-disabled", "true");
+  });
+});
+
+describe("PosTerminal with the user menu's Approval PIN dialog (P6-18)", () => {
+  const renderWithMenu = async () => {
+    renderWithProviders(
+      <>
+        <UserMenu />
+        <PosTerminal />
+      </>,
+      { preloadedState: { auth: authState(managerSessionUser()), branches: branchesState([mainShop]) } },
+    );
+    await screen.findByRole("list", { name: "Cart" });
+  };
+
+  const openPinDialog = async (user) => {
+    await user.click(screen.getByRole("button", { name: /Asha Perera/ }));
+    await user.click(await screen.findByRole("menuitem", { name: /Approval PIN/ }));
+    return screen.findByRole("dialog", { name: /approval PIN/i });
+  };
+
+  it("the till's keys are ignored while it is open (F4 opens no payment)", async () => {
+    salesService.createSale.mockResolvedValue(draftSale({ lines, subtotal: "3990.00", total: "3990.00" }));
+    const user = userEvent.setup();
+    await renderWithMenu();
+    await openPinDialog(user);
+
+    await user.keyboard("[F4]");
+
+    expect(screen.queryByRole("dialog", { name: "Take payment" })).not.toBeInTheDocument();
+  });
+
+  it("closing it hands focus back to the scan bar (pos:return-focus)", async () => {
+    const user = userEvent.setup();
+    await renderWithMenu();
+    await openPinDialog(user);
+
+    await user.keyboard("{Escape}");
+
+    await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
+    await waitFor(() => expect(scanBar()).toHaveFocus());
   });
 });
 

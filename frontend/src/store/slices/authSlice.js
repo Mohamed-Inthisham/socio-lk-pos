@@ -103,6 +103,14 @@ const authSlice = createSlice({
     clearError: (state) => {
       state.error = null;
     },
+    // PUT /auth/me/approval-pin answered (P6-18): the user menu's
+    // "Set on <date>" updates without another /auth/me. Only these two
+    // non-secret fields; the PIN and the password never reach Redux.
+    approvalPinSet: (state, action) => {
+      if (!state.user) return;
+      state.user.has_approval_pin = action.payload.has_approval_pin;
+      state.user.approval_pin_set_at = action.payload.approval_pin_set_at;
+    },
   },
 
   extraReducers: (builder) => {
@@ -160,5 +168,5 @@ const authSlice = createSlice({
   },
 });
 
-export const { clearError } = authSlice.actions;
+export const { clearError, approvalPinSet } = authSlice.actions;
 export default authSlice.reducer;
