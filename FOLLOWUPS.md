@@ -112,6 +112,8 @@ Non-blocking issues and tech debt to address opportunistically. When you fix one
 - **Concurrent billing.** Deferred to multi-cashier launch. _[earlier phases]_
 - **Password change flow.** Phase 6.8 or earlier. _[earlier phases]_
 
+- **Roadmap phase numbers conflict.** The planning doc §10 gives Phase 6.5 to parked / held sales, while the shop's notes put phone inventory and supplier receiving (the supplier-intake, IMEI-inventory and phone-purchase entries above, and returning faulty phones to the supplier) in 6.5. The P6 plan refers to "the supplier-receiving phase" without a number. Fix: one renumbering pass over the planning doc §10, FOLLOWUPS and the phase notes, done on its own, not in P6. _[Phase 6.4 P6 planning review]_
+
 ## Frontend
 
 - **Sweep 6 unused `eslint-disable` directives.** _[Path B]_
