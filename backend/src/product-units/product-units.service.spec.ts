@@ -415,7 +415,7 @@ describe('ProductUnitsService', () => {
       orderBy: jest.Mock;
       getOne: jest.Mock;
     };
-    let mockManager: { createQueryBuilder: jest.Mock };
+    let mockManager: { createQueryBuilder: jest.Mock; query: jest.Mock };
 
     const soldUnit = () => ({
       id: 'u-1',
@@ -452,7 +452,75 @@ describe('ProductUnitsService', () => {
               ? mockLaterQb
               : mockReadQb,
         ),
+        // The later-sale lookup (P6-22)
+        query: jest.fn().mockResolvedValue([]),
       };
+    });
+
+    const laterUnit = () => ({
+      id: 'u-2',
+      imei: '354789102345678',
+      status: ProductUnitStatus.IN_STOCK,
+      product_id: 'p-used',
+      branch_id: 'b-1',
+      phone_purchase_id: 'pp-2',
+    });
+
+    const conflictOf = async () => {
+      try {
+        await service.markAvailableForReversal(
+          mockManager as unknown as import('typeorm').EntityManager,
+          'u-1',
+        );
+      } catch (err) {
+        expect(err).toBeInstanceOf(ConflictException);
+        return (err as ConflictException).getResponse() as Record<
+          string,
+          unknown
+        >;
+      }
+      throw new Error('Expected ConflictException');
+    };
+
+    it('names the later sale when the phone was traded back in on it (TAKEN_BACK_ON_SALE)', async () => {
+      mockReadQb.getOne.mockResolvedValue(soldUnit());
+      mockLaterQb.getOne.mockResolvedValue(laterUnit());
+      mockManager.query.mockResolvedValue([
+        { id: 'sale-b', sale_number: 'INV-20261021-0002' },
+      ]);
+
+      const response = await conflictOf();
+
+      expect(mockManager.query).toHaveBeenCalledWith(
+        expect.stringContaining('p.trade_in_phone_purchase_id = $1'),
+        ['pp-2'],
+      );
+      expect(response).toMatchObject({
+        message: expect.stringContaining('taken back into stock'),
+        imei: '354789102345678',
+        reason: 'TAKEN_BACK_ON_SALE',
+        later_sale: { id: 'sale-b', sale_number: 'INV-20261021-0002' },
+        existing_unit: { id: 'u-2', status: ProductUnitStatus.IN_STOCK },
+      });
+      expect(mockUpdateQb.execute).not.toHaveBeenCalled();
+    });
+
+    it('refuses for good when the phone was bought back on a phone purchase (BOUGHT_BACK_ON_PURCHASE, no later sale)', async () => {
+      mockReadQb.getOne.mockResolvedValue(soldUnit());
+      mockLaterQb.getOne.mockResolvedValue(laterUnit());
+      mockManager.query.mockResolvedValue([]);
+
+      const response = await conflictOf();
+
+      expect(response).toMatchObject({
+        message:
+          "This sale can't be voided: the phone (IMEI 354789102345678) " +
+          'was bought back on a later purchase.',
+        imei: '354789102345678',
+        reason: 'BOUGHT_BACK_ON_PURCHASE',
+        later_sale: null,
+      });
+      expect(mockUpdateQb.execute).not.toHaveBeenCalled();
     });
 
     it('checks for a newer, non-RETURNED unit with the same IMEI before flipping', async () => {
@@ -539,7 +607,15 @@ describe('ProductUnitsService', () => {
           existing_unit: unknown;
         };
         expect(response.existing_unit).toBeNull();
+        // The race: generic, no lookup in the aborted transaction (P6-22)
+        expect(response).toMatchObject({
+          message: expect.stringContaining('taken back into stock'),
+          imei: '354789102345678',
+          reason: null,
+          later_sale: null,
+        });
       }
+      expect(mockManager.query).not.toHaveBeenCalled();
     });
 
     it('propagates other errors from the flip unchanged', async () => {
@@ -680,7 +756,7 @@ describe('ProductUnitsService', () => {
       where: jest.Mock;
       execute: jest.Mock;
     };
-    let mockManager: { createQueryBuilder: jest.Mock };
+    let mockManager: { createQueryBuilder: jest.Mock; query: jest.Mock };
 
     beforeEach(() => {
       mockReadQb = {
@@ -698,7 +774,54 @@ describe('ProductUnitsService', () => {
         createQueryBuilder: jest.fn((entityArg?: unknown) =>
           entityArg ? mockReadQb : mockUpdateQb,
         ),
+        // The resale lookup (P6-22)
+        query: jest.fn().mockResolvedValue([]),
       };
+    });
+
+    it('names the most recently completed sale that resold the trade-in phone (RESOLD)', async () => {
+      mockReadQb.getOne.mockResolvedValue({
+        id: 'u-1',
+        imei: '354789102345678',
+        status: ProductUnitStatus.SOLD,
+        product_id: 'p-1',
+        branch_id: 'b-1',
+      });
+      // Two completed sales have a line on the unit: the query orders by
+      // completed_at DESC with LIMIT 1, so the newest comes back first.
+      mockManager.query.mockResolvedValue([
+        { id: 'sale-newer', sale_number: 'INV-20261022-0003' },
+        { id: 'sale-older', sale_number: 'INV-20261020-0001' },
+      ]);
+
+      let response: Record<string, unknown> | undefined;
+      try {
+        await service.markReturnedForVoid(
+          mockManager as unknown as import('typeorm').EntityManager,
+          'u-1',
+        );
+      } catch (err) {
+        expect(err).toBeInstanceOf(ConflictException);
+        response = (err as ConflictException).getResponse() as Record<
+          string,
+          unknown
+        >;
+      }
+
+      const [sql, params] = mockManager.query.mock.calls[0] as [
+        string,
+        unknown[],
+      ];
+      expect(sql).toContain('l.product_unit_id = $1');
+      expect(sql).toContain("s.status = 'COMPLETED'");
+      expect(sql).toMatch(/ORDER BY s\.completed_at DESC\s+LIMIT 1/);
+      expect(params).toEqual(['u-1']);
+      expect(response).toMatchObject({
+        imei: '354789102345678',
+        reason: 'RESOLD',
+        later_sale: { id: 'sale-newer', sale_number: 'INV-20261022-0003' },
+      });
+      expect(mockUpdateQb.execute).not.toHaveBeenCalled();
     });
 
     it('flips IN_STOCK to RETURNED and returns the unit on the happy path', async () => {

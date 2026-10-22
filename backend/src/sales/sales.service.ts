@@ -7,6 +7,7 @@ import {
 } from '@nestjs/common';
 import { InjectRepository, InjectDataSource } from '@nestjs/typeorm';
 import {
+  Brackets,
   DataSource,
   EntityManager,
   In,
@@ -205,9 +206,20 @@ export class SalesService {
    * same. No opt-out yet — if we need ASC sorting later, add a ?sort
    * param then.
    *
-   * Nested branch + cashier included via joins so the frontend can
-   * render "Sale #INV-... by cashier X at branch Y" without extra
-   * round trips. Follows the nested-response pattern from Phase 6.1.
+   * Nested branch + cashier + customer included via joins so the frontend
+   * can render "Sale #INV-... by cashier X at branch Y for customer Z"
+   * without extra round trips. Follows the nested-response pattern from
+   * Phase 6.1. withDeleted, as findOne: a soft-deleted cashier or customer
+   * is still named on the row (sales have no soft delete).
+   *
+   * sort=completed_at (Phase 6.4 P6-2) orders by completion, ties broken
+   * by created_at; a DRAFT has none and sorts last, and completedFrom/To
+   * leave drafts out altogether.
+   *
+   * q (P6-3): the sale number, customer name or phone by substring, or an
+   * exact IMEI. The IMEI matches are EXISTS subqueries, not joins, so a
+   * sale with several matching lines or payments is one row and the page
+   * and total stay right.
    */
   async findAll(query: ListSalesQueryDto): Promise<PaginatedResponse<Sale>> {
     const page = query.page ?? 1;
@@ -215,8 +227,10 @@ export class SalesService {
 
     const qb = this.salesRepository
       .createQueryBuilder('sale')
+      .withDeleted()
       .leftJoinAndSelect('sale.branch', 'branch')
-      .leftJoinAndSelect('sale.cashier', 'cashier');
+      .leftJoinAndSelect('sale.cashier', 'cashier')
+      .leftJoinAndSelect('sale.customer', 'customer');
 
     if (query.branchId) {
       qb.andWhere('sale.branch_id = :branchId', { branchId: query.branchId });
@@ -239,20 +253,58 @@ export class SalesService {
       const to = this.normalizeToUpperBound(query.to);
       qb.andWhere('sale.created_at < :to', { to });
     }
+    if (query.completedFrom) {
+      qb.andWhere('sale.completed_at >= :completedFrom', {
+        completedFrom: query.completedFrom,
+      });
+    }
+    if (query.completedTo) {
+      qb.andWhere('sale.completed_at < :completedTo', {
+        completedTo: query.completedTo,
+      });
+    }
+    if (query.q) {
+      const pattern = `%${query.q.replace(/[\\%_]/g, '\\$&')}%`;
+      qb.andWhere(
+        new Brackets((sub) => {
+          sub
+            .where('sale.sale_number ILIKE :pattern', { pattern })
+            .orWhere('customer.name ILIKE :pattern', { pattern })
+            .orWhere('customer.phone ILIKE :pattern', { pattern })
+            .orWhere(
+              'EXISTS (SELECT 1 FROM sale_lines l ' +
+                'WHERE l.sale_id = sale.id AND l.imei_snapshot = :imei)',
+              { imei: query.q },
+            )
+            .orWhere(
+              'EXISTS (SELECT 1 FROM payments p ' +
+                'WHERE p.sale_id = sale.id AND p.trade_in_imei = :imei)',
+              { imei: query.q },
+            );
+        }),
+      );
+    }
 
-    qb.orderBy('sale.created_at', 'DESC')
-      .skip((page - 1) * limit)
-      .take(limit);
+    if (query.sort === 'completed_at') {
+      // NULLS LAST: without completed bounds, drafts sort after completions.
+      qb.orderBy('sale.completed_at', 'DESC', 'NULLS LAST').addOrderBy(
+        'sale.created_at',
+        'DESC',
+      );
+    } else {
+      qb.orderBy('sale.created_at', 'DESC');
+    }
+    qb.skip((page - 1) * limit).take(limit);
 
     const [rows, total] = await qb.getManyAndCount();
     return paginate(rows, total, page, limit);
   }
 
   /**
-   * Fetch one sale with nested branch + cashier + customer + lines +
-   * payments.
+   * Fetch one sale with nested branch + cashier + customer + voider +
+   * lines + payments.
    *
-   * withDeleted: a soft-deleted customer (or cashier) is still shown on
+   * withDeleted: a soft-deleted customer (or cashier, or voider) is still shown on
    * the sale. The sale is a historical record and must keep naming who
    * it was for and who rang it up. Sales themselves have no soft delete,
    * so this only affects the joined relations.
@@ -272,10 +324,12 @@ export class SalesService {
       where: { id },
       // payments.trade_in_product: TRADE_IN rows show the traded-in
       // phone's product name (POS payments list, sale detail).
+      // voider: who voided a VOIDED sale (sale detail, P6-6).
       relations: [
         'branch',
         'cashier',
         'customer',
+        'voider',
         'lines',
         'payments',
         'payments.trade_in_product',

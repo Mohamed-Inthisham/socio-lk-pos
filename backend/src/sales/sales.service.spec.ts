@@ -1,6 +1,6 @@
 import { Test, TestingModule } from '@nestjs/testing';
 import { getRepositoryToken, getDataSourceToken } from '@nestjs/typeorm';
-import { In, QueryFailedError } from 'typeorm';
+import { Brackets, In, QueryFailedError } from 'typeorm';
 import {
   NotFoundException,
   BadRequestException,
@@ -38,10 +38,12 @@ describe('SalesService', () => {
   // new transactional chain used inside line mutations
   // (setLock/where/andWhere/getOne, plus select/getRawOne for MAX line_number).
   const mockQueryBuilder = {
+    withDeleted: jest.fn().mockReturnThis(),
     leftJoinAndSelect: jest.fn().mockReturnThis(),
     where: jest.fn().mockReturnThis(),
     andWhere: jest.fn().mockReturnThis(),
     orderBy: jest.fn().mockReturnThis(),
+    addOrderBy: jest.fn().mockReturnThis(),
     skip: jest.fn().mockReturnThis(),
     take: jest.fn().mockReturnThis(),
     setLock: jest.fn().mockReturnThis(),
@@ -496,10 +498,67 @@ describe('SalesService', () => {
       expect(mockQueryBuilder.skip).toHaveBeenCalledWith(40);
       expect(mockQueryBuilder.take).toHaveBeenCalledWith(20);
     });
+
+    // Phase 6.4 P6: recent sales at the till
+    it('joins the customer and keeps soft-deleted cashiers and customers', async () => {
+      mockQueryBuilder.getManyAndCount.mockResolvedValue([[], 0]);
+
+      await service.findAll({});
+
+      expect(mockQueryBuilder.withDeleted).toHaveBeenCalled();
+      expect(mockQueryBuilder.leftJoinAndSelect).toHaveBeenCalledWith(
+        'sale.customer',
+        'customer',
+      );
+    });
+
+    it('applies completedFrom (inclusive) and completedTo (exclusive) on completed_at', async () => {
+      mockQueryBuilder.getManyAndCount.mockResolvedValue([[], 0]);
+
+      await service.findAll({
+        completedFrom: '2026-10-21T00:00:00+05:30',
+        completedTo: '2026-10-22T00:00:00+05:30',
+      });
+
+      expect(mockQueryBuilder.andWhere).toHaveBeenCalledWith(
+        'sale.completed_at >= :completedFrom',
+        { completedFrom: '2026-10-21T00:00:00+05:30' },
+      );
+      expect(mockQueryBuilder.andWhere).toHaveBeenCalledWith(
+        'sale.completed_at < :completedTo',
+        { completedTo: '2026-10-22T00:00:00+05:30' },
+      );
+    });
+
+    it('sort=completed_at orders by completed_at DESC (drafts last), then created_at DESC', async () => {
+      mockQueryBuilder.getManyAndCount.mockResolvedValue([[], 0]);
+
+      await service.findAll({ sort: 'completed_at' });
+
+      expect(mockQueryBuilder.orderBy).toHaveBeenCalledWith(
+        'sale.completed_at',
+        'DESC',
+        'NULLS LAST',
+      );
+      expect(mockQueryBuilder.addOrderBy).toHaveBeenCalledWith(
+        'sale.created_at',
+        'DESC',
+      );
+    });
+
+    it('q adds one bracketed search condition', async () => {
+      mockQueryBuilder.getManyAndCount.mockResolvedValue([[], 0]);
+
+      await service.findAll({ q: '0042' });
+
+      expect(mockQueryBuilder.andWhere).toHaveBeenCalledWith(
+        expect.any(Brackets),
+      );
+    });
   });
 
   describe('findOne', () => {
-    it('returns the sale with nested branch, cashier, customer, lines, and payments (including soft-deleted relations)', async () => {
+    it('returns the sale with nested branch, cashier, customer, voider, lines, and payments (including soft-deleted relations)', async () => {
       const sale = {
         id: 's1',
         branch: {},
@@ -518,6 +577,7 @@ describe('SalesService', () => {
           'branch',
           'cashier',
           'customer',
+          'voider',
           'lines',
           'payments',
           'payments.trade_in_product',

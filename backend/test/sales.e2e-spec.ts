@@ -686,9 +686,405 @@ describe('Sales (e2e)', () => {
         .set('Cookie', managerCookies)
         .expect(200);
     });
+
+    // ---- Phase 6.4 P6: recent sales at the till (P6-2, P6-3, P6-5) ----
+
+    describe('recent sales (completed bounds, sort, customer, q)', () => {
+      let saleSeq = 0;
+      /** A COMPLETED sale with a unique sale number, completed at `at`. */
+      function seedCompleted(
+        branchId: string,
+        cashierId: string,
+        at: string,
+        overrides: Partial<Sale> = {},
+      ) {
+        saleSeq += 1;
+        return seedSale({
+          branch_id: branchId,
+          cashier_id: cashierId,
+          status: SaleStatus.COMPLETED,
+          sale_number: `INV-20261021-${String(saleSeq).padStart(4, '0')}`,
+          completed_at: new Date(at),
+          ...overrides,
+        });
+      }
+
+      /** A line carrying an IMEI (no unit needed for a list search). */
+      async function seedImeiLine(
+        saleId: string,
+        productId: string,
+        lineNumber: number,
+        imei: string,
+      ) {
+        const repo = dataSource.getRepository(SaleLine);
+        return repo.save(
+          repo.create({
+            sale_id: saleId,
+            line_number: lineNumber,
+            product_id: productId,
+            product_sku_snapshot: 'SKU-TEST',
+            product_name_snapshot: 'Test Phone',
+            unit_price: '100000.00',
+            cost_price_snapshot: '80000.00',
+            quantity: 1,
+            discount_amount: '0',
+            line_total: '100000.00',
+            imei_snapshot: imei,
+            warranty: WarrantyPeriod.NO_WARRANTY,
+          }),
+        );
+      }
+
+      function list(cookies: string[], qs: string) {
+        return request(app.getHttpServer())
+          .get(`/api/v1/sales?${qs}`)
+          .set('Cookie', cookies);
+      }
+
+      // One Colombo day, sent as the POS sends it ("+" encoded).
+      const DAY =
+        'completedFrom=2026-10-21T00:00:00%2B05:30' +
+        '&completedTo=2026-10-22T00:00:00%2B05:30';
+
+      it('completedFrom/To bound one Colombo day, leave drafts out, and sort=completed_at is newest first', async () => {
+        const branch = await seedBranch();
+        const { user, password } = await seedUser(UserRole.ADMIN, 'a@t.com');
+        // 00:30 Colombo on the 21st is 19:00 UTC on the 20th: in the day.
+        const early = await seedCompleted(
+          branch.id,
+          user.id,
+          '2026-10-21T00:30:00+05:30',
+        );
+        const late = await seedCompleted(
+          branch.id,
+          user.id,
+          '2026-10-21T23:59:00+05:30',
+        );
+        // Out: the minute before, and the exclusive end.
+        await seedCompleted(branch.id, user.id, '2026-10-20T23:59:00+05:30');
+        await seedCompleted(branch.id, user.id, '2026-10-22T00:00:00+05:30');
+        await seedSale({ branch_id: branch.id, cashier_id: user.id });
+        const cookies = await loginAndGetCookies(user.email, password);
+
+        const response = await list(
+          cookies,
+          `branchId=${branch.id}&${DAY}&sort=completed_at`,
+        ).expect(200);
+
+        expect((response.body.data as Sale[]).map((s) => s.id)).toEqual([
+          late.id,
+          early.id,
+        ]);
+        expect(response.body.meta.total).toBe(2);
+      });
+
+      it('returns 400 for a date-only or offset-less completedFrom/To', async () => {
+        const { user, password } = await seedUser(UserRole.ADMIN, 'a@t.com');
+        const cookies = await loginAndGetCookies(user.email, password);
+
+        for (const qs of [
+          'completedFrom=2026-10-21',
+          'completedTo=2026-10-22',
+          'completedFrom=2026-10-21T00:00:00',
+          // An unencoded "+" arrives as a space.
+          'completedFrom=2026-10-21T00:00:00+05:30',
+        ]) {
+          const response = await list(cookies, qs).expect(400);
+          expect(JSON.stringify(response.body.message)).toMatch(
+            /timestamp with a time and an offset/,
+          );
+        }
+      });
+
+      it('sort=completed_at without bounds puts drafts last', async () => {
+        const branch = await seedBranch();
+        const { user, password } = await seedUser(UserRole.ADMIN, 'a@t.com');
+        const draft = await seedSale({
+          branch_id: branch.id,
+          cashier_id: user.id,
+        });
+        const completed = await seedCompleted(
+          branch.id,
+          user.id,
+          '2026-10-21T10:00:00+05:30',
+        );
+        const cookies = await loginAndGetCookies(user.email, password);
+
+        const response = await list(cookies, 'sort=completed_at').expect(200);
+
+        expect((response.body.data as Sale[]).map((s) => s.id)).toEqual([
+          completed.id,
+          draft.id,
+        ]);
+      });
+
+      it('returns 400 for an unknown sort', async () => {
+        const { user, password } = await seedUser(UserRole.ADMIN, 'a@t.com');
+        const cookies = await loginAndGetCookies(user.email, password);
+
+        await list(cookies, 'sort=total').expect(400);
+      });
+
+      it('includes the customer on each row (null for a walk-in)', async () => {
+        const branch = await seedBranch();
+        const { user, password } = await seedUser(UserRole.ADMIN, 'a@t.com');
+        const customer = await seedCustomer({ name: 'Nimal Silva' });
+        const withCustomer = await seedCompleted(
+          branch.id,
+          user.id,
+          '2026-10-21T10:00:00+05:30',
+          { customer_id: customer.id },
+        );
+        await seedCompleted(branch.id, user.id, '2026-10-21T09:00:00+05:30');
+        const cookies = await loginAndGetCookies(user.email, password);
+
+        const response = await list(cookies, `${DAY}&sort=completed_at`).expect(
+          200,
+        );
+
+        expect(response.body.data[0].id).toBe(withCustomer.id);
+        expect(response.body.data[0].customer).toMatchObject({
+          id: customer.id,
+          name: 'Nimal Silva',
+        });
+        expect(response.body.data[1].customer).toBeNull();
+      });
+
+      it('still names a soft-deleted cashier and customer on the row', async () => {
+        const branch = await seedBranch();
+        const { user, password } = await seedUser(UserRole.ADMIN, 'a@t.com');
+        const { user: cashier } = await seedUser(
+          UserRole.CASHIER,
+          'gone@t.com',
+          branch.id,
+        );
+        const customer = await seedCustomer({ name: 'Former Customer' });
+        await seedCompleted(
+          branch.id,
+          cashier.id,
+          '2026-10-21T10:00:00+05:30',
+          {
+            customer_id: customer.id,
+          },
+        );
+        await dataSource.getRepository(User).softDelete(cashier.id);
+        await dataSource.getRepository(Customer).softDelete(customer.id);
+        const cookies = await loginAndGetCookies(user.email, password);
+
+        const response = await list(cookies, DAY).expect(200);
+
+        expect(response.body.data).toHaveLength(1);
+        expect(response.body.data[0].cashier).toMatchObject({
+          id: cashier.id,
+          full_name: cashier.full_name,
+        });
+        expect(response.body.data[0].cashier.deleted_at).not.toBeNull();
+        expect(response.body.data[0].customer).toMatchObject({
+          id: customer.id,
+          name: 'Former Customer',
+        });
+        expect(response.body.data[0].customer.deleted_at).not.toBeNull();
+      });
+
+      it('q matches the sale number by substring', async () => {
+        const branch = await seedBranch();
+        const { user, password } = await seedUser(UserRole.ADMIN, 'a@t.com');
+        const target = await seedCompleted(
+          branch.id,
+          user.id,
+          '2026-10-21T10:00:00+05:30',
+          { sale_number: 'INV-20261021-0042' },
+        );
+        await seedCompleted(branch.id, user.id, '2026-10-21T11:00:00+05:30', {
+          sale_number: 'INV-20261021-0043',
+        });
+        const cookies = await loginAndGetCookies(user.email, password);
+
+        const response = await list(cookies, 'q=0042').expect(200);
+
+        expect((response.body.data as Sale[]).map((s) => s.id)).toEqual([
+          target.id,
+        ]);
+      });
+
+      it('q matches the customer name case-insensitively and the phone by substring', async () => {
+        const branch = await seedBranch();
+        const { user, password } = await seedUser(UserRole.ADMIN, 'a@t.com');
+        const kamal = await seedCustomer({
+          name: 'Kamal Perera',
+          phone: '0771234567',
+        });
+        const nimal = await seedCustomer({
+          name: 'Nimal Silva',
+          phone: '0719876543',
+        });
+        const kamalSale = await seedCompleted(
+          branch.id,
+          user.id,
+          '2026-10-21T10:00:00+05:30',
+          { customer_id: kamal.id },
+        );
+        const nimalSale = await seedCompleted(
+          branch.id,
+          user.id,
+          '2026-10-21T11:00:00+05:30',
+          { customer_id: nimal.id },
+        );
+        const cookies = await loginAndGetCookies(user.email, password);
+
+        const byName = await list(cookies, 'q=kAmAl').expect(200);
+        expect((byName.body.data as Sale[]).map((s) => s.id)).toEqual([
+          kamalSale.id,
+        ]);
+
+        const byPhone = await list(cookies, 'q=9876543').expect(200);
+        expect((byPhone.body.data as Sale[]).map((s) => s.id)).toEqual([
+          nimalSale.id,
+        ]);
+      });
+
+      it('q escapes LIKE wildcards', async () => {
+        const branch = await seedBranch();
+        const { user, password } = await seedUser(UserRole.ADMIN, 'a@t.com');
+        const customer = await seedCustomer({ name: 'Kamal Perera' });
+        await seedCompleted(branch.id, user.id, '2026-10-21T10:00:00+05:30', {
+          customer_id: customer.id,
+        });
+        const cookies = await loginAndGetCookies(user.email, password);
+
+        // Unescaped, "%%" and "__" would match every name.
+        for (const q of ['%25%25', '__']) {
+          const response = await list(cookies, `q=${q}`).expect(200);
+          expect(response.body.data).toHaveLength(0);
+        }
+      });
+
+      it('q matches an exact IMEI on a line: a sale with two phone lines appears once and the total is right', async () => {
+        const branch = await seedBranch();
+        const { user, password } = await seedUser(UserRole.ADMIN, 'a@t.com');
+        const product = await seedProduct(branch.id, { is_serialized: true });
+        const twoPhones = await seedCompleted(
+          branch.id,
+          user.id,
+          '2026-10-21T10:00:00+05:30',
+        );
+        await seedImeiLine(twoPhones.id, product.id, 1, '350000000000101');
+        await seedImeiLine(twoPhones.id, product.id, 2, '350000000000102');
+        const other = await seedCompleted(
+          branch.id,
+          user.id,
+          '2026-10-21T11:00:00+05:30',
+        );
+        await seedImeiLine(other.id, product.id, 1, '350000000000201');
+        const cookies = await loginAndGetCookies(user.email, password);
+
+        const response = await list(cookies, 'q=350000000000102').expect(200);
+
+        expect((response.body.data as Sale[]).map((s) => s.id)).toEqual([
+          twoPhones.id,
+        ]);
+        expect(response.body.meta.total).toBe(1);
+
+        // Exact, not substring: the shared prefix matches nothing.
+        const partial = await list(cookies, 'q=3500000000001').expect(200);
+        expect(partial.body.data).toHaveLength(0);
+      });
+
+      it('q matches an exact trade-in IMEI on a payment', async () => {
+        const branch = await seedBranch();
+        const { user, password } = await seedUser(UserRole.ADMIN, 'a@t.com');
+        const used = await seedProduct(branch.id, {
+          name: 'Used iPhone 12',
+          is_serialized: true,
+        });
+        const sale = await seedSale({
+          branch_id: branch.id,
+          cashier_id: user.id,
+        });
+        const paymentRepo = dataSource.getRepository(Payment);
+        await paymentRepo.save(
+          paymentRepo.create({
+            sale_id: sale.id,
+            payment_method: PaymentMethod.TRADE_IN,
+            amount: '60000.00',
+            trade_in_product_id: used.id,
+            trade_in_imei: '490154203237518',
+            trade_in_buying_price: '60000.00',
+          }),
+        );
+        await seedSale({ branch_id: branch.id, cashier_id: user.id });
+        const cookies = await loginAndGetCookies(user.email, password);
+
+        const response = await list(cookies, 'q=490154203237518').expect(200);
+
+        expect((response.body.data as Sale[]).map((s) => s.id)).toEqual([
+          sale.id,
+        ]);
+      });
+
+      it('returns 400 for a one-character q, and ignores a blank one', async () => {
+        const branch = await seedBranch();
+        const { user, password } = await seedUser(UserRole.ADMIN, 'a@t.com');
+        await seedSale({ branch_id: branch.id, cashier_id: user.id });
+        const cookies = await loginAndGetCookies(user.email, password);
+
+        await list(cookies, 'q=4').expect(400);
+        const blank = await list(cookies, 'q=%20%20').expect(200);
+        expect(blank.body.data).toHaveLength(1);
+      });
+    });
   });
 
   describe('GET /api/v1/sales/:id', () => {
+    it('returns the voider on a VOIDED sale (P6-6)', async () => {
+      const branch = await seedBranch();
+      const { user, password } = await seedUser(UserRole.ADMIN, 'a@t.com');
+      const { user: manager } = await seedUser(
+        UserRole.MANAGER,
+        'm@t.com',
+        branch.id,
+      );
+      const sale = await seedSale({
+        branch_id: branch.id,
+        cashier_id: user.id,
+        status: SaleStatus.VOIDED,
+        sale_number: 'INV-20261021-0001',
+        completed_at: new Date('2026-10-21T10:00:00+05:30'),
+        voided_at: new Date('2026-10-21T11:00:00+05:30'),
+        voided_by: manager.id,
+        void_reason: 'Wrong price',
+      });
+      const cookies = await loginAndGetCookies(user.email, password);
+
+      const response = await request(app.getHttpServer())
+        .get(`/api/v1/sales/${sale.id}`)
+        .set('Cookie', cookies)
+        .expect(200);
+
+      expect(response.body.voider).toMatchObject({
+        id: manager.id,
+        full_name: manager.full_name,
+      });
+      expect(response.body.voider).not.toHaveProperty('password_hash');
+    });
+
+    it('returns voider null on a sale that was never voided', async () => {
+      const branch = await seedBranch();
+      const { user, password } = await seedUser(UserRole.ADMIN, 'a@t.com');
+      const sale = await seedSale({
+        branch_id: branch.id,
+        cashier_id: user.id,
+      });
+      const cookies = await loginAndGetCookies(user.email, password);
+
+      const response = await request(app.getHttpServer())
+        .get(`/api/v1/sales/${sale.id}`)
+        .set('Cookie', cookies)
+        .expect(200);
+
+      expect(response.body.voider).toBeNull();
+    });
+
     it('returns a sale with nested branch and cashier', async () => {
       const branch = await seedBranch();
       const { user, password } = await seedUser(UserRole.ADMIN, 'a@t.com');
@@ -5231,6 +5627,15 @@ describe('Sales (e2e)', () => {
         expect(response.body.existing_unit).toMatchObject({
           status: ProductUnitStatus.SOLD,
         });
+        // P6-22: the 409 names the sale to void first.
+        const saleBNumber = (
+          await dataSource.getRepository(Sale).findOneByOrFail({ id: saleB.id })
+        ).sale_number;
+        expect(response.body).toMatchObject({
+          imei: IMEI_A,
+          reason: 'RESOLD',
+          later_sale: { id: saleB.id, sale_number: saleBNumber },
+        });
 
         const saleRepo = dataSource.getRepository(Sale);
         expect(
@@ -5487,6 +5892,15 @@ describe('Sales (e2e)', () => {
           id: before[1].id,
           status: ProductUnitStatus.IN_STOCK,
         });
+        // P6-22: traded back in on sale B, so B is the sale to void first.
+        const saleBNumber = (
+          await dataSource.getRepository(Sale).findOneByOrFail({ id: saleB.id })
+        ).sale_number;
+        expect(blocked.body).toMatchObject({
+          imei: IMEI_A,
+          reason: 'TAKEN_BACK_ON_SALE',
+          later_sale: { id: saleB.id, sale_number: saleBNumber },
+        });
         // Nothing moved.
         expect(await saleStatus(saleA.id)).toBe(SaleStatus.COMPLETED);
         expect(await unitsOf(IMEI_A)).toEqual(before);
@@ -5519,6 +5933,39 @@ describe('Sales (e2e)', () => {
         expect(blocked.body.existing_unit).toMatchObject({
           status: ProductUnitStatus.SOLD,
           product_id: ctx.usedProduct.id,
+        });
+        expect(await saleStatus(saleA.id)).toBe(SaleStatus.COMPLETED);
+      });
+
+      it('refuses for good to void a sale whose phone was bought back on a later phone purchase (P6-22)', async () => {
+        const ctx = await setupTradeIn();
+        const { newSerialized } = await seedNewSerializedUnit(ctx);
+        const saleA = await sellNew(ctx, newSerialized.id);
+        // Bought back outright, not as a trade-in on a sale.
+        await request(app.getHttpServer())
+          .post('/api/v1/phone-purchases')
+          .set('Cookie', ctx.cookies)
+          .send({
+            customer_id: ctx.customer.id,
+            branch_id: ctx.branch.id,
+            product_id: ctx.usedProduct.id,
+            imei: IMEI_A,
+            buying_price: 55000,
+          })
+          .expect(201);
+
+        const blocked = await voidReq(ctx, saleA.id, 409);
+        expect(blocked.body).toMatchObject({
+          message:
+            `This sale can't be voided: the phone (IMEI ${IMEI_A}) was ` +
+            'bought back on a later purchase.',
+          imei: IMEI_A,
+          reason: 'BOUGHT_BACK_ON_PURCHASE',
+          later_sale: null,
+          existing_unit: {
+            status: ProductUnitStatus.IN_STOCK,
+            product_id: ctx.usedProduct.id,
+          },
         });
         expect(await saleStatus(saleA.id)).toBe(SaleStatus.COMPLETED);
       });
