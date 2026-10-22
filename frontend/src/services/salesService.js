@@ -30,6 +30,39 @@ export const createSale = async (payload) => {
 };
 
 /**
+ * List sales (recent sales, P6-2 – P6-5). Params go through axios
+ * `params`, which URL-encodes them: the `+05:30` in completedFrom /
+ * completedTo must reach the server as `%2B05:30` (a raw `+` arrives as a
+ * space and the backend answers 400). Build the bounds with
+ * utils/colomboDay.js.
+ *
+ * Empty values (undefined, null, "") are left out, so callers can pass
+ * a filter object as is. A search ignores the day (P6-3): send `q`
+ * without completedFrom / completedTo.
+ *
+ * @param {Object} params
+ * @param {string} [params.branchId]
+ * @param {string} [params.cashierId]
+ * @param {string} [params.status] - DRAFT | COMPLETED | VOIDED
+ * @param {string} [params.completedFrom] - "2026-10-21T00:00:00+05:30" (inclusive)
+ * @param {string} [params.completedTo] - "2026-10-22T00:00:00+05:30" (exclusive)
+ * @param {string} [params.sort] - "completed_at" (default: created_at)
+ * @param {string} [params.q] - 2–100 characters
+ * @param {number} [params.page]
+ * @param {number} [params.limit] - ≤ 200 (server default 50)
+ * @returns {Promise<{ data: Object[], meta: Object }>} Rows with branch,
+ *   cashier and customer (null for a walk-in); meta { total, page, limit,
+ *   totalPages, hasNext, hasPrev }
+ */
+export const listSales = async (params = {}) => {
+  const query = Object.fromEntries(
+    Object.entries(params).filter(([, v]) => v !== undefined && v !== null && v !== ""),
+  );
+  const response = await api.get("/sales", { params: query });
+  return response.data;
+};
+
+/**
  * Get one sale, hydrated with lines, payments and customer.
  *
  * @param {string} id - Sale UUID
@@ -143,6 +176,32 @@ export const COMPLETE_TIMEOUT_MS = 30000;
 export const completeSale = async (saleId) => {
   const response = await api.post(`/sales/${saleId}/complete`, undefined, {
     timeout: COMPLETE_TIMEOUT_MS,
+  });
+  return response.data;
+};
+
+/** POST /sales/:id/void gives up after this long (P6-11). */
+export const VOID_TIMEOUT_MS = 30000;
+
+/**
+ * Void a COMPLETED sale with a manager's or admin's approval PIN (P6-17).
+ * `approval` is required on every void, a manager's own session included.
+ *
+ * Never resent: not here, not by the caller. A wrong PIN counts as an
+ * attempt, and each request may write an audit row, so after a lost
+ * response or a timeout the caller re-fetches the sale (getSale) and
+ * reads its status (P6-11; utils/voidErrors.js `reconcile`). The body
+ * carries the PIN: never log it or the request config.
+ *
+ * @param {string} saleId
+ * @param {Object} payload
+ * @param {string} payload.void_reason - 3–500 characters after trimming
+ * @param {{ approver_id: string, pin: string }} payload.approval
+ * @returns {Promise<Object>} The hydrated VOIDED sale
+ */
+export const voidSale = async (saleId, payload) => {
+  const response = await api.post(`/sales/${saleId}/void`, payload, {
+    timeout: VOID_TIMEOUT_MS,
   });
   return response.data;
 };
