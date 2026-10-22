@@ -26,6 +26,24 @@ const PRODUCT_UNIT_RELATIONS = [
   'phone_purchase.customer',
 ] as const;
 
+/**
+ * Why a void is blocked by a later transaction (Phase 6.4 P6-22), sent as
+ * `reason` on the void 409s so the till can word it and link the sale:
+ * - RESOLD: this sale's trade-in phone was sold on a later sale.
+ * - TAKEN_BACK_ON_SALE: a phone this sale sold was traded back in on a
+ *   later sale.
+ * - BOUGHT_BACK_ON_PURCHASE: a phone this sale sold was bought back on a
+ *   later phone purchase. Permanent: a purchase is never reversed.
+ * null when only the live-IMEI index saw the later acquisition (a race).
+ */
+export type VoidBlockReason =
+  | 'RESOLD'
+  | 'TAKEN_BACK_ON_SALE'
+  | 'BOUGHT_BACK_ON_PURCHASE';
+
+/** The later sale a void 409 points at: void it first. */
+type LaterSale = { id: string; sale_number: string };
+
 @Injectable()
 export class ProductUnitsService {
   constructor(
@@ -247,7 +265,7 @@ export class ProductUnitsService {
       .orderBy('later.created_at', 'DESC')
       .getOne();
     if (reacquired) {
-      throw this.reacquiredConflict(unit.imei, reacquired);
+      throw await this.reacquiredConflict(manager, unit.imei, reacquired);
     }
 
     try {
@@ -259,26 +277,57 @@ export class ProductUnitsService {
         .execute();
     } catch (err) {
       if (isLiveImeiConflict(err)) {
-        throw this.reacquiredConflict(unit.imei, null);
+        throw await this.reacquiredConflict(manager, unit.imei, null);
       }
       throw err;
     }
   }
 
   /**
-   * 409 for voiding a sale whose phone was acquired again later.
+   * 409 for voiding a sale whose phone was acquired again later, with
+   * `imei`, `reason` and `later_sale` (Phase 6.4 P6-22). The later unit's
+   * phone purchase tells which: a TRADE_IN payment stamped with it means a
+   * later sale took the phone back (void that sale first); none means an
+   * outright phone purchase, which blocks the void for good (later_sale
+   * null).
+   *
    * `later` is null when the re-acquisition raced the void (only the
-   * unique index saw it, and the aborted transaction can't be queried).
+   * unique index saw it, and the aborted transaction can't be queried):
+   * the generic message, with reason and later_sale null. A later unit
+   * without a phone purchase can't happen (every unit comes from one) and
+   * gets the same generic answer.
    */
-  private reacquiredConflict(
+  private async reacquiredConflict(
+    manager: EntityManager,
     imei: string,
     later: ProductUnit | null,
-  ): ConflictException {
+  ): Promise<ConflictException> {
+    let reason: VoidBlockReason | null = null;
+    let laterSale: LaterSale | null = null;
+    if (later?.phone_purchase_id) {
+      const rows: LaterSale[] = await manager.query(
+        `SELECT s.id, s.sale_number
+           FROM payments p
+           JOIN sales s ON s.id = p.sale_id
+          WHERE p.trade_in_phone_purchase_id = $1
+          LIMIT 1`,
+        [later.phone_purchase_id],
+      );
+      laterSale = rows[0] ?? null;
+      reason = laterSale ? 'TAKEN_BACK_ON_SALE' : 'BOUGHT_BACK_ON_PURCHASE';
+    }
+
     return new ConflictException({
       message:
-        `Cannot void this sale: the phone (IMEI '${imei}') was taken ` +
-        `back into stock on a later sale or purchase. Void that sale ` +
-        `first, or contact an administrator.`,
+        reason === 'BOUGHT_BACK_ON_PURCHASE'
+          ? `This sale can't be voided: the phone (IMEI ${imei}) was ` +
+            `bought back on a later purchase.`
+          : `Cannot void this sale: the phone (IMEI '${imei}') was taken ` +
+            `back into stock on a later sale or purchase. Void that sale ` +
+            `first, or contact an administrator.`,
+      imei,
+      reason,
+      later_sale: laterSale,
       existing_unit: later && {
         id: later.id,
         status: later.status,
@@ -307,9 +356,8 @@ export class ProductUnitsService {
    *     with another customer via the newer sale). Throw
    *     ConflictException with a structured payload mirroring
    *     markSoldForSale's shape, so voidSale can surface a clear 409
-   *     to the operator: "void the subsequent sale first."
-   *     FOLLOWUP: enrich the payload with resold_in_sale_id via
-   *     `SELECT sale_id FROM sale_lines WHERE product_unit_id = <id>`.
+   *     to the operator: "void the subsequent sale first." The payload
+   *     names that sale (`later_sale`, reason RESOLD; Phase 6.4 P6-22).
    *
    *   - RETURNED or WRITTEN_OFF: integrity error, raw 500. A
    *     COMPLETED sale being voided should NEVER have its trade-in
@@ -359,12 +407,26 @@ export class ProductUnitsService {
     if (unit.status === ProductUnitStatus.SOLD) {
       // Business-legit: the trade-in phone was resold before this void.
       // Block-the-void per Q7. Operator must void the subsequent sale
-      // first.
+      // first, so the 409 names it (P6-22): the most recently completed
+      // sale with a line on this unit.
+      const rows: LaterSale[] = await manager.query(
+        `SELECT s.id, s.sale_number
+           FROM sale_lines l
+           JOIN sales s ON s.id = l.sale_id
+          WHERE l.product_unit_id = $1
+            AND s.status = 'COMPLETED'
+          ORDER BY s.completed_at DESC
+          LIMIT 1`,
+        [unit.id],
+      );
       throw new ConflictException({
         message:
           `Cannot void this sale: trade-in phone (IMEI '${unit.imei}') ` +
           `has been resold in a subsequent sale. Void the subsequent ` +
           `sale first, or contact an administrator.`,
+        imei: unit.imei,
+        reason: 'RESOLD' satisfies VoidBlockReason,
+        later_sale: rows[0] ?? null,
         existing_unit: {
           id: unit.id,
           status: unit.status,

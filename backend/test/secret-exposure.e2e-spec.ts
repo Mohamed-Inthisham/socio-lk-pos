@@ -250,9 +250,11 @@ describe('Secret exposure (e2e)', () => {
       const res = await http()
         .patch(`/api/v1/sales/${saleId}`)
         .set('Cookie', cashierCookies)
-        .send({ notes: 'secret-exposure probe' })
+        // customer_id: so the list after the void carries a customer (P6-5)
+        .send({ notes: 'secret-exposure probe', customer_id: customer.id })
         .expect(200);
       expect(res.body.cashier).toMatchObject({ id: cashier.id });
+      expect(res.body.customer).toMatchObject({ id: customer.id });
       expectNoSecrets(res);
     });
 
@@ -322,6 +324,36 @@ describe('Secret exposure (e2e)', () => {
         .expect(200);
       expect(res.body.cashier).toMatchObject({ id: cashier.id });
       expect(res.body.voided_by).toBe(manager.id);
+      // The voider relation (P6-6) is loaded on every hydrated sale
+      expect(res.body.voider).toMatchObject({ id: manager.id });
+      expectNoSecrets(res);
+    });
+
+    it('GET /sales/:id on the voided sale (voider loaded)', async () => {
+      const res = await http()
+        .get(`/api/v1/sales/${saleId}`)
+        .set('Cookie', cashierCookies)
+        .expect(200);
+      expect(res.body.voider).toMatchObject({ id: manager.id });
+      expectNoSecrets(res);
+    });
+
+    it('GET /sales recent-sales list (cashier and customer loaded)', async () => {
+      const res = await http()
+        .get('/api/v1/sales')
+        .query({
+          branchId: branch.id,
+          completedFrom: '2000-01-01T00:00:00+05:30',
+          completedTo: '2100-01-01T00:00:00+05:30',
+          sort: 'completed_at',
+        })
+        .set('Cookie', cashierCookies)
+        .expect(200);
+      expect(res.body.data[0]).toMatchObject({
+        id: saleId,
+        cashier: { id: cashier.id },
+        customer: { id: customer.id },
+      });
       expectNoSecrets(res);
     });
   });

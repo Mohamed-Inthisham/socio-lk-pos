@@ -290,6 +290,19 @@ Same transactional shape, same row lock, same enlistment pattern — with three 
 
 Fields preserved on the voided record: `sale_number`, `completed_at`, all lines, payment amounts. Nothing is zeroed out or deleted — void is a mark, not an eraser.
 
+#### When a later transaction blocks the void
+
+A void is refused with 409, and nothing changes, when a phone it would move has been handed on since. The body names why and which sale to void first (Phase 6.4 P6-22):
+
+| `reason` | Cause | `later_sale` | Message |
+|---|---|---|---|
+| `RESOLD` | A trade-in phone from this sale was sold on a later sale | That sale (the most recently completed one with a line on the unit) | `Cannot void this sale: trade-in phone (IMEI '<imei>') has been resold in a subsequent sale…` |
+| `TAKEN_BACK_ON_SALE` | A phone this sale sold was traded back in on a later sale (buy-back) | The sale whose TRADE_IN payment took it back | `Cannot void this sale: the phone (IMEI '<imei>') was taken back into stock on a later sale or purchase…` |
+| `BOUGHT_BACK_ON_PURCHASE` | A phone this sale sold was bought back on a later phone purchase | `null` | `This sale can't be voided: the phone (IMEI <imei>) was bought back on a later purchase.` — permanent: a phone purchase is a real transaction of its own and is never reversed |
+| `null` | A concurrent take-back caught only by the live-IMEI index | `null` | The generic "taken back" message; `existing_unit` is null too |
+
+Every body is `{ message, imei, reason, later_sale: { id, sale_number } | null, existing_unit }`. Voids unwind newest-first: void `later_sale`, then this one.
+
 #### Why payments stamped in a single UPDATE, not a loop
 
 Unlike stock (which needs per-line branching on `external_supplier_id`), every payment on a voided sale gets identical treatment: same `reversed_at`, same `reversal_reason`. A single `UPDATE payments SET ... WHERE sale_id = $1` is far cheaper than N individual round trips and equally correct.
@@ -366,8 +379,8 @@ All endpoints are prefixed with `/api/v1` and require authentication via the `ac
 
 | Method | Path | Role | Purpose |
 |--------|------|------|---------|
-| GET | `/sales` | any | List sales (paginated, filterable by branch/cashier/status/date range) |
-| GET | `/sales/:id` | any | Get one sale with nested branch, cashier, customer (soft-deleted included), lines, payments |
+| GET | `/sales` | any | List sales (paginated, filterable by branch/cashier/status/date range). Rows carry branch, cashier and customer (soft-deleted included). Phase 6.4 P6 adds `completedFrom` / `completedTo` (inclusive / exclusive on `completed_at`; a timestamp with a time and an offset, date-only is a 400; excludes drafts), `sort=completed_at` (newest first, drafts last, ties by `created_at`) and `q` (sale number, customer name or phone by case-insensitive substring, or an exact IMEI on a sale line or a trade-in payment; 2–100 characters). IMEI matches are EXISTS subqueries, so a sale appears once however many of its lines match |
+| GET | `/sales/:id` | any | Get one sale with nested branch, cashier, customer, voider (soft-deleted included), lines, payments |
 | POST | `/sales` | any | Create a DRAFT sale (empty cart) |
 | PATCH | `/sales/:id` | any | Update DRAFT sale (notes, customer_id only) |
 | DELETE | `/sales/:id` | any | Discard a DRAFT sale (hard delete; cascade removes lines + payments) |
@@ -428,7 +441,7 @@ Six migrations shipped in Phase 6.3, one per major schema unit, in dependency or
 
 All six run cleanly on an empty DB and revert cleanly in reverse order. Verified end-to-end during Phase 6.3.
 
-Later sales migrations: Phase 6.4 P5 added `AddSaleLinesWarrantySnapshot` (`sale_lines.warranty_months_snapshot` and `checking_warranty_days_snapshot`), then P5-18's `WarrantyPeriodPerLine` replaced them with `sale_lines.warranty` + `warranty_until` and `products.default_warranty` (dropping `warranty_months` / `checking_warranty_days`). It maps the old values to codes and backfills existing lines; `down()` restores the old columns from the codes. See "Warranty per line".
+Later sales migrations: Phase 6.4 P5 added `AddSaleLinesWarrantySnapshot` (`sale_lines.warranty_months_snapshot` and `checking_warranty_days_snapshot`), then P5-18's `WarrantyPeriodPerLine` replaced them with `sale_lines.warranty` + `warranty_until` and `products.default_warranty` (dropping `warranty_months` / `checking_warranty_days`). It maps the old values to codes and backfills existing lines; `down()` restores the old columns from the codes. See "Warranty per line". Phase 6.4 P6 added `AddSalesBranchCompletedAtIndex` (`idx_sales_branch_completed_at` on `(branch_id, completed_at)`, for the till's recent-sales list).
 
 ## Test Coverage
 

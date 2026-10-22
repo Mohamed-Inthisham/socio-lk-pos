@@ -46,15 +46,20 @@ export class SalesController {
     summary: 'List sales (paginated, filterable)',
     description:
       'All authenticated roles can list sales. Filters: branchId, cashierId, ' +
-      'status (DRAFT/COMPLETED/VOIDED), from, to. Pagination: page (default 1), ' +
-      'limit (default 50, max 200). Sorted by created_at DESC. ' +
+      'status (DRAFT/COMPLETED/VOIDED), from, to (created_at), ' +
+      'completedFrom, completedTo (completed_at; timestamps with an offset, ' +
+      'date-only is a 400; excludes drafts), and q (sale number, customer ' +
+      'name or phone by substring, or an exact IMEI on a line or a trade-in). ' +
+      'Pagination: page (default 1), limit (default 50, max 200). Sorted by ' +
+      'created_at DESC, or completed_at DESC with sort=completed_at. ' +
       'Note: multi-branch scoping ("only my branch") is deferred to R9; for now ' +
       'all roles see all sales.',
   })
   @ApiResponse({
     status: 200,
     description:
-      'Paginated list of sales with nested branch + cashier. ' +
+      'Paginated list of sales with nested branch + cashier + customer ' +
+      '(soft-deleted ones included; customer null for a walk-in). ' +
       'Shape: { data: Sale[], meta: { total, page, limit, totalPages, hasNext, hasPrev } }',
   })
   @ApiResponse({ status: 400, description: 'Invalid query parameter' })
@@ -67,11 +72,12 @@ export class SalesController {
   @Roles(UserRole.ADMIN, UserRole.MANAGER, UserRole.CASHIER)
   @ApiOperation({
     summary:
-      'Get a sale by ID (with nested branch, cashier, customer, lines, payments)',
+      'Get a sale by ID (with nested branch, cashier, customer, voider, lines, payments)',
     description:
       'Returns the sale with branch, cashier, customer (null when none is ' +
-      'attached), lines ordered by line_number, and payments ordered by ' +
-      'created_at. A soft-deleted customer or cashier is still included, ' +
+      'attached), voider (who voided it; null unless VOIDED), lines ordered ' +
+      'by line_number, and payments ordered by ' +
+      'created_at. A soft-deleted customer, cashier or voider is still included, ' +
       'with deleted_at set, so historical sales keep naming them. Every ' +
       'endpoint that returns the hydrated sale uses this same shape.',
   })
@@ -510,8 +516,14 @@ export class SalesController {
   @ApiResponse({
     status: 409,
     description:
-      'A traded-in phone from this sale has since been sold on another ' +
-      'sale. Void that later sale first. Body includes existing_unit.',
+      'A later transaction blocks the void. Body: message, imei, reason, ' +
+      'later_sale ({ id, sale_number } or null), existing_unit. reason: ' +
+      'RESOLD (a trade-in phone from this sale was sold on later_sale: void ' +
+      'it first); TAKEN_BACK_ON_SALE (a phone this sale sold was traded back ' +
+      'in on later_sale: void it first); BOUGHT_BACK_ON_PURCHASE (a phone ' +
+      'this sale sold was bought back on a later phone purchase: the sale ' +
+      "can't be voided, later_sale null); null when only the live-IMEI " +
+      'index caught a concurrent take-back (later_sale and existing_unit null).',
   })
   async voidSale(
     @Param('id', ParseUUIDPipe) id: string,
