@@ -53,6 +53,18 @@ export const receiptWarranty = (line) => {
 };
 
 /**
+ * Has a line's warranty run out (P6-6)? `warranty_until` is the last day
+ * covered, a Colombo date (backend products/warranty.ts), so it has expired
+ * once today in Colombo is after it. False when there is no end date
+ * (NO_WARRANTY, CHECKING).
+ *
+ * @param {Object} line - a sale line
+ * @param {string} today - "YYYY-MM-DD" in Colombo (colomboToday())
+ */
+export const warrantyExpired = (line, today) =>
+  !!line.warranty_until && today > String(line.warranty_until).slice(0, 10);
+
+/**
  * The label of a line's discount row (P5-20): "Discount (20%)",
  * "Discount (160.00 each)", or just "Discount" (an AMOUNT discount).
  */

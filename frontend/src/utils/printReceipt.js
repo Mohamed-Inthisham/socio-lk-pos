@@ -21,7 +21,12 @@ import { RECEIPT_LAYOUT } from "../constants/receipt";
  * The receipt stays rendered (hidden) until the next print; nothing reads
  * it, and it lets a print preview be taken after the fact.
  *
- * @param {Object} sale - the hydrated COMPLETED sale
+ * @param {Object} sale - the hydrated COMPLETED or VOIDED sale (a VOIDED
+ *   one prints "VOIDED — NOT VALID", P6-7)
+ * @param {Object} [options]
+ * @param {string} [options.reprintedAt] - ISO time; a detail-page reprint
+ *   prints "REPRINT · <time>" (P6-7). Omit it for the Sale complete panel
+ *   and "Last receipt" (unmarked, P5-12).
  * @returns {Promise<number>} the page height used, in mm
  */
 
@@ -81,9 +86,9 @@ export const receiptPageHeightMm = (heightPx) =>
     RECEIPT_LAYOUT.minPageHeightMm,
   );
 
-export const printReceipt = async (sale) => {
+export const printReceipt = async (sale, { reprintedAt } = {}) => {
   const el = container();
-  flushSync(() => root.render(createElement(Receipt, { sale })));
+  flushSync(() => root.render(createElement(Receipt, { sale, reprintedAt })));
   await imagesLoaded(el);
   const heightMm = receiptPageHeightMm(el.firstElementChild.getBoundingClientRect().height);
   setPageSize(heightMm);

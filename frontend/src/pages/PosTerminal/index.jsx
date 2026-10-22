@@ -25,7 +25,6 @@ import {
   selectCanPay,
   selectCartLines,
   selectDraftSale,
-  selectLastCompletedSale,
   selectPosError,
   selectPosStatus,
   selectAttachedCustomer,
@@ -64,8 +63,9 @@ import { CASH, TRADE_IN } from "../../schemas/paymentSchema";
  * confirm has closed (utils/printReceipt.js); Reprint on the Sale complete
  * panel prints it again, and "Last receipt" on the Current sale card
  * reprints the last completed sale, also after a reload (its id is
- * persisted; the sale is re-read with GET /sales/:id when it isn't in
- * memory).
+ * persisted). It always re-reads the sale with GET /sales/:id (P6-7), so
+ * a sale voided since prints "VOIDED — NOT VALID"; if that fails, nothing
+ * prints.
  *
  * SALE COMPLETE (P5-9, P5-10): once a sale completes, the
  * SaleCompletePanel takes the place of the cart, the payments and the
@@ -130,7 +130,6 @@ const PosTerminal = () => {
   // Receipts (P5-12): the completed sale waiting for the confirm to close,
   // and "Reprint last receipt" (works after a reload: the id is persisted).
   const receiptToPrint = useRef(null);
-  const lastCompletedSale = useSelector(selectLastCompletedSale);
   const lastCompletedSaleId = useTerminalSessionStore((s) => s.lastCompletedSaleId);
   const [reprintingLast, setReprintingLast] = useState(false);
   const [reprintError, setReprintError] = useState(null);
@@ -144,14 +143,14 @@ const PosTerminal = () => {
 
   const reprint = (completedSale) => printReceipt(completedSale).catch(() => {});
 
+  // Always re-read (P6-7): a sale voided since prints "VOIDED — NOT VALID".
+  // Never fall back to the copy in memory: it could print a voided sale as
+  // valid. A failed fetch prints nothing.
   const reprintLast = async () => {
     setReprintingLast(true);
     setReprintError(null);
     try {
-      const completedSale =
-        lastCompletedSale?.id === lastCompletedSaleId
-          ? lastCompletedSale
-          : await getSale(lastCompletedSaleId);
+      const completedSale = await getSale(lastCompletedSaleId);
       await printReceipt(completedSale);
     } catch {
       setReprintError("Couldn't load the last receipt. Try again.");

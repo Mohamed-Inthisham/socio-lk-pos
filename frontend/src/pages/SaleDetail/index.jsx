@@ -1,19 +1,23 @@
 import { useEffect, useState } from "react";
 import { useHotkeys } from "react-hotkeys-hook";
 import { useLocation, useNavigate, useParams } from "react-router-dom";
-import { AlertTriangle, ArrowLeft } from "lucide-react";
+import { AlertTriangle, ArrowLeft, Printer } from "lucide-react";
 import Button from "../../components/common/Button";
+import SaleDetailView from "../../components/pos/SaleDetailView";
 import { getSale } from "../../services/salesService";
-import { formatLKR } from "../../utils/money";
-import { receiptDateTime } from "../../utils/receipt";
+import { colomboToday } from "../../utils/colomboDay";
+import { printReceipt } from "../../utils/printReceipt";
 
 /**
  * SaleDetail Page
  *
- * Route: /pos/sales/:id, inside TerminalLayout (P6-1). Step B ships the
- * route with a minimal summary (sale number, status, completion time,
- * total); step C replaces the body with SaleDetailView (P6-6), Reprint
- * and, in D2, Void.
+ * Route: /pos/sales/:id, inside TerminalLayout (P6-1). A completed or
+ * voided sale, read-only (SaleDetailView, P6-6), with Reprint (P6-7);
+ * Void arrives in D2.
+ *
+ * REPRINT (P, or the button): re-fetches the sale first, so a sale voided
+ * since the page opened prints as voided (and the page shows it), then
+ * prints it marked "REPRINT · <time>". A failed fetch prints nothing.
  *
  * Esc (or Back) returns to the list as it was: the list passed
  * { search, pages, activeId } when it opened this sale, and gets it back
@@ -43,6 +47,8 @@ const SaleDetail = () => {
   const current = result.key === requestKey;
   const status = current ? result.status : "loading"; // loading | ready | not_found | error
   const sale = current ? result.sale : null;
+  const [printing, setPrinting] = useState(false);
+  const [printError, setPrintError] = useState(null);
 
   useEffect(() => {
     let live = true;
@@ -65,6 +71,28 @@ const SaleDetail = () => {
       state: from ? { restore: { pages: from.pages, activeId: from.activeId } } : undefined,
     });
 
+  const reprint = async () => {
+    if (printing || status !== "ready") return;
+    setPrinting(true);
+    setPrintError(null);
+    let fresh;
+    try {
+      fresh = await getSale(id);
+    } catch {
+      setPrintError("Couldn't load the sale. Nothing was printed.");
+      setPrinting(false);
+      return;
+    }
+    setResult({ key: requestKey, status: "ready", sale: fresh });
+    try {
+      await printReceipt(fresh, { reprintedAt: new Date().toISOString() });
+    } catch {
+      setPrintError("Couldn't print the receipt. Try again.");
+    } finally {
+      setPrinting(false);
+    }
+  };
+
   useHotkeys(
     "esc",
     (e) => {
@@ -75,6 +103,42 @@ const SaleDetail = () => {
     { enableOnFormTags: true },
     [from],
   );
+  useHotkeys(
+    "p",
+    () => {
+      if (!dialogOpen()) reprint();
+    },
+    { preventDefault: true },
+    [printing, status, requestKey],
+  );
+
+  if (status === "ready" && sale) {
+    return (
+      <SaleDetailView
+        sale={sale}
+        today={colomboToday()}
+        onBack={backToList}
+        actions={
+          <div className="flex flex-col gap-2">
+            <Button
+              variant="secondary"
+              icon={Printer}
+              label="Reprint receipt"
+              title="Reprint receipt (P)"
+              loading={printing}
+              onClick={reprint}
+              fullWidth
+            />
+            {printError && (
+              <p role="alert" className="text-xs text-red-600 dark:text-red-400">
+                {printError}
+              </p>
+            )}
+          </div>
+        }
+      />
+    );
+  }
 
   return (
     <div className="h-full overflow-y-auto p-3 sm:p-4">
@@ -104,29 +168,6 @@ const SaleDetail = () => {
             <span className="flex-1">Couldn&apos;t load the sale.</span>
             <Button size="sm" variant="accent" label="Try again" onClick={() => setReloadKey((k) => k + 1)} />
           </div>
-        )}
-
-        {status === "ready" && sale && (
-          <>
-            <div className="flex flex-wrap items-center gap-3">
-              <h1 className="text-xl font-semibold tabular-nums">{sale.sale_number ?? "Draft sale"}</h1>
-              {sale.status === "VOIDED" ? (
-                <span className="inline-flex items-center px-2 py-0.5 rounded-md text-[11px] font-semibold uppercase tracking-wider bg-red-100 text-red-700 dark:bg-red-900/50 dark:text-red-300">
-                  Voided
-                </span>
-              ) : (
-                <span className="text-xs font-semibold uppercase tracking-wider text-slate-500 dark:text-slate-400">
-                  {sale.status === "COMPLETED" ? "Completed" : sale.status}
-                </span>
-              )}
-            </div>
-            <dl className="mt-4 grid grid-cols-[auto_1fr] gap-x-6 gap-y-2 text-sm">
-              <dt className="text-slate-500 dark:text-slate-400">Completed</dt>
-              <dd data-testid="sale-completed-at">{receiptDateTime(sale.completed_at) || "—"}</dd>
-              <dt className="text-slate-500 dark:text-slate-400">Total</dt>
-              <dd className="font-semibold tabular-nums">{formatLKR(sale.total)}</dd>
-            </dl>
-          </>
         )}
       </Card>
     </div>

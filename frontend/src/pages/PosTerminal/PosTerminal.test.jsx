@@ -571,20 +571,56 @@ describe("PosTerminal Sale complete panel (P5-9, P5-10)", () => {
       await waitFor(() => expect(print).toHaveBeenCalledTimes(2));
     });
 
-    it("'Last receipt' on the next sale reprints the sale just completed, without a request", async () => {
-      const user = userEvent.setup();
+    // Complete, then Next sale: "Last receipt" is on the Current sale card.
+    const toNextSale = async (user) => {
       await renderTerminal();
       await completeTheSale(user);
       await user.click(within(panel()).getByRole("button", { name: /Next sale/ }));
       await waitFor(() => expect(panel()).not.toBeInTheDocument());
       print.mockClear();
-      salesService.getSale.mockClear();
+      salesService.getSale.mockReset();
+    };
+
+    it("'Last receipt' re-reads the sale just completed (P6-7), unmarked", async () => {
+      const user = userEvent.setup();
+      await toNextSale(user);
+      salesService.getSale.mockResolvedValue(completed());
 
       await user.click(screen.getByRole("button", { name: "Reprint last receipt" }));
 
       await waitFor(() => expect(print).toHaveBeenCalledTimes(1));
-      expect(salesService.getSale).not.toHaveBeenCalled();
+      expect(salesService.getSale).toHaveBeenCalledWith("sale-1");
       expect(receiptRoot().textContent).toContain("INV-20261020-0001");
+      expect(receiptRoot().textContent).not.toContain("REPRINT");
+      expect(receiptRoot().textContent).not.toContain("VOIDED");
+    });
+
+    it("'Last receipt' prints a sale voided since as VOIDED — NOT VALID", async () => {
+      const user = userEvent.setup();
+      await toNextSale(user);
+      salesService.getSale.mockResolvedValue({
+        ...completed(),
+        status: "VOIDED",
+        voided_at: "2026-10-20T10:00:00.000Z",
+        void_reason: "Wrong price",
+      });
+
+      await user.click(screen.getByRole("button", { name: "Reprint last receipt" }));
+
+      await waitFor(() => expect(print).toHaveBeenCalledTimes(1));
+      expect(receiptRoot().textContent).toContain("VOIDED — NOT VALID");
+      expect(receiptRoot().textContent).toContain("Reason: Wrong price");
+    });
+
+    it("'Last receipt' prints nothing when the re-read fails, even with the sale in memory", async () => {
+      const user = userEvent.setup();
+      await toNextSale(user);
+      salesService.getSale.mockRejectedValue(new Error("Network Error"));
+
+      await user.click(screen.getByRole("button", { name: "Reprint last receipt" }));
+
+      expect(await screen.findByRole("alert")).toHaveTextContent("Couldn't load the last receipt. Try again.");
+      expect(print).not.toHaveBeenCalled();
     });
   });
 

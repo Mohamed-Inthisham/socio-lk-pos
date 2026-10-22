@@ -5,7 +5,25 @@ import {
   receiptDateTime,
   receiptDiscountLabel,
   receiptWarranty,
+  warrantyExpired,
 } from "./receipt";
+
+describe("warrantyExpired (P6-6)", () => {
+  const line = { warranty: "MONTH_6", warranty_until: "2027-04-21" };
+
+  it("is covered up to and including the last day", () => {
+    expect(warrantyExpired(line, "2027-04-20")).toBe(false);
+    expect(warrantyExpired(line, "2027-04-21")).toBe(false);
+  });
+
+  it("has expired the day after", () => {
+    expect(warrantyExpired(line, "2027-04-22")).toBe(true);
+  });
+
+  it.each(["NO_WARRANTY", "CHECKING"])("never expires for %s (no end date)", (warranty) => {
+    expect(warrantyExpired({ warranty, warranty_until: null }, "2030-01-01")).toBe(false);
+  });
+});
 
 describe("receipt formatting (P5-11, P5-18, P5-19, P5-20)", () => {
   it("formats amounts with grouping and 2 decimals, no currency", () => {
