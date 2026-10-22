@@ -1,6 +1,7 @@
-import { Link, Outlet } from "react-router-dom";
+import { Link, NavLink, Outlet, useLocation, useNavigate } from "react-router-dom";
 import { useSelector } from "react-redux";
-import { LogOut, Store, User } from "lucide-react";
+import { useHotkeys } from "react-hotkeys-hook";
+import { LogOut, ReceiptText, Store, User } from "lucide-react";
 import HeaderLogo from "../HeaderLogo";
 import BranchChip from "../BranchChip";
 import ThemeToggle from "../../common/ThemeToggle";
@@ -27,12 +28,32 @@ import { ROLE_INFO } from "../../../constants/rolePermissions";
  * strip off-screen. The main area is flex-1 min-h-0; terminal pages own
  * their own internal scrolling (cart list, payments column), the shell
  * itself never scrolls. Target viewport is 1366×768 (Q23).
+ *
+ * RECENT SALES (P6-1): the Sales button and Alt+R open /pos/sales from
+ * any terminal page. Alt+R is preventDefault-ed (verified with an
+ * OS-level Alt+R in Chrome and Edge 155: neither browser uses it) and
+ * ignored while a dialog is open or when already on the sales pages.
  */
+
+const SALES_PATH = "/pos/sales";
+const dialogOpen = () => !!document.querySelector('[role="dialog"]');
 
 const TerminalLayout = () => {
   const user = useSelector((state) => state.auth.user);
   const { branch } = useTerminalBranch();
   const roleInfo = ROLE_INFO[user?.role] || {};
+  const navigate = useNavigate();
+  const { pathname } = useLocation();
+  const onSalesPages = pathname === SALES_PATH || pathname.startsWith(`${SALES_PATH}/`);
+
+  useHotkeys(
+    "alt+r",
+    () => {
+      if (!onSalesPages && !dialogOpen()) navigate(SALES_PATH);
+    },
+    { enableOnFormTags: true, preventDefault: true },
+    [onSalesPages, navigate],
+  );
 
   return (
     <div className="h-dvh flex flex-col bg-slate-50 dark:bg-slate-950 text-slate-900 dark:text-slate-100">
@@ -58,6 +79,25 @@ const TerminalLayout = () => {
         <div className="flex-1" />
 
         <div className="flex items-center gap-2">
+          <NavLink
+            to={SALES_PATH}
+            aria-label="Recent sales"
+            title="Recent sales (Alt+R)"
+            className={`
+              h-10 flex items-center gap-2 px-2.5 sm:px-3 rounded-lg
+              text-sm font-medium
+              transition-colors
+              focus:outline-none focus-visible:ring-2 focus-visible:ring-cyan-500
+              ${
+                onSalesPages
+                  ? "bg-cyan-50 text-cyan-700 dark:bg-cyan-900/40 dark:text-cyan-300"
+                  : "text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800 hover:text-slate-900 dark:hover:text-white"
+              }
+            `}
+          >
+            <ReceiptText size={16} aria-hidden="true" />
+            <span className="hidden sm:inline">Sales</span>
+          </NavLink>
           <BranchChip
             name={branch?.name || "—"}
             title={`Terminal branch: ${branch?.name || "—"}`}

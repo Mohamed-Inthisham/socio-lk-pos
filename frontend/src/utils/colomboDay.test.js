@@ -1,4 +1,32 @@
-import { colomboDayBounds, colomboToday, shiftColomboDay } from "./colomboDay";
+import {
+  colomboDayBounds,
+  colomboToday,
+  formatColomboDayLabel,
+  formatColomboTime,
+  shiftColomboDay,
+} from "./colomboDay";
+
+describe("formatColomboTime", () => {
+  it("shows a UTC timestamp in Colombo time, 24-hour", () => {
+    expect(formatColomboTime("2026-10-22T09:02:00.000Z")).toBe("14:32");
+    expect(formatColomboTime("2026-10-21T18:30:00.000Z")).toBe("00:00");
+  });
+
+  it("is empty for no timestamp", () => {
+    expect(formatColomboTime(null)).toBe("");
+  });
+});
+
+describe("formatColomboDayLabel", () => {
+  it("names the day itself, without shifting it", () => {
+    expect(formatColomboDayLabel("2026-10-22")).toBe("Thu 22 Oct 2026");
+    expect(formatColomboDayLabel("2027-01-01")).toBe("Fri 1 Jan 2027");
+  });
+
+  it("throws on a bad day", () => {
+    expect(() => formatColomboDayLabel("2026-02-30")).toThrow(RangeError);
+  });
+});
 
 describe("colomboToday", () => {
   it("is still the same day one second before Colombo midnight (18:29:59Z)", () => {

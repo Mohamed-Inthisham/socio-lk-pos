@@ -1,6 +1,7 @@
 import { vi } from "vitest";
 import { fireEvent, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
+import { Link, Route, Routes } from "react-router-dom";
 import PosTerminal from ".";
 import {
   authState,
@@ -765,5 +766,78 @@ describe("PosTerminal trade-in: F6, attach-then-return, F3 guard (P4-2, P4-11)",
 
     expect(attachDialog()).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Change" })).toHaveAttribute("aria-disabled", "true");
+  });
+});
+
+describe("PosTerminal round trip through /pos/sales (P6-1)", () => {
+  // Leaving /pos unmounts the terminal; the Redux state stays.
+  const renderRoutes = async () => {
+    const utils = renderWithProviders(
+      <>
+        <Link to="/pos/sales">to sales</Link>
+        <Link to="/pos">to terminal</Link>
+        <Routes>
+          <Route path="/pos" element={<PosTerminal />} />
+          <Route path="/pos/sales" element={<p>sales list</p>} />
+        </Routes>
+      </>,
+      {
+        route: "/pos",
+        preloadedState: { auth: authState(cashierUser), branches: branchesState([mainShop]) },
+      },
+    );
+    await screen.findByRole("list", { name: "Cart" });
+    return utils;
+  };
+
+  const roundTrip = async (user) => {
+    await user.click(screen.getByRole("link", { name: "to sales" }));
+    await screen.findByText("sales list");
+    await user.click(screen.getByRole("link", { name: "to terminal" }));
+  };
+
+  it("keeps the open draft and its cart: same sale, no new draft, no discard", async () => {
+    salesService.createSale.mockResolvedValue(draftSale({ lines }));
+    salesService.getSale.mockResolvedValue(draftSale({ lines }));
+    const user = userEvent.setup();
+    await renderRoutes();
+    expect(row("USB-C Cable 1m")).toBeInTheDocument();
+
+    await roundTrip(user);
+
+    expect(await screen.findByRole("listitem", { name: "USB-C Cable 1m" })).toBeInTheDocument();
+    expect(screen.getByRole("listitem", { name: "Tempered Glass" })).toBeInTheDocument();
+    expect(salesService.getSale).toHaveBeenCalledWith("sale-1");
+    expect(salesService.createSale).toHaveBeenCalledTimes(1);
+    expect(salesService.discardSale).not.toHaveBeenCalled();
+    expect(useTerminalSessionStore.getState().draftSaleId).toBe("sale-1");
+  });
+
+  it("keeps the Sale complete panel, with no extra draft", async () => {
+    const cash = { id: "pay-1", payment_method: "CASH", amount: "3990.00", cash_received: "4000.00", reference_number: null };
+    const paidSale = draftSale({ lines, subtotal: "3990.00", total: "3990.00", amount_paid: "3990.00", change_due: "10.00", payments: [cash] });
+    salesService.createSale.mockResolvedValueOnce(paidSale).mockResolvedValueOnce(draftSale({ id: "sale-2" }));
+    salesService.completeSale.mockResolvedValue({
+      ...paidSale, status: "COMPLETED", sale_number: "INV-20261020-0001", completed_at: "2026-10-20T09:15:00.000Z",
+    });
+    const print = vi.spyOn(window, "print").mockImplementation(() => {});
+    const user = userEvent.setup();
+    await renderRoutes();
+
+    await user.keyboard("[F9]");
+    const dialog = await screen.findByRole("dialog", { name: "Complete this sale?" });
+    await waitFor(() => expect(within(dialog).getByRole("button", { name: /Complete sale/ })).toHaveFocus());
+    await user.keyboard("{Enter}");
+    await screen.findByRole("region", { name: "Sale complete" });
+    await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
+    await waitFor(() => expect(salesService.createSale).toHaveBeenCalledTimes(2));
+
+    await roundTrip(user);
+
+    const panel = await screen.findByRole("region", { name: "Sale complete" });
+    expect(within(panel).getByTestId("sale-number")).toHaveTextContent("INV-20261020-0001");
+    expect(salesService.createSale).toHaveBeenCalledTimes(2);
+    expect(salesService.discardSale).not.toHaveBeenCalled();
+    print.mockRestore();
   });
 });

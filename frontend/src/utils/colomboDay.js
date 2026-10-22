@@ -50,6 +50,35 @@ export const colomboToday = (now = new Date()) => toDay(new Date(now.getTime() +
 export const shiftColomboDay = (day, delta) =>
   toDay(new Date(parseDay(day).getTime() + delta * DAY_MS));
 
+const timeFormat = new Intl.DateTimeFormat("en-GB", {
+  timeZone: "Asia/Colombo",
+  hour: "2-digit",
+  minute: "2-digit",
+  hourCycle: "h23",
+});
+
+const dayLabelFormat = new Intl.DateTimeFormat("en-GB", {
+  timeZone: "UTC",
+  weekday: "short",
+  day: "numeric",
+  month: "short",
+  year: "numeric",
+});
+
+/** An ISO timestamp → "14:32", Colombo time. "" for none. */
+export const formatColomboTime = (iso) => (iso ? timeFormat.format(new Date(iso)) : "");
+
+/**
+ * "2026-10-22" → "Thu 22 Oct 2026" (the day itself; no zone shift). Built
+ * from the parts: ICU versions disagree on a comma after the weekday.
+ */
+export const formatColomboDayLabel = (day) => {
+  const parts = Object.fromEntries(
+    dayLabelFormat.formatToParts(parseDay(day)).map((p) => [p.type, p.value]),
+  );
+  return `${parts.weekday} ${parts.day} ${parts.month} ${parts.year}`;
+};
+
 /**
  * GET /sales bounds for one Colombo day: inclusive start, exclusive end
  * (the next midnight).

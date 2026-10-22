@@ -15,6 +15,8 @@ import AppLayout from "./components/layout/AppLayout";
 import TerminalLayout from "./components/layout/TerminalLayout";
 import BranchContextGuard from "./components/pos/BranchContextGuard";
 import PosTerminal from "./pages/PosTerminal";
+import RecentSales from "./pages/RecentSales";
+import SaleDetail from "./pages/SaleDetail";
 import { restoreSession } from "./store/slices/authSlice";
 import { fetchBranches } from "./store/slices/branchesSlice";
 
@@ -149,6 +151,9 @@ function App() {
         }
       >
         <Route path="/pos" element={<PosTerminal />} />
+        {/* Recent sales and a sale's detail (P6-1) */}
+        <Route path="/pos/sales" element={<RecentSales />} />
+        <Route path="/pos/sales/:id" element={<SaleDetail />} />
       </Route>
 
       {/* 404 fallback */}

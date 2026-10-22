@@ -1,5 +1,5 @@
-import { screen } from "@testing-library/react";
-import { Route, Routes } from "react-router-dom";
+import { fireEvent, screen } from "@testing-library/react";
+import { Route, Routes, useLocation } from "react-router-dom";
 import TerminalLayout from "./index";
 import useActiveBranchStore from "../../../store/zustand/activeBranchStore";
 import {
@@ -78,5 +78,75 @@ describe("TerminalLayout", () => {
     expect(
       screen.queryByRole("link", { name: /products/i }),
     ).not.toBeInTheDocument();
+  });
+});
+
+describe("TerminalLayout: recent sales (P6-1)", () => {
+  const Where = () => {
+    const location = useLocation();
+    return <p data-testid="where">{location.pathname + location.search}</p>;
+  };
+
+  const renderAt = (route, page = <p>terminal page</p>) =>
+    renderWithProviders(
+      <>
+        <Where />
+        <Routes>
+          <Route element={<TerminalLayout />}>
+            <Route path="/pos" element={page} />
+            <Route path="/pos/sales" element={<p>sales list</p>} />
+            <Route path="/pos/sales/:id" element={<p>sale detail</p>} />
+          </Route>
+        </Routes>
+      </>,
+      {
+        route,
+        preloadedState: { auth: authState(cashierUser), branches: branchesState([mainShop]) },
+      },
+    );
+
+  const altR = () => fireEvent.keyDown(document.body, { key: "r", code: "KeyR", altKey: true });
+  const where = () => screen.getByTestId("where").textContent;
+
+  it("the header's Sales button links to /pos/sales", () => {
+    renderAt("/pos");
+    const link = screen.getByRole("link", { name: "Recent sales" });
+    expect(link).toHaveAttribute("href", "/pos/sales");
+    expect(link).toHaveTextContent("Sales");
+  });
+
+  it("Alt+R opens the sales list, and the browser's own Alt+R is cancelled", () => {
+    renderAt("/pos");
+
+    // fireEvent returns false when a handler called preventDefault().
+    expect(altR()).toBe(false);
+
+    expect(screen.getByText("sales list")).toBeInTheDocument();
+  });
+
+  it("Alt+R works from an input too (the scan bar)", () => {
+    renderAt("/pos", <input aria-label="scan" />);
+    const input = screen.getByRole("textbox", { name: "scan" });
+    input.focus();
+
+    fireEvent.keyDown(input, { key: "r", code: "KeyR", altKey: true });
+
+    expect(screen.getByText("sales list")).toBeInTheDocument();
+  });
+
+  it("Alt+R is ignored while a dialog is open", () => {
+    renderAt("/pos", <div role="dialog" aria-label="Take payment">payment</div>);
+
+    altR();
+
+    expect(where()).toBe("/pos");
+  });
+
+  it("Alt+R does nothing on the sales pages, so the list keeps its day and search", () => {
+    renderAt("/pos/sales?day=2026-10-20&q=Kamal");
+
+    altR();
+
+    expect(where()).toBe("/pos/sales?day=2026-10-20&q=Kamal");
   });
 });
