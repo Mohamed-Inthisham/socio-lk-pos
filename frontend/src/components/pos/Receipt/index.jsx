@@ -40,8 +40,17 @@ import {
  * (reference; trade-in phone + IMEI; cash received and change), the
  * terms, and the footer.
  *
+ * MARKINGS (P6-7):
+ * - reprintedAt: a reprint from the sale detail page prints
+ *   "REPRINT · <date, time printed>" under the invoice number. The Sale
+ *   complete panel's Reprint and "Last receipt" pass nothing (unmarked).
+ * - A VOIDED sale, whichever way it's printed, gets a "VOIDED — NOT VALID"
+ *   block (voided date and time, reason) as the very first thing on the
+ *   paper and again above the footer, and no Change line.
+ *
  * PROPS:
- * - sale: the hydrated COMPLETED sale
+ * - sale: the hydrated COMPLETED or VOIDED sale
+ * - reprintedAt: ISO time of a detail-page reprint, or undefined
  */
 
 const BASE_FONT = "11px";
@@ -86,7 +95,23 @@ const styles = {
   total: { fontSize: "14px", fontWeight: 700 },
   small: { fontSize: SMALL_FONT, lineHeight: 1.3 },
   line: { marginBottom: "1.2mm" },
+  // Black only: a thermal head has no grey or red.
+  voided: {
+    border: "0.5mm solid #000",
+    padding: "1.2mm 1.5mm",
+    margin: "1mm 0 1.5mm",
+    textAlign: "center",
+  },
+  voidedTitle: { fontSize: "14px", fontWeight: 700, letterSpacing: "0.3mm" },
 };
+
+const VoidedBlock = ({ sale, testId }) => (
+  <div style={styles.voided} data-testid={testId}>
+    <div style={styles.voidedTitle}>VOIDED — NOT VALID</div>
+    <div>Voided {receiptDateTime(sale.voided_at)}</div>
+    {sale.void_reason && <div>Reason: {sale.void_reason}</div>}
+  </div>
+);
 
 const Row = ({ label, value, style }) => (
   <div style={{ ...styles.row, ...style }}>
@@ -102,16 +127,18 @@ const tenderLabel = (payment) => {
     : label;
 };
 
-const Receipt = ({ sale }) => {
+const Receipt = ({ sale, reprintedAt }) => {
   const branch = sale.branch ?? {};
   const customer = sale.customer;
   const lines = sale.lines ?? [];
   const payments = sale.payments ?? [];
   const discount = Number(sale.discount_total ?? 0);
+  const voided = sale.status === "VOIDED";
 
   return (
     <div style={styles.page} data-testid="receipt">
       <div style={styles.content}>
+        {voided && <VoidedBlock sale={sale} testId="receipt-voided-top" />}
         <img src={logo} alt={SHOP_NAME} style={styles.logo} />
         <div style={styles.tagline} data-testid="receipt-tagline">
           {SHOP_TAGLINE}
@@ -124,6 +151,11 @@ const Receipt = ({ sale }) => {
 
         <hr style={styles.rule} />
         <Row label="Invoice" value={sale.sale_number} />
+        {reprintedAt && (
+          <div style={styles.bold} data-testid="receipt-reprint">
+            REPRINT · {receiptDateTime(reprintedAt)}
+          </div>
+        )}
         <Row label="Date" value={receiptDateTime(sale.completed_at)} />
         {sale.cashier?.full_name && <Row label="Cashier" value={sale.cashier.full_name} />}
         {customer && (
@@ -176,7 +208,7 @@ const Receipt = ({ sale }) => {
             {payment.payment_method === "CASH" && (
               <>
                 <Row style={styles.indent} label="Cash received" value={receiptAmount(payment.cash_received)} />
-                {Number(cashChange(payment)) > 0 && (
+                {!voided && Number(cashChange(payment)) > 0 && (
                   <Row style={{ ...styles.indent, ...styles.bold }} label="Change" value={receiptAmount(cashChange(payment))} />
                 )}
               </>
@@ -198,6 +230,7 @@ const Receipt = ({ sale }) => {
         </div>
 
         <hr style={styles.rule} />
+        {voided && <VoidedBlock sale={sale} testId="receipt-voided-bottom" />}
         <div style={{ ...styles.center, ...styles.bold, marginBottom: "2mm" }}>{RECEIPT_FOOTER}</div>
       </div>
     </div>

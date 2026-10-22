@@ -1,7 +1,10 @@
 import { vi } from "vitest";
 import { fireEvent, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
+import { Link, Route, Routes } from "react-router-dom";
 import PosTerminal from ".";
+import UserMenu from "../../components/layout/UserMenu";
+import { managerSessionUser } from "../../test/authEntities";
 import {
   authState,
   branchesState,
@@ -570,20 +573,56 @@ describe("PosTerminal Sale complete panel (P5-9, P5-10)", () => {
       await waitFor(() => expect(print).toHaveBeenCalledTimes(2));
     });
 
-    it("'Last receipt' on the next sale reprints the sale just completed, without a request", async () => {
-      const user = userEvent.setup();
+    // Complete, then Next sale: "Last receipt" is on the Current sale card.
+    const toNextSale = async (user) => {
       await renderTerminal();
       await completeTheSale(user);
       await user.click(within(panel()).getByRole("button", { name: /Next sale/ }));
       await waitFor(() => expect(panel()).not.toBeInTheDocument());
       print.mockClear();
-      salesService.getSale.mockClear();
+      salesService.getSale.mockReset();
+    };
+
+    it("'Last receipt' re-reads the sale just completed (P6-7), unmarked", async () => {
+      const user = userEvent.setup();
+      await toNextSale(user);
+      salesService.getSale.mockResolvedValue(completed());
 
       await user.click(screen.getByRole("button", { name: "Reprint last receipt" }));
 
       await waitFor(() => expect(print).toHaveBeenCalledTimes(1));
-      expect(salesService.getSale).not.toHaveBeenCalled();
+      expect(salesService.getSale).toHaveBeenCalledWith("sale-1");
       expect(receiptRoot().textContent).toContain("INV-20261020-0001");
+      expect(receiptRoot().textContent).not.toContain("REPRINT");
+      expect(receiptRoot().textContent).not.toContain("VOIDED");
+    });
+
+    it("'Last receipt' prints a sale voided since as VOIDED — NOT VALID", async () => {
+      const user = userEvent.setup();
+      await toNextSale(user);
+      salesService.getSale.mockResolvedValue({
+        ...completed(),
+        status: "VOIDED",
+        voided_at: "2026-10-20T10:00:00.000Z",
+        void_reason: "Wrong price",
+      });
+
+      await user.click(screen.getByRole("button", { name: "Reprint last receipt" }));
+
+      await waitFor(() => expect(print).toHaveBeenCalledTimes(1));
+      expect(receiptRoot().textContent).toContain("VOIDED — NOT VALID");
+      expect(receiptRoot().textContent).toContain("Reason: Wrong price");
+    });
+
+    it("'Last receipt' prints nothing when the re-read fails, even with the sale in memory", async () => {
+      const user = userEvent.setup();
+      await toNextSale(user);
+      salesService.getSale.mockRejectedValue(new Error("Network Error"));
+
+      await user.click(screen.getByRole("button", { name: "Reprint last receipt" }));
+
+      expect(await screen.findByRole("alert")).toHaveTextContent("Couldn't load the last receipt. Try again.");
+      expect(print).not.toHaveBeenCalled();
     });
   });
 
@@ -765,5 +804,119 @@ describe("PosTerminal trade-in: F6, attach-then-return, F3 guard (P4-2, P4-11)",
 
     expect(attachDialog()).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Change" })).toHaveAttribute("aria-disabled", "true");
+  });
+});
+
+describe("PosTerminal with the user menu's Approval PIN dialog (P6-18)", () => {
+  const renderWithMenu = async () => {
+    renderWithProviders(
+      <>
+        <UserMenu />
+        <PosTerminal />
+      </>,
+      { preloadedState: { auth: authState(managerSessionUser()), branches: branchesState([mainShop]) } },
+    );
+    await screen.findByRole("list", { name: "Cart" });
+  };
+
+  const openPinDialog = async (user) => {
+    await user.click(screen.getByRole("button", { name: /Asha Perera/ }));
+    await user.click(await screen.findByRole("menuitem", { name: /Approval PIN/ }));
+    return screen.findByRole("dialog", { name: /approval PIN/i });
+  };
+
+  it("the till's keys are ignored while it is open (F4 opens no payment)", async () => {
+    salesService.createSale.mockResolvedValue(draftSale({ lines, subtotal: "3990.00", total: "3990.00" }));
+    const user = userEvent.setup();
+    await renderWithMenu();
+    await openPinDialog(user);
+
+    await user.keyboard("[F4]");
+
+    expect(screen.queryByRole("dialog", { name: "Take payment" })).not.toBeInTheDocument();
+  });
+
+  it("closing it hands focus back to the scan bar (pos:return-focus)", async () => {
+    const user = userEvent.setup();
+    await renderWithMenu();
+    await openPinDialog(user);
+
+    await user.keyboard("{Escape}");
+
+    await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
+    await waitFor(() => expect(scanBar()).toHaveFocus());
+  });
+});
+
+describe("PosTerminal round trip through /pos/sales (P6-1)", () => {
+  // Leaving /pos unmounts the terminal; the Redux state stays.
+  const renderRoutes = async () => {
+    const utils = renderWithProviders(
+      <>
+        <Link to="/pos/sales">to sales</Link>
+        <Link to="/pos">to terminal</Link>
+        <Routes>
+          <Route path="/pos" element={<PosTerminal />} />
+          <Route path="/pos/sales" element={<p>sales list</p>} />
+        </Routes>
+      </>,
+      {
+        route: "/pos",
+        preloadedState: { auth: authState(cashierUser), branches: branchesState([mainShop]) },
+      },
+    );
+    await screen.findByRole("list", { name: "Cart" });
+    return utils;
+  };
+
+  const roundTrip = async (user) => {
+    await user.click(screen.getByRole("link", { name: "to sales" }));
+    await screen.findByText("sales list");
+    await user.click(screen.getByRole("link", { name: "to terminal" }));
+  };
+
+  it("keeps the open draft and its cart: same sale, no new draft, no discard", async () => {
+    salesService.createSale.mockResolvedValue(draftSale({ lines }));
+    salesService.getSale.mockResolvedValue(draftSale({ lines }));
+    const user = userEvent.setup();
+    await renderRoutes();
+    expect(row("USB-C Cable 1m")).toBeInTheDocument();
+
+    await roundTrip(user);
+
+    expect(await screen.findByRole("listitem", { name: "USB-C Cable 1m" })).toBeInTheDocument();
+    expect(screen.getByRole("listitem", { name: "Tempered Glass" })).toBeInTheDocument();
+    expect(salesService.getSale).toHaveBeenCalledWith("sale-1");
+    expect(salesService.createSale).toHaveBeenCalledTimes(1);
+    expect(salesService.discardSale).not.toHaveBeenCalled();
+    expect(useTerminalSessionStore.getState().draftSaleId).toBe("sale-1");
+  });
+
+  it("keeps the Sale complete panel, with no extra draft", async () => {
+    const cash = { id: "pay-1", payment_method: "CASH", amount: "3990.00", cash_received: "4000.00", reference_number: null };
+    const paidSale = draftSale({ lines, subtotal: "3990.00", total: "3990.00", amount_paid: "3990.00", change_due: "10.00", payments: [cash] });
+    salesService.createSale.mockResolvedValueOnce(paidSale).mockResolvedValueOnce(draftSale({ id: "sale-2" }));
+    salesService.completeSale.mockResolvedValue({
+      ...paidSale, status: "COMPLETED", sale_number: "INV-20261020-0001", completed_at: "2026-10-20T09:15:00.000Z",
+    });
+    const print = vi.spyOn(window, "print").mockImplementation(() => {});
+    const user = userEvent.setup();
+    await renderRoutes();
+
+    await user.keyboard("[F9]");
+    const dialog = await screen.findByRole("dialog", { name: "Complete this sale?" });
+    await waitFor(() => expect(within(dialog).getByRole("button", { name: /Complete sale/ })).toHaveFocus());
+    await user.keyboard("{Enter}");
+    await screen.findByRole("region", { name: "Sale complete" });
+    await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
+    await waitFor(() => expect(salesService.createSale).toHaveBeenCalledTimes(2));
+
+    await roundTrip(user);
+
+    const panel = await screen.findByRole("region", { name: "Sale complete" });
+    expect(within(panel).getByTestId("sale-number")).toHaveTextContent("INV-20261020-0001");
+    expect(salesService.createSale).toHaveBeenCalledTimes(2);
+    expect(salesService.discardSale).not.toHaveBeenCalled();
+    print.mockRestore();
   });
 });

@@ -39,6 +39,8 @@ describe("authService user mapping", () => {
       role: "cashier",
       branch_id: "branch-1",
       branch,
+      has_approval_pin: false,
+      approval_pin_set_at: null,
       avatar: null,
     });
   });
@@ -71,5 +73,40 @@ describe("authService user mapping", () => {
 
     expect(user.branch_id).toBeNull();
     expect(user.branch).toBeNull();
+  });
+
+  it("keeps the approval PIN state on /auth/me (P6-18)", async () => {
+    const manager = {
+      ...cashier,
+      role: "manager",
+      has_approval_pin: true,
+      approval_pin_set_at: "2026-10-22T06:00:00.000Z",
+    };
+    api.get.mockResolvedValueOnce({ data: { user: manager } });
+
+    const { user } = await getCurrentUser();
+
+    expect(user.has_approval_pin).toBe(true);
+    expect(user.approval_pin_set_at).toBe("2026-10-22T06:00:00.000Z");
+  });
+
+  it("keeps the approval PIN state on login", async () => {
+    api.post.mockResolvedValueOnce({
+      data: { user: { ...admin, has_approval_pin: false, approval_pin_set_at: null } },
+    });
+
+    const { user } = await loginAPI({ email: "x", password: "y" });
+
+    expect(user.has_approval_pin).toBe(false);
+    expect(user.approval_pin_set_at).toBeNull();
+  });
+
+  it("defaults missing approval PIN fields to false / null", async () => {
+    api.get.mockResolvedValueOnce({ data: { user: cashier } });
+
+    const { user } = await getCurrentUser();
+
+    expect(user.has_approval_pin).toBe(false);
+    expect(user.approval_pin_set_at).toBeNull();
   });
 });

@@ -1,5 +1,5 @@
 import { vi } from "vitest";
-import { createTestStore } from "../../test/renderWithProviders";
+import { createTestStore, posTerminalState } from "../../test/renderWithProviders";
 import {
   draftSale,
   saleLine,
@@ -136,6 +136,20 @@ describe("posTerminal draft lifecycle", () => {
     expect(store.getState().posTerminal.status).toBe("error");
     expect(useTerminalSessionStore.getState().draftSaleId).toBe("sale-old");
   });
+
+  it.each(["completing", "completed"])(
+    "does nothing while the sale is %s: the terminal remounting keeps the Sale complete panel (P6-1)",
+    async (status) => {
+      useTerminalSessionStore.getState().setDraftSaleId("sale-1");
+      const store = createTestStore({ posTerminal: posTerminalState({ status }) });
+
+      await store.dispatch(ensureDraftSale({ branchId: "branch-main" }));
+
+      expect(salesService.getSale).not.toHaveBeenCalled();
+      expect(salesService.createSale).not.toHaveBeenCalled();
+      expect(store.getState().posTerminal.status).toBe(status);
+    },
+  );
 
   it("discards the current draft and opens a fresh one", async () => {
     const { store, ready } = readyStore(draftSale({ id: "sale-old" }));

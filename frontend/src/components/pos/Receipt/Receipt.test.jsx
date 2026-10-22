@@ -1,6 +1,8 @@
 import { render, screen, within } from "@testing-library/react";
 import Receipt from ".";
 import { completedSaleForReceipt, completedSaleWithDiscounts } from "../../../test/posFixtures";
+import { saleEntity, voidedSaleEntity } from "../../../test/saleEntities";
+import { RECEIPT_FOOTER } from "../../../constants/receipt";
 
 const receipt = () => screen.getByTestId("receipt");
 const text = () => receipt().textContent;
@@ -124,5 +126,59 @@ describe("Receipt (P5-11, P5-18)", () => {
     expect(text()).not.toContain("Tel ");
     expect(text()).not.toMatch(/Subtotal67,990\.00Discount/);
     expect(screen.getByTestId("receipt-payment").textContent).toBe("Cash66,990.00Cash received66,990.00");
+  });
+});
+
+describe("Receipt markings (P6-7)", () => {
+  it("is unmarked without reprintedAt (Sale complete Reprint, Last receipt)", () => {
+    render(<Receipt sale={saleEntity()} />);
+
+    expect(screen.queryByTestId("receipt-reprint")).not.toBeInTheDocument();
+    expect(text()).not.toContain("REPRINT");
+    expect(text()).not.toContain("VOIDED");
+  });
+
+  it("a detail-page reprint prints REPRINT with the time printed (Colombo), under the invoice number", () => {
+    render(<Receipt sale={saleEntity()} reprintedAt="2026-10-22T06:05:00.000Z" />);
+
+    expect(screen.getByTestId("receipt-reprint")).toHaveTextContent("REPRINT · 22 Oct 2026, 11:35");
+    expect(text()).toContain("InvoiceINV-20261021-0007REPRINT · 22 Oct 2026, 11:35Date21 Oct 2026, 14:32");
+  });
+
+  it("a voided sale prints VOIDED — NOT VALID first on the paper and again above the footer", () => {
+    render(<Receipt sale={voidedSaleEntity()} />);
+
+    const top = screen.getByTestId("receipt-voided-top");
+    const bottom = screen.getByTestId("receipt-voided-bottom");
+    for (const block of [top, bottom]) {
+      expect(block.textContent).toBe(
+        "VOIDED — NOT VALIDVoided 22 Oct 2026, 10:15Reason: Wrong price — rang 64,990, was 59,990",
+      );
+    }
+    const content = receipt().firstElementChild;
+    expect(content.firstElementChild).toBe(top); // above the logo
+    expect(bottom.nextElementSibling.textContent).toBe(RECEIPT_FOOTER);
+  });
+
+  it("a voided sale prints no Change line (cash received stays)", () => {
+    render(<Receipt sale={voidedSaleEntity()} />);
+
+    const cash = screen.getAllByTestId("receipt-payment").find((p) => p.textContent.startsWith("Cash"));
+    expect(cash.textContent).toBe("Cash20,290.00Cash received20,300.00");
+    expect(text()).not.toContain("Change");
+  });
+
+  it("the same sale, completed, does print its change", () => {
+    render(<Receipt sale={saleEntity()} />);
+
+    const cash = screen.getAllByTestId("receipt-payment").find((p) => p.textContent.startsWith("Cash"));
+    expect(cash.textContent).toBe("Cash20,290.00Cash received20,300.00Change10.00");
+  });
+
+  it("a voided reprint carries both markings", () => {
+    render(<Receipt sale={voidedSaleEntity()} reprintedAt="2026-10-22T06:05:00.000Z" />);
+
+    expect(screen.getByTestId("receipt-reprint")).toBeInTheDocument();
+    expect(screen.getByTestId("receipt-voided-top")).toBeInTheDocument();
   });
 });

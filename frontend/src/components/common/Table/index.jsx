@@ -1,3 +1,4 @@
+import { useEffect, useRef } from "react";
 import { Inbox } from "lucide-react";
 
 /**
@@ -26,6 +27,15 @@ import { Inbox } from "lucide-react";
  * - loading: boolean, shows skeleton rows
  * - onRowClick: (row) => void, makes rows interactive
  * - emptyMessage: string, shown when data is empty (default 'No results')
+ *
+ * OPTIONAL (keyboard lists such as the POS recent sales; off by default):
+ * - activeKey: the keyField value of the highlighted row (aria-selected),
+ *   kept scrolled into view
+ * - fill: ≥ md the table fills its parent's height, scrolls inside, and
+ *   keeps its header pinned
+ * - dense: tighter row padding
+ * - footer: ReactNode after the rows, inside the scroll area (e.g. Load more)
+ * - ariaLabel: accessible name for the table (and the card list)
  */
 
 const alignClass = (align) =>
@@ -69,7 +79,29 @@ const Table = ({
   loading = false,
   onRowClick,
   emptyMessage = "No results",
+  activeKey,
+  fill = false,
+  dense = false,
+  footer = null,
+  ariaLabel,
 }) => {
+  const tableRef = useRef(null);
+  const cardsRef = useRef(null);
+
+  useEffect(() => {
+    if (activeKey === undefined || activeKey === null) return;
+    for (const container of [tableRef.current, cardsRef.current]) {
+      const el = [...(container?.querySelectorAll("[data-row-key]") ?? [])].find(
+        (node) => node.dataset.rowKey === String(activeKey),
+      );
+      el?.scrollIntoView?.({ block: "nearest" });
+    }
+  }, [activeKey]);
+
+  const isActive = (row) => activeKey !== undefined && activeKey !== null && row[keyField] === activeKey;
+  const cellPad = dense ? "py-2" : "py-3.5";
+  const headPad = dense ? "py-2" : "py-3";
+
   const visibleColumns = columns.filter((c) => !c.mobileHidden);
   const primaryCol =
     columns.find((c) => c.primary) || visibleColumns[0] || null;
@@ -84,8 +116,11 @@ const Table = ({
   return (
     <>
       {/* DESKTOP TABLE */}
-      <div className="hidden md:block overflow-hidden rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900">
-        <table className="w-full text-sm">
+      <div
+        ref={tableRef}
+        className={`hidden md:block ${fill ? "h-full min-h-0 overflow-y-auto" : "overflow-hidden"} rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900`}
+      >
+        <table className="w-full text-sm" aria-label={ariaLabel}>
           <thead className="bg-slate-50 dark:bg-slate-800">
             <tr>
               {columns.map((col) => (
@@ -93,9 +128,10 @@ const Table = ({
                   key={col.key}
                   className={`
                     ${alignClass(col.align)}
-                    px-4 py-3
+                    px-4 ${headPad}
                     text-xs font-semibold uppercase tracking-wider
                     text-slate-500 dark:text-slate-400
+                    ${fill ? "sticky top-0 z-10 bg-slate-50 dark:bg-slate-800" : ""}
                   `}
                 >
                   {col.header}
@@ -114,6 +150,8 @@ const Table = ({
               data.map((row) => (
                 <tr
                   key={row[keyField]}
+                  data-row-key={row[keyField]}
+                  aria-selected={activeKey !== undefined ? isActive(row) : undefined}
                   onClick={onRowClick ? () => onRowClick(row) : undefined}
                   className={`
                     border-t border-slate-200 dark:border-slate-700
@@ -122,6 +160,7 @@ const Table = ({
                         ? "cursor-pointer hover:bg-slate-50 dark:hover:bg-slate-800 transition-colors"
                         : ""
                     }
+                    ${isActive(row) ? "bg-cyan-50 dark:bg-cyan-950/50 shadow-[inset_3px_0_0_0_var(--color-cyan-500)]" : ""}
                   `}
                 >
                   {columns.map((col) => (
@@ -129,7 +168,7 @@ const Table = ({
                       key={col.key}
                       className={`
                         ${alignClass(col.align)}
-                        px-4 py-3.5
+                        px-4 ${cellPad}
                         text-slate-700 dark:text-slate-200
                       `}
                     >
@@ -142,10 +181,11 @@ const Table = ({
         </table>
 
         {!loading && data.length === 0 && <EmptyState message={emptyMessage} />}
+        {footer}
       </div>
 
       {/* MOBILE CARDS */}
-      <div className="md:hidden space-y-2">
+      <div ref={cardsRef} className="md:hidden space-y-2" role={ariaLabel ? "list" : undefined} aria-label={ariaLabel}>
         {loading &&
           Array.from({ length: 3 }).map((_, i) => <SkeletonCard key={i} />)}
 
@@ -154,9 +194,13 @@ const Table = ({
           data.map((row) => (
             <div
               key={row[keyField]}
+              data-row-key={row[keyField]}
+              role={ariaLabel ? "listitem" : undefined}
+              aria-current={isActive(row) ? "true" : undefined}
               onClick={onRowClick ? () => onRowClick(row) : undefined}
               className={`
-                rounded-xl border border-slate-200 dark:border-slate-700
+                rounded-xl border
+                ${isActive(row) ? "border-cyan-500 dark:border-cyan-500" : "border-slate-200 dark:border-slate-700"}
                 bg-white dark:bg-slate-800
                 p-4
                 ${
@@ -203,6 +247,7 @@ const Table = ({
             <EmptyState message={emptyMessage} />
           </div>
         )}
+        {footer}
       </div>
     </>
   );

@@ -18,6 +18,10 @@ import api from "./api";
  *
  * branch_id / branch: UUID + nested branch for staff, null for admins.
  * Normalised to null (never undefined) so callers can rely on the shape.
+ *
+ * has_approval_pin / approval_pin_set_at: the manager approval PIN
+ * (P6-18), read from the database on every /auth/me and login. false /
+ * null when missing (cashiers, or an older server).
  */
 const mapBackendUser = (backendUser) => ({
   id: backendUser.id,
@@ -26,6 +30,8 @@ const mapBackendUser = (backendUser) => ({
   role: backendUser.role,
   branch_id: backendUser.branch_id ?? null,
   branch: backendUser.branch ?? null,
+  has_approval_pin: backendUser.has_approval_pin ?? false,
+  approval_pin_set_at: backendUser.approval_pin_set_at ?? null,
   avatar: null,
 });
 

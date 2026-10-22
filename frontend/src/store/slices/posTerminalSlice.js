@@ -214,8 +214,11 @@ export const ensureDraftSale = createAsyncThunk(
   },
   {
     // StrictMode double-mount / re-renders must not create two drafts.
+    // Completing / completed: the terminal remounting (back from
+    // /pos/sales, P6-1) keeps the Sale complete panel; the next draft is
+    // already opening in the background (openNextDraft).
     condition: (_, { getState }) =>
-      !["loading", "discarding"].includes(getState().posTerminal.status),
+      !["loading", "discarding", ...SALE_LOCKED].includes(getState().posTerminal.status),
   },
 );
 

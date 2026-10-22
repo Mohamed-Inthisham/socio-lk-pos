@@ -1,6 +1,6 @@
 # POS till setup — receipt printer and browser
 
-How to set up a till so the POS terminal (`/pos`) prints its 80mm receipt with no print dialog and one cut per sale. Planning doc §8 P5-13, P5-16. The settings below were worked out on the shop's printer in October 2026; if they change, change them here.
+How to set up a till so the POS terminal (`/pos`) prints its 80mm receipt with no print dialog and one cut per sale. Section 6 covers going live with Phase 6.4 P6 (recent sales, reprints, voids with a manager's PIN). Planning doc §8 P5-13, P5-16. The settings below were worked out on the shop's printer in October 2026; if they change, change them here.
 
 **Hardware:** Xprinter XP-80 (XP-80T), 80mm thermal paper, USB, Windows driver. No cash drawer.
 
@@ -90,3 +90,82 @@ If any check fails, the remembered settings were lost: close Chrome completely, 
 - Branch name, address and phone: the sale's branch record (`PATCH /branches/:id`; there is no branch screen yet). A null address or phone is skipped.
 - Per line: warranty "Warranty: 12 months (until 21 Oct 2027)", "Checking only" for Checking, nothing for No warranty (P5-18, P5-19); discount "Discount (20%)" or "Discount (160.00 each)" (P5-20).
 - Layout numbers: `RECEIPT_LAYOUT` in `constants/receipt.js` (page 72mm, content 64mm, left margin 1.2mm, minimum height 90mm). Change them only after a test print on the real printer; Chrome's print preview → Save as PDF shows the page size but not the driver's ×1.057 enlargement.
+- Markings (P6-7): a reprint from a sale's detail page prints **"REPRINT · <date, time printed>"** under the invoice number; a voided sale prints a **"VOIDED — NOT VALID"** block (voided time, reason) first on the paper and again above the footer, and no Change line. The Sale complete panel's Reprint and Last receipt print unmarked; Last receipt always re-reads the sale, so a sale voided since prints as voided.
+
+## 6. Going live with P6 (recent sales, reprints, voids)
+
+Planning doc §8 "P6 decision log" and "P6 as built"; backend: `docs/backend/sales.md`, `docs/backend/approvals.md`.
+
+### 6.1 Before starting the new backend: run the two migrations
+
+P6 adds two migrations. Run them **before** starting the new backend, which expects the new columns:
+
+| Migration | What it does |
+|---|---|
+| `AddSalesBranchCompletedAtIndex` | An index on `sales (branch_id, completed_at)` for the recent-sales day list |
+| `AddApprovalPinAndVoidRequestedBy` | The approval PIN columns on `users` (hash, set time, wrong-PIN count, lock), `sales.void_requested_by` (backfilled from `voided_by` on earlier voids) and their CHECK constraints |
+
+1. Back up the database.
+2. In `backend/`, with the production `.env`: `npm run migration:show` lists both as pending (`[ ]`).
+3. `npm run migration:run`, then `npm run migration:show` again: both are now `[X]`.
+4. Start the new backend.
+
+Both migrations have a `down` (`npm run migration:revert` undoes the last one).
+
+### 6.2 Before anyone needs to void: every manager and admin sets a PIN
+
+**Every void needs a manager's or admin's approval PIN, on every session**, a manager's own included (P6-8). Until someone at a branch has a PIN, nobody there can void: the void dialog says "No manager has set an approval PIN yet."
+
+Each manager and admin, once, signed in as themselves:
+
+1. User menu (name, top right) → **Approval PIN**. It reads "Not set".
+2. Current login password, then a **6-digit PIN** twice. One repeated digit (`111111`) and straight runs (`123456`, `654321`) are refused.
+3. **Save PIN**. The menu now reads "Set on <date, time>".
+
+Each person sets their own PIN; nobody can set someone else's. Cashiers have no PIN and don't see the menu item.
+
+### 6.3 Voids and refunds at the till
+
+- **Sales** (header button, or **Alt+R**) lists the day's sales; open one and press **V** (or **Void sale**). Pick a reason, choose the approver (on a manager's or admin's own session it is preselected), and the approver enters their PIN.
+- **Refunds happen outside the system until P7.** The void dialog lists what to hand back first: cash, and each card, bank transfer, Koko or Mintpay payment to reverse (with its reference). A trade-in phone goes back to the customer: take it off the shelf. Items from another shop aren't added to our stock; return them to that shop.
+- A void slip prints only on request: **Reprint** (P) on the voided sale.
+
+### 6.4 A forgotten or locked PIN
+
+- **Five wrong PINs in a row lock that approver's PIN for 15 minutes**; it unlocks by itself. Meanwhile another manager or an admin can approve. The lock doesn't affect logging in.
+- **Forgotten, or locked and it can't wait:** an admin clears the PIN, then its owner sets a new one (§6.2). Until the Phase 6.8 user screens there is no screen for this. Outside production it is done through **Swagger** with `DELETE /users/:id/approval-pin`, which records the clear in the audit log (`APPROVAL_PIN_CLEARED`). On a **production** backend Swagger isn't served, so use the SQL fallback below.
+
+Steps (Swagger, as an admin; backend not started with `NODE_ENV=production`):
+
+1. Open `http://<backend-host>:<port>/api/docs`.
+2. **POST /api/v1/auth/login** → Try it out → body `{ "email": "<admin email>", "password": "<admin password>" }` → Execute. 200; the browser now holds the admin's session for the following calls.
+3. **GET /api/v1/branches** → Execute. Copy the `id` of the manager's branch.
+4. **GET /api/v1/approvers** with `branchId` = that id → Execute. Copy the manager's `id` from the list. (A forgotten or locked PIN is still set, so the manager is listed.)
+5. **DELETE /api/v1/users/{id}/approval-pin** with that `id` → Execute. **204** means cleared (also when no PIN was set).
+6. **POST /api/v1/auth/logout** → Execute.
+7. The manager signs in and sets a new PIN (§6.2).
+
+**Swagger is only served when the backend is not started with `NODE_ENV=production`** (`backend/src/main.ts`), so on a production backend use the fallback below (FOLLOWUPS "No way to clear an approval PIN on a production backend").
+
+**Production fallback (SQL, until the Phase 6.8 screens).** An admin with database access runs this on the **production** database, for one user, by email. It does what `DELETE /users/:id/approval-pin` does: clears the PIN, its set time, the wrong-PIN count and the lock.
+
+```sql
+BEGIN;
+
+UPDATE users
+   SET approval_pin_hash            = NULL,
+       approval_pin_set_at          = NULL,
+       approval_pin_failed_attempts = 0,
+       approval_pin_locked_until    = NULL,
+       updated_at                   = now()
+ WHERE email = lower('manager@example.com')   -- the user whose PIN to clear
+   AND deleted_at IS NULL
+RETURNING email, full_name, role;
+
+-- Exactly one row must come back. If it did: COMMIT;  otherwise: ROLLBACK;
+COMMIT;
+```
+
+- Check the returned row is the right person before `COMMIT`. Emails are stored lower-case.
+- **This bypasses the audit log**: no `APPROVAL_PIN_CLEARED` entry is written. Write it down by hand in the shop's log: who cleared it, for whom, when, and why.
+- Then the user signs in and sets a new PIN (§6.2).

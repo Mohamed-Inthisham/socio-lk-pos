@@ -7,4 +7,19 @@ describe("rolePermissions", () => {
       expect(hasPermission(role, PERMISSIONS.APPLY_DISCOUNT)).toBe(true);
     },
   );
+
+  it.each([ROLES.ADMIN, ROLES.MANAGER, ROLES.CASHIER])(
+    "%s may start a void; a manager's PIN approves it (P6-8)",
+    (role) => {
+      expect(hasPermission(role, PERMISSIONS.VOID_SALE)).toBe(true);
+    },
+  );
+
+  it.each([
+    [ROLES.ADMIN, true],
+    [ROLES.MANAGER, true],
+    [ROLES.CASHIER, false],
+  ])("%s may set their own approval PIN: %s (P6-18)", (role, allowed) => {
+    expect(hasPermission(role, PERMISSIONS.SET_APPROVAL_PIN)).toBe(allowed);
+  });
 });

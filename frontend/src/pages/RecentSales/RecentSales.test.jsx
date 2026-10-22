@@ -1,0 +1,554 @@
+import { vi } from "vitest";
+import { act, fireEvent, screen, waitFor, within } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
+import { Route, Routes, useLocation } from "react-router-dom";
+import RecentSales from ".";
+import SaleDetail from "../SaleDetail";
+import { authState, branchesState, renderWithProviders } from "../../test/renderWithProviders";
+import { cashierUser, mainShop } from "../../test/fixtures";
+import * as salesService from "../../services/salesService";
+
+vi.mock("../../services/salesService");
+
+// 11:30 on Thu 22 Oct 2026 in Colombo
+const NOW = new Date("2026-10-22T06:00:00.000Z");
+const TODAY = {
+  completedFrom: "2026-10-22T00:00:00+05:30",
+  completedTo: "2026-10-23T00:00:00+05:30",
+};
+
+// GET /sales rows are serialized entities (ClassSerializerInterceptor, no
+// renames). customer: the Customer entity (backend/src/customers/entities/
+// customer.entity.ts) — `name`, not `full_name` — or null for a walk-in.
+// cashier: the User entity minus its @Exclude fields (user.entity.ts).
+const listCustomer = (overrides = {}) => ({
+  id: "cust-1",
+  name: "Kamal Perera",
+  phone: "0771234567",
+  nic: "199012345678",
+  email: null,
+  notes: null,
+  created_at: "2026-10-01T04:00:00.000Z",
+  updated_at: "2026-10-01T04:00:00.000Z",
+  deleted_at: null,
+  ...overrides,
+});
+
+const listCashier = (overrides = {}) => ({
+  id: "user-cashier",
+  email: "cashier@socio.lk",
+  full_name: "Test Cashier",
+  approval_pin_set_at: null,
+  role: "cashier",
+  is_active: true,
+  branch_id: "branch-main",
+  created_at: "2026-09-01T04:00:00.000Z",
+  updated_at: "2026-09-01T04:00:00.000Z",
+  deleted_at: null,
+  ...overrides,
+});
+
+const listRow = (n, overrides = {}) => ({
+  id: `sale-${n}`,
+  sale_number: `INV-20261022-${String(n).padStart(4, "0")}`,
+  sale_type: "RETAIL",
+  status: "COMPLETED",
+  branch_id: "branch-main",
+  cashier_id: "user-cashier",
+  customer_id: null,
+  subtotal: "1500.00",
+  discount_total: "0.00",
+  tax_total: "0.00",
+  total: "1500.00",
+  amount_paid: "1500.00",
+  change_due: "0.00",
+  notes: null,
+  completed_at: "2026-10-22T04:32:00.000Z", // 10:02 Colombo
+  voided_at: null,
+  voided_by: null,
+  void_requested_by: null,
+  void_reason: null,
+  created_at: "2026-10-22T04:20:00.000Z",
+  updated_at: "2026-10-22T04:32:00.000Z",
+  branch: { id: "branch-main", name: "Main Shop" }, // the list doesn't read it; trimmed
+  cashier: listCashier(),
+  customer: null,
+  ...overrides,
+});
+
+const page = (rows, total = rows.length) => ({ data: rows, meta: { total, page: 1 } });
+
+const rowsFrom = (from, count) => Array.from({ length: count }, (_, i) => listRow(from + i));
+
+const Where = () => {
+  const location = useLocation();
+  return <p data-testid="where">{location.pathname + location.search}</p>;
+};
+
+const providers = (route) => ({
+  route,
+  preloadedState: { auth: authState(cashierUser), branches: branchesState([mainShop]) },
+});
+
+const renderList = (route = "/pos/sales") =>
+  renderWithProviders(
+    <>
+      <Where />
+      <Routes>
+        <Route path="/pos" element={<p>terminal page</p>} />
+        <Route path="/pos/sales" element={<RecentSales />} />
+        <Route path="/pos/sales/:id" element={<SaleDetail />} />
+      </Routes>
+    </>,
+    providers(route),
+  );
+
+// jsdom has no CSS, so the < md cards render too: query the table.
+const where = () => screen.getByTestId("where").textContent;
+const table = () => screen.getByRole("table");
+const bodyRows = () => within(table()).getAllByRole("row").slice(1);
+const activeRow = () => bodyRows().find((r) => r.getAttribute("aria-selected") === "true");
+const sale = (number) => within(table()).getByText(number);
+const findSale = (number) => waitFor(() => sale(number));
+const searchBox = () => screen.getByRole("searchbox", { name: "Search sales" });
+const lastCall = () => salesService.listSales.mock.calls.at(-1)[0];
+
+beforeEach(() => {
+  vi.resetAllMocks();
+  vi.useFakeTimers({ toFake: ["Date"] });
+  vi.setSystemTime(NOW);
+});
+
+afterEach(() => {
+  vi.useRealTimers();
+});
+
+describe("RecentSales: the day list (P6-2, P6-5)", () => {
+  it("loads today's completed sales for the terminal branch, newest completion first", async () => {
+    salesService.listSales.mockResolvedValue(page([listRow(1)]));
+    renderList();
+
+    await findSale("INV-20261022-0001");
+    expect(salesService.listSales).toHaveBeenCalledTimes(1);
+    expect(lastCall()).toEqual({
+      branchId: "branch-main",
+      ...TODAY,
+      sort: "completed_at",
+      page: 1,
+      limit: 50,
+    });
+    expect(screen.getByTestId("day-label")).toHaveTextContent("Today · Thu 22 Oct 2026");
+    expect(screen.getByText("1 sale")).toBeInTheDocument();
+  });
+
+  it("shows time, sale number, customer or Walk-in, cashier, total and a Voided badge", async () => {
+    salesService.listSales.mockResolvedValue(
+      page([
+        listRow(2, { customer_id: "cust-1", customer: listCustomer(), total: "60000.00" }),
+        listRow(1, { status: "VOIDED", cashier: listCashier({ id: "u-2", full_name: "Nimali Silva" }) }),
+      ]),
+    );
+    renderList();
+
+    await findSale("INV-20261022-0002");
+    const [first, second] = bodyRows();
+    expect(within(first).getByText("10:02")).toBeInTheDocument();
+    expect(within(first).getByText("Kamal Perera")).toBeInTheDocument();
+    expect(within(first).getByText(/LKR\s60,000\.00/)).toBeInTheDocument();
+    expect(within(first).queryByText("Voided")).not.toBeInTheDocument();
+    expect(within(second).getByText("Walk-in")).toBeInTheDocument();
+    expect(within(second).getByText("Nimali Silva")).toBeInTheDocument();
+    expect(within(second).getAllByText("Voided").length).toBeGreaterThan(0);
+  });
+
+  it("Customer column: the customer's name (Customer.name), or Walk-in for none — in the table and the cards", async () => {
+    salesService.listSales.mockResolvedValue(
+      page([
+        listRow(3, { customer_id: "cust-7", customer: listCustomer({ id: "cust-7", name: "Fathima Rizwan" }) }),
+        listRow(2, { customer_id: null, customer: null }),
+      ]),
+    );
+    renderList();
+
+    await findSale("INV-20261022-0003");
+    const [named, walkIn] = bodyRows();
+    const customerCell = (tr) => within(tr).getAllByRole("cell")[2];
+    expect(customerCell(named)).toHaveTextContent(/^Fathima Rizwan$/);
+    expect(within(customerCell(named)).getByTitle("Fathima Rizwan")).toBeInTheDocument();
+    expect(customerCell(walkIn)).toHaveTextContent(/^Walk-in$/);
+
+    // < md cards render the same column
+    const cards = within(screen.getByRole("list", { name: "Sales on Thu 22 Oct 2026" })).getAllByRole("listitem");
+    expect(cards[0]).toHaveTextContent("Fathima Rizwan");
+    expect(cards[1]).toHaveTextContent("Walk-in");
+  });
+
+  it("says so when the day has no sales", async () => {
+    salesService.listSales.mockResolvedValue(page([]));
+    renderList();
+
+    expect(await screen.findAllByText("No sales on Thu 22 Oct 2026")).not.toHaveLength(0);
+    expect(screen.getByText("0 sales")).toBeInTheDocument();
+  });
+
+  it("shows an error with Try again, which reloads", async () => {
+    salesService.listSales.mockRejectedValueOnce(new Error("Network Error")).mockResolvedValue(page([listRow(1)]));
+    const user = userEvent.setup();
+    renderList();
+
+    const alert = await screen.findByRole("alert");
+    expect(alert).toHaveTextContent("Couldn't load the sales.");
+    await user.click(within(alert).getByRole("button", { name: "Try again" }));
+
+    await findSale("INV-20261022-0001");
+    expect(salesService.listSales).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe("RecentSales: the day stepper (P6-2)", () => {
+  beforeEach(() => {
+    salesService.listSales.mockResolvedValue(page([listRow(1)]));
+  });
+
+  it("← and the Previous button go back a day, with that day's +05:30 bounds", async () => {
+    const user = userEvent.setup();
+    renderList();
+    await findSale("INV-20261022-0001");
+
+    await user.keyboard("{ArrowLeft}");
+    await waitFor(() =>
+      expect(lastCall()).toMatchObject({
+        completedFrom: "2026-10-21T00:00:00+05:30",
+        completedTo: "2026-10-22T00:00:00+05:30",
+      }),
+    );
+    expect(where()).toBe("/pos/sales?day=2026-10-21");
+    expect(screen.getByTestId("day-label")).toHaveTextContent("Wed 21 Oct 2026");
+
+    await user.click(screen.getByRole("button", { name: "Previous day" }));
+    await waitFor(() => expect(where()).toBe("/pos/sales?day=2026-10-20"));
+  });
+
+  it("can't go past today: Next is disabled and → does nothing", async () => {
+    const user = userEvent.setup();
+    renderList();
+    await findSale("INV-20261022-0001");
+
+    expect(screen.getByRole("button", { name: "Next day" })).toBeDisabled();
+    await user.keyboard("{ArrowRight}");
+    expect(salesService.listSales).toHaveBeenCalledTimes(1);
+    expect(where()).toBe("/pos/sales");
+  });
+
+  it("→ steps forward and Today jumps back to today", async () => {
+    const user = userEvent.setup();
+    renderList("/pos/sales?day=2026-10-19");
+    await findSale("INV-20261022-0001");
+    expect(lastCall().completedFrom).toBe("2026-10-19T00:00:00+05:30");
+
+    await user.keyboard("{ArrowRight}");
+    await waitFor(() => expect(where()).toBe("/pos/sales?day=2026-10-20"));
+
+    await user.click(screen.getByRole("button", { name: "Today" }));
+    await waitFor(() => expect(where()).toBe("/pos/sales"));
+    await waitFor(() => expect(lastCall()).toMatchObject(TODAY));
+  });
+
+  it.each(["2027-01-01", "2026-02-30", "yesterday"])("reads ?day=%s as today", async (day) => {
+    renderList(`/pos/sales?day=${day}`);
+    await findSale("INV-20261022-0001");
+    expect(lastCall()).toMatchObject(TODAY);
+  });
+});
+
+describe("RecentSales: search (P6-3)", () => {
+  it("sends 2+ characters after 250 ms as q, still for the branch, without the day bounds", async () => {
+    salesService.listSales.mockResolvedValue(page([listRow(1)]));
+    const user = userEvent.setup();
+    renderList();
+    await findSale("INV-20261022-0001");
+    salesService.listSales.mockClear();
+    salesService.listSales.mockResolvedValue(page([listRow(42, { completed_at: "2026-07-02T09:02:00.000Z" })]));
+
+    await user.type(searchBox(), "0042");
+
+    await findSale("INV-20261022-0042");
+    expect(salesService.listSales).toHaveBeenCalledTimes(1);
+    const params = lastCall();
+    expect(params).toEqual({ branchId: "branch-main", q: "0042", sort: "completed_at", page: 1, limit: 50 });
+    expect(params).not.toHaveProperty("completedFrom");
+    expect(params).not.toHaveProperty("completedTo");
+    expect(where()).toBe("/pos/sales?q=0042");
+    // Across dates: the row shows its date; the stepper says so
+    expect(within(bodyRows()[0]).getByText("02 Jul 2026, 14:32")).toBeInTheDocument();
+    expect(screen.getByTestId("day-label")).toHaveTextContent("All dates");
+    expect(screen.getByRole("button", { name: "Previous day" })).toBeDisabled();
+    expect(screen.getByText("1 match for “0042”, all dates")).toBeInTheDocument();
+  });
+
+  it("waits for the debounce: nothing is sent until typing pauses", async () => {
+    salesService.listSales.mockResolvedValue(page([]));
+    renderList();
+    await waitFor(() => expect(salesService.listSales).toHaveBeenCalledTimes(1));
+
+    fireEvent.change(searchBox(), { target: { value: "Ka" } });
+    fireEvent.change(searchBox(), { target: { value: "Kam" } });
+    expect(salesService.listSales).toHaveBeenCalledTimes(1);
+
+    await waitFor(() => expect(salesService.listSales).toHaveBeenCalledTimes(2));
+    expect(lastCall().q).toBe("Kam");
+  });
+
+  it("doesn't send one character; it says to type 2 or more", async () => {
+    salesService.listSales.mockResolvedValue(page([listRow(1)]));
+    const user = userEvent.setup();
+    renderList();
+    await findSale("INV-20261022-0001");
+
+    await user.type(searchBox(), "K");
+    await act(() => new Promise((r) => setTimeout(r, 400)));
+
+    expect(salesService.listSales).toHaveBeenCalledTimes(1);
+    expect(screen.getByText("Type 2 or more characters to search all dates")).toBeInTheDocument();
+  });
+
+  it("Esc in a non-empty search box clears it and returns to the day; the next Esc goes to /pos", async () => {
+    salesService.listSales.mockResolvedValue(page([listRow(1)]));
+    const user = userEvent.setup();
+    renderList("/pos/sales?day=2026-10-20");
+    await findSale("INV-20261022-0001");
+
+    await user.type(searchBox(), "Kamal");
+    await waitFor(() => expect(where()).toBe("/pos/sales?day=2026-10-20&q=Kamal"));
+
+    await user.keyboard("{Escape}");
+    expect(searchBox()).toHaveValue("");
+    expect(searchBox()).toHaveFocus();
+    await waitFor(() => expect(where()).toBe("/pos/sales?day=2026-10-20"));
+    await waitFor(() => expect(lastCall().completedFrom).toBe("2026-10-20T00:00:00+05:30"));
+
+    await user.keyboard("{Escape}");
+    expect(where()).toBe("/pos");
+  });
+
+  it("says when nothing matches", async () => {
+    salesService.listSales.mockResolvedValue(page([]));
+    renderList("/pos/sales?q=0777123456");
+
+    expect(await screen.findAllByText("No sales match “0777123456”")).not.toHaveLength(0);
+    expect(lastCall()).toMatchObject({ branchId: "branch-main", q: "0777123456" });
+  });
+
+  it("drops a stale response when the query changed meanwhile", async () => {
+    let resolveFirst;
+    salesService.listSales
+      .mockImplementationOnce(() => new Promise((r) => { resolveFirst = r; }))
+      .mockResolvedValueOnce(page([listRow(7)]));
+    const user = userEvent.setup();
+    renderList();
+    await waitFor(() => expect(salesService.listSales).toHaveBeenCalledTimes(1));
+
+    await user.keyboard("{ArrowLeft}");
+    await findSale("INV-20261022-0007");
+    resolveFirst(page([listRow(1)]));
+    await act(() => Promise.resolve());
+
+    expect(within(table()).queryByText("INV-20261022-0001")).not.toBeInTheDocument();
+    expect(sale("INV-20261022-0007")).toBeInTheDocument();
+  });
+});
+
+describe("RecentSales: Load more (P6-5)", () => {
+  it("appends the next 50 and hides once everything is loaded", async () => {
+    salesService.listSales
+      .mockResolvedValueOnce(page(rowsFrom(1, 50), 60))
+      .mockResolvedValueOnce(page(rowsFrom(51, 10), 60));
+    const user = userEvent.setup();
+    renderList();
+    await findSale("INV-20261022-0001");
+    expect(bodyRows()).toHaveLength(50);
+
+    await user.click(within(table().parentElement).getByRole("button", { name: "Load more (10 more)" }));
+
+    await findSale("INV-20261022-0060");
+    expect(lastCall()).toMatchObject({ ...TODAY, page: 2, limit: 50 });
+    expect(bodyRows()).toHaveLength(60);
+    expect(screen.queryByRole("button", { name: /Load more/ })).not.toBeInTheDocument();
+  });
+
+  it("isn't offered when one page holds everything", async () => {
+    salesService.listSales.mockResolvedValue(page(rowsFrom(1, 3), 3));
+    renderList();
+    await findSale("INV-20261022-0001");
+
+    expect(screen.queryByRole("button", { name: /Load more/ })).not.toBeInTheDocument();
+  });
+});
+
+describe("RecentSales: keys (P6-1 – P6-5)", () => {
+  beforeEach(() => {
+    salesService.listSales.mockResolvedValue(page(rowsFrom(1, 3)));
+    salesService.getSale.mockImplementation((id) =>
+      Promise.resolve({ ...listRow(Number(id.split("-")[1])), id }),
+    );
+  });
+
+  it("opens with focus on the list, not the search box, so ←/→ work at once", async () => {
+    const user = userEvent.setup();
+    renderList();
+    await findSale("INV-20261022-0001");
+
+    expect(screen.getByLabelText("Sales", { selector: "div" })).toHaveFocus();
+    expect(searchBox()).not.toHaveFocus();
+    await user.keyboard("{ArrowLeft}");
+    await waitFor(() => expect(where()).toBe("/pos/sales?day=2026-10-21"));
+  });
+
+  it("opens with the first row active; ↓/↑ move it; Enter opens the sale", async () => {
+    const user = userEvent.setup();
+    renderList();
+    await findSale("INV-20261022-0001");
+    expect(activeRow()).toHaveTextContent("INV-20261022-0001");
+
+    await user.keyboard("{ArrowDown}{ArrowDown}{ArrowDown}");
+    expect(activeRow()).toHaveTextContent("INV-20261022-0003");
+    await user.keyboard("{ArrowUp}");
+    expect(activeRow()).toHaveTextContent("INV-20261022-0002");
+
+    await user.keyboard("{Enter}");
+    expect(where()).toBe("/pos/sales/sale-2");
+  });
+
+  it("↓ and Enter work from the search box too", async () => {
+    const user = userEvent.setup();
+    renderList();
+    await findSale("INV-20261022-0001");
+
+    searchBox().focus();
+    await user.keyboard("{ArrowDown}{Enter}");
+
+    expect(where()).toBe("/pos/sales/sale-2");
+  });
+
+  it("a click opens the sale", async () => {
+    const user = userEvent.setup();
+    renderList();
+    await findSale("INV-20261022-0003");
+
+    await user.click(sale("INV-20261022-0003"));
+
+    expect(where()).toBe("/pos/sales/sale-3");
+  });
+
+  it("/ focuses the search box without typing the slash", async () => {
+    const user = userEvent.setup();
+    renderList();
+    await findSale("INV-20261022-0001");
+
+    await user.keyboard("/");
+
+    expect(searchBox()).toHaveFocus();
+    expect(searchBox()).toHaveValue("");
+  });
+
+  it("←/→ don't change the day while typing in the search box", async () => {
+    const user = userEvent.setup();
+    renderList();
+    await findSale("INV-20261022-0001");
+
+    await user.type(searchBox(), "a{ArrowLeft}");
+
+    expect(where()).toBe("/pos/sales");
+  });
+
+  it("Esc on the list goes back to /pos", async () => {
+    const user = userEvent.setup();
+    renderList();
+    await findSale("INV-20261022-0001");
+
+    await user.keyboard("{Escape}");
+
+    expect(where()).toBe("/pos");
+  });
+
+  it("Enter on a focused button keeps the button's own action", async () => {
+    const user = userEvent.setup();
+    renderList("/pos/sales?day=2026-10-20");
+    await findSale("INV-20261022-0001");
+
+    screen.getByRole("button", { name: "Today" }).focus();
+    await user.keyboard("{Enter}");
+
+    await waitFor(() => expect(where()).toBe("/pos/sales"));
+  });
+});
+
+describe("RecentSales: back from a sale (P6-13)", () => {
+  beforeEach(() => {
+    salesService.getSale.mockImplementation((id) =>
+      Promise.resolve({ ...listRow(Number(id.split("-")[1])), id }),
+    );
+  });
+
+  it("Esc on the detail page restores the day, the search and the active row, and re-reads the rows", async () => {
+    salesService.listSales.mockResolvedValue(page(rowsFrom(1, 3)));
+    const user = userEvent.setup();
+    renderList("/pos/sales?day=2026-10-20&q=Kamal");
+    await findSale("INV-20261022-0001");
+
+    await user.keyboard("{ArrowDown}{ArrowDown}{Enter}");
+    await screen.findByRole("heading", { name: "INV-20261022-0003" });
+    salesService.listSales.mockClear();
+
+    await user.keyboard("{Escape}");
+
+    await findSale("INV-20261022-0001");
+    expect(where()).toBe("/pos/sales?day=2026-10-20&q=Kamal");
+    expect(salesService.listSales).toHaveBeenCalledTimes(1);
+    expect(lastCall()).toMatchObject({ q: "Kamal", page: 1, limit: 50 });
+    expect(activeRow()).toHaveTextContent("INV-20261022-0003");
+  });
+
+  it("after Load more, refetches as many rows as were loaded in one request", async () => {
+    salesService.listSales
+      .mockResolvedValueOnce(page(rowsFrom(1, 50), 120))
+      .mockResolvedValueOnce(page(rowsFrom(51, 50), 120))
+      .mockResolvedValueOnce(page(rowsFrom(1, 100), 120));
+    const user = userEvent.setup();
+    renderList();
+    await findSale("INV-20261022-0001");
+    await user.click(screen.getAllByRole("button", { name: "Load more (70 more)" })[0]);
+    await findSale("INV-20261022-0100");
+
+    await user.click(sale("INV-20261022-0077"));
+    await screen.findByRole("heading", { name: "INV-20261022-0077" });
+    await user.keyboard("{Escape}");
+
+    await findSale("INV-20261022-0100");
+    expect(lastCall()).toMatchObject({ page: 1, limit: 100 });
+    expect(activeRow()).toHaveTextContent("INV-20261022-0077");
+    // Load more carries on after the restored rows
+    salesService.listSales.mockResolvedValueOnce(page(rowsFrom(101, 20), 120));
+    await user.click(screen.getAllByRole("button", { name: "Load more (20 more)" })[0]);
+    await findSale("INV-20261022-0120");
+    expect(lastCall()).toMatchObject({ page: 3, limit: 50 });
+  });
+
+  it("past 200 rows, refetches the 200 cap; a sale beyond them leaves the first row active, no error", async () => {
+    // Five pages were loaded (250 rows) and sale 230 opened.
+    salesService.listSales.mockResolvedValue(page(rowsFrom(1, 200), 250));
+    renderWithProviders(
+      <Routes>
+        <Route path="/pos/sales" element={<RecentSales />} />
+      </Routes>,
+      providers({ pathname: "/pos/sales", state: { restore: { pages: 5, activeId: "sale-230" } } }),
+    );
+
+    await findSale("INV-20261022-0200");
+    expect(salesService.listSales).toHaveBeenCalledTimes(1);
+    expect(lastCall()).toMatchObject({ page: 1, limit: 200 });
+    expect(activeRow()).toHaveTextContent("INV-20261022-0001");
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+    expect(screen.getAllByRole("button", { name: "Load more (50 more)" }).length).toBeGreaterThan(0);
+  });
+});
