@@ -8,8 +8,8 @@
  *
  * Result: { kind, message, status, reconcile, field, ...fields }
  * - kind: one of VOID_ERROR
- * - message: the server's message as sent (the dialog's own wording is
- *   step D2's job)
+ * - message: the server's message as sent (the dialog's wording is
+ *   voidErrorView, below)
  * - status: HTTP status, or null when no response arrived
  * - reconcile: true when the void may have gone through anyway (no
  *   response, timeout, 5xx) or already had (V4: not COMPLETED). The
@@ -148,4 +148,73 @@ export const classifyVoidError = (error) => {
   }
 
   return { ...base, kind: VOID_ERROR.REJECTED };
+};
+
+export const SET_YOUR_PIN_MESSAGE =
+  "Set your approval PIN first (user menu → Approval PIN), or pick another approver.";
+const LOCKED_SUFFIX = " Another manager can approve, or an admin can clear the PIN.";
+
+/**
+ * What VoidSaleDialog shows for a classified void error (P6-11, P6-19,
+ * P6-20, P6-22).
+ *
+ * @param {object} error - classifyVoidError's result
+ * @param {{ approverIsSelf?: boolean }} [context] - the approver picked is
+ *   the session user (APPROVER_NO_PIN then says "set your PIN first")
+ * @returns {{
+ *   field: "pin"|"approver"|null,   // where it shows; null = an alert
+ *   message: string,
+ *   laterSale: { id: string, sale_number: string }|null,  // link target
+ *   lead: string|null, tail: string|null,  // the text around the link
+ *   blocksVoid: boolean,            // Void stays disabled until closed
+ *   reconcile: boolean,             // re-fetch the sale, never resend
+ * }}
+ */
+export const voidErrorView = (error, { approverIsSelf = false } = {}) => {
+  const view = { field: null, laterSale: null, lead: null, tail: null, blocksVoid: false, reconcile: false };
+  const imei = error.imei ? ` (IMEI ${error.imei})` : "";
+  const laterSaleText = (lead, tail) =>
+    error.later_sale
+      ? { ...view, message: `${lead}${error.later_sale.sale_number}${tail}`, laterSale: error.later_sale, lead, tail }
+      : { ...view, message: `${lead}a later sale${tail}` };
+
+  switch (error.kind) {
+    case VOID_ERROR.WRONG_PIN:
+      return { ...view, field: "pin", message: error.message };
+    case VOID_ERROR.PIN_LOCKED:
+      return { ...view, field: "pin", message: `${error.message}${LOCKED_SUFFIX}` };
+    case VOID_ERROR.APPROVER_REFUSED:
+      return {
+        ...view,
+        field: "approver",
+        message: error.code === "APPROVER_NO_PIN" && approverIsSelf ? SET_YOUR_PIN_MESSAGE : error.message,
+      };
+    case VOID_ERROR.WRONG_BRANCH:
+      return { ...view, message: error.message, blocksVoid: true };
+    case VOID_ERROR.RESOLD:
+      return laterSaleText(`The trade-in phone${imei} was sold on `, ". Void that sale first.");
+    case VOID_ERROR.TAKEN_BACK_ON_SALE:
+      return laterSaleText(`The phone${imei} was traded back in on `, ". Void that sale first.");
+    case VOID_ERROR.BOUGHT_BACK_ON_PURCHASE:
+      return {
+        ...view,
+        message: `This sale can't be voided: the phone${imei} was bought back on a later purchase.`,
+        blocksVoid: true,
+      };
+    case VOID_ERROR.TAKEN_BACK:
+      return { ...view, message: `A phone on this sale${imei} was taken back on a later sale or purchase. Void that one first.` };
+    case VOID_ERROR.NOT_FOUND:
+      return { ...view, message: "This sale no longer exists.", blocksVoid: true };
+    case VOID_ERROR.INTEGRITY:
+      return { ...view, message: "Couldn't void. Nothing was changed." };
+    case VOID_ERROR.FORBIDDEN:
+      return { ...view, message: "You can't void this sale." };
+    case VOID_ERROR.NETWORK:
+    case VOID_ERROR.TIMEOUT:
+    case VOID_ERROR.SERVER:
+    case VOID_ERROR.NOT_COMPLETED:
+      return { ...view, message: error.message, reconcile: true };
+    default:
+      return { ...view, message: error.message || "Couldn't void the sale." };
+  }
 };

@@ -172,6 +172,27 @@ describe("SaleDetail: Reprint (P6-7)", () => {
     expect(salesService.getSale).toHaveBeenCalledTimes(1); // the page load only
   });
 
+  it("V is ignored while another dialog is open (e.g. the user menu's Approval PIN)", async () => {
+    salesService.getSale.mockResolvedValue(saleEntity());
+    const user = userEvent.setup();
+    renderWithProviders(
+      <>
+        <div role="dialog" aria-label="Set approval PIN" />
+        <Routes>
+          <Route path="/pos/sales/:id" element={<SaleDetail />} />
+        </Routes>
+      </>,
+      { route: "/pos/sales/sale-7", preloadedState: { auth: authState(cashierUser), branches: branchesState([mainShop]) } },
+    );
+    await heading();
+    expect(screen.getByRole("button", { name: "Void sale" })).toBeEnabled(); // V would open it otherwise
+
+    await user.keyboard("v");
+
+    expect(screen.queryByRole("dialog", { name: /^Void / })).not.toBeInTheDocument();
+    expect(screen.getAllByRole("dialog")).toHaveLength(1); // only the other one
+  });
+
   it("P is ignored while a reprint is still loading", async () => {
     let release;
     salesService.getSale

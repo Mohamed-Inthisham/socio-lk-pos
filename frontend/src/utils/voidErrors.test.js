@@ -1,4 +1,108 @@
-import { VOID_ERROR, classifyVoidError } from "./voidErrors";
+import { SET_YOUR_PIN_MESSAGE, VOID_ERROR, classifyVoidError, voidErrorView } from "./voidErrors";
+import {
+  approverRefusedError,
+  boughtBackError,
+  integrityConflictError,
+  notCompletedError,
+  pinLockedError,
+  resoldError,
+  saleNotFoundError,
+  serverError,
+  takenBackOnSaleError,
+  takenBackRaceError,
+  voidNetworkError,
+  voidTimeoutError,
+  voidValidationError,
+  voidWrongBranchError,
+  wrongPinError,
+} from "../test/voidEntities";
+
+describe("voidErrorView: what the dialog shows (P6-11, P6-19, P6-20, P6-22)", () => {
+  const view = (error, context) => voidErrorView(classifyVoidError(error), context);
+
+  it("WRONG_PIN: the server's message with the attempts left, under the PIN", () => {
+    expect(view(wrongPinError(3))).toMatchObject({ field: "pin", message: "Wrong PIN. 3 attempts left.", reconcile: false });
+  });
+
+  it("PIN_LOCKED: the unlock time, and what to do instead, under the PIN", () => {
+    expect(view(pinLockedError())).toMatchObject({
+      field: "pin",
+      message: "Asha Perera's PIN is locked until 14:32. Another manager can approve, or an admin can clear the PIN.",
+    });
+    expect(view(pinLockedError({ fifth: true })).message).toMatch(/^Wrong PIN\. Asha Perera's PIN is locked until 14:32\./);
+  });
+
+  it.each(["APPROVER_NOT_FOUND", "APPROVER_INACTIVE", "APPROVER_NOT_MANAGER", "APPROVER_WRONG_BRANCH", "APPROVER_NO_PIN"])(
+    "%s: the server's message, under the approver",
+    (code) => {
+      const v = view(approverRefusedError(code));
+      expect(v.field).toBe("approver");
+      expect(v.message).toBe(approverRefusedError(code).response.data.message);
+    },
+  );
+
+  it("APPROVER_NO_PIN for yourself: set your PIN first", () => {
+    expect(view(approverRefusedError("APPROVER_NO_PIN"), { approverIsSelf: true })).toMatchObject({
+      field: "approver",
+      message: SET_YOUR_PIN_MESSAGE,
+    });
+  });
+
+  it("VOID_WRONG_BRANCH: an alert, and Void stays disabled", () => {
+    expect(view(voidWrongBranchError())).toMatchObject({
+      field: null,
+      message: "You can only void sales at your own branch.",
+      blocksVoid: true,
+    });
+  });
+
+  it("RESOLD: the IMEI and a link to the later sale", () => {
+    expect(view(resoldError())).toMatchObject({
+      message: "The trade-in phone (IMEI 354789102345678) was sold on INV-20261022-0012. Void that sale first.",
+      laterSale: { id: "sale-12", sale_number: "INV-20261022-0012" },
+      lead: "The trade-in phone (IMEI 354789102345678) was sold on ",
+      tail: ". Void that sale first.",
+      blocksVoid: false,
+    });
+  });
+
+  it("TAKEN_BACK_ON_SALE: the IMEI and a link to the later sale", () => {
+    expect(view(takenBackOnSaleError())).toMatchObject({
+      message: "The phone (IMEI 356789012345671) was traded back in on INV-20261022-0015. Void that sale first.",
+      laterSale: { id: "sale-15", sale_number: "INV-20261022-0015" },
+    });
+  });
+
+  it("BOUGHT_BACK_ON_PURCHASE: never voidable, Void stays disabled", () => {
+    expect(view(boughtBackError())).toMatchObject({
+      message: "This sale can't be voided: the phone (IMEI 356789012345671) was bought back on a later purchase.",
+      laterSale: null,
+      blocksVoid: true,
+    });
+  });
+
+  it("the race (no reason): the generic taken-back wording", () => {
+    expect(view(takenBackRaceError())).toMatchObject({
+      message: "A phone on this sale (IMEI 356789012345671) was taken back on a later sale or purchase. Void that one first.",
+      laterSale: null,
+    });
+  });
+
+  it("not found, integrity, validation", () => {
+    expect(view(saleNotFoundError())).toMatchObject({ message: "This sale no longer exists.", blocksVoid: true });
+    expect(view(integrityConflictError())).toMatchObject({ message: "Couldn't void. Nothing was changed.", reconcile: false });
+    expect(view(voidValidationError())).toMatchObject({ message: "pin must be exactly 6 digits" });
+  });
+
+  it.each([
+    ["a timeout", voidTimeoutError],
+    ["no response", voidNetworkError],
+    ["a 500", serverError],
+    ["not COMPLETED any more", notCompletedError],
+  ])("%s re-fetches the sale (never resends)", (_, error) => {
+    expect(view(error())).toMatchObject({ reconcile: true });
+  });
+});
 
 const httpError = (status, data) =>
   Object.assign(new Error(`Request failed with status code ${status}`), {

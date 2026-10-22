@@ -13,7 +13,7 @@ import {
 } from "../../../schemas/approvalPinSchema";
 import { setApprovalPin } from "../../../services/approvalsService";
 import { approvalPinSet } from "../../../store/slices/authSlice";
-import { filterPinInput } from "../../../utils/pin";
+import PinField from "../PinField";
 import { requestPosFocus } from "../../../utils/posFocus";
 import { receiptDateTime } from "../../../utils/receipt";
 
@@ -39,10 +39,8 @@ import { receiptDateTime } from "../../../utils/receipt";
  * axios error carries the request body, so only its status, code and
  * message are read: the error object itself is never kept or logged.
  *
- * PIN FIELDS: digits only, other scripts' digits converted to 0–9
- * (utils/pin.js filterPinInput); a dropped key or paste shows "Digits
- * only" under that field until the next accepted digit. A paste is
- * filtered before it's cut to 6 ("12a3456" → "123456").
+ * PIN FIELDS: the shared PinField (digits only, other scripts' digits
+ * converted, a "Digits only" hint when a key is dropped).
  *
  * FOCUS: Current password on open; Done on success. Esc / Cancel close it
  * (not while saving). After it has gone, `pos:return-focus` lets the
@@ -54,85 +52,6 @@ import { receiptDateTime } from "../../../utils/receipt";
 
 const FORM_ID = "approval-pin-form";
 const firstMessage = (data) => (Array.isArray(data?.message) ? data.message[0] : data?.message);
-
-// Digits only, other scripts' digits converted (utils/pin.js). A dropped
-// keystroke or paste shows "Digits only" under the field until the next
-// accepted digit, so the field never silently ignores a key.
-const PinField = ({ id, label, error, registration }) => {
-  const [droppedHint, setDroppedHint] = useState(false);
-  const describedBy = error ? `${id}-error` : droppedHint ? `${id}-hint` : undefined;
-
-  const handleChange = (e) => {
-    const { value, dropped } = filterPinInput(e.target.value);
-    e.target.value = value;
-    // Shown on a dropped key or paste; cleared by the next insert that
-    // drops nothing (a digit typed or pasted). Deleting leaves it as it is.
-    const inserted = (e.nativeEvent?.inputType ?? "insert").startsWith("insert");
-    if (dropped) setDroppedHint(true);
-    else if (inserted) setDroppedHint(false);
-    registration.onChange(e);
-  };
-
-  // A browser cuts a paste to maxLength before filtering ("12a3456" would
-  // keep "12a345" → "12345"), so a paste is filtered first, then cut to 6.
-  const handlePaste = (e) => {
-    e.preventDefault();
-    const el = e.target;
-    const pasted = e.clipboardData?.getData("text") ?? "";
-    const start = el.selectionStart ?? el.value.length;
-    const end = el.selectionEnd ?? el.value.length;
-    const { value, dropped } = filterPinInput(el.value.slice(0, start) + pasted + el.value.slice(end));
-    el.value = value;
-    setDroppedHint(dropped);
-    registration.onChange({ target: el, type: "change" });
-  };
-
-  return (
-    <div className="flex flex-col gap-1.5 min-w-0">
-      <label
-        htmlFor={id}
-        className="text-xs uppercase tracking-widest font-semibold text-slate-500 dark:text-slate-400"
-      >
-        {label}
-      </label>
-      <input
-        id={id}
-        type="password"
-        inputMode="numeric"
-        autoComplete="off"
-        maxLength={6}
-        spellCheck={false}
-        aria-invalid={error ? "true" : undefined}
-        aria-describedby={describedBy}
-        {...registration}
-        onChange={handleChange}
-        onPaste={handlePaste}
-        className={`
-          h-11 w-full px-3.5 rounded-lg text-base tracking-[0.4em] tabular-nums
-          bg-slate-50 dark:bg-slate-800 text-slate-900 dark:text-slate-100
-          border focus:outline-none focus:ring-2
-          ${
-            // As InputField: an error stays red while focused.
-            error
-              ? "border-red-400 dark:border-red-500 focus:ring-red-500/20"
-              : "border-slate-300 dark:border-slate-600 focus:border-cyan-500 dark:focus:border-cyan-400 focus:ring-cyan-500/20"
-          }
-        `}
-      />
-      {error ? (
-        <p id={`${id}-error`} className="text-xs text-red-500 dark:text-red-400 mt-0.5">
-          {error}
-        </p>
-      ) : (
-        droppedHint && (
-          <p id={`${id}-hint`} aria-live="polite" className="text-xs text-amber-700 dark:text-amber-400 mt-0.5">
-            Digits only
-          </p>
-        )
-      )}
-    </div>
-  );
-};
 
 const ApprovalPinDialog = ({ open, onClose }) => {
   const dispatch = useDispatch();

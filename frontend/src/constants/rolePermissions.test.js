@@ -8,6 +8,13 @@ describe("rolePermissions", () => {
     },
   );
 
+  it.each([ROLES.ADMIN, ROLES.MANAGER, ROLES.CASHIER])(
+    "%s may start a void; a manager's PIN approves it (P6-8)",
+    (role) => {
+      expect(hasPermission(role, PERMISSIONS.VOID_SALE)).toBe(true);
+    },
+  );
+
   it.each([
     [ROLES.ADMIN, true],
     [ROLES.MANAGER, true],

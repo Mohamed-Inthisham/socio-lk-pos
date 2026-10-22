@@ -170,6 +170,9 @@ export const ROLE_PERMISSIONS = {
     // Sales - Primary function
     PERMISSIONS.VIEW_SALES,
     PERMISSIONS.CREATE_SALE,
+    // Voids with a manager's or admin's approval PIN (P6-8): the PIN is
+    // the authority, so every role sees Void enabled
+    PERMISSIONS.VOID_SALE,
     // Line discounts at the till: any cashier, no limit (Q11, P5-20)
     PERMISSIONS.APPLY_DISCOUNT,
 
