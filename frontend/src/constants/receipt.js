@@ -34,6 +34,9 @@ export const RECEIPT_FOOTER = "Thank you for choosing Care That Stays";
 
 export const CHECKING_ONLY_TEXT = "Checking only";
 
+/** Under the footer on a return slip (P7-17), instead of the receipt's terms. */
+export const RETURN_SLIP_NOTE = "Keep this slip with your original bill.";
+
 /** Page and content geometry, in mm (CSS mm; the driver prints ~×1.057). */
 export const RECEIPT_LAYOUT = {
   pageWidthMm: 72,

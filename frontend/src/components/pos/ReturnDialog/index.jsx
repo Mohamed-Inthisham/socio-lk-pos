@@ -21,6 +21,7 @@ import {
 import { CASH } from "../../../schemas/paymentSchema";
 import { createReturn, getSale } from "../../../services/salesService";
 import { listStock } from "../../../services/stockService";
+import { printReturnSlip } from "../../../utils/printReceipt";
 import { colomboToday } from "../../../utils/colomboDay";
 import { formatLKR, fromCents, toCents } from "../../../utils/money";
 import { formatSlPhone } from "../../../utils/phone";
@@ -76,7 +77,9 @@ import {
  * If the re-read fails too: Check again, which only re-reads.
  *
  * 3 RECORDED (ReturnRecorded): what to hand over and where the items go,
- * read from the sale the server answered with; Done is focused.
+ * read from the sale the server answered with; Done is focused. The
+ * return slip prints on its own, two copies (printReturnSlip, P7-17);
+ * Print again prints them again, unmarked.
  *
  * STOCK TRACKING decides whether a line takes a condition, and sale lines
  * don't carry it: one GET /stock?branchId= when the dialog opens, only
@@ -175,6 +178,7 @@ const ReturnDialog = ({ open, onClose, sale, onReturned, onSaleChanged, afterLea
   const [approvers, setApprovers] = useState({ status: "loading", count: 0 });
   const [touched, setTouched] = useState(() => new Set());
   const [recorded, setRecorded] = useState(null); // { ret, sale, resent }
+  const [slip, setSlip] = useState("idle"); // idle | printing | printed | failed
   const requestId = useRef(null);
   const rowRefs = useRef({});
   const sending = useRef(false);
@@ -306,6 +310,7 @@ const ReturnDialog = ({ open, onClose, sale, onReturned, onSaleChanged, afterLea
     setApprovers({ status: "loading", count: 0 });
     setTouched(new Set());
     setRecorded(null);
+    setSlip("idle");
     requestId.current = null;
     refundBasis.current = null;
     sending.current = false;
@@ -397,6 +402,18 @@ const ReturnDialog = ({ open, onClose, sale, onReturned, onSaleChanged, afterLea
     setServerErrors((e) => ({ ...e, refund: undefined }));
   };
 
+  // The return slip, two copies (P7-17): printed on its own once the return
+  // is recorded, and again (unmarked) from Print again.
+  const printSlip = async (fresh, returnId) => {
+    setSlip("printing");
+    try {
+      await printReturnSlip(fresh, returnId);
+      setSlip("printed");
+    } catch {
+      setSlip("failed");
+    }
+  };
+
   const succeed = (fresh, returnId, resent) => {
     const ret = fresh.returns.find((r) => r.id === returnId) ?? fresh.returns[fresh.returns.length - 1];
     setValue("pin", "");
@@ -404,6 +421,9 @@ const ReturnDialog = ({ open, onClose, sale, onReturned, onSaleChanged, afterLea
     setAlert(null);
     setPhase("done");
     onReturned?.(fresh);
+    // Every way to a recorded return prints: a 201, a resend answered 200,
+    // a lost response found on re-read (nothing was printed for those).
+    printSlip(fresh, ret.id);
   };
 
   // Lost response, timeout, 5xx: re-read and look for this request id.
@@ -570,7 +590,13 @@ const ReturnDialog = ({ open, onClose, sale, onReturned, onSaleChanged, afterLea
     if (phase === "done" && recorded) {
       return (
         <ScrollFade className={BODY} scrollClassName="min-h-0 overflow-y-auto pr-1" testId="return-recorded-scroll">
-          <ReturnRecorded ret={recorded.ret} sale={recorded.sale} resent={recorded.resent} />
+          <ReturnRecorded
+            ret={recorded.ret}
+            sale={recorded.sale}
+            resent={recorded.resent}
+            slip={slip}
+            onPrintAgain={() => printSlip(recorded.sale, recorded.ret.id)}
+          />
         </ScrollFade>
       );
     }

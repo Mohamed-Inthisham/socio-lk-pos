@@ -1,4 +1,5 @@
-import { CheckCircle2 } from "lucide-react";
+import { AlertCircle, CheckCircle2, Loader2, Printer } from "lucide-react";
+import Button from "../../common/Button";
 import { formatLKR, toCents } from "../../../utils/money";
 import { handOverLines, itemLines, lkr, recordedTradeInCents } from "./returnText";
 
@@ -8,13 +9,17 @@ import { handOverLines, itemLines, lkr, recordedTradeInCents } from "./returnTex
  * What the ReturnDialog shows once a return is recorded (planning doc
  * P7-15, P7-17): read from the sale the server answered with, by
  * return_id, never from the form, so a resend (or a lost response found
- * on re-read) shows what was actually recorded. Step D prints the slip
- * from here.
+ * on re-read) shows what was actually recorded. The return slip prints
+ * from here (P7-17): on its own once recorded, and on Print again, which
+ * stays unmarked (it replaces a print that didn't come out; a marked
+ * REPRINT comes from the sale's Returns section).
  *
  * PROPS:
  * - ret: the recorded return (sale.returns[] entry)
  * - sale: the sale it belongs to
  * - resent: the server had recorded it already (200 on a resend)
+ * - slip: "idle" | "printing" | "printed" | "failed"
+ * - onPrintAgain: () => void
  */
 
 const Section = ({ title, children }) => (
@@ -24,7 +29,32 @@ const Section = ({ title, children }) => (
   </section>
 );
 
-const ReturnRecorded = ({ ret, sale, resent }) => {
+const SlipStatus = ({ slip, onPrintAgain }) => (
+  <div className="flex flex-wrap items-center gap-x-3 gap-y-2" data-testid="return-slip-status">
+    {slip === "printing" && (
+      <p role="status" className="flex items-center gap-2 text-xs text-slate-600 dark:text-slate-300">
+        <Loader2 size={14} aria-hidden="true" className="animate-spin" />
+        Printing the return slip (2 copies)…
+      </p>
+    )}
+    {slip === "printed" && (
+      <p role="status" className="text-xs text-slate-600 dark:text-slate-300">
+        Return slip printed: the customer&apos;s copy and the shop&apos;s.
+      </p>
+    )}
+    {slip === "failed" && (
+      <p role="alert" className="flex items-center gap-2 text-xs text-red-700 dark:text-red-300">
+        <AlertCircle size={14} aria-hidden="true" />
+        Couldn&apos;t print the return slip.
+      </p>
+    )}
+    {(slip === "printed" || slip === "failed") && (
+      <Button size="sm" variant="secondary" icon={Printer} label="Print again" onClick={onPrintAgain} />
+    )}
+  </div>
+);
+
+const ReturnRecorded = ({ ret, sale, resent, slip = "idle", onPrintAgain }) => {
   const tradeInCents = recordedTradeInCents(ret, sale);
   const lowered = toCents(ret.refund_total) < toCents(ret.refund_due);
   return (
@@ -40,6 +70,8 @@ const ReturnRecorded = ({ ret, sale, resent }) => {
           <p className="text-xs">Approved by {ret.approver?.full_name ?? "a manager"}.</p>
         </div>
       </div>
+
+      <SlipStatus slip={slip} onPrintAgain={onPrintAgain} />
 
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-x-6 gap-y-4">
         <Section title="Hand over">

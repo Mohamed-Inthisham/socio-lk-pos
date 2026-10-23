@@ -2,6 +2,7 @@ import { createElement } from "react";
 import { createRoot } from "react-dom/client";
 import { flushSync } from "react-dom";
 import Receipt from "../components/pos/Receipt";
+import ReturnSlip from "../components/pos/ReturnSlip";
 import { RECEIPT_LAYOUT } from "../constants/receipt";
 
 /**
@@ -86,12 +87,49 @@ export const receiptPageHeightMm = (heightPx) =>
     RECEIPT_LAYOUT.minPageHeightMm,
   );
 
-export const printReceipt = async (sale, { reprintedAt } = {}) => {
+/**
+ * Render one paper (a receipt, or one copy of a return slip) into
+ * #receipt-root, wait for its logo, size the page to it and print it: one
+ * print job. Resolves once window.print() has returned.
+ */
+const printElement = async (element) => {
   const el = container();
-  flushSync(() => root.render(createElement(Receipt, { sale, reprintedAt })));
+  flushSync(() => root.render(element));
   await imagesLoaded(el);
   const heightMm = receiptPageHeightMm(el.firstElementChild.getBoundingClientRect().height);
   setPageSize(heightMm);
   window.print();
   return heightMm;
+};
+
+export const printReceipt = (sale, { reprintedAt } = {}) =>
+  printElement(createElement(Receipt, { sale, reprintedAt }));
+
+/** The copies of a return slip, in the order they print (P7-17). */
+export const RETURN_SLIP_COPIES = ["customer", "shop"];
+
+/**
+ * Print a recorded return's slip (planning doc P7-17): the customer's
+ * copy, then the shop's (with a signature line when cash went back), as
+ * two print jobs, so each gets its own page height and its own cut. The
+ * shop copy is rendered, measured and printed only after the customer
+ * copy's window.print() has returned (with --kiosk-printing, once that job
+ * is spooled; otherwise when its print dialog closes).
+ *
+ * @param {Object} sale - the hydrated sale, with returns[]
+ * @param {string} returnId - which of its returns
+ * @param {Object} [options]
+ * @param {string} [options.reprintedAt] - ISO time; a reprint from the
+ *   sale's Returns section (step E) prints "REPRINT · <time>". The Return
+ *   recorded panel's automatic print and its Print again pass nothing.
+ * @returns {Promise<number[]>} the page heights used, in mm, per copy
+ */
+export const printReturnSlip = async (sale, returnId, { reprintedAt } = {}) => {
+  const ret = sale.returns?.find((r) => r.id === returnId);
+  if (!ret) throw new Error(`Return ${returnId} is not on sale ${sale.id}`);
+  const heights = [];
+  for (const copy of RETURN_SLIP_COPIES) {
+    heights.push(await printElement(createElement(ReturnSlip, { sale, ret, copy, reprintedAt })));
+  }
+  return heights;
 };

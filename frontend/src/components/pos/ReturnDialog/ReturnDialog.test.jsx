@@ -26,6 +26,7 @@ import * as approvalsService from "../../../services/approvalsService";
 import * as salesService from "../../../services/salesService";
 import * as stockService from "../../../services/stockService";
 import * as requestId from "../../../utils/requestId";
+import * as printing from "../../../utils/printReceipt";
 import { formatLKR } from "../../../utils/money";
 
 // formatLKR puts a no-break space after LKR; toHaveTextContent folds it to a space.
@@ -34,6 +35,7 @@ const lkr = (value) => formatLKR(value).replace(/\s/g, " ");
 vi.mock("../../../services/approvalsService");
 vi.mock("../../../services/salesService");
 vi.mock("../../../services/stockService");
+vi.mock("../../../utils/printReceipt");
 
 // 10:30 on Fri 23 Oct 2026 in Colombo; saleEntity was completed on the 21st.
 const NOW = new Date("2026-10-23T05:00:00.000Z");
@@ -82,6 +84,7 @@ beforeEach(() => {
   vi.setSystemTime(NOW);
   stockService.listStock.mockResolvedValue(branchStockResponse());
   approvalsService.listApprovers.mockResolvedValue(approversResponse());
+  printing.printReturnSlip.mockResolvedValue([160, 213]);
 });
 
 afterEach(() => {
@@ -797,5 +800,78 @@ describe("ReturnDialog: a lost response (P7-15)", () => {
     expect(await within(dialog()).findByTestId("return-recorded")).toBeInTheDocument();
     expect(salesService.createReturn).toHaveBeenCalledTimes(1);
     expect(salesService.getSale).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe("ReturnDialog: the return slip (P7-17)", () => {
+  let idSpy;
+  beforeEach(() => {
+    idSpy = vi.spyOn(requestId, "newClientRequestId").mockReturnValue(CLIENT_REQUEST_ID);
+  });
+  afterEach(() => idSpy.mockRestore());
+
+  const send = async (user) => {
+    await toRefund(user);
+    await refundToCard(user);
+    await fillApproval(user);
+    await user.click(returnButton());
+  };
+  const slipStatus = () => within(dialog()).getByTestId("return-slip-status");
+
+  it("prints both copies on its own once the return is recorded, unmarked; Done keeps the focus", async () => {
+    const user = userEvent.setup();
+    const response = createReturnResponse();
+    salesService.createReturn.mockResolvedValue({ ...response, resent: false });
+    renderDialog();
+    await send(user);
+
+    await waitFor(() => expect(slipStatus()).toHaveTextContent("Return slip printed: the customer's copy and the shop's."));
+    expect(printing.printReturnSlip).toHaveBeenCalledTimes(1);
+    expect(printing.printReturnSlip).toHaveBeenCalledWith(response.sale, "ret-1");
+    expect(within(dialog()).getByRole("button", { name: "Done" })).toHaveFocus();
+  });
+
+  it("says it's printing while the copies go out", async () => {
+    const user = userEvent.setup();
+    let release;
+    printing.printReturnSlip.mockReturnValue(new Promise((r) => (release = r)));
+    salesService.createReturn.mockResolvedValue({ ...createReturnResponse(), resent: false });
+    renderDialog();
+    await send(user);
+
+    expect(await within(dialog()).findByText("Printing the return slip (2 copies)…")).toBeInTheDocument();
+    expect(within(dialog()).queryByRole("button", { name: "Print again" })).not.toBeInTheDocument();
+    release([160, 213]);
+    expect(await within(dialog()).findByRole("button", { name: "Print again" })).toBeInTheDocument();
+  });
+
+  it("prints after a lost response found on re-read, and after a resend answered 200", async () => {
+    const user = userEvent.setup();
+    salesService.createReturn
+      .mockRejectedValueOnce(returnTimeoutError())
+      .mockResolvedValueOnce({ ...createReturnResponse(), resent: true });
+    const fresh = saleWithReturnsEntity();
+    salesService.getSale.mockResolvedValue(fresh);
+    renderDialog();
+    await send(user);
+
+    await within(dialog()).findByTestId("return-recorded");
+    expect(printing.printReturnSlip).toHaveBeenCalledWith(fresh, "ret-1");
+  });
+
+  it("a failed print says so; Print again prints both copies again, unmarked", async () => {
+    const user = userEvent.setup();
+    printing.printReturnSlip.mockRejectedValueOnce(new Error("print failed")).mockResolvedValueOnce([160, 213]);
+    const response = createReturnResponse();
+    salesService.createReturn.mockResolvedValue({ ...response, resent: false });
+    renderDialog();
+    await send(user);
+
+    expect(await within(slipStatus()).findByRole("alert")).toHaveTextContent("Couldn't print the return slip.");
+    await user.click(within(dialog()).getByRole("button", { name: "Print again" }));
+
+    await waitFor(() => expect(slipStatus()).toHaveTextContent("Return slip printed"));
+    expect(printing.printReturnSlip).toHaveBeenCalledTimes(2);
+    expect(printing.printReturnSlip).toHaveBeenLastCalledWith(response.sale, "ret-1");
   });
 });
