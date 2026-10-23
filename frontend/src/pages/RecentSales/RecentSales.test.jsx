@@ -180,6 +180,61 @@ describe("RecentSales: the day list (P6-2, P6-5)", () => {
     expect(within(second).getAllByText("Voided").length).toBeGreaterThan(0);
   });
 
+  describe("the Status header and the sales count", () => {
+    const count = () => screen.getByTestId("sales-count");
+    // The header buttons' corner radius (rounded-lg), in the accent colour
+    const isPill = (el) => el.className.includes("rounded-lg") && el.className.includes("bg-cyan-600");
+
+    it("the table's last column is headed Status, like the others", async () => {
+      salesService.listSales.mockResolvedValue(page([listRow(1)]));
+      renderList();
+      await findSale("INV-20261022-0001");
+
+      const headers = within(table()).getAllByRole("columnheader").map((h) => h.textContent);
+      expect(headers.at(-1)).toBe("Status");
+      expect(within(table()).getByRole("columnheader", { name: "Status" }).className).toContain("uppercase");
+    });
+
+    it("the count is a highlighted pill at the right of the toolbar: plural", async () => {
+      salesService.listSales.mockResolvedValue(page(rowsFrom(1, 4)));
+      renderList();
+      await findSale("INV-20261022-0004");
+
+      expect(count()).toHaveTextContent(/^4 sales$/);
+      expect(isPill(count())).toBe(true);
+      expect(count().className).toContain("ml-auto");
+      expect(count().className).toContain("whitespace-nowrap");
+      // In the toolbar row, after the search box
+      expect(count().parentElement).toContainElement(searchBox());
+    });
+
+    it("one sale is singular", async () => {
+      salesService.listSales.mockResolvedValue(page([listRow(1)]));
+      renderList();
+      await findSale("INV-20261022-0001");
+      expect(count()).toHaveTextContent(/^1 sale$/);
+    });
+
+    it("a search keeps its wording in the pill", async () => {
+      salesService.listSales.mockResolvedValue(page([listRow(42)]));
+      renderList("/pos/sales?q=0042");
+      await findSale("INV-20261022-0042");
+      expect(count()).toHaveTextContent("1 match for “0042”, all dates");
+      expect(isPill(count())).toBe(true);
+    });
+
+    it("the search hint is plain text, not a pill", async () => {
+      salesService.listSales.mockResolvedValue(page([listRow(1)]));
+      const user = userEvent.setup();
+      renderList();
+      await findSale("INV-20261022-0001");
+      await user.type(searchBox(), "0");
+
+      expect(count()).toHaveTextContent("Type 2 or more characters to search all dates");
+      expect(isPill(count())).toBe(false);
+    });
+  });
+
   describe("one status badge per row (P7-18)", () => {
     const BADGE = /^(Completed|Part returned|Returned|Voided)$/;
     const rows = () => [
@@ -341,6 +396,138 @@ describe("RecentSales: the day stepper (P6-2)", () => {
     renderList(`/pos/sales?day=${day}`);
     await findSale("INV-20261022-0001");
     expect(lastCall()).toMatchObject(TODAY);
+  });
+});
+
+describe("RecentSales: the day picker", () => {
+  const label = () => screen.getByTestId("day-label");
+  const picker = () => screen.getByTestId("day-picker");
+  let showPicker;
+
+  beforeEach(() => {
+    salesService.listSales.mockResolvedValue(page([listRow(1)]));
+    // jsdom has no showPicker: stand one in, to see that the label calls it.
+    showPicker = vi.fn();
+    HTMLInputElement.prototype.showPicker = showPicker;
+  });
+
+  afterEach(() => {
+    delete HTMLInputElement.prototype.showPicker;
+  });
+
+  it("the label opens the browser's date picker, on a click and on Enter / Space", async () => {
+    const user = userEvent.setup();
+    renderList();
+    await findSale("INV-20261022-0001");
+
+    expect(label().tagName).toBe("BUTTON");
+    expect(label()).toHaveAttribute("title", "Pick a day");
+    await user.click(label());
+    expect(showPicker).toHaveBeenCalledTimes(1);
+    expect(showPicker.mock.contexts[0]).toBe(picker());
+
+    label().focus();
+    await user.keyboard("{Enter}");
+    await user.keyboard(" ");
+    expect(showPicker).toHaveBeenCalledTimes(3);
+    expect(salesService.listSales).toHaveBeenCalledTimes(1); // Enter didn't open a sale
+  });
+
+  it("where showPicker isn't supported, the label focuses the date input instead", async () => {
+    delete HTMLInputElement.prototype.showPicker;
+    const user = userEvent.setup();
+    renderList();
+    await findSale("INV-20261022-0001");
+
+    await user.click(label());
+    expect(picker()).toHaveFocus();
+  });
+
+  it("starts on the day shown; no later than today in Colombo, no earliest day", async () => {
+    renderList("/pos/sales?day=2026-10-19");
+    await findSale("INV-20261022-0001");
+
+    expect(picker()).toHaveAttribute("type", "date");
+    expect(picker()).toHaveValue("2026-10-19");
+    expect(picker()).toHaveAttribute("max", "2026-10-22");
+    expect(picker()).not.toHaveAttribute("min");
+  });
+
+  it("max follows the Colombo date, not the till's clock zone", async () => {
+    vi.setSystemTime(new Date("2026-10-22T19:00:00.000Z")); // 00:30 on the 23rd in Colombo
+    renderList();
+    await findSale("INV-20261022-0001");
+    expect(picker()).toHaveAttribute("max", "2026-10-23");
+  });
+
+  it("choosing a date jumps to it, as stepping does: the URL, the list, the Today button", async () => {
+    renderList();
+    await findSale("INV-20261022-0001");
+
+    fireEvent.change(picker(), { target: { value: "2026-10-15" } });
+
+    await waitFor(() => expect(where()).toBe("/pos/sales?day=2026-10-15"));
+    await waitFor(() =>
+      expect(lastCall()).toMatchObject({
+        completedFrom: "2026-10-15T00:00:00+05:30",
+        completedTo: "2026-10-16T00:00:00+05:30",
+      }),
+    );
+    expect(label()).toHaveTextContent("Thu 15 Oct 2026");
+    expect(screen.getByRole("button", { name: "Today" })).toBeInTheDocument();
+  });
+
+  it("choosing today goes back to today's list", async () => {
+    renderList("/pos/sales?day=2026-10-15");
+    await findSale("INV-20261022-0001");
+
+    fireEvent.change(picker(), { target: { value: "2026-10-22" } });
+    await waitFor(() => expect(where()).toBe("/pos/sales"));
+  });
+
+  it("cancelling (no change) or a cleared or future value changes nothing", async () => {
+    const user = userEvent.setup();
+    renderList("/pos/sales?day=2026-10-19");
+    await findSale("INV-20261022-0001");
+
+    await user.click(label()); // opened, then closed with no choice: no change event
+    fireEvent.change(picker(), { target: { value: "" } });
+    fireEvent.change(picker(), { target: { value: "2026-10-30" } });
+
+    expect(where()).toBe("/pos/sales?day=2026-10-19");
+    expect(salesService.listSales).toHaveBeenCalledTimes(1);
+  });
+
+  it("during a search the label still opens it: choosing a day ends the search; cancelling keeps it", async () => {
+    const user = userEvent.setup();
+    salesService.listSales.mockResolvedValue(page([listRow(42)]));
+    renderList("/pos/sales?q=0042");
+    await findSale("INV-20261022-0042");
+    expect(label()).toHaveTextContent("All dates");
+    expect(label()).toHaveAttribute("title", "Pick a day (ends the search)");
+
+    await user.click(label());
+    expect(showPicker).toHaveBeenCalledTimes(1);
+    expect(where()).toBe("/pos/sales?q=0042"); // opening alone changes nothing
+
+    fireEvent.change(picker(), { target: { value: "2026-10-20" } });
+    await waitFor(() => expect(where()).toBe("/pos/sales?day=2026-10-20"));
+    expect(searchBox()).toHaveValue("");
+    expect(lastCall()).not.toHaveProperty("q");
+  });
+
+  it("keys in the date input stay there: Enter opens no sale, Esc leaves the input, not the page", async () => {
+    delete HTMLInputElement.prototype.showPicker;
+    const user = userEvent.setup();
+    renderList();
+    await findSale("INV-20261022-0001");
+    await user.click(label()); // focuses the input (no showPicker)
+
+    await user.keyboard("{Enter}");
+    expect(where()).toBe("/pos/sales");
+    await user.keyboard("{Escape}");
+    expect(where()).toBe("/pos/sales");
+    expect(picker()).not.toHaveFocus();
   });
 });
 

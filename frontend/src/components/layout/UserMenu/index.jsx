@@ -45,7 +45,11 @@ const getInitials = (name, email) => {
   return parts[0][0].toUpperCase();
 };
 
-const UserMenu = () => {
+/**
+ * `rounded`: the trigger's corner class, a full pill by default (the main
+ * app header); the terminal header passes its buttons' `rounded-lg`.
+ */
+const UserMenu = ({ rounded = "rounded-full" }) => {
   const dispatch = useDispatch();
   const user = useSelector((state) => state.auth.user);
   const [pinOpen, setPinOpen] = useState(false);
@@ -63,13 +67,13 @@ const UserMenu = () => {
   return (
     <Menu as="div" className="relative">
       <MenuButton
-        className="
+        className={`
           flex items-center gap-2
-          h-10 pl-1 pr-2 sm:pr-3 rounded-full
+          h-10 pl-1 pr-2 sm:pr-3 ${rounded}
           hover:bg-slate-100 dark:hover:bg-slate-800
           transition-colors
           focus:outline-none focus-visible:ring-2 focus-visible:ring-cyan-500
-        "
+        `}
       >
         <span
           className="

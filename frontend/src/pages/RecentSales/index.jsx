@@ -200,6 +200,14 @@ const RecentSales = () => {
   };
 
   const goToDay = (next) => updateParams({ day: next === today ? null : next });
+
+  // A day chosen in the date picker: that day, and the end of any search.
+  const pickDay = (next) => {
+    if (next > today) return;
+    clearTimeout(debounceTimer.current);
+    setInput("");
+    updateParams({ q: null, day: next === today ? null : next });
+  };
   const stepDay = (delta) => {
     if (searching) return;
     const next = shiftColomboDay(day, delta);
@@ -233,8 +241,9 @@ const RecentSales = () => {
   useHotkeys(
     "enter",
     (e) => {
-      // A focused button or link keeps its own Enter (Load more, Today…).
-      if (dialogOpen() || e.target.closest?.("button, a")) return;
+      // A focused button or link keeps its own Enter (Load more, Today, the
+      // day label…), and so does the date picker's input.
+      if (dialogOpen() || e.target.closest?.("button, a") || e.target.type === "date") return;
       e.preventDefault();
       openSale(activeId);
     },
@@ -255,6 +264,12 @@ const RecentSales = () => {
     "esc",
     (e) => {
       if (dialogOpen()) return;
+      // Esc in the date picker's input (where showPicker isn't supported)
+      // leaves the input, not the page.
+      if (e.target.type === "date") {
+        e.target.blur();
+        return;
+      }
       e.preventDefault();
       if (e.target === searchRef.current && input) {
         clearSearch();
@@ -268,12 +283,15 @@ const RecentSales = () => {
 
   const pendingShort = input.trim().length > 0 && input.trim().length < MIN_QUERY;
   const dayLabel = formatColomboDayLabel(day);
-  let statusText = "";
+  // The count ("4 sales", "3 matches for …") shows as a highlighted pill;
+  // the search hint and Loading… as plain text, in the same place.
+  let countText = "";
+  if (!pendingShort && status === "ready" && searching)
+    countText = `${total} ${total === 1 ? "match" : "matches"} for “${q}”, all dates`;
+  else if (!pendingShort && status === "ready") countText = `${total} ${total === 1 ? "sale" : "sales"}`;
+  let statusText = countText;
   if (pendingShort) statusText = "Type 2 or more characters to search all dates";
   else if (status === "loading") statusText = "Loading…";
-  else if (status === "ready" && searching)
-    statusText = `${total} ${total === 1 ? "match" : "matches"} for “${q}”, all dates`;
-  else if (status === "ready") statusText = `${total} ${total === 1 ? "sale" : "sales"}`;
 
   const columns = [
     {
@@ -347,7 +365,7 @@ const RecentSales = () => {
     },
     {
       key: "status",
-      header: <span className="sr-only">Status</span>,
+      header: "Status",
       mobileHidden: true,
       render: (s) => <StatusBadge row={s} />,
     },
@@ -393,21 +411,32 @@ const RecentSales = () => {
             searching={searching}
             onStep={stepDay}
             onToday={() => goToDay(today)}
+            onPick={pickDay}
           />
           <SalesSearchBox
             value={input}
             onChange={changeInput}
             inputRef={searchRef}
           />
+          {/* The count, at the right of the toolbar: a highlighted pill
+              ("4 sales", "3 matches for …"); the search hint and Loading…
+              stay plain text. Never wraps: the search box gives up room. */}
+          <p
+            id="sales-status"
+            aria-live="polite"
+            data-testid="sales-count"
+            className={`
+              ml-auto shrink-0 whitespace-nowrap
+              ${
+                countText
+                  ? "px-3 py-1 rounded-lg text-sm font-semibold tabular-nums bg-cyan-600 text-white dark:bg-cyan-500 dark:text-slate-950"
+                  : "text-xs text-slate-500 dark:text-slate-400"
+              }
+            `}
+          >
+            {statusText}
+          </p>
         </div>
-
-        <p
-          id="sales-status"
-          aria-live="polite"
-          className="-mt-1 text-xs text-slate-500 dark:text-slate-400"
-        >
-          {statusText}
-        </p>
 
         <div
           ref={listRef}

@@ -6,15 +6,18 @@ import { Store } from "lucide-react";
  * Read-only pill showing a branch name. Used by BranchSelector for staff
  * (who can't switch) and by TerminalLayout for everyone — in the terminal,
  * branch switching happens only from the main app header.
+ *
+ * `rounded`: the corner class, a full pill by default; the terminal header
+ * passes its buttons' `rounded-lg` so the chip matches them.
  */
-const BranchChip = ({ name, title }) => (
+const BranchChip = ({ name, title, rounded = "rounded-full" }) => (
   <div
-    className="
+    className={`
       flex items-center gap-1 sm:gap-2
-      h-10 px-2 sm:px-3 rounded-full
+      h-10 px-2 sm:px-3 ${rounded}
       bg-slate-100 dark:bg-slate-800
       text-sm font-medium text-slate-700 dark:text-slate-200
-    "
+    `}
     title={title}
   >
     <Store
