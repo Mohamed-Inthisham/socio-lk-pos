@@ -358,18 +358,7 @@ export class ProductUnitsService {
       );
     }
 
-    const reacquired = await manager
-      .createQueryBuilder(ProductUnit, 'later')
-      .where('later.imei = :imei', { imei: unit.imei })
-      .andWhere('later.id != :id', { id: unit.id })
-      .andWhere('later.created_at > :createdAt', {
-        createdAt: unit.created_at,
-      })
-      .andWhere('later.status != :returned', {
-        returned: ProductUnitStatus.RETURNED,
-      })
-      .orderBy('later.created_at', 'DESC')
-      .getOne();
+    const reacquired = await this.findLaterAcquisition(manager, unit);
     if (reacquired) {
       throw await this.reacquiredConflict(manager, unit.imei, reacquired);
     }
@@ -408,20 +397,10 @@ export class ProductUnitsService {
     imei: string,
     later: ProductUnit | null,
   ): Promise<ConflictException> {
-    let reason: VoidBlockReason | null = null;
-    let laterSale: LaterSale | null = null;
-    if (later?.phone_purchase_id) {
-      const rows: LaterSale[] = await manager.query(
-        `SELECT s.id, s.sale_number
-           FROM payments p
-           JOIN sales s ON s.id = p.sale_id
-          WHERE p.trade_in_phone_purchase_id = $1
-          LIMIT 1`,
-        [later.phone_purchase_id],
-      );
-      laterSale = rows[0] ?? null;
-      reason = laterSale ? 'TAKEN_BACK_ON_SALE' : 'BOUGHT_BACK_ON_PURCHASE';
-    }
+    const { reason, laterSale } = await this.laterAcquisitionDetail(
+      manager,
+      later,
+    );
 
     return new ConflictException({
       message:
@@ -441,6 +420,159 @@ export class ProductUnitsService {
         branch_id: later.branch_id,
       },
     });
+  }
+
+  /**
+   * A newer acquisition of the same IMEI that isn't RETURNED (buy-back):
+   * the phone came back into the shop after `unit` was sold, on a later
+   * sale's trade-in or a phone purchase. null when there is none. A newer
+   * RETURNED row means that later trade-in was itself voided.
+   */
+  private findLaterAcquisition(
+    manager: EntityManager,
+    unit: ProductUnit,
+  ): Promise<ProductUnit | null> {
+    return manager
+      .createQueryBuilder(ProductUnit, 'later')
+      .where('later.imei = :imei', { imei: unit.imei })
+      .andWhere('later.id != :id', { id: unit.id })
+      .andWhere('later.created_at > :createdAt', {
+        createdAt: unit.created_at,
+      })
+      .andWhere('later.status != :returned', {
+        returned: ProductUnitStatus.RETURNED,
+      })
+      .orderBy('later.created_at', 'DESC')
+      .getOne();
+  }
+
+  /**
+   * How a later acquisition happened (P6-22): a TRADE_IN payment stamped
+   * with its phone purchase means a later sale took the phone back; none
+   * means an outright phone purchase. Both null when `later` is null (a
+   * race only the unique index saw) or has no phone purchase.
+   */
+  private async laterAcquisitionDetail(
+    manager: EntityManager,
+    later: ProductUnit | null,
+  ): Promise<{ reason: VoidBlockReason | null; laterSale: LaterSale | null }> {
+    if (!later?.phone_purchase_id) return { reason: null, laterSale: null };
+    const rows: LaterSale[] = await manager.query(
+      `SELECT s.id, s.sale_number
+         FROM payments p
+         JOIN sales s ON s.id = p.sale_id
+        WHERE p.trade_in_phone_purchase_id = $1
+        LIMIT 1`,
+      [later.phone_purchase_id],
+    );
+    const laterSale = rows[0] ?? null;
+    return {
+      reason: laterSale ? 'TAKEN_BACK_ON_SALE' : 'BOUGHT_BACK_ON_PURCHASE',
+      laterSale,
+    };
+  }
+
+  /**
+   * 409 PHONE_TAKEN_BACK for returning a phone that came back into the
+   * shop after this sale (Phase 6.4 P7-13): the customer no longer has it
+   * to return. `reason` and `later_sale` as on the void 409 (P6-22); both
+   * null when only the live-IMEI index saw the later acquisition.
+   */
+  private async takenBackConflict(
+    manager: EntityManager,
+    imei: string,
+    later: ProductUnit | null,
+  ): Promise<ConflictException> {
+    const { reason, laterSale } = await this.laterAcquisitionDetail(
+      manager,
+      later,
+    );
+    const how =
+      reason === 'BOUGHT_BACK_ON_PURCHASE'
+        ? 'it was bought back on a later purchase'
+        : reason === 'TAKEN_BACK_ON_SALE'
+          ? `it was traded back in on ${laterSale!.sale_number}`
+          : 'it was taken back into stock on a later sale or purchase';
+    return new ConflictException({
+      message: `This phone (IMEI ${imei}) can't be returned on this sale: ${how}.`,
+      code: 'PHONE_TAKEN_BACK',
+      imei,
+      reason,
+      later_sale: laterSale,
+    });
+  }
+
+  /**
+   * The return's "taken back later" check (P7-13), without a change:
+   * SaleReturnsService runs it before the approval PIN, and
+   * markInspectionForReturn runs it again under the unit's lock.
+   */
+  async assertNotTakenBackForReturn(
+    manager: EntityManager,
+    unit: ProductUnit,
+  ): Promise<void> {
+    const later = await this.findLaterAcquisition(manager, unit);
+    if (later) {
+      throw await this.takenBackConflict(manager, unit.imei, later);
+    }
+  }
+
+  /**
+   * A customer returns a phone this sale sold (Phase 6.4 P7-6): SOLD →
+   * INSPECTION, inside the return's transaction (the caller locked the
+   * unit through lockInventoryRows). The same unit row is reused; stock
+   * doesn't move until the phone passes inspection.
+   *
+   *   - Missing unit, or not SOLD: raw Error (500). The return checked
+   *     returned_quantity first, so a sold line's unit is always SOLD
+   *     here; anything else means the state machine was bypassed.
+   *   - Taken back on a later sale or purchase: 409 PHONE_TAKEN_BACK.
+   *     A concurrent take-back caught only by uq_product_units_imei_live
+   *     gets the same 409 with reason and later_sale null.
+   *
+   * Must be called inside a transaction.
+   */
+  async markInspectionForReturn(
+    manager: EntityManager,
+    unitId: string,
+  ): Promise<void> {
+    const unit = await manager
+      .createQueryBuilder(ProductUnit, 'unit')
+      .setLock('pessimistic_write')
+      .where('unit.id = :unitId', { unitId })
+      .getOne();
+
+    if (!unit) {
+      throw new Error(
+        `ProductUnit ${unitId} not found at return time. ` +
+          `This indicates a data integrity issue — the RESTRICT FK on ` +
+          `sale_lines.product_unit_id should prevent this.`,
+      );
+    }
+    if (unit.status !== ProductUnitStatus.SOLD) {
+      throw new Error(
+        `ProductUnit ${unitId} has status ${unit.status} at return time, ` +
+          `expected SOLD. The PU state machine was bypassed by an ` +
+          `unknown code path.`,
+      );
+    }
+
+    await this.assertNotTakenBackForReturn(manager, unit);
+
+    try {
+      await manager.query(
+        `UPDATE product_units
+         SET status = $1,
+             updated_at = now()
+         WHERE id = $2`,
+        [ProductUnitStatus.INSPECTION, unit.id],
+      );
+    } catch (err) {
+      if (isLiveImeiConflict(err)) {
+        throw await this.takenBackConflict(manager, unit.imei, null);
+      }
+      throw err;
+    }
   }
 
   /**

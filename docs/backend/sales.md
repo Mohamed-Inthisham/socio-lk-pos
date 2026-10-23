@@ -58,7 +58,9 @@ Valid transitions:
 | _(nothing)_ | DRAFT | `POST /sales` | Creates empty cart |
 | DRAFT | _(deleted)_ | `DELETE /sales/:id` | Hard delete of sale + lines + payments |
 | DRAFT | COMPLETED | `POST /sales/:id/complete` | Decrements stock, issues invoice number, sets completed_at |
-| COMPLETED | VOIDED | `POST /sales/:id/void` | Re-increments stock, stamps payments reversed, sets voided_at/by/reason |
+| COMPLETED | VOIDED | `POST /sales/:id/void` | Re-increments stock, stamps payments reversed, sets voided_at/by/reason. Refused once the sale has a return (409 `SALE_HAS_RETURNS`) |
+
+A **return** (Phase 6.4 P7, `POST /sales/:id/returns`) is not a transition: the sale stays COMPLETED, its money unchanged, and only its lines' `returned_quantity` grows. Returns are their own records; see [returns.md](./returns.md).
 
 Invalid transitions — all return `400 Bad Request`:
 
@@ -172,11 +174,13 @@ Cross-table invariants (e.g., "payment.reversed_at is set iff parent sale is VOI
 
 `sale_number` follows the format `INV-YYYYMMDD-NNNN` — e.g., `INV-20260911-0007` is the 7th sale at some branch on Sep 11, 2026. **Uniqueness is per-branch:** two branches on the same day both have their own `-0001`.
 
-`SaleNumberCounter` has one row per `(branch_id, sale_date)`. The `generateNext` method:
+`SaleNumberCounter` has one row per `(branch_id, kind, counter_date)` (`UQ_sale_counter_branch_kind_date`; Phase 6.4 P7-10 added `kind`). The `generateNext(branchId, manager?, kind = 'SALE')` method:
 
-1. `SELECT ... FOR UPDATE` the counter row (creating it at `next_value = 1` if this is the first sale of the day at this branch).
-2. Read `next_value`, format as `INV-YYYYMMDD-NNNN`, increment and write back.
+1. `SELECT ... FOR UPDATE` the counter row (creating it at `next_value = 1` if this is the first number of the day of that kind at this branch).
+2. Read `next_value`, format as `INV-YYYYMMDD-NNNN` (kind `SALE`) or `RET-YYYYMMDD-NNNN` (kind `RETURN`, a return's number), increment and write back.
 3. Return the formatted string.
+
+The two kinds count separately: a return never takes an invoice number.
 
 The service enlists in the caller's transaction (the same transaction that flips the sale to COMPLETED), so a failed complete doesn't burn a number.
 
@@ -284,6 +288,8 @@ Steps 2 and 3 are `lockInventoryRows(manager, { stock, unitIds })` (`backend/src
 | `completeSale` | In-house lines' products; each trade-in's product (the trade-in payments are read before the line loop) | Lines' `product_unit_id` (trade-in units don't exist yet; they are inserted after the locks) |
 | `voidSale` | In-house lines' products; each trade-in unit's product | Lines' `product_unit_id`; the trade-in units, found by reading `phone_purchase_id` first without a lock (a purchase's unit and that unit's product and branch never change). A payment never stamped, or a purchase with no unit, is skipped here and raises its integrity error where it always did |
 | `PhonePurchasesService.create`, `createForTradeIn` | The phone's product, after the IMEI pre-check and before the inserts (so a race still gets the same 409) | — |
+| `SaleReturnsService` (a return, Phase 6.4 P7) | The lines going back to stock (in-house, not a phone, `condition: RESALEABLE`) | The returned phones' `product_unit_id` |
+| `ProductUnitsService.passInspection` | The unit's product | The unit |
 
 #### Why
 
@@ -344,7 +350,11 @@ Different callers hit different layers, and each layer has one job. A silent voi
 
 _(Revised Phase 6.4 P6-17; was "Void restricted to admin + manager".)_ `POST /sales/:id/void` takes `{ void_reason, approval: { approver_id, pin } }`, and `approval` is required on **every** void, a manager's or admin's own session included. Any role may call it, but only for a sale at their own branch (admins: any branch; otherwise 403 `VOID_WRONG_BRANCH`). The approver must be an active admin, or an active manager of the sale's branch, with an approval PIN; they may be the session user. The PIN check, its lockout and its error codes are in [approvals.md](./approvals.md).
 
-Order of work: a pre-check without locks (404, not COMPLETED 400, the branch check), so a void that can't happen never uses a PIN attempt; then the PIN check in **its own committed transaction**; then the void's transaction as before.
+Order of work: a pre-check without locks (404, not COMPLETED 400, the branch check, then 409 `SALE_HAS_RETURNS` when the sale has any return, Phase 6.4 P7-11), so a void that can't happen never uses a PIN attempt; then the PIN check in **its own committed transaction**; then the void's transaction as before, which checks `SALE_HAS_RETURNS` again under the sale lock (a return holds that lock while it commits, so none can slip in).
+
+#### Why a sale with a return can't be voided
+
+A void puts back the full quantity of every line and moves every sold phone back to IN_STOCK. After a return that would restock the returned items twice, and fail on a phone in INSPECTION. Returns are final too: a mistaken return is put right with a new sale. The body is `{ message, code: 'SALE_HAS_RETURNS' }`.
 
 Recorded: `voided_by` = the **approver** (the admin or manager who authorized it, as before), `void_requested_by` = the **session user** (the same person when a manager approves their own). `CHK_sales_void_requested_consistency` requires `void_requested_by` exactly on VOIDED sales; the migration backfilled it with `voided_by` on earlier voids. `findOne` loads both (`voider`, `void_requester`). The VOID audit row is written **inside the void's transaction** (not by the `AuditLogInterceptor`, which has no changes for VOID and doesn't know the approver): actor = the session user, `changes` with `voided_by` and `void_requested_by`, and a description naming both.
 
@@ -404,8 +414,8 @@ All endpoints are prefixed with `/api/v1` and require authentication via the `ac
 
 | Method | Path | Role | Purpose |
 |--------|------|------|---------|
-| GET | `/sales` | any | List sales (paginated, filterable by branch/cashier/status/date range). Rows carry branch, cashier and customer (soft-deleted included). Phase 6.4 P6 adds `completedFrom` / `completedTo` (inclusive / exclusive on `completed_at`; a timestamp with a time and an offset, date-only is a 400; excludes drafts), `sort=completed_at` (newest first, drafts last, ties by `created_at`) and `q` (sale number, customer name or phone by case-insensitive substring, or an exact IMEI on a sale line or a trade-in payment; 2–100 characters). IMEI matches are EXISTS subqueries, so a sale appears once however many of its lines match |
-| GET | `/sales/:id` | any | Get one sale with nested branch, cashier, customer, voider (soft-deleted included), lines, payments |
+| GET | `/sales` | any | List sales (paginated, filterable by branch/cashier/status/date range). Rows carry branch, cashier and customer (soft-deleted included). Phase 6.4 P6 adds `completedFrom` / `completedTo` (inclusive / exclusive on `completed_at`; a timestamp with a time and an offset, date-only is a 400; excludes drafts), `sort=completed_at` (newest first, drafts last, ties by `created_at`) and `q` (sale number, customer name or phone by case-insensitive substring, or an exact IMEI on a sale line or a trade-in payment; 2–100 characters). IMEI matches are EXISTS subqueries, so a sale appears once however many of its lines match. Phase 6.4 P7: each row gains `return_state` (`NONE` / `PARTIAL` / `FULL`) and `refunded_total`, and `q` also matches `RET-` numbers ([returns.md](./returns.md)) |
+| GET | `/sales/:id` | any | Get one sale with nested branch, cashier, customer, voider (soft-deleted included), lines (each with `returned_quantity`), payments, and `returns[]` (Phase 6.4 P7; approver and requester as `{ id, full_name }` only) |
 | POST | `/sales` | any | Create a DRAFT sale (empty cart) |
 | PATCH | `/sales/:id` | any | Update DRAFT sale (notes, customer_id only) |
 | DELETE | `/sales/:id` | any | Discard a DRAFT sale (hard delete; cascade removes lines + payments) |
@@ -431,7 +441,9 @@ All endpoints are prefixed with `/api/v1` and require authentication via the `ac
 | Method | Path | Role | Purpose |
 |--------|------|------|---------|
 | POST | `/sales/:id/complete` | any | DRAFT → COMPLETED. Decrements stock, issues invoice number, sets completed_at. Auditable. |
-| POST | `/sales/:id/void` | any, at the sale's branch | COMPLETED → VOIDED with a manager's approval PIN (`approval: { approver_id, pin }`, required). Re-increments stock, stamps payments reversed, sets voided_at/by (approver)/reason and void_requested_by (session user). Audited in the void's transaction. |
+| POST | `/sales/:id/void` | any, at the sale's branch | COMPLETED → VOIDED with a manager's approval PIN (`approval: { approver_id, pin }`, required). Re-increments stock, stamps payments reversed, sets voided_at/by (approver)/reason and void_requested_by (session user). Audited in the void's transaction. 409 `SALE_HAS_RETURNS` once the sale has a return. |
+| POST | `/sales/:id/returns` | any, at the sale's branch | A return with refunds, approved with a manager's PIN; the sale stays COMPLETED. 201 `{ return_id, sale }`, 200 on an accepted resend. See [returns.md](./returns.md) |
+| GET | `/sale-returns/inspection` | admin, manager (own branch) | Returned phones waiting for inspection at a branch. See [returns.md](./returns.md) |
 
 ## RBAC Matrix
 
@@ -445,6 +457,8 @@ All endpoints are prefixed with `/api/v1` and require authentication via the `ac
 | Add/update/remove payments on DRAFT sales | ✅ | ✅ | ✅ |
 | Complete a DRAFT sale | ✅ | ✅ | ✅ |
 | Void a COMPLETED sale (with an admin's or manager's PIN, every time) | ✅ | ✅ | ✅ |
+| Return items on a COMPLETED sale (with an admin's or manager's PIN, every time; Phase 6.4 P7) | ✅ | ✅ | ✅ |
+| List returned phones waiting for inspection (managers: own branch) | ✅ | ✅ | ❌ |
 
 Two design intentions codified in the matrix:
 
@@ -466,7 +480,7 @@ Six migrations shipped in Phase 6.3, one per major schema unit, in dependency or
 
 All six run cleanly on an empty DB and revert cleanly in reverse order. Verified end-to-end during Phase 6.3.
 
-Later sales migrations: Phase 6.4 P5 added `AddSaleLinesWarrantySnapshot` (`sale_lines.warranty_months_snapshot` and `checking_warranty_days_snapshot`), then P5-18's `WarrantyPeriodPerLine` replaced them with `sale_lines.warranty` + `warranty_until` and `products.default_warranty` (dropping `warranty_months` / `checking_warranty_days`). It maps the old values to codes and backfills existing lines; `down()` restores the old columns from the codes. See "Warranty per line". Phase 6.4 P6 added `AddSalesBranchCompletedAtIndex` (`idx_sales_branch_completed_at` on `(branch_id, completed_at)`, for the till's recent-sales list) and `AddApprovalPinAndVoidRequestedBy` (the approval PIN columns on `users`, and `sales.void_requested_by` backfilled from `voided_by`; see [approvals.md](./approvals.md)).
+Later sales migrations: Phase 6.4 P5 added `AddSaleLinesWarrantySnapshot` (`sale_lines.warranty_months_snapshot` and `checking_warranty_days_snapshot`), then P5-18's `WarrantyPeriodPerLine` replaced them with `sale_lines.warranty` + `warranty_until` and `products.default_warranty` (dropping `warranty_months` / `checking_warranty_days`). It maps the old values to codes and backfills existing lines; `down()` restores the old columns from the codes. See "Warranty per line". Phase 6.4 P6 added `AddSalesBranchCompletedAtIndex` (`idx_sales_branch_completed_at` on `(branch_id, completed_at)`, for the till's recent-sales list) and `AddApprovalPinAndVoidRequestedBy` (the approval PIN columns on `users`, and `sales.void_requested_by` backfilled from `voided_by`; see [approvals.md](./approvals.md)). Phase 6.4 P7 added `CreateSaleReturns`: `sale_lines.returned_quantity`, `sale_number_counters.kind` with its new unique key, and the `sale_returns`, `sale_return_lines` and `sale_refunds` tables; `down()` refuses while any return exists. See [returns.md](./returns.md).
 
 ## Test Coverage
 

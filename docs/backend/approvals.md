@@ -1,6 +1,6 @@
 # Manager Approval PIN
 
-A manager or admin approves an action at the till by choosing their name and entering a 6-digit PIN. Every sale void needs one (Phase 6.4 P6-17); returns will use the same check (P7). Planning doc: [phase-6.4-pos-terminal.md](../frontend/phase-6.4-pos-terminal.md) §8 P6-15 – P6-21. Code: `backend/src/approvals/`.
+A manager or admin approves an action at the till by choosing their name and entering a 6-digit PIN. Every sale void needs one (Phase 6.4 P6-17), and so does every return (P7-9; [returns.md](./returns.md)). Planning doc: [phase-6.4-pos-terminal.md](../frontend/phase-6.4-pos-terminal.md) §8 P6-15 – P6-21. Code: `backend/src/approvals/`.
 
 ## Storage
 
@@ -23,7 +23,7 @@ Exactly 6 digits. **Weak-PIN rule** (`weak-pin.ts`): with digits d1…d6, a PIN 
 
 ## The check: `ApprovalsService.verify`
 
-`verify({ approverId, pin, action, branchId, requestedBy, ip })` returns `{ id, full_name, role }` or throws. `action` names what is approved (`SALE_VOID`; P7 adds its own) and goes into the audit rows.
+`verify({ approverId, pin, action, branchId, requestedBy, ip })` returns `{ id, full_name, role }` or throws. `action` names what is approved (`SALE_VOID`, `SALE_RETURN`) and goes into the audit rows. Each caller runs every check it can without locks first, so a void or return that can't go through never spends a PIN attempt.
 
 **Its own committed transaction.** `verify` opens `dataSource.transaction(...)` itself; it never joins the caller's. Inside, it writes the count, the lock and their audit rows and **returns** the outcome; it throws only after the commit. So a refused or rolled-back action can never undo a failed attempt or a lock, and a correct PIN's reset sticks even if the action then fails (both proven in e2e).
 
@@ -46,7 +46,7 @@ Order, and the refusals (always `{ message, code }`, never the PIN; never 401, w
 | 9 | Wrong PIN, 5th in a row | 423 | `PIN_LOCKED` + `locked_until` | Wrong PIN. `<name>`'s PIN is locked until HH:MM. — locked 15 minutes |
 | 10 | Correct PIN | — | — | Count reset to 0, lock cleared; returns the approver |
 
-The approver may be the session user (a manager approving their own void). A locked-out manager can't approve anything, their own voids included, until the lock expires, another manager or admin approves, or an admin clears their PIN. A lock blocks PIN approvals only, not the login.
+The approver may be the session user (a manager approving their own void or return). A locked-out manager can't approve anything, their own voids and returns included, until the lock expires, another manager or admin approves, or an admin clears their PIN. A lock blocks PIN approvals only, not the login. Two simultaneous first sends of the same return (same `client_request_id`) each run `verify`, so with a wrong PIN they count two attempts; accepted (P7-36).
 
 ## Endpoints
 
@@ -56,6 +56,7 @@ The approver may be the session user (a manager approving their own void). A loc
 | PUT | `/auth/me/approval-pin` | admin, manager | `{ current_password, pin }` → 200 `{ has_approval_pin: true, approval_pin_set_at }`. Resets count and lock. 400 malformed or weak PIN; 403 `WRONG_PASSWORD` (audited) or a cashier |
 | DELETE | `/users/:id/approval-pin` | admin | → 204, also when none was set. Clears hash, set time, count and lock. 404 unknown user |
 | POST | `/sales/:id/void` | any, at the sale's branch | `approval: { approver_id, pin }` required; see [sales.md](./sales.md) "Every void is approved with a manager's PIN" |
+| POST | `/sales/:id/returns` | any, at the sale's branch | `approval: { approver_id, pin }` required, `action: 'SALE_RETURN'`; an accepted resend of the same `client_request_id` skips the PIN check. See [returns.md](./returns.md) |
 
 Nobody can set another user's PIN: an admin clears it and the user sets a new one (a new manager sets theirs after first login).
 
@@ -71,6 +72,7 @@ Written by the service inside the transaction they describe (the `AuditLogInterc
 | `APPROVAL_PIN_FAILED` | the session user | the approver |
 | `APPROVAL_PIN_LOCKED` | the session user | the approver |
 | `VOID` (Sale) | the session user | the sale; `changes` carry `voided_by` (approver) and `void_requested_by` |
+| `RETURN` (Sale) | the session user | the sale; `changes` carry `approved_by`, `requested_by`, `refund_due`, `refund_total`, `out_of_warranty` (Phase 6.4 P7-14) |
 
 No audit row, log line, error body or validation message carries the PIN, its hash or a password (e2e: audit rows, error bodies and console output are checked).
 

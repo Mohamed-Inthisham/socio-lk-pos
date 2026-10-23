@@ -55,7 +55,7 @@ All new FKs are `ON DELETE RESTRICT` — physical inventory and financial histor
    │                 ▼                           │
    │               SOLD ─────────────────────────┘
    │                 │
-   │                 │ customer return (P7 returns, step 0b)
+   │                 │ customer return (POST /sales/:id/returns)
    │                 ▼
    │            INSPECTION ── inspection-pass ──► IN_STOCK
    │
@@ -67,7 +67,7 @@ RETURNED      (WRITTEN_OFF: reserved, no path yet)
 - `IN_STOCK → SOLD` — `ProductUnitsService.markSoldForSale` (completeSale, Slice E)
 - `SOLD → IN_STOCK` — `markAvailableForReversal` (voidSale, Slice E). 409 if the phone was bought back after that sale (see Buy-back below).
 - `IN_STOCK → RETURNED` — `markReturnedForVoid` (voidSale trade-in reversal, Slice G). The only path that produces RETURNED: the trade-in was reversed and **the phone is back with the customer**.
-- `SOLD → INSPECTION` — a customer returns the phone (Phase 6.4 P7 returns, step 0b; P7-6). **The shop holds it again but it isn't sellable** until it is checked. The same unit row is reused (a return isn't a new acquisition). No stock change.
+- `SOLD → INSPECTION` — `ProductUnitsService.markInspectionForReturn`, a customer returns the phone (`POST /sales/:id/returns`, Phase 6.4 P7-6; [returns.md](./returns.md)). **The shop holds it again but it isn't sellable** until it is checked. The same unit row is reused (a return isn't a new acquisition); the return line names it. No stock change. 409 `PHONE_TAKEN_BACK` if the phone was taken back after that sale (a later trade-in or phone purchase), with the same `reason` and `later_sale` as the void 409. `GET /sale-returns/inspection` lists the branch's INSPECTION phones with their latest return.
 - `INSPECTION → IN_STOCK` — `ProductUnitsService.passInspection`, `POST /product-units/:id/inspection-pass` (step 0a; P7-7): checked, no fault. Stock +1, audited `INSPECTION_PASSED`. A faulty phone stays in INSPECTION until the supplier-receiving phase returns it to its supplier.
 
 There is no `deleted_at` on ProductUnit — status is the tombstone.
@@ -192,7 +192,8 @@ All endpoints are prefixed with `/api/v1` and require the `access_token` cookie.
 | `POST /sales/:saleId/payments` | `TRADE_IN` method + `trade_in_*` fields; 409 on IMEI collision (Slice G) |
 | `PATCH /sales/:saleId/payments/:paymentId` | TRADE_IN frozen except `notes` (Slice G) |
 | `POST /sales/:id/complete` | Flips PUs to SOLD; materializes trade-ins; 409 on IMEI conflicts (Slices E, G) |
-| `POST /sales/:id/void` | Flips PUs back to IN_STOCK; reverses trade-ins; 409 if a trade-in was resold (Slices E, G), or if a sold phone was bought back later (buy-back) |
+| `POST /sales/:id/void` | Flips PUs back to IN_STOCK; reverses trade-ins; 409 if a trade-in was resold (Slices E, G), or if a sold phone was bought back later (buy-back); 409 `SALE_HAS_RETURNS` once the sale has a return (Phase 6.4 P7-11) |
+| `POST /sales/:id/returns` | A returned phone goes SOLD → INSPECTION; 409 `PHONE_TAKEN_BACK` after a buy-back (Phase 6.4 P7) |
 | `POST /phone-purchases`, `TRADE_IN` | IMEI only collides with live units; SOLD / RETURNED IMEIs are bought back as new rows (buy-back); INSPECTION is live (Phase 6.4 P7 step 0a) |
 
 Swagger (`/api/docs`, dev only) is generated from the decorators and reflects all of the above.
@@ -241,5 +242,5 @@ Tracked in [FOLLOWUPS.md](../../FOLLOWUPS.md). The ones this phase touched most:
 
 - ~~**Stock/PU lock-ordering deadlock**~~ — fixed in Phase 6.4 P7 step 0c: one global lock order (sales.md "Lock order").
 - **Resale 409 payload** could include the reselling sale's id.
-- ~~**Buy-back**~~ — done: one unit row per acquisition (see ProductUnit Lifecycle). **Customer-return re-stock**: the INSPECTION status and the inspection pass shipped in Phase 6.4 P7 step 0a; the return itself ships in step 0b.
+- ~~**Buy-back**~~ — done: one unit row per acquisition (see ProductUnit Lifecycle). ~~**Customer-return re-stock**~~ — done in Phase 6.4 P7: the INSPECTION status and the inspection pass (step 0a), and the return itself (step 0b, [returns.md](./returns.md)). A faulty phone still waits in INSPECTION for the supplier-receiving phase.
 - **Admin endpoint to set `ProductUnit.selling_price`** after a "price later" intake.
