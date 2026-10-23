@@ -15,6 +15,7 @@ import AppLayout from "./components/layout/AppLayout";
 import TerminalLayout from "./components/layout/TerminalLayout";
 import BranchContextGuard from "./components/pos/BranchContextGuard";
 import PosTerminal from "./pages/PosTerminal";
+import PhonesToCheck from "./pages/PhonesToCheck";
 import RecentSales from "./pages/RecentSales";
 import SaleDetail from "./pages/SaleDetail";
 import { restoreSession } from "./store/slices/authSlice";
@@ -154,6 +155,15 @@ function App() {
         {/* Recent sales and a sale's detail (P6-1) */}
         <Route path="/pos/sales" element={<RecentSales />} />
         <Route path="/pos/sales/:id" element={<SaleDetail />} />
+        {/* Phones to check (P7-7): admins and managers; a cashier lands back on /pos */}
+        <Route
+          path="/pos/inspection"
+          element={
+            <RoleProtectedRoute allowedRoles={["admin", "manager"]} fallbackPath="/pos">
+              <PhonesToCheck />
+            </RoleProtectedRoute>
+          }
+        />
       </Route>
 
       {/* 404 fallback */}

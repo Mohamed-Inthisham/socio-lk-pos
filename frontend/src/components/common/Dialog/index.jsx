@@ -20,6 +20,7 @@ import { X } from "lucide-react";
  * - sm: 400px max — confirmations, single-question dialogs
  * - md: 512px max — small forms (stock adjustment)
  * - lg: 720px max — larger forms (product create/edit if we ever modal them)
+ * - xl: 896px max — line-by-line work on a sale (the POS ReturnDialog)
  *
  * SLOTS:
  * - title: heading text at the top
@@ -32,7 +33,7 @@ import { X } from "lucide-react";
  * - onClose: () => void, called when user dismisses (Escape, backdrop click, X)
  * - title: string
  * - description: optional string
- * - size: 'sm' | 'md' | 'lg' (default 'md')
+ * - size: 'sm' | 'md' | 'lg' | 'xl' (default 'md')
  * - hideCloseButton: hide the X button in the top-right
  * - dismissible: whether clicking backdrop / pressing Escape closes (default true).
  *   Set to false for "submitting" states so users can't dismiss mid-request.
@@ -42,6 +43,7 @@ const SIZE_CLASSES = {
   sm: "max-w-md",
   md: "max-w-lg",
   lg: "max-w-2xl",
+  xl: "max-w-4xl",
 };
 
 const Dialog = ({

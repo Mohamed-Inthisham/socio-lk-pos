@@ -35,7 +35,7 @@ const SalesSearchBox = ({ value, onChange, inputRef, onKeyDown }) => (
       value={value}
       onChange={(e) => onChange(e.target.value)}
       onKeyDown={onKeyDown}
-      placeholder="Sale number, customer, phone or IMEI"
+      placeholder="Sale or return number, customer, phone or IMEI"
       className="
         w-full h-10 pl-10 pr-10 rounded-lg text-sm
         bg-white dark:bg-slate-900

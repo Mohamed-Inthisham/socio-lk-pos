@@ -2,14 +2,16 @@ import { useEffect, useRef, useState } from "react";
 import { useHotkeys } from "react-hotkeys-hook";
 import { useSelector } from "react-redux";
 import { useLocation, useNavigate, useParams } from "react-router-dom";
-import { AlertTriangle, ArrowLeft, Ban, Printer } from "lucide-react";
+import { AlertTriangle, ArrowLeft, Ban, Printer, Undo2 } from "lucide-react";
 import Button from "../../components/common/Button";
 import SaleDetailView from "../../components/pos/SaleDetailView";
+import ReturnDialog from "../../components/pos/ReturnDialog";
 import VoidSaleDialog from "../../components/pos/VoidSaleDialog";
 import { PERMISSIONS, hasPermission } from "../../constants/rolePermissions";
 import { getSale } from "../../services/salesService";
 import { colomboToday } from "../../utils/colomboDay";
-import { printReceipt } from "../../utils/printReceipt";
+import { printReceipt, printReturnSlip } from "../../utils/printReceipt";
+import { returnableQuantity } from "../../utils/returnMath";
 
 /**
  * SaleDetail Page
@@ -24,6 +26,20 @@ import { printReceipt } from "../../utils/printReceipt";
  * tenders, no Void button) and focus goes to Reprint, so a void slip is
  * one P away (printed on request, P6-13). A VOIDED sale has no Void button.
  *
+ * RETURN ITEMS (R, or the button; P7-16): COMPLETED sales with something
+ * left to return, every role (REFUND_SALE; the approver's PIN is the
+ * authority). Shown disabled once everything has come back; not on a
+ * VOIDED sale. ReturnDialog makes the return; the page then shows the sale
+ * the server answered with (new returned quantities) and, once the dialog
+ * has closed, focus goes to Return items while something is left, else to
+ * Reprint. After Cancel, Headless UI hands focus back to the button.
+ *
+ * RETURNS (P7-18): the Returns card lists them; Reprint slip re-reads the
+ * sale, then prints both copies marked "REPRINT · <time>" (no hotkey: a
+ * sale may have several). Once a sale has a return there is no Void
+ * (P7-11): "Sales with returns can't be voided." in its place, and V does
+ * nothing.
+ *
  * REPRINT (P, or the button): re-fetches the sale first, so a sale voided
  * since the page opened prints as voided (and the page shows it), then
  * prints it marked "REPRINT · <time>". A failed fetch prints nothing.
@@ -35,6 +51,17 @@ import { printReceipt } from "../../utils/printReceipt";
  */
 
 const dialogOpen = () => !!document.querySelector('[role="dialog"]');
+
+/**
+ * The tab the detail opens on (P7-18): Returns when the sale was opened
+ * from a Recent sales search whose text is in one of its RET numbers (the
+ * server's match, contains), else Items.
+ */
+const initialTabFor = (sale, fromSearch) => {
+  const q = new URLSearchParams(fromSearch ?? "").get("q")?.trim().toUpperCase();
+  if (!q || !q.startsWith("RET")) return "items";
+  return (sale.returns ?? []).some((r) => r.return_number.toUpperCase().includes(q)) ? "returns" : "items";
+};
 
 const Card = ({ className = "", children }) => (
   <div
@@ -59,10 +86,19 @@ const SaleDetail = () => {
   const [printing, setPrinting] = useState(false);
   const [printError, setPrintError] = useState(null);
   const [voidOpen, setVoidOpen] = useState(false);
+  const [returnOpen, setReturnOpen] = useState(false);
   const justVoided = useRef(false);
+  const justReturned = useRef(false);
   const reprintRef = useRef(null);
+  const returnRef = useRef(null);
   const role = useSelector((state) => state.auth.user?.role);
-  const canVoid = hasPermission(role, PERMISSIONS.VOID_SALE) && sale?.status === "COMPLETED";
+  // A sale with a return can't be voided (P7-11): no Void button, V does nothing.
+  const hasReturns = (sale?.returns?.length ?? 0) > 0;
+  const canVoid = hasPermission(role, PERMISSIONS.VOID_SALE) && sale?.status === "COMPLETED" && !hasReturns;
+  const [slipPrinting, setSlipPrinting] = useState(null); // the return whose slip is reprinting
+  const [slipErrors, setSlipErrors] = useState({});
+  const leftToReturn = sale?.lines?.reduce((sum, line) => sum + returnableQuantity(line), 0) ?? 0;
+  const canReturn = hasPermission(role, PERMISSIONS.REFUND_SALE) && sale?.status === "COMPLETED" && leftToReturn > 0;
 
   useEffect(() => {
     let live = true;
@@ -80,13 +116,20 @@ const SaleDetail = () => {
     };
   }, [id, requestKey]);
 
-  const backToList = () =>
+  // Back (and Esc) to where the sale was opened from: Phones to check passes
+  // its own path (P7-7); Recent sales passes its search and rows to restore.
+  const backToList = () => {
+    if (from?.path) {
+      navigate(from.path);
+      return;
+    }
     navigate(`/pos/sales${from?.search ?? ""}`, {
       state: from ? { restore: { pages: from.pages, activeId: from.activeId } } : undefined,
     });
+  };
 
   const reprint = async () => {
-    if (printing || status !== "ready") return;
+    if (printing || slipPrinting || status !== "ready") return;
     setPrinting(true);
     setPrintError(null);
     let fresh;
@@ -107,6 +150,31 @@ const SaleDetail = () => {
     }
   };
 
+  // Reprint a return's slip (P7-17, P7-18): re-read the sale first (as the
+  // receipt's Reprint does), then both copies marked "REPRINT · <time>". A
+  // failed re-read prints nothing.
+  const reprintSlip = async (returnId) => {
+    if (printing || slipPrinting) return;
+    setSlipPrinting(returnId);
+    setSlipErrors({});
+    let fresh;
+    try {
+      fresh = await getSale(id);
+    } catch {
+      setSlipErrors({ [returnId]: "Couldn't load the sale. Nothing was printed." });
+      setSlipPrinting(null);
+      return;
+    }
+    setResult({ key: requestKey, status: "ready", sale: fresh });
+    try {
+      await printReturnSlip(fresh, returnId, { reprintedAt: new Date().toISOString() });
+    } catch {
+      setSlipErrors({ [returnId]: "Couldn't print the slip. Try again." });
+    } finally {
+      setSlipPrinting(null);
+    }
+  };
+
   useHotkeys(
     "esc",
     (e) => {
@@ -123,7 +191,7 @@ const SaleDetail = () => {
       if (!dialogOpen()) reprint();
     },
     { preventDefault: true },
-    [printing, status, requestKey],
+    [printing, slipPrinting, status, requestKey],
   );
   useHotkeys(
     "v",
@@ -132,6 +200,14 @@ const SaleDetail = () => {
     },
     { preventDefault: true },
     [canVoid, printing],
+  );
+  useHotkeys(
+    "r",
+    () => {
+      if (canReturn && !printing && !dialogOpen()) setReturnOpen(true);
+    },
+    { preventDefault: true },
+    [canReturn, printing],
   );
 
   const onVoided = (voided) => {
@@ -148,6 +224,24 @@ const SaleDetail = () => {
     setTimeout(() => reprintRef.current?.focus(), 0);
   };
 
+  // The sale a return answered with (or a re-read after a refusal): the
+  // page shows the new returned quantities at once.
+  const showSale = (fresh) => setResult({ key: requestKey, status: "ready", sale: fresh });
+
+  const onReturned = (fresh) => {
+    justReturned.current = true;
+    showSale(fresh);
+  };
+
+  // After a return, focus goes back to Return items while something is
+  // left to return, else to Reprint; after Cancel, Headless UI returns it
+  // to the button.
+  const afterReturnLeave = () => {
+    if (!justReturned.current) return;
+    justReturned.current = false;
+    setTimeout(() => (canReturn ? returnRef.current : reprintRef.current)?.focus(), 0);
+  };
+
   if (status === "ready" && sale) {
     return (
       <>
@@ -155,6 +249,14 @@ const SaleDetail = () => {
           sale={sale}
           today={colomboToday()}
           onBack={backToList}
+          backLabel={from?.label}
+          initialTab={location.state?.tab === "returns" ? "returns" : initialTabFor(sale, from?.search)}
+          returnActions={{
+            onReprint: reprintSlip,
+            reprinting: slipPrinting,
+            errors: slipErrors,
+            disabled: printing || !!slipPrinting,
+          }}
           actions={
             <div className="flex flex-col gap-2">
               <Button
@@ -168,6 +270,23 @@ const SaleDetail = () => {
                 fullWidth
               />
               {sale.status !== "VOIDED" && (
+                <Button
+                  ref={returnRef}
+                  variant="secondary"
+                  icon={Undo2}
+                  label="Return items"
+                  title={canReturn ? "Return items (R)" : "Everything on this sale has been returned"}
+                  disabled={!canReturn || printing}
+                  onClick={() => setReturnOpen(true)}
+                  fullWidth
+                />
+              )}
+              {sale.status !== "VOIDED" && hasReturns && (
+                <p className="text-xs text-slate-500 dark:text-slate-400" data-testid="no-void-note">
+                  Sales with returns can&apos;t be voided.
+                </p>
+              )}
+              {sale.status !== "VOIDED" && !hasReturns && (
                 <Button
                   variant="danger"
                   icon={Ban}
@@ -195,6 +314,14 @@ const SaleDetail = () => {
           sale={sale}
           onVoided={onVoided}
           afterLeave={afterVoidLeave}
+        />
+        <ReturnDialog
+          open={returnOpen}
+          onClose={() => setReturnOpen(false)}
+          sale={sale}
+          onReturned={onReturned}
+          onSaleChanged={showSale}
+          afterLeave={afterReturnLeave}
         />
       </>
     );

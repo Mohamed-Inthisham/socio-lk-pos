@@ -5,6 +5,8 @@ import { AlertTriangle, ArrowLeft } from "lucide-react";
 import Button from "../../components/common/Button";
 import Table from "../../components/common/Table";
 import DayStepper from "../../components/pos/DayStepper";
+import SaleStatusBadge from "../../components/pos/SaleStatusBadge";
+import { saleListStatus } from "../../utils/returnMath";
 import SalesSearchBox from "../../components/pos/SalesSearchBox";
 import useTerminalBranch from "../../hooks/useTerminalBranch";
 import { listSales } from "../../services/salesService";
@@ -25,7 +27,10 @@ import { receiptDateTime } from "../../utils/receipt";
  * COMPLETED and VOIDED sales for one Colombo day by completed_at, newest
  * first (P6-2), or a search across all dates (P6-3). Every role sees the
  * branch's sales (P6-4). Rows: time, sale number, customer, cashier,
- * total, a red Voided badge (P6-5); pages of 50 with Load more.
+ * total, and exactly one status badge: Completed, Part returned,
+ * Returned or Voided (P6-5, P7-18); pages of 50 with Load more. A sale
+ * with refunds shows "Refunded LKR X" under its total, which stays the
+ * original; a search also finds RET- numbers (the server matches them).
  *
  * STATE IN THE URL: ?day=YYYY-MM-DD (none = today) and ?q=… (a committed
  * search), so the list comes back as it was after the detail page, and
@@ -62,11 +67,8 @@ const validDay = (raw, today) => {
   return raw <= today ? raw : today;
 };
 
-const VoidedBadge = () => (
-  <span className="inline-flex items-center px-2 py-0.5 rounded-md text-[11px] font-semibold uppercase tracking-wider bg-red-100 text-red-700 dark:bg-red-900/50 dark:text-red-300">
-    Voided
-  </span>
-);
+/** Exactly one status badge per row: Completed, Part returned, Returned or Voided (P7-18). */
+const StatusBadge = ({ row }) => <SaleStatusBadge state={saleListStatus(row)} />;
 
 const RecentSales = () => {
   const navigate = useNavigate();
@@ -293,7 +295,9 @@ const RecentSales = () => {
           <span className="font-semibold tabular-nums whitespace-nowrap text-slate-900 dark:text-slate-100">
             {s.sale_number}
           </span>
-          {s.status === "VOIDED" && <span className="md:hidden"><VoidedBadge /></span>}
+          <span className="md:hidden">
+            <StatusBadge row={s} />
+          </span>
         </span>
       ),
     },
@@ -323,11 +327,21 @@ const RecentSales = () => {
       key: "total",
       header: "Total",
       align: "right",
+      // The original total always; what went back to the customer under it (P7-18).
       render: (s) => (
-        <span
-          className={`tabular-nums whitespace-nowrap font-medium ${s.status === "VOIDED" ? "line-through text-slate-400 dark:text-slate-500" : ""}`}
-        >
-          {formatLKR(s.total)}
+        <span className="inline-flex flex-col items-end">
+          <span
+            className={`tabular-nums whitespace-nowrap font-medium ${s.status === "VOIDED" ? "line-through text-slate-400 dark:text-slate-500" : ""}`}
+          >
+            {formatLKR(s.total)}
+          </span>
+          {Number(s.refunded_total) > 0 && (
+            // The totals' own formatLKR: "Refunded LKR 5,490.00". 12px, not
+            // 11px: at 11px the thousands comma reads like a dot on screen.
+            <span className="text-xs tabular-nums whitespace-nowrap text-slate-500 dark:text-slate-400" data-testid="sale-refunded">
+              Refunded {formatLKR(s.refunded_total)}
+            </span>
+          )}
         </span>
       ),
     },
@@ -335,7 +349,7 @@ const RecentSales = () => {
       key: "status",
       header: <span className="sr-only">Status</span>,
       mobileHidden: true,
-      render: (s) => (s.status === "VOIDED" ? <VoidedBadge /> : null),
+      render: (s) => <StatusBadge row={s} />,
     },
   ];
 

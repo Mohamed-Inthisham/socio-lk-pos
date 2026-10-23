@@ -2,13 +2,16 @@ import { vi } from "vitest";
 import api from "./api";
 import {
   COMPLETE_TIMEOUT_MS,
+  RETURN_TIMEOUT_MS,
   VOID_TIMEOUT_MS,
   addSalePayment,
   completeSale,
+  createReturn,
   listSales,
   removeSalePayment,
   voidSale,
 } from "./salesService";
+import { CLIENT_REQUEST_ID, createReturnResponse, returnTimeoutError } from "../test/returnEntities";
 
 vi.mock("./api", () => ({
   default: { get: vi.fn(), post: vi.fn(), patch: vi.fn(), delete: vi.fn() },
@@ -138,6 +141,47 @@ describe("salesService voidSale", () => {
     await expect(
       voidSale("sale-1", { void_reason: "Wrong price", approval: { approver_id: "u", pin: "1" } }),
     ).rejects.toBe(error);
+    expect(api.post).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("salesService createReturn", () => {
+  const payload = {
+    client_request_id: CLIENT_REQUEST_ID,
+    lines: [{ sale_line_id: "line-case", quantity: 1, condition: "RESALEABLE" }],
+    refunds: [{ method: "CASH", amount: 1600 }],
+    reason: "Faulty item",
+    approval: { approver_id: "user-manager", pin: "482915" },
+  };
+
+  beforeEach(() => {
+    vi.resetAllMocks();
+  });
+
+  it("posts the body as given with its own 30 s timeout; 201 is a new return", async () => {
+    const body = createReturnResponse();
+    api.post.mockResolvedValue({ status: 201, data: body });
+
+    await expect(createReturn("sale-7", payload)).resolves.toEqual({
+      return_id: "ret-1",
+      sale: body.sale,
+      resent: false,
+    });
+    expect(RETURN_TIMEOUT_MS).toBe(30000);
+    expect(api.post).toHaveBeenCalledWith("/sales/sale-7/returns", payload, { timeout: 30000 });
+  });
+
+  it("200 is an accepted resend: the return recorded earlier", async () => {
+    api.post.mockResolvedValue({ status: 200, data: createReturnResponse() });
+
+    await expect(createReturn("sale-7", payload)).resolves.toMatchObject({ return_id: "ret-1", resent: true });
+  });
+
+  it("never resends by itself: a timeout reaches the caller after one POST", async () => {
+    const error = returnTimeoutError();
+    api.post.mockRejectedValue(error);
+
+    await expect(createReturn("sale-7", payload)).rejects.toBe(error);
     expect(api.post).toHaveBeenCalledTimes(1);
   });
 });

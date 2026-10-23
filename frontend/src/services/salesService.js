@@ -206,6 +206,43 @@ export const voidSale = async (saleId, payload) => {
   return response.data;
 };
 
+/** POST /sales/:id/returns gives up after this long (P7-15). */
+export const RETURN_TIMEOUT_MS = 30000;
+
+/**
+ * Return items from a COMPLETED sale, with a manager's or admin's
+ * approval PIN (P7-9). Contract: docs/backend/returns.md.
+ *
+ * Unlike a void, a return may be resent (P7-15, P7-24): the body carries
+ * a `client_request_id` the ReturnDialog makes once, when it opens
+ * (utils/requestId.js), and every attempt from that dialog sends the same
+ * id. Never resent here. After a timeout, a network error or a 5xx the
+ * caller re-reads the sale (getSale) and looks for a return with that id
+ * (utils/returnErrors.js `findReturnByRequestId`): found → it went
+ * through; none → Try again, which resends the same body and id with the
+ * PIN typed again. A resend the server has already recorded comes back
+ * 200 with the recorded return (no PIN check, its body ignored), so the
+ * caller shows what was recorded, by `return_id`, never the form.
+ *
+ * The body carries the PIN: never log it or the request config.
+ *
+ * @param {string} saleId
+ * @param {Object} payload - schemas/returnSchema.js buildReturnPayload
+ * @returns {Promise<{ return_id: string, sale: Object, resent: boolean }>}
+ *   sale hydrated as GET /sales/:id (with returns[]); resent: the server
+ *   answered 200, an id it had already recorded
+ */
+export const createReturn = async (saleId, payload) => {
+  const response = await api.post(`/sales/${saleId}/returns`, payload, {
+    timeout: RETURN_TIMEOUT_MS,
+  });
+  return {
+    return_id: response.data.return_id,
+    sale: response.data.sale,
+    resent: response.status === 200,
+  };
+};
+
 /**
  * Remove a payment from a DRAFT sale.
  *

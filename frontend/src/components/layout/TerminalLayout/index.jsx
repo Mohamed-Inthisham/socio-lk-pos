@@ -1,13 +1,14 @@
 import { Link, NavLink, Outlet, useLocation, useNavigate } from "react-router-dom";
 import { useSelector } from "react-redux";
 import { useHotkeys } from "react-hotkeys-hook";
-import { LogOut, ReceiptText, Store, User } from "lucide-react";
+import { ClipboardCheck, LogOut, ReceiptText, Store, User } from "lucide-react";
 import HeaderLogo from "../HeaderLogo";
 import BranchChip from "../BranchChip";
 import ThemeToggle from "../../common/ThemeToggle";
 import UserMenu from "../UserMenu";
+import useInspectionCount from "../../../hooks/useInspectionCount";
 import useTerminalBranch from "../../../hooks/useTerminalBranch";
-import { ROLE_INFO } from "../../../constants/rolePermissions";
+import { PERMISSIONS, ROLE_INFO, hasPermission } from "../../../constants/rolePermissions";
 
 /**
  * TerminalLayout Component
@@ -33,9 +34,16 @@ import { ROLE_INFO } from "../../../constants/rolePermissions";
  * any terminal page. Alt+R is preventDefault-ed (verified with an
  * OS-level Alt+R in Chrome and Edge 155: neither browser uses it) and
  * ignored while a dialog is open or when already on the sales pages.
+ *
+ * PHONES TO CHECK (P7-7): admins and managers get a link to
+ * /pos/inspection with the number of returned phones waiting
+ * (useInspectionCount: read on mount, when the tab comes back, and on a
+ * pos:inspection-changed event; no polling). Hidden for cashiers; no
+ * hotkey.
  */
 
 const SALES_PATH = "/pos/sales";
+const INSPECTION_PATH = "/pos/inspection";
 const dialogOpen = () => !!document.querySelector('[role="dialog"]');
 
 const TerminalLayout = () => {
@@ -45,6 +53,9 @@ const TerminalLayout = () => {
   const navigate = useNavigate();
   const { pathname } = useLocation();
   const onSalesPages = pathname === SALES_PATH || pathname.startsWith(`${SALES_PATH}/`);
+  const onInspection = pathname === INSPECTION_PATH;
+  const canInspect = hasPermission(user?.role, PERMISSIONS.PASS_INSPECTION);
+  const count = useInspectionCount(branch?.id, canInspect);
 
   useHotkeys(
     "alt+r",
@@ -79,6 +90,36 @@ const TerminalLayout = () => {
         <div className="flex-1" />
 
         <div className="flex items-center gap-2">
+          {canInspect && (
+            <NavLink
+              to={INSPECTION_PATH}
+              aria-label={count ? `Phones to check, ${count} waiting` : "Phones to check"}
+              title="Phones to check: returned phones waiting for a check"
+              className={`
+                relative h-10 flex items-center gap-2 px-2.5 sm:px-3 rounded-lg
+                text-sm font-medium
+                transition-colors
+                focus:outline-none focus-visible:ring-2 focus-visible:ring-cyan-500
+                ${
+                  onInspection
+                    ? "bg-cyan-50 text-cyan-700 dark:bg-cyan-900/40 dark:text-cyan-300"
+                    : "text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800 hover:text-slate-900 dark:hover:text-white"
+                }
+              `}
+            >
+              <ClipboardCheck size={16} aria-hidden="true" />
+              <span className="hidden lg:inline">Phones to check</span>
+              {count > 0 && (
+                <span
+                  aria-hidden="true"
+                  data-testid="inspection-count"
+                  className="min-w-5 h-5 px-1.5 inline-flex items-center justify-center rounded-full text-[11px] font-semibold tabular-nums bg-amber-500 text-white dark:bg-amber-400 dark:text-slate-900"
+                >
+                  {count}
+                </span>
+              )}
+            </NavLink>
+          )}
           <NavLink
             to={SALES_PATH}
             aria-label="Recent sales"
@@ -98,10 +139,14 @@ const TerminalLayout = () => {
             <ReceiptText size={16} aria-hidden="true" />
             <span className="hidden sm:inline">Sales</span>
           </NavLink>
-          <BranchChip
-            name={branch?.name || "—"}
-            title={`Terminal branch: ${branch?.name || "—"}`}
-          />
+          {/* Below sm the status strip at the bottom names the branch: the
+              header needs the room for Phones to check (P7-7). */}
+          <div className="hidden sm:flex">
+            <BranchChip
+              name={branch?.name || "—"}
+              title={`Terminal branch: ${branch?.name || "—"}`}
+            />
+          </div>
           <ThemeToggle />
           <UserMenu />
           <Link

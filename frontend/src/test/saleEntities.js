@@ -6,10 +6,11 @@
  * numeric → string, timestamptz → ISO string, date → "YYYY-MM-DD"), minus
  * @Exclude fields, plus the relations findOne loads: branch, cashier,
  * customer, voider, void_requester, lines, payments,
- * payments.trade_in_product (backend/src/sales/sales.service.ts findOne).
- * A loaded relation that is empty is null; relations not loaded are
- * absent (lines: product, external_supplier, product_unit; payments:
- * trade_in_phone_purchase).
+ * payments.trade_in_product (backend/src/sales/sales.service.ts findOne),
+ * and `returns` (findOne's loadReturns, P7-18: [] when there are none;
+ * builders in returnEntities.js). A loaded relation that is empty is
+ * null; relations not loaded are absent (lines: product,
+ * external_supplier, product_unit; payments: trade_in_phone_purchase).
  *
  * Each builder names its entity file. Keep them in step with the entity,
  * not with what the screen happens to read.
@@ -97,6 +98,7 @@ export const saleLineEntity = (overrides = {}) => ({
   unit_price: "1500.00",
   cost_price_snapshot: "600.00",
   quantity: 1,
+  returned_quantity: 0,
   discount_type: null,
   discount_value: null,
   discount_amount: "0.00",
@@ -252,6 +254,7 @@ export const saleEntity = (overrides = {}) => ({
       created_at: "2026-10-21T09:00:00.000Z",
     }),
   ],
+  returns: [],
   ...overrides,
 });
 

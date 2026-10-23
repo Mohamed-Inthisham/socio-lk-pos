@@ -16,6 +16,22 @@ describe("describeCompleteError", () => {
     );
   });
 
+  it("a trade-in IMEI on a returned phone waiting to be checked (INSPECTION, P7-6)", () => {
+    expect(
+      describeCompleteError({
+        kind: "trade_in_imei_in_stock",
+        imei: "356789012345671",
+        existing_unit: { id: "unit-a15", status: "INSPECTION", product_id: "p-a15" },
+      }),
+    ).toEqual({
+      title: "Trade-in phone waiting to be checked",
+      body: "The trade-in phone (IMEI 356789012345671) was returned and is waiting to be checked. It can't be taken in again: remove the trade-in.",
+      fix: "payments",
+      reload: false,
+      nic: false,
+    });
+  });
+
   it("an inactive trade-in product without a name", () => {
     expect(describeCompleteError({ kind: "trade_in_product_inactive", product_name: null }).body).toMatch(
       /^The trade-in's product was deactivated/,

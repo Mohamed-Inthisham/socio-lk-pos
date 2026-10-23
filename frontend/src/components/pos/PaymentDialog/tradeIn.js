@@ -42,6 +42,10 @@ export const tradeInImeiConflict = (error) => {
       return "Already in stock: the shop holds a phone with this IMEI.";
     case "WRITTEN_OFF":
       return "This IMEI is on a written-off phone. Ask a manager to check it.";
+    // A returned phone waiting for its check (P7-6). The add-time 409
+    // carries no IMEI (FOLLOWUPS); the IMEI is in the field it shows under.
+    case "INSPECTION":
+      return "This phone was returned and is waiting to be checked. It can't be taken in again.";
     default:
       return "This IMEI is already in inventory.";
   }

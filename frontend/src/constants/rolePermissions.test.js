@@ -15,6 +15,21 @@ describe("rolePermissions", () => {
     },
   );
 
+  it.each([ROLES.ADMIN, ROLES.MANAGER, ROLES.CASHIER])(
+    "%s may start a return; a manager's PIN approves it (P7-19)",
+    (role) => {
+      expect(hasPermission(role, PERMISSIONS.REFUND_SALE)).toBe(true);
+    },
+  );
+
+  it.each([
+    [ROLES.ADMIN, true],
+    [ROLES.MANAGER, true],
+    [ROLES.CASHIER, false],
+  ])("%s may pass a returned phone's check (Phones to check): %s (P7-7)", (role, allowed) => {
+    expect(hasPermission(role, PERMISSIONS.PASS_INSPECTION)).toBe(allowed);
+  });
+
   it.each([
     [ROLES.ADMIN, true],
     [ROLES.MANAGER, true],

@@ -827,6 +827,11 @@ describe("PaymentDialog — Trade-in", () => {
   it.each([
     ["IN_STOCK", { id: "u-1", status: "IN_STOCK" }, "Already in stock: the shop holds a phone with this IMEI."],
     ["WRITTEN_OFF", { id: "u-1", status: "WRITTEN_OFF" }, "This IMEI is on a written-off phone. Ask a manager to check it."],
+    [
+      "INSPECTION",
+      { id: "u-1", status: "INSPECTION" },
+      "This phone was returned and is waiting to be checked. It can't be taken in again.",
+    ],
     ["no unit", null, "This IMEI is already in inventory."],
   ])("shows a 409 (%s) on the IMEI field and clears it when the IMEI changes", async (_, unit, message) => {
     salesService.addSalePayment.mockRejectedValue(

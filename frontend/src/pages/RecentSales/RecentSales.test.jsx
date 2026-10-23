@@ -6,7 +6,9 @@ import RecentSales from ".";
 import SaleDetail from "../SaleDetail";
 import { authState, branchesState, renderWithProviders } from "../../test/renderWithProviders";
 import { cashierUser, mainShop } from "../../test/fixtures";
+import { paymentEntity, saleEntity, saleLineEntity } from "../../test/saleEntities";
 import * as salesService from "../../services/salesService";
+import { formatLKR } from "../../utils/money";
 
 vi.mock("../../services/salesService");
 
@@ -73,8 +75,25 @@ const listRow = (n, overrides = {}) => ({
   branch: { id: "branch-main", name: "Main Shop" }, // the list doesn't read it; trimmed
   cashier: listCashier(),
   customer: null,
+  // P7-18: every list row carries these (sales.service.ts findAll)
+  return_state: "NONE",
+  refunded_total: "0.00",
   ...overrides,
 });
+
+/**
+ * GET /sales/:id for a list row: the row's own figures (1,500.00) on the
+ * hydrated shape, with the one line and payment they add up to, and
+ * returns[] (the detail page's Return items reads them).
+ */
+const detailOf = (id) =>
+  saleEntity({
+    ...listRow(Number(id.split("-")[1])),
+    id,
+    lines: [saleLineEntity({ sale_id: id })],
+    payments: [paymentEntity({ sale_id: id })],
+    returns: [],
+  });
 
 const page = (rows, total = rows.length) => ({ data: rows, meta: { total, page: 1 } });
 
@@ -159,6 +178,70 @@ describe("RecentSales: the day list (P6-2, P6-5)", () => {
     expect(within(second).getByText("Walk-in")).toBeInTheDocument();
     expect(within(second).getByText("Nimali Silva")).toBeInTheDocument();
     expect(within(second).getAllByText("Voided").length).toBeGreaterThan(0);
+  });
+
+  describe("one status badge per row (P7-18)", () => {
+    const BADGE = /^(Completed|Part returned|Returned|Voided)$/;
+    const rows = () => [
+      listRow(4),
+      listRow(3, { return_state: "PARTIAL", refunded_total: "5490.00" }),
+      listRow(2, { return_state: "FULL", refunded_total: "1500.00" }),
+      listRow(1, { status: "VOIDED" }),
+    ];
+    const cards = () => within(screen.getByRole("list", { name: /^Sales on / })).getAllByRole("listitem");
+
+    it("the Status column: Completed, Part returned, Returned or Voided, exactly one each", async () => {
+      salesService.listSales.mockResolvedValue(page(rows()));
+      renderList();
+      await findSale("INV-20261022-0004");
+
+      const statusCells = bodyRows().map((r) => within(r).getAllByRole("cell").at(-1));
+      expect(statusCells.map((c) => within(c).getAllByText(BADGE).map((b) => b.textContent))).toEqual([
+        ["Completed"],
+        ["Part returned"],
+        ["Returned"],
+        ["Voided"],
+      ]);
+    });
+
+    it("below md, the same one badge under the sale number on each card", async () => {
+      salesService.listSales.mockResolvedValue(page(rows()));
+      renderList();
+      await findSale("INV-20261022-0004");
+
+      expect(cards().map((c) => within(c).getAllByText(BADGE).map((b) => b.textContent))).toEqual([
+        ["Completed"],
+        ["Part returned"],
+        ["Returned"],
+        ["Voided"],
+      ]);
+      // In the table that copy sits in the sale-number cell, hidden from md up
+      const mobileCopy = within(bodyRows()[1]).getAllByText("Part returned")[0];
+      expect(mobileCopy.closest(".md\\:hidden")).not.toBeNull();
+    });
+
+    it("the total stays the original; what was refunded goes under it, formatted as the total", async () => {
+      salesService.listSales.mockResolvedValue(page(rows()));
+      renderList();
+      await findSale("INV-20261022-0004");
+
+      const [completed, partial] = bodyRows();
+      expect(within(completed).queryByTestId("sale-refunded")).not.toBeInTheDocument();
+      expect(within(partial).getByText(/^LKR\s1,500\.00$/)).toBeInTheDocument();
+      // 4 digits: the same formatLKR as the total, a comma for thousands
+      const refunded = within(partial).getByTestId("sale-refunded");
+      expect(refunded.textContent).toBe(`Refunded ${formatLKR("5490.00")}`);
+      expect(refunded.textContent.replace(/\s/g, " ")).toBe("Refunded LKR 5,490.00");
+    });
+
+    it("a search by RET number goes to the server as typed and shows the sale it finds", async () => {
+      salesService.listSales.mockResolvedValue(page([listRow(3, { return_state: "PARTIAL", refunded_total: "5490.00" })]));
+      renderList("/pos/sales?q=RET-20261023-0001");
+      await findSale("INV-20261022-0003");
+
+      expect(lastCall()).toMatchObject({ q: "RET-20261023-0001" });
+      expect(within(bodyRows()[0]).getAllByText("Part returned").length).toBeGreaterThan(0);
+    });
   });
 
   it("Customer column: the customer's name (Customer.name), or Walk-in for none — in the table and the cards", async () => {
@@ -388,9 +471,7 @@ describe("RecentSales: Load more (P6-5)", () => {
 describe("RecentSales: keys (P6-1 – P6-5)", () => {
   beforeEach(() => {
     salesService.listSales.mockResolvedValue(page(rowsFrom(1, 3)));
-    salesService.getSale.mockImplementation((id) =>
-      Promise.resolve({ ...listRow(Number(id.split("-")[1])), id }),
-    );
+    salesService.getSale.mockImplementation((id) => Promise.resolve(detailOf(id)));
   });
 
   it("opens with focus on the list, not the search box, so ←/→ work at once", async () => {
@@ -485,9 +566,7 @@ describe("RecentSales: keys (P6-1 – P6-5)", () => {
 
 describe("RecentSales: back from a sale (P6-13)", () => {
   beforeEach(() => {
-    salesService.getSale.mockImplementation((id) =>
-      Promise.resolve({ ...listRow(Number(id.split("-")[1])), id }),
-    );
+    salesService.getSale.mockImplementation((id) => Promise.resolve(detailOf(id)));
   });
 
   it("Esc on the detail page restores the day, the search and the active row, and re-reads the rows", async () => {

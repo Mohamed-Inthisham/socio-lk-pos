@@ -57,6 +57,8 @@ export const PERMISSIONS = {
   // Your own manager approval PIN (P6-18); cashiers never hold one
   SET_APPROVAL_PIN: "set_approval_pin",
   REFUND_SALE: "refund_sale",
+  // Phones to check: pass a returned phone back to stock (P7-7)
+  PASS_INSPECTION: "pass_inspection",
   APPLY_DISCOUNT: "apply_discount",
 
   // ===== CUSTOMERS =====
@@ -105,6 +107,7 @@ export const ROLE_PERMISSIONS = {
     PERMISSIONS.CREATE_SALE,
     PERMISSIONS.VOID_SALE,
     PERMISSIONS.REFUND_SALE,
+    PERMISSIONS.PASS_INSPECTION,
     PERMISSIONS.APPLY_DISCOUNT,
     PERMISSIONS.SET_APPROVAL_PIN,
 
@@ -141,6 +144,8 @@ export const ROLE_PERMISSIONS = {
     PERMISSIONS.VIEW_SALES,
     PERMISSIONS.CREATE_SALE,
     PERMISSIONS.VOID_SALE,
+    PERMISSIONS.REFUND_SALE,
+    PERMISSIONS.PASS_INSPECTION,
     PERMISSIONS.APPLY_DISCOUNT,
     PERMISSIONS.SET_APPROVAL_PIN,
 
@@ -173,6 +178,8 @@ export const ROLE_PERMISSIONS = {
     // Voids with a manager's or admin's approval PIN (P6-8): the PIN is
     // the authority, so every role sees Void enabled
     PERMISSIONS.VOID_SALE,
+    // Returns and refunds, likewise approved with a manager's PIN (P7-19)
+    PERMISSIONS.REFUND_SALE,
     // Line discounts at the till: any cashier, no limit (Q11, P5-20)
     PERMISSIONS.APPLY_DISCOUNT,
 

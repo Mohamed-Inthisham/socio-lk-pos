@@ -1,5 +1,6 @@
 import {
   colomboDayBounds,
+  colomboDaysSince,
   colomboToday,
   formatColomboDayLabel,
   formatColomboTime,
@@ -64,6 +65,20 @@ describe("shiftColomboDay", () => {
     ["2026-10-21", -30, "2026-09-21"],
   ])("%s %+d → %s", (day, delta, expected) => {
     expect(shiftColomboDay(day, delta)).toBe(expected);
+  });
+});
+
+describe("colomboDaysSince (P7-7)", () => {
+  it("counts Colombo dates, not 24-hour spans", () => {
+    // 23:50 Colombo on the 23rd is 18:20 UTC
+    expect(colomboDaysSince("2026-10-23T18:20:00.000Z", "2026-10-23")).toBe(0);
+    expect(colomboDaysSince("2026-10-23T18:20:00.000Z", "2026-10-24")).toBe(1);
+    // 00:10 Colombo on the 24th is 18:40 UTC on the 23rd
+    expect(colomboDaysSince("2026-10-23T18:40:00.000Z", "2026-10-24")).toBe(0);
+  });
+
+  it("across a month end", () => {
+    expect(colomboDaysSince("2026-10-25T05:00:00.000Z", "2026-11-02")).toBe(8);
   });
 });
 
