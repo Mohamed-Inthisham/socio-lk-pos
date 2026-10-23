@@ -515,6 +515,25 @@ describe('Secret exposure (e2e)', () => {
         .expect(200);
       expectNoSecrets(one);
     });
+
+    it('POST /product-units/:id/inspection-pass (Phase 6.4 P7-7)', async () => {
+      // Returns ship in P7 step 0b; until then a unit is put in
+      // INSPECTION directly. Passing it puts it back to IN_STOCK.
+      const rows: { id: string }[] = await dataSource.query(
+        `SELECT id FROM product_units WHERE phone_purchase_id = $1`,
+        [purchaseId],
+      );
+      await dataSource.query(
+        `UPDATE product_units SET status = 'INSPECTION' WHERE id = $1`,
+        [rows[0].id],
+      );
+      const res = await http()
+        .post(`/api/v1/product-units/${rows[0].id}/inspection-pass`)
+        .set('Cookie', adminCookies)
+        .expect(200);
+      expect(res.body).toMatchObject({ status: 'IN_STOCK' });
+      expectNoSecrets(res);
+    });
   });
 
   describe('users and audit log', () => {

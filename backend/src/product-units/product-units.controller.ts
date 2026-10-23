@@ -1,4 +1,14 @@
-import { Controller, Get, Param, ParseUUIDPipe, Query } from '@nestjs/common';
+import {
+  Controller,
+  Get,
+  HttpCode,
+  HttpStatus,
+  Ip,
+  Param,
+  ParseUUIDPipe,
+  Post,
+  Query,
+} from '@nestjs/common';
 import {
   ApiCookieAuth,
   ApiOperation,
@@ -10,6 +20,8 @@ import { ProductUnitsService } from './product-units.service';
 import { ListProductUnitsQueryDto } from './dto/list-product-units-query.dto';
 import { Roles } from '../auth/decorators/roles.decorator';
 import { UserRole } from '../users/enums/user-role.enum';
+import { CurrentUser } from '../auth/decorators/current-user.decorator';
+import type { AuthenticatedUser } from '../auth/strategies/jwt.strategy';
 
 @ApiTags('Product Units')
 @ApiCookieAuth('access_token')
@@ -69,5 +81,49 @@ export class ProductUnitsController {
   @ApiResponse({ status: 404, description: 'Product unit not found' })
   async findOne(@Param('id', ParseUUIDPipe) id: string) {
     return this.productUnitsService.findOne(id);
+  }
+
+  // Not @Auditable: passInspection writes the INSPECTION_PASSED row in
+  // its own transaction.
+  @Post(':id/inspection-pass')
+  @HttpCode(HttpStatus.OK)
+  @Roles(UserRole.ADMIN, UserRole.MANAGER)
+  @ApiOperation({
+    summary: 'Pass a returned phone after inspection (back to stock)',
+    description:
+      'Phase 6.4 P7-7. A phone a customer returned waits in INSPECTION ' +
+      '(held, not sellable). When it is checked and has no fault, this ' +
+      'moves it to IN_STOCK and adds 1 to its stock, in one transaction ' +
+      '(Stock row, then the unit, in the global lock order), and writes ' +
+      'an INSPECTION_PASSED audit row. A faulty phone stays in INSPECTION ' +
+      'until the supplier-receiving phase.\n\n' +
+      'Admins at any branch; managers only for a unit at their own branch.',
+  })
+  @ApiParam({ name: 'id', description: 'ProductUnit UUID', format: 'uuid' })
+  @ApiResponse({
+    status: 200,
+    description: 'Passed; the unit as GET /product-units/:id returns it',
+  })
+  @ApiResponse({ status: 400, description: 'Malformed id' })
+  @ApiResponse({ status: 401, description: 'Not authenticated' })
+  @ApiResponse({
+    status: 403,
+    description:
+      'A cashier, or { message, code: INSPECTION_WRONG_BRANCH } for a ' +
+      'manager of another branch',
+  })
+  @ApiResponse({ status: 404, description: 'Product unit not found' })
+  @ApiResponse({
+    status: 409,
+    description:
+      '{ message, code: NOT_IN_INSPECTION, status }: the unit is not ' +
+      'waiting for inspection',
+  })
+  async passInspection(
+    @Param('id', ParseUUIDPipe) id: string,
+    @CurrentUser() user: AuthenticatedUser,
+    @Ip() ip: string,
+  ) {
+    return this.productUnitsService.passInspection(id, user, ip);
   }
 }

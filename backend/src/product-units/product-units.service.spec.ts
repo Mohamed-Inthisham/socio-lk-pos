@@ -1,10 +1,18 @@
 import { Test, TestingModule } from '@nestjs/testing';
-import { getRepositoryToken } from '@nestjs/typeorm';
+import { getDataSourceToken, getRepositoryToken } from '@nestjs/typeorm';
 import { ConflictException, NotFoundException } from '@nestjs/common';
 import { ProductUnitsService } from './product-units.service';
 import { ProductUnit } from './entities/product-unit.entity';
 import { ProductUnitStatus } from './enums/product-unit-status.enum';
 import { QueryFailedError } from 'typeorm';
+import { StockService } from '../stock/stock.service';
+import { lockInventoryRows } from '../stock/lock-inventory-rows';
+import { UserRole } from '../users/enums/user-role.enum';
+import { AuditAction } from '../audit-log/enums/audit-action.enum';
+
+// The global lock order's helper takes its own queries on the manager;
+// mocked so the per-call manager mocks below stay exact (Phase 6.4 P7-25).
+jest.mock('../stock/lock-inventory-rows');
 
 describe('ProductUnitsService', () => {
   let service: ProductUnitsService;
@@ -23,6 +31,12 @@ describe('ProductUnitsService', () => {
     createQueryBuilder: jest.fn(() => mockQueryBuilder),
   };
 
+  // passInspection (Phase 6.4 P7-7) opens a transaction, adds stock and
+  // writes an audit row through the transaction's manager.
+  const mockDataSource = { transaction: jest.fn() };
+  const mockStockService = { incrementForReversal: jest.fn() };
+  const mockAuditRepo = { save: jest.fn() };
+
   beforeEach(async () => {
     jest.resetAllMocks();
     mockQueryBuilder.leftJoinAndSelect.mockReturnThis();
@@ -36,6 +50,8 @@ describe('ProductUnitsService', () => {
       providers: [
         ProductUnitsService,
         { provide: getRepositoryToken(ProductUnit), useValue: mockRepo },
+        { provide: getDataSourceToken(), useValue: mockDataSource },
+        { provide: StockService, useValue: mockStockService },
       ],
     }).compile();
 
@@ -951,6 +967,171 @@ describe('ProductUnitsService', () => {
       ).rejects.toThrow(ConflictException);
 
       expect(mockUpdateQb.execute).not.toHaveBeenCalled();
+    });
+  });
+
+  // ---- passInspection (Phase 6.4 P7-7) ----
+
+  describe('passInspection', () => {
+    const manager = {
+      findOneOrFail: jest.fn(),
+      query: jest.fn(),
+      getRepository: jest.fn(() => mockAuditRepo),
+    };
+
+    const inspectionUnit = (overrides: Partial<ProductUnit> = {}) =>
+      ({
+        id: 'u-1',
+        imei: '356938035643809',
+        status: ProductUnitStatus.INSPECTION,
+        product_id: 'p-1',
+        branch_id: 'b-1',
+        product: { name: 'Used iPhone 12 128GB' },
+        ...overrides,
+      }) as unknown as ProductUnit;
+
+    const manager1 = {
+      id: 'm-1',
+      full_name: 'Branch Manager',
+      role: UserRole.MANAGER,
+      branch_id: 'b-1',
+    };
+
+    beforeEach(() => {
+      mockDataSource.transaction.mockImplementation(
+        (cb: (m: typeof manager) => unknown) => cb(manager),
+      );
+      manager.getRepository.mockReturnValue(mockAuditRepo);
+      manager.findOneOrFail.mockResolvedValue(inspectionUnit());
+      manager.query.mockResolvedValue(undefined);
+      mockStockService.incrementForReversal.mockResolvedValue(undefined);
+      mockAuditRepo.save.mockResolvedValue(undefined);
+    });
+
+    it('locks the stock row then the unit, flips INSPECTION to IN_STOCK, adds 1 to stock and audits it', async () => {
+      mockRepo.findOne
+        .mockResolvedValueOnce(inspectionUnit())
+        .mockResolvedValueOnce({
+          id: 'u-1',
+          status: ProductUnitStatus.IN_STOCK,
+        });
+
+      const result = await service.passInspection('u-1', manager1, '1.2.3.4');
+
+      expect(lockInventoryRows).toHaveBeenCalledWith(manager, {
+        stock: [{ productId: 'p-1', branchId: 'b-1' }],
+        unitIds: ['u-1'],
+      });
+      const lockOrder =
+        jest.mocked(lockInventoryRows).mock.invocationCallOrder[0];
+      expect(lockOrder).toBeLessThan(
+        manager.findOneOrFail.mock.invocationCallOrder[0],
+      );
+      expect(manager.query).toHaveBeenCalledWith(
+        expect.stringContaining('UPDATE product_units'),
+        [ProductUnitStatus.IN_STOCK, 'u-1'],
+      );
+      expect(mockStockService.incrementForReversal).toHaveBeenCalledWith(
+        manager,
+        'p-1',
+        'b-1',
+        1,
+      );
+      expect(mockAuditRepo.save).toHaveBeenCalledWith(
+        expect.objectContaining({
+          user_id: 'm-1',
+          action: AuditAction.INSPECTION_PASSED,
+          entity_type: 'ProductUnit',
+          entity_id: 'u-1',
+          description:
+            'Inspection passed: IMEI 356938035643809 (Used iPhone 12 128GB) back in stock',
+          changes: {
+            status: {
+              old: ProductUnitStatus.INSPECTION,
+              new: ProductUnitStatus.IN_STOCK,
+            },
+          },
+          ip_address: '1.2.3.4',
+        }),
+      );
+      expect(result).toEqual({ id: 'u-1', status: ProductUnitStatus.IN_STOCK });
+    });
+
+    it('404 for an unknown unit, before any transaction', async () => {
+      mockRepo.findOne.mockResolvedValueOnce(null);
+
+      await expect(service.passInspection('u-x', manager1)).rejects.toThrow(
+        NotFoundException,
+      );
+      expect(mockDataSource.transaction).not.toHaveBeenCalled();
+    });
+
+    it('403 INSPECTION_WRONG_BRANCH for a manager of another branch, before the status check', async () => {
+      mockRepo.findOne.mockResolvedValueOnce(
+        inspectionUnit({
+          branch_id: 'b-2',
+          status: ProductUnitStatus.IN_STOCK,
+        }),
+      );
+
+      await expect(
+        service.passInspection('u-1', manager1),
+      ).rejects.toMatchObject({
+        status: 403,
+        response: { code: 'INSPECTION_WRONG_BRANCH' },
+      });
+      expect(mockDataSource.transaction).not.toHaveBeenCalled();
+    });
+
+    it('lets an admin pass at any branch', async () => {
+      mockRepo.findOne
+        .mockResolvedValueOnce(inspectionUnit({ branch_id: 'b-2' }))
+        .mockResolvedValueOnce({ id: 'u-1' });
+
+      await service.passInspection('u-1', {
+        id: 'a-1',
+        full_name: 'Admin',
+        role: UserRole.ADMIN,
+        branch_id: null,
+      });
+
+      expect(mockStockService.incrementForReversal).toHaveBeenCalled();
+    });
+
+    it('409 NOT_IN_INSPECTION when the unit is not waiting for inspection, before any transaction', async () => {
+      mockRepo.findOne.mockResolvedValueOnce(
+        inspectionUnit({ status: ProductUnitStatus.IN_STOCK }),
+      );
+
+      await expect(
+        service.passInspection('u-1', manager1),
+      ).rejects.toMatchObject({
+        status: 409,
+        response: {
+          message:
+            'This phone (IMEI 356938035643809) is not waiting for inspection (status: IN_STOCK).',
+          code: 'NOT_IN_INSPECTION',
+          status: ProductUnitStatus.IN_STOCK,
+        },
+      });
+      expect(mockDataSource.transaction).not.toHaveBeenCalled();
+    });
+
+    it('re-checks under the lock: a pass that lost the race gets the same 409 and changes nothing', async () => {
+      mockRepo.findOne.mockResolvedValueOnce(inspectionUnit());
+      manager.findOneOrFail.mockResolvedValueOnce(
+        inspectionUnit({ status: ProductUnitStatus.IN_STOCK }),
+      );
+
+      await expect(
+        service.passInspection('u-1', manager1),
+      ).rejects.toMatchObject({
+        status: 409,
+        response: { code: 'NOT_IN_INSPECTION' },
+      });
+      expect(manager.query).not.toHaveBeenCalled();
+      expect(mockStockService.incrementForReversal).not.toHaveBeenCalled();
+      expect(mockAuditRepo.save).not.toHaveBeenCalled();
     });
   });
 });

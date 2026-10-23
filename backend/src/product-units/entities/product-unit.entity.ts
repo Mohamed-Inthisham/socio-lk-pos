@@ -17,9 +17,16 @@ import { PhonePurchase } from '../../phone-purchases/entities/phone-purchase.ent
 import { SaleLine } from '../../sales/entities/sale-line.entity';
 
 @Entity('product_units')
-@Check(`"status" IN ('IN_STOCK', 'SOLD', 'RETURNED', 'WRITTEN_OFF')`)
-@Check(`"buying_price" >= 0`)
-@Check(`"selling_price" IS NULL OR "selling_price" >= 0`)
+// Named as in the migrations, so generated migrations see no drift.
+@Check(
+  'CHK_product_units_status',
+  `"status" IN ('IN_STOCK', 'SOLD', 'RETURNED', 'WRITTEN_OFF', 'INSPECTION')`,
+)
+@Check('CHK_product_units_buying_price_nonneg', `"buying_price" >= 0`)
+@Check(
+  'CHK_product_units_selling_price_nonneg',
+  `"selling_price" IS NULL OR "selling_price" >= 0`,
+)
 export class ProductUnit {
   @PrimaryGeneratedColumn('uuid')
   id!: string;
@@ -39,12 +46,13 @@ export class ProductUnit {
   branch?: Branch;
 
   // One row per acquisition (buy-back): IMEI is unique only among units
-  // the shop holds. SOLD and RETURNED rows are history and may repeat an
-  // IMEI. Mirrors uq_product_units_imei_live; the plain index serves
-  // lookups across all statuses.
+  // the shop holds (IN_STOCK, WRITTEN_OFF, INSPECTION). SOLD and RETURNED
+  // rows are history and may repeat an IMEI. Mirrors
+  // uq_product_units_imei_live and LIVE_UNIT_STATUSES; the plain index
+  // serves lookups across all statuses.
   @Index('uq_product_units_imei_live', {
     unique: true,
-    where: `"status" IN ('IN_STOCK', 'WRITTEN_OFF')`,
+    where: `"status" IN ('IN_STOCK', 'WRITTEN_OFF', 'INSPECTION')`,
   })
   @Index('idx_product_units_imei')
   @Column({ type: 'varchar', length: 50 })
