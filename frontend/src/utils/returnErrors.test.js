@@ -192,12 +192,15 @@ describe("returnErrorView", () => {
     });
   });
 
-  it("the refund errors name the server's figures", () => {
-    expect(view(refundTooHighError)).toMatchObject({ field: "refund", message: "The refund can be at most LKR 1600.00." });
-    expect(view(refundExceedsPaymentError)).toMatchObject({
-      field: "refunds",
-      message: "Only LKR 2500.00 can still go back to that payment.",
-    });
+  it("the refund errors name the server's figures, with thousands separators", () => {
+    // formatLKR puts a no-break space after LKR; fold it to compare the words.
+    const words = (text) => text.replace(/\s/g, " ");
+    const tooHigh = view(refundTooHighError);
+    expect(tooHigh.field).toBe("refund");
+    expect(words(tooHigh.message)).toBe("The refund can be at most LKR 1,600.00.");
+    const exceeds = view(() => refundExceedsPaymentError("2500.00"));
+    expect(exceeds.field).toBe("refunds");
+    expect(words(exceeds.message)).toBe("Only LKR 2,500.00 can still go back to that payment.");
     expect(view(refundMethodError)).toMatchObject({ field: "refunds" });
   });
 

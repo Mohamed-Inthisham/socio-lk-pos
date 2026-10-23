@@ -6,6 +6,7 @@ import {
   buildReturnPayload,
   buildReturnReason,
   buildReturnSchema,
+  defaultRefundRows,
   itemsIssues,
   refundIssues,
   refundTotalCents,
@@ -13,7 +14,7 @@ import {
   returnFormDefaults,
 } from "./returnSchema";
 import { formatLKR } from "../utils/money";
-import { saleEntity } from "../test/saleEntities";
+import { paymentEntity, saleEntity } from "../test/saleEntities";
 import { CLIENT_REQUEST_ID, saleWithReturnsEntity } from "../test/returnEntities";
 
 // saleEntity: phone 63,990 (within warranty on the 23rd), 2 cases 3,200
@@ -149,11 +150,25 @@ describe("buildReturnSchema", () => {
     });
 
     it("amounts must be positive with at most 2 decimals", () => {
-      const rows = (amount) => [{ method: "CASH", payment_id: "", reference: "", amount }];
-      expect(issues(valid({ refunds: rows("0") }))).toMatchObject({ "refunds.0.amount": "Amount must be more than 0" });
-      expect(issues(valid({ refunds: rows("10.005") }))).toMatchObject({
+      const card = (amount) => [{ method: "CARD", payment_id: "pay-card", reference: "REV-1", amount }];
+      const cash = (amount) => [{ method: "CASH", payment_id: "", reference: "", amount }];
+      expect(issues(valid({ refunds: card("0") }))).toMatchObject({ "refunds.0.amount": "Amount must be more than 0" });
+      expect(issues(valid({ refunds: card("") }))).toMatchObject({
         "refunds.0.amount": "Enter an amount like 1500 or 1499.80",
       });
+      expect(issues(valid({ refunds: cash("10.005") }))).toMatchObject({
+        "refunds.0.amount": "Enter an amount like 1500 or 1499.80",
+      });
+    });
+
+    it("a cash row left empty or at 0 is no cash: the refund is lower, not wrong", () => {
+      const cash = (amount) => ({ method: "CASH", payment_id: "", reference: "", amount });
+      for (const amount of ["", "  ", "0", "0.00"]) {
+        const found = issues(valid({ refunds: [cash(amount)], reason_detail: "" }));
+        expect(found).not.toHaveProperty("refunds.0.amount");
+        expect(found).toMatchObject({ reason_detail: LOWER_REFUND_MESSAGE });
+      }
+      expect(issues(valid({ refunds: [cash("")], reason_detail: "Agreed with the customer" }))).toEqual({});
     });
 
     it("cash takes no payment or reference, and appears once", () => {
@@ -281,6 +296,61 @@ describe("itemsIssues and refundIssues (the dialog's two steps)", () => {
   });
 });
 
+describe("defaultRefundRows (refunds start the way the sale was paid)", () => {
+  const card = (id, amount, ref = "AUTH-1") =>
+    paymentEntity({ id, payment_method: "CARD", amount, reference_number: ref });
+  const koko = (id, amount) => paymentEntity({ id, payment_method: "KOKO", amount, reference_number: "K-1" });
+  const cashPaid = (amount) => paymentEntity({ id: "pay-cash", payment_method: "CASH", amount });
+  const tradeIn = (amount) => paymentEntity({ id: "pay-ti", payment_method: "TRADE_IN", amount });
+  const rowsFor = (payments, dueCents, sale = saleEntity({ payments })) =>
+    defaultRefundRows(contextFor(sale), dueCents);
+  const row = (method, amount, paymentId = "") => ({ method, payment_id: paymentId, reference: "", amount });
+
+  it("a cash-only sale: one Cash row for the refund due", () => {
+    expect(rowsFor([cashPaid("70290.00")], 6559000)).toEqual([row("CASH", "65590.00")]);
+  });
+
+  it("a card-only sale: one Card row for the refund due, no Cash", () => {
+    expect(rowsFor([card("pay-card", "70290.00")], 6559000)).toEqual([row("CARD", "65590.00", "pay-card")]);
+  });
+
+  it("a mixed sale: the card up to its amount, the rest in Cash (the fixture)", () => {
+    expect(rowsFor(saleEntity().payments, 6559000, saleEntity())).toEqual([
+      row("CARD", "10000.00", "pay-card"),
+      row("CASH", "55590.00"),
+    ]);
+  });
+
+  it("several payments in the order paid, each up to what is left of it", () => {
+    expect(rowsFor([koko("pay-koko", "3000.00"), card("pay-card", "5000.00"), cashPaid("2000.00")], 900000)).toEqual([
+      row("KOKO", "3000.00", "pay-koko"),
+      row("CARD", "5000.00", "pay-card"),
+      row("CASH", "1000.00"),
+    ]);
+    // A refund due smaller than the first payment stays on it
+    expect(rowsFor([koko("pay-koko", "3000.00"), card("pay-card", "5000.00")], 120000)).toEqual([
+      row("KOKO", "1200.00", "pay-koko"),
+    ]);
+  });
+
+  it("a trade-in sale: the trade-in's share goes to Cash, never to the trade-in", () => {
+    expect(rowsFor([tradeIn("40000.00"), cashPaid("30290.00")], 6559000)).toEqual([row("CASH", "65590.00")]);
+    expect(rowsFor([tradeIn("40000.00"), card("pay-card", "30290.00")], 6559000)).toEqual([
+      row("CARD", "30290.00", "pay-card"),
+      row("CASH", "35300.00"),
+    ]);
+  });
+
+  it("a payment already refunded by an earlier return takes only what is left", () => {
+    // The fixture return took the card's 10,000.00: the rest is cash.
+    expect(defaultRefundRows(contextFor(saleWithReturnsEntity()), 160000)).toEqual([row("CASH", "1600.00")]);
+  });
+
+  it("nothing due: no rows", () => {
+    expect(rowsFor([card("pay-card", "100.00")], 0)).toEqual([]);
+  });
+});
+
 describe("returnFormDefaults", () => {
   it("every line at 0, nothing else filled in; the session's approver", () => {
     expect(returnFormDefaults(saleEntity(), { approverId: "user-manager" })).toEqual({
@@ -351,6 +421,26 @@ describe("buildReturnPayload", () => {
       { method: "CARD", amount: 966.67, original_payment_id: "pay-card", reference_number: "REV-9" },
       { method: "CASH", amount: 0.1 },
     ]);
+  });
+
+  it("a cash row left empty or at 0 is not sent", () => {
+    const payload = buildReturnPayload(
+      valid({
+        refunds: [
+          { method: "CARD", payment_id: "pay-card", reference: "REV-1", amount: "10000" },
+          { method: "CASH", payment_id: "", reference: "", amount: "" },
+        ],
+      }),
+      { clientRequestId: CLIENT_REQUEST_ID, context: contextFor() },
+    );
+    expect(payload.refunds).toEqual([
+      { method: "CARD", amount: 10000, original_payment_id: "pay-card", reference_number: "REV-1" },
+    ]);
+    const zero = buildReturnPayload(
+      valid({ refunds: [{ method: "CASH", payment_id: "", reference: "", amount: "0" }] }),
+      { clientRequestId: CLIENT_REQUEST_ID, context: contextFor() },
+    );
+    expect(zero.refunds).toEqual([]);
   });
 
   it("no override reason within warranty; an empty refund list when nothing is refunded", () => {

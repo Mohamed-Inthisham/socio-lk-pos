@@ -32,7 +32,9 @@ import { CASH } from "./paymentSchema";
  *   of this sale. CASH has no payment or reference; non-cash goes back to
  *   its payment, same method, with the reversal's reference (1–100). Each
  *   payment takes no more than is left of it; the total no more than the
- *   refund due. Amounts in integer cents.
+ *   refund due. Amounts in integer cents. A cash row left empty or at 0
+ *   is no cash (the refund is lower), never sent. The rows start as
+ *   defaultRefundRows: the way the sale was paid.
  * - Approval: an approver and their 6-digit PIN, never stored (P6-20).
  *
  * The client_request_id is not a form value: the dialog makes it when it
@@ -76,6 +78,35 @@ export const refundTotalCents = (refunds) =>
     const cents = amountCents(row.amount);
     return Number.isNaN(cents) ? sum : sum + cents;
   }, 0);
+
+/** A cash row left empty or at 0: no cash refund (not an error, not sent). */
+const isNoCash = (row) =>
+  row.method === CASH && (String(row.amount ?? "").trim() === "" || amountCents(row.amount) === 0);
+
+/**
+ * The refund rows a return starts with: they mirror how the sale was
+ * paid. This sale's card / bank / Koko / Mintpay payments first, in the
+ * order paid, each up to what is left of it; whatever remains (cash
+ * paid, a trade-in's share) in one Cash row. A card-only sale therefore
+ * starts with its card row for the whole refund due.
+ *
+ * @param {ReturnType<typeof returnContext>} context
+ * @param {number} dueCents - the refund due
+ * @returns {Array<{ method, payment_id, reference, amount }>}
+ */
+export const defaultRefundRows = (context, dueCents) => {
+  const rows = [];
+  let left = dueCents;
+  for (const payment of context.payments) {
+    if (left <= 0) break;
+    const take = Math.min(payment.refundableCents, left);
+    if (take <= 0) continue;
+    rows.push({ method: payment.method, payment_id: payment.id, reference: "", amount: fromCents(take) });
+    left -= take;
+  }
+  if (left > 0) rows.push({ method: CASH, payment_id: "", reference: "", amount: fromCents(left) });
+  return rows;
+};
 
 /**
  * The `reason` sent for a preset and detail: "Faulty item — <detail>",
@@ -174,7 +205,9 @@ export const refundIssues = (values, context) => {
   let cashRows = 0;
   values.refunds.forEach((row, i) => {
     const cents = amountCents(row.amount);
-    if (Number.isNaN(cents)) {
+    if (isNoCash(row)) {
+      // An empty or 0 cash amount is no cash: the total is lower, not wrong.
+    } else if (Number.isNaN(cents)) {
       add(["refunds", i, "amount"], "Enter an amount like 1500 or 1499.80");
     } else if (cents <= 0) {
       add(["refunds", i, "amount"], "Amount must be more than 0");
@@ -310,7 +343,7 @@ export const buildReturnPayload = (values, { clientRequestId, context }) => {
       ...(context.needsCondition(line) ? { condition: values.conditions[line.id] } : {}),
     }));
 
-  const refunds = values.refunds.map((row) => {
+  const refunds = values.refunds.filter((row) => !isNoCash(row)).map((row) => {
     const amount = Number(fromCents(amountCents(row.amount)));
     return row.method === CASH
       ? { method: CASH, amount }

@@ -1,4 +1,4 @@
-import { toCents } from "./money";
+import { formatLKR, toCents } from "./money";
 import { SET_YOUR_PIN_MESSAGE } from "./voidErrors";
 
 /**
@@ -235,9 +235,9 @@ export const returnErrorView = (error, { approverIsSelf = false, lineName = () =
     case RETURN_ERROR.OVERRIDE_REQUIRED:
       return { ...view, message: "Outside warranty: a manager or admin must give an override reason." };
     case RETURN_ERROR.REFUND_TOO_HIGH:
-      return { ...view, message: `The refund can be at most LKR ${error.refund_due}.` };
+      return { ...view, message: `The refund can be at most ${formatLKR(error.refund_due)}.` };
     case RETURN_ERROR.REFUND_EXCEEDS_PAYMENT:
-      return { ...view, message: `Only LKR ${error.refundable} can still go back to that payment.` };
+      return { ...view, message: `Only ${formatLKR(error.refundable)} can still go back to that payment.` };
     case RETURN_ERROR.REFUND_METHOD:
       return { ...view, message: "Refund in cash, or back to a card, bank, Koko or Mintpay payment of this sale." };
     case RETURN_ERROR.QTY_EXCEEDED:

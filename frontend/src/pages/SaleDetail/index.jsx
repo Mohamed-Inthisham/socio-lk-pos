@@ -29,8 +29,10 @@ import { returnableQuantity } from "../../utils/returnMath";
  * RETURN ITEMS (R, or the button; P7-16): COMPLETED sales with something
  * left to return, every role (REFUND_SALE; the approver's PIN is the
  * authority). Shown disabled once everything has come back; not on a
- * VOIDED sale. ReturnDialog makes the return; after Cancel, Headless UI
- * hands focus back to the button.
+ * VOIDED sale. ReturnDialog makes the return; the page then shows the sale
+ * the server answered with (new returned quantities) and, once the dialog
+ * has closed, focus goes to Return items while something is left, else to
+ * Reprint. After Cancel, Headless UI hands focus back to the button.
  *
  * REPRINT (P, or the button): re-fetches the sale first, so a sale voided
  * since the page opened prints as voided (and the page shows it), then
@@ -69,7 +71,9 @@ const SaleDetail = () => {
   const [voidOpen, setVoidOpen] = useState(false);
   const [returnOpen, setReturnOpen] = useState(false);
   const justVoided = useRef(false);
+  const justReturned = useRef(false);
   const reprintRef = useRef(null);
+  const returnRef = useRef(null);
   const role = useSelector((state) => state.auth.user?.role);
   const canVoid = hasPermission(role, PERMISSIONS.VOID_SALE) && sale?.status === "COMPLETED";
   const leftToReturn = sale?.lines?.reduce((sum, line) => sum + returnableQuantity(line), 0) ?? 0;
@@ -167,6 +171,24 @@ const SaleDetail = () => {
     setTimeout(() => reprintRef.current?.focus(), 0);
   };
 
+  // The sale a return answered with (or a re-read after a refusal): the
+  // page shows the new returned quantities at once.
+  const showSale = (fresh) => setResult({ key: requestKey, status: "ready", sale: fresh });
+
+  const onReturned = (fresh) => {
+    justReturned.current = true;
+    showSale(fresh);
+  };
+
+  // After a return, focus goes back to Return items while something is
+  // left to return, else to Reprint; after Cancel, Headless UI returns it
+  // to the button.
+  const afterReturnLeave = () => {
+    if (!justReturned.current) return;
+    justReturned.current = false;
+    setTimeout(() => (canReturn ? returnRef.current : reprintRef.current)?.focus(), 0);
+  };
+
   if (status === "ready" && sale) {
     return (
       <>
@@ -188,6 +210,7 @@ const SaleDetail = () => {
               />
               {sale.status !== "VOIDED" && (
                 <Button
+                  ref={returnRef}
                   variant="secondary"
                   icon={Undo2}
                   label="Return items"
@@ -226,7 +249,14 @@ const SaleDetail = () => {
           onVoided={onVoided}
           afterLeave={afterVoidLeave}
         />
-        <ReturnDialog open={returnOpen} onClose={() => setReturnOpen(false)} sale={sale} />
+        <ReturnDialog
+          open={returnOpen}
+          onClose={() => setReturnOpen(false)}
+          sale={sale}
+          onReturned={onReturned}
+          onSaleChanged={showSale}
+          afterLeave={afterReturnLeave}
+        />
       </>
     );
   }

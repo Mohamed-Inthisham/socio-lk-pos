@@ -7,9 +7,12 @@ import { authState, branchesState, renderWithProviders } from "../../test/render
 import { cashierUser, mainShop } from "../../test/fixtures";
 import { saleEntity, voidedSaleEntity } from "../../test/saleEntities";
 import { branchStockResponse, saleWithReturnsEntity } from "../../test/returnEntities";
+import { approversResponse } from "../../test/voidEntities";
+import * as approvalsService from "../../services/approvalsService";
 import * as salesService from "../../services/salesService";
 import * as stockService from "../../services/stockService";
 
+vi.mock("../../services/approvalsService");
 vi.mock("../../services/salesService");
 vi.mock("../../services/stockService");
 
@@ -291,6 +294,61 @@ describe("SaleDetail: Return items (P7-16)", () => {
     expect(screen.queryByRole("button", { name: "Return items" })).not.toBeInTheDocument();
     await user.keyboard("r");
     expect(returnDialog()).not.toBeInTheDocument();
+  });
+
+  /** Return the phone (within warranty: no override) with the manager's PIN. */
+  const returnPhone = async (user) => {
+    await user.click(returnButton());
+    const dialog = await screen.findByRole("dialog", { name: /^Return items/ });
+    await waitFor(() => expect(within(dialog).getByRole("button", { name: "Next: refund" })).toBeEnabled());
+    await user.click(within(dialog).getByRole("button", { name: "More Samsung Galaxy A15 128GB" }));
+    await user.click(within(dialog).getByRole("button", { name: "Next: refund" }));
+    await within(dialog).findByRole("option", { name: "Asha Perera" });
+    // The sale was partly paid by card: its row is there, waiting for the reversal's reference
+    await user.type(within(within(dialog).getByTestId("refund-row-pay-card")).getByLabelText("Reversal reference"), "REV-1");
+    await user.click(within(dialog).getByRole("radio", { name: "Faulty item" }));
+    await user.selectOptions(within(dialog).getByLabelText("Approver"), "user-manager");
+    await user.type(within(dialog).getByLabelText("Approval PIN"), "482915");
+    await user.click(within(dialog).getByRole("button", { name: "Return items" }));
+    await within(dialog).findByTestId("return-recorded");
+    return dialog;
+  };
+
+  it("after a return: the page shows the answered sale; Done hands focus back to Return items", async () => {
+    salesService.getSale.mockResolvedValue(saleEntity());
+    const answered = saleWithReturnsEntity(); // the case and charger are still left
+    salesService.createReturn.mockResolvedValue({ return_id: "ret-1", sale: answered, resent: false });
+    approvalsService.listApprovers.mockResolvedValue(approversResponse());
+    const user = userEvent.setup();
+    renderDetail();
+    await heading();
+
+    const dialog = await returnPhone(user);
+    await user.click(within(dialog).getByRole("button", { name: "Done" }));
+
+    await waitFor(() => expect(returnDialog()).not.toBeInTheDocument());
+    await waitFor(() => expect(returnButton()).toHaveFocus());
+    expect(returnButton()).toBeEnabled();
+    expect(salesService.getSale).toHaveBeenCalledTimes(1); // the page load: the answer is shown as is
+  });
+
+  it("after a return of everything left: Return items disables itself and focus goes to Reprint", async () => {
+    salesService.getSale.mockResolvedValue(saleEntity());
+    const answered = saleWithReturnsEntity();
+    answered.lines = answered.lines.map((line) => ({ ...line, returned_quantity: line.quantity }));
+    salesService.createReturn.mockResolvedValue({ return_id: "ret-1", sale: answered, resent: false });
+    approvalsService.listApprovers.mockResolvedValue(approversResponse());
+    const user = userEvent.setup();
+    renderDetail();
+    await heading();
+
+    const dialog = await returnPhone(user);
+    await user.keyboard("{Enter}"); // Done has the focus
+
+    await waitFor(() => expect(returnDialog()).not.toBeInTheDocument());
+    expect(returnButton()).toBeDisabled();
+    await waitFor(() => expect(reprintButton()).toHaveFocus());
+    expect(dialog).not.toBeInTheDocument();
   });
 
   it("Cancel hands focus back to the button", async () => {
