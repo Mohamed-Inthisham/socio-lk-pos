@@ -141,6 +141,7 @@ export const ROLE_PERMISSIONS = {
     PERMISSIONS.VIEW_SALES,
     PERMISSIONS.CREATE_SALE,
     PERMISSIONS.VOID_SALE,
+    PERMISSIONS.REFUND_SALE,
     PERMISSIONS.APPLY_DISCOUNT,
     PERMISSIONS.SET_APPROVAL_PIN,
 
@@ -173,6 +174,8 @@ export const ROLE_PERMISSIONS = {
     // Voids with a manager's or admin's approval PIN (P6-8): the PIN is
     // the authority, so every role sees Void enabled
     PERMISSIONS.VOID_SALE,
+    // Returns and refunds, likewise approved with a manager's PIN (P7-19)
+    PERMISSIONS.REFUND_SALE,
     // Line discounts at the till: any cashier, no limit (Q11, P5-20)
     PERMISSIONS.APPLY_DISCOUNT,
 

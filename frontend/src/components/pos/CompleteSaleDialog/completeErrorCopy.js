@@ -44,6 +44,14 @@ export const describeCompleteError = (err) => {
         { fix: "cart" },
       );
     case COMPLETE_ERROR.TRADE_IN_IMEI_IN_STOCK:
+      if (err.existing_unit?.status === "INSPECTION") {
+        // A returned phone waiting for its check (P7-6)
+        return describe(
+          "Trade-in phone waiting to be checked",
+          `The trade-in phone${err.imei ? ` (IMEI ${err.imei})` : ""} was returned and is waiting to be checked. It can't be taken in again: remove the trade-in.`,
+          { fix: "payments" },
+        );
+      }
       return describe(
         "Trade-in phone already in stock",
         `The trade-in phone${err.imei ? ` (IMEI ${err.imei})` : ""} is already in the shop's stock. Remove the trade-in and check the phone.`,

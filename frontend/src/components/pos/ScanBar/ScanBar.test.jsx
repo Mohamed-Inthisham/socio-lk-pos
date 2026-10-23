@@ -118,6 +118,31 @@ describe("ScanBar", () => {
     expect(await within(dialog).findByRole("alert")).toHaveTextContent("Unit is not IN_STOCK (unit status: SOLD)");
   });
 
+  it("says a returned phone is waiting to be checked (INSPECTION, P7-6)", async () => {
+    productsService.getProductByBarcode.mockResolvedValue(phoneProduct);
+    salesService.addSaleLine.mockRejectedValue(
+      Object.assign(new Error("conflict"), {
+        response: {
+          status: 409,
+          data: {
+            message: "IMEI '356938035643809' is not available (status: INSPECTION)",
+            existing_unit: { id: "unit-9", status: "INSPECTION", product_id: phoneProduct.id },
+          },
+        },
+      }),
+    );
+    const user = userEvent.setup();
+    renderScanBar();
+
+    await user.type(input(), "SLP-000042{Enter}");
+    const dialog = await screen.findByRole("dialog");
+    await user.type(within(dialog).getByLabelText("IMEI"), "356938035643809{Enter}");
+
+    expect(await within(dialog).findByRole("alert")).toHaveTextContent(
+      "This phone was returned and is waiting to be checked. It can't be sold until a manager passes it.",
+    );
+  });
+
   it("hints that a 15-digit miss is probably an IMEI", async () => {
     productsService.getProductByBarcode.mockRejectedValue(
       Object.assign(new Error("not found"), { response: { status: 404, data: {} } }),

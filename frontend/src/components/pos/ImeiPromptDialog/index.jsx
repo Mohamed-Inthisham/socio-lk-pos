@@ -14,7 +14,8 @@ import Button from "../../common/Button";
  * Server errors stay inline and keep the dialog open:
  * - 400: IMEI not found / belongs to a different product
  * - 409: unit isn't IN_STOCK (sold, reserved in another draft...) —
- *   `existing_unit.status` is shown when the server sends it
+ *   `existing_unit.status` is shown when the server sends it; a returned
+ *   phone waiting for its check (INSPECTION, P7-6) gets its own words
  *
  * PROPS:
  * - product: the serialized catalog product, or null when closed
@@ -25,8 +26,12 @@ import Button from "../../common/Button";
 // Mirrors the backend's IMEI rule (letters/digits, 8–50 chars).
 const IMEI_PATTERN = /^[A-Za-z0-9]{8,50}$/;
 
+const INSPECTION_MESSAGE =
+  "This phone was returned and is waiting to be checked. It can't be sold until a manager passes it.";
+
 const describeError = (err) => {
   const status = err?.existing_unit?.status;
+  if (status === "INSPECTION") return INSPECTION_MESSAGE;
   const message = err?.message || "Couldn't add the phone";
   return status ? `${message} (unit status: ${status})` : message;
 };
