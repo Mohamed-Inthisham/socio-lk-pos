@@ -1,6 +1,6 @@
 # POS till setup — receipt printer and browser
 
-How to set up a till so the POS terminal (`/pos`) prints its 80mm receipt with no print dialog and one cut per sale. Section 6 covers going live with Phase 6.4 P6 (recent sales, reprints, voids with a manager's PIN). Planning doc §8 P5-13, P5-16. The settings below were worked out on the shop's printer in October 2026; if they change, change them here.
+How to set up a till so the POS terminal (`/pos`) prints its 80mm receipt with no print dialog and one cut per sale. Section 6 covers going live with Phase 6.4 P6 (recent sales, reprints, voids with a manager's PIN); section 7 covers P7 (returns, refunds, return slips, phones to check). Planning doc §8 P5-13, P5-16. The settings below were worked out on the shop's printer in October 2026; if they change, change them here.
 
 **Hardware:** Xprinter XP-80 (XP-80T), 80mm thermal paper, USB, Windows driver. No cash drawer.
 
@@ -127,7 +127,7 @@ Each person sets their own PIN; nobody can set someone else's. Cashiers have no 
 ### 6.3 Voids and refunds at the till
 
 - **Sales** (header button, or **Alt+R**) lists the day's sales; open one and press **V** (or **Void sale**). Pick a reason, choose the approver (on a manager's or admin's own session it is preselected), and the approver enters their PIN.
-- **Refunds happen outside the system until P7.** The void dialog lists what to hand back first: cash, and each card, bank transfer, Koko or Mintpay payment to reverse (with its reference). A trade-in phone goes back to the customer: take it off the shelf. Items from another shop aren't added to our stock; return them to that shop.
+- **A void still records no refund** (returns do, from P7: section 7). The void dialog lists what to hand back first: cash, and each card, bank transfer, Koko or Mintpay payment to reverse (with its reference). A trade-in phone goes back to the customer: take it off the shelf. Items from another shop aren't added to our stock; return them to that shop.
 - A void slip prints only on request: **Reprint** (P) on the voided sale.
 
 ### 6.4 A forgotten or locked PIN
@@ -169,3 +169,57 @@ COMMIT;
 - Check the returned row is the right person before `COMMIT`. Emails are stored lower-case.
 - **This bypasses the audit log**: no `APPROVAL_PIN_CLEARED` entry is written. Write it down by hand in the shop's log: who cleared it, for whom, when, and why.
 - Then the user signs in and sets a new PIN (§6.2).
+
+## 7. Going live with P7 (returns, refunds, phones to check)
+
+Planning doc section 8 "P7 decision log" and "P7 as built"; backend: `docs/backend/returns.md`, `docs/backend/used-phones.md`.
+
+### 7.1 Before starting the new backend: run the two migrations, in order
+
+P7 adds two migrations. Run them **before** starting the new backend, which expects the new status, tables and columns. `migration:run` applies them in this order:
+
+| Migration | What it does |
+|---|---|
+| `AddProductUnitInspectionStatus` | The `INSPECTION` status for a returned phone: the product-unit status CHECK, and the live-IMEI unique index (an `INSPECTION` phone is still in the shop) |
+| `CreateSaleReturns` | `sale_returns`, `sale_return_lines`, `sale_refunds`, `sale_lines.returned_quantity`, and a `kind` on the sale-number counters so returns get their own `RET-YYYYMMDD-NNNN` numbers |
+
+1. Back up the database.
+2. In `backend/`, with the production `.env`: `npm run migration:show` lists both as pending (`[ ]`).
+3. `npm run migration:run`, then `npm run migration:show` again: both are now `[X]`.
+4. Start the new backend.
+
+Both have a `down`, but each refuses (and changes nothing) while it would lose real records: `CreateSaleReturns` while any return or `RET-` counter exists, `AddProductUnitInspectionStatus` while any phone is in `INSPECTION`.
+
+### 7.2 PINs
+
+**Every return needs a manager's or admin's approval PIN, on every session**, exactly as voids do. Managers and admins who set a PIN for P6 need nothing new; anyone who hasn't, sets one now (section 6.2).
+
+### 7.3 A return at the till
+
+1. **Sales** (Alt+R), open the sale (search finds sale numbers, customers, phones, IMEIs and `RET-` numbers), then **Return items** (R).
+2. **Items.** Pick how many of each line come back. For an item from our stock, choose **Back to stock** or **Damaged** (B / D). A phone says **Goes to inspection**; an item from another shop says **Not our stock** (return it to that shop yourself). Each line shows its warranty; Checking only, No warranty and an expired warranty are **outside warranty**.
+3. **Refund.** The refund due is what the customer actually paid for those items. The refund starts the way the sale was paid: back to the card, bank transfer, Koko or Mintpay payment first (up to what is left of it), the rest in cash; a trade-in's share goes back as cash ("includes LKR X from a trade-in"; the trade-in phone stays with the shop). The refund can be **lowered, never raised**; a lower refund needs the reason's detail to say why.
+4. **Outside warranty:** the manager gives an **override reason** as well as the normal reason.
+5. **Approval:** the manager or admin picks themselves and enters their PIN. **Return items.**
+6. If the till loses its connection while sending, it checks by itself whether the return went through; if not, it says so and **Try again** sends the same return again (never a second one).
+
+### 7.4 The money goes back outside the system
+
+The till **records** the refund; it doesn't move any money. Before pressing Return items: count out the cash; for a card, bank transfer, Koko or Mintpay refund, do the reversal on the card machine, in the banking app or on the provider's portal first, and type the reversal's reference into its row. The **Return recorded** panel then lists exactly what to hand over.
+
+### 7.5 Return slips
+
+- **Two copies print by themselves**, each cut separately: the **customer's copy**, then the **shop's copy**. When cash was refunded the shop's copy has "Received LKR X cash." and a **Customer signature** line: the customer signs it and the shop keeps it.
+- If a slip didn't come out (paper, jam), **Print again** on the Return recorded panel prints both copies again, unmarked.
+- Later: the sale's **Returns** tab, **Reprint slip** on that return. Both copies print marked "REPRINT · <date, time>".
+
+### 7.6 Returned phones: Phones to check
+
+- A returned phone goes to **inspection**: it can't be sold, traded in or bought back until it is checked.
+- Managers and admins see **Phones to check** in the terminal header, with the number waiting (cashiers don't see it). It lists each phone, oldest first, with its IMEI, the return and sale it came from, and how long it has waited (amber from 8 days).
+- **No fault:** **Passed: back to stock** (or P), then confirm (Tab, Enter; Cancel has the focus). The phone is back in stock and can be sold again.
+- **Faulty:** leave it on the list and **set it aside physically, labelled with its IMEI**. Returning faulty phones to their supplier comes with supplier receiving; until then it stays in inspection.
+
+### 7.7 Voids after a return
+
+A sale with a return **can't be voided**: Sale detail shows "Sales with returns can't be voided." instead of the Void button. A return is final; a mistaken return is put right with a new sale.
