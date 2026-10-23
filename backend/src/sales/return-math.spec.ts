@@ -80,4 +80,10 @@ describe('tradeInShareCents (P7-5)', () => {
     // 15,000 refunded before; 20,000 more now: 15,000 of it is trade-in.
     expect(tradeInShareCents(2000000, 2000000, 1500000)).toBe(1500000);
   });
+
+  it('earlier refunds above the non-trade-in money: never more than the refund', () => {
+    // 65,590 refunded before against 30,290 non-trade-in; 1,600 more now:
+    // all of it is trade-in money (1,600), not 1,600 − (30,290 − 65,590).
+    expect(tradeInShareCents(160000, 3029000, 6559000)).toBe(160000);
+  });
 });

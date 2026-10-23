@@ -36,14 +36,16 @@ export function refundShareCents(
  * How much of a refund comes from a trade-in (P7-5): the refund total less
  * the non-trade-in money still unrefunded on the sale (the non-TRADE_IN
  * payments less every earlier refund), when that is positive; else 0.
+ * Never more than the refund itself: once earlier refunds have used more
+ * than the non-trade-in money, all of this refund is trade-in money.
  */
 export function tradeInShareCents(
   refundTotalCents: number,
   nonTradeInPaidCents: number,
   earlierRefundsCents: number,
 ): number {
-  return Math.max(
-    0,
-    refundTotalCents - (nonTradeInPaidCents - earlierRefundsCents),
+  return Math.min(
+    refundTotalCents,
+    Math.max(0, refundTotalCents - (nonTradeInPaidCents - earlierRefundsCents)),
   );
 }

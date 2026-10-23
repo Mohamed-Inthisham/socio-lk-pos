@@ -853,6 +853,58 @@ describe('Returns (e2e)', () => {
         'includes LKR 30000.00 from a trade-in',
       );
     });
+
+    it('a later return after the non-trade-in money is used up: its trade-in share is never more than its refund', async () => {
+      const phone = await seedProduct('New phone', { price: '48400.00' });
+      const kase = await seedProduct('Case', { price: '1600.00' });
+      const usedModel = await seedProduct('Used phone model', {
+        serialized: true,
+      });
+      const sale = await sell(
+        [
+          { product: phone, quantity: 1 },
+          { product: kase, quantity: 1 },
+        ],
+        {
+          withCustomer: true,
+          payments: [
+            {
+              method: PaymentMethod.TRADE_IN,
+              amount: 30000,
+              tradeIn: { product: usedModel, imei: nextImei() },
+            },
+            { method: PaymentMethod.CASH, amount: 20000 },
+          ],
+        },
+      );
+
+      // First return: 48,400 in cash, 28,400 of it trade-in money.
+      const first = await postReturn(
+        sale.id,
+        returnBody([resaleable(sale.lines[0].id)], [cash(48400)]),
+      );
+      expect(first.status).toBe(201);
+      // Second: 1,600 in cash. The 20,000 non-trade-in money is used up,
+      // so all of it is trade-in money: 1,600, not 1,600 − (20,000 − 48,400).
+      const second = await postReturn(
+        sale.id,
+        returnBody([resaleable(sale.lines[1].id)], [cash(1600)]),
+      );
+      expect(second.status).toBe(201);
+
+      const audits = await dataSource.getRepository(AuditLog).find({
+        where: { action: AuditAction.RETURN, entity_id: sale.id },
+        order: { created_at: 'ASC' },
+      });
+      expect(audits).toHaveLength(2);
+      expect(audits[0].description).toContain(
+        'includes LKR 28400.00 from a trade-in',
+      );
+      expect(audits[1].description).toContain(
+        'includes LKR 1600.00 from a trade-in',
+      );
+      expect(audits[1].description).not.toContain('30000.00 from a trade-in');
+    });
   });
 
   // ---- Where the items go (P7-6, P7-8) ----

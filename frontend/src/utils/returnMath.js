@@ -43,9 +43,14 @@ export function refundShareCents(lineTotalCents, quantity, alreadyReturned, retu
  * How much of a refund comes from a trade-in (P7-5): the refund total less
  * the non-trade-in money still unrefunded on the sale (the non-TRADE_IN
  * payments less every earlier refund), when that is positive; else 0.
+ * Never more than the refund itself: once earlier refunds have used more
+ * than the non-trade-in money, all of this refund is trade-in money.
  */
 export function tradeInShareCents(refundTotalCents, nonTradeInPaidCents, earlierRefundsCents) {
-  return Math.max(0, refundTotalCents - (nonTradeInPaidCents - earlierRefundsCents));
+  return Math.min(
+    refundTotalCents,
+    Math.max(0, refundTotalCents - (nonTradeInPaidCents - earlierRefundsCents)),
+  );
 }
 
 const CASH = "CASH";
@@ -140,16 +145,10 @@ export const saleRefundContext = (sale) => {
   };
 };
 
-/**
- * The trade-in share of a refund on this sale (P7-5): "includes LKR X
- * from a trade-in" when > 0. Never more than the refund itself: once
- * earlier refunds have used more than the non-trade-in money,
- * tradeInShareCents alone goes above the refund (the server's audit
- * description isn't capped; FOLLOWUPS).
- */
+/** The trade-in share of a refund on this sale (P7-5): "includes LKR X from a trade-in" when > 0. */
 export const saleTradeInShareCents = (sale, refundTotalCents) => {
   const { nonTradeInPaidCents, earlierRefundsCents } = saleRefundContext(sale);
-  return Math.min(refundTotalCents, tradeInShareCents(refundTotalCents, nonTradeInPaidCents, earlierRefundsCents));
+  return tradeInShareCents(refundTotalCents, nonTradeInPaidCents, earlierRefundsCents);
 };
 
 /**
