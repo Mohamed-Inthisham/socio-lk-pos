@@ -14,6 +14,7 @@ import { SaleStatus } from './enums/sale-status.enum';
 import { SaleType } from './enums/sale-type.enum';
 import { DiscountType } from './enums/discount-type.enum';
 import { Payment } from './entities/payment.entity';
+import { SaleReturn } from './entities/sale-return.entity';
 import { PaymentMethod } from './enums/payment-method.enum';
 import { UpdatePaymentDto } from './dto/update-payment.dto';
 import { Branch } from '../branches/entities/branch.entity';
@@ -77,6 +78,25 @@ describe('SalesService', () => {
     findOne: jest.fn(),
   };
 
+  // Returns (Phase 6.4 P7): no sale here has any. findOne's returns query,
+  // findAll's return-state query and the void's SALE_HAS_RETURNS check all
+  // come back empty unless a test says otherwise.
+  const mockSaleReturnsQueryBuilder = {
+    withDeleted: jest.fn().mockReturnThis(),
+    leftJoin: jest.fn().mockReturnThis(),
+    leftJoinAndSelect: jest.fn().mockReturnThis(),
+    addSelect: jest.fn().mockReturnThis(),
+    where: jest.fn().mockReturnThis(),
+    orderBy: jest.fn().mockReturnThis(),
+    addOrderBy: jest.fn().mockReturnThis(),
+    getMany: jest.fn(),
+  };
+  const mockSaleReturnsRepo = {
+    createQueryBuilder: jest.fn(() => mockSaleReturnsQueryBuilder),
+    count: jest.fn(),
+    query: jest.fn(),
+  };
+
   const mockBranchesRepo = {
     findOne: jest.fn(),
   };
@@ -99,6 +119,7 @@ describe('SalesService', () => {
     save: jest.fn(),
     remove: jest.fn(),
     query: jest.fn(),
+    count: jest.fn(),
     getRepository: jest.fn(() => mockAuditRepo),
   };
 
@@ -197,6 +218,16 @@ describe('SalesService', () => {
     mockDataSource.transaction.mockImplementation(
       (cb: (m: typeof mockManager) => unknown) => cb(mockManager),
     );
+    Object.values(mockSaleReturnsQueryBuilder).forEach((fn) => {
+      if ('mockReturnThis' in fn) fn.mockReturnThis();
+    });
+    mockSaleReturnsQueryBuilder.getMany.mockResolvedValue([]);
+    mockSaleReturnsRepo.createQueryBuilder.mockReturnValue(
+      mockSaleReturnsQueryBuilder,
+    );
+    mockSaleReturnsRepo.count.mockResolvedValue(0);
+    mockSaleReturnsRepo.query.mockResolvedValue([]);
+    mockManager.count.mockResolvedValue(0);
 
     const module: TestingModule = await Test.createTestingModule({
       providers: [
@@ -204,6 +235,10 @@ describe('SalesService', () => {
         { provide: getRepositoryToken(Sale), useValue: mockSalesRepo },
         { provide: getRepositoryToken(SaleLine), useValue: mockSaleLinesRepo },
         { provide: getRepositoryToken(Payment), useValue: mockPaymentsRepo },
+        {
+          provide: getRepositoryToken(SaleReturn),
+          useValue: mockSaleReturnsRepo,
+        },
         { provide: getRepositoryToken(Branch), useValue: mockBranchesRepo },
         { provide: getRepositoryToken(User), useValue: mockUsersRepo },
         { provide: getDataSourceToken(), useValue: mockDataSource },
@@ -417,6 +452,36 @@ describe('SalesService', () => {
       });
     });
 
+    it('adds return_state and refunded_total to each row (P7-18)', async () => {
+      const sales = [{ id: 's1' }, { id: 's2' }, { id: 's3' }];
+      mockQueryBuilder.getManyAndCount.mockResolvedValue([sales, 3]);
+      mockSaleReturnsRepo.query.mockResolvedValue([
+        { sale_id: 's1', quantity: 3, returned: 0, refunded: '0' },
+        { sale_id: 's2', quantity: 3, returned: 1, refunded: '966.67' },
+        { sale_id: 's3', quantity: 3, returned: 3, refunded: '2900' },
+      ]);
+
+      const result = await service.findAll({});
+
+      expect(mockSaleReturnsRepo.query).toHaveBeenCalledWith(
+        expect.stringContaining('unnest($1::uuid[])'),
+        [['s1', 's2', 's3']],
+      );
+      expect(result.data).toEqual([
+        { id: 's1', return_state: 'NONE', refunded_total: '0.00' },
+        { id: 's2', return_state: 'PARTIAL', refunded_total: '966.67' },
+        { id: 's3', return_state: 'FULL', refunded_total: '2900.00' },
+      ]);
+    });
+
+    it('skips the return-state query on an empty page', async () => {
+      mockQueryBuilder.getManyAndCount.mockResolvedValue([[], 0]);
+
+      await service.findAll({});
+
+      expect(mockSaleReturnsRepo.query).not.toHaveBeenCalled();
+    });
+
     it('defaults page=1 and limit=50 when omitted', async () => {
       mockQueryBuilder.getManyAndCount.mockResolvedValue([[], 0]);
 
@@ -626,6 +691,89 @@ describe('SalesService', () => {
       await expect(service.findOne('missing')).rejects.toThrow(
         NotFoundException,
       );
+    });
+
+    it('attaches returns, naming approver and requester by id and full_name only (P7-18)', async () => {
+      mockSalesRepo.findOne.mockResolvedValue({ id: 's1', lines: [] });
+      mockSaleReturnsQueryBuilder.getMany.mockResolvedValue([
+        {
+          id: 'ret-1',
+          return_number: 'RET-20261024-0001',
+          created_at: new Date('2026-10-24T05:00:00Z'),
+          reason: 'Changed mind',
+          override_reason: null,
+          out_of_warranty: false,
+          refund_due: '966.67',
+          refund_total: '900.00',
+          client_request_id: 'crid-1',
+          approver: { id: 'm1', full_name: 'Manager One', email: 'x@t.com' },
+          requester: { id: 'c1', full_name: 'Cashier One', role: 'cashier' },
+          lines: [
+            {
+              id: 'rl-1',
+              sale_return_id: 'ret-1',
+              sale_line_id: 'line-1',
+              quantity: 1,
+              refund_share: '966.67',
+              out_of_warranty: false,
+              disposition: 'RESTOCKED',
+              product_unit_id: null,
+              sale_line: { id: 'line-1', line_number: 1 },
+            },
+          ],
+          refunds: [
+            {
+              id: 'f-1',
+              sale_return_id: 'ret-1',
+              method: PaymentMethod.CASH,
+              amount: '900.00',
+              reference_number: null,
+              original_payment_id: null,
+              created_at: new Date(),
+            },
+          ],
+        },
+      ]);
+
+      const result = await service.findOne('s1');
+
+      expect(mockSaleReturnsQueryBuilder.where).toHaveBeenCalledWith(
+        'ret.sale_id = :saleId',
+        { saleId: 's1' },
+      );
+      expect(result.returns).toEqual([
+        {
+          id: 'ret-1',
+          return_number: 'RET-20261024-0001',
+          created_at: new Date('2026-10-24T05:00:00Z'),
+          reason: 'Changed mind',
+          override_reason: null,
+          out_of_warranty: false,
+          refund_due: '966.67',
+          refund_total: '900.00',
+          client_request_id: 'crid-1',
+          approver: { id: 'm1', full_name: 'Manager One' },
+          requester: { id: 'c1', full_name: 'Cashier One' },
+          lines: [
+            {
+              sale_line_id: 'line-1',
+              quantity: 1,
+              refund_share: '966.67',
+              out_of_warranty: false,
+              disposition: 'RESTOCKED',
+              product_unit: null,
+            },
+          ],
+          refunds: [
+            {
+              method: PaymentMethod.CASH,
+              amount: '900.00',
+              reference_number: null,
+              original_payment_id: null,
+            },
+          ],
+        },
+      ]);
     });
   });
 
@@ -4464,6 +4612,25 @@ describe('SalesService', () => {
 
     const validDto = { void_reason: 'Customer returned defective phone' };
 
+    it('409 SALE_HAS_RETURNS under the sale lock when a return committed meanwhile (P7-11)', async () => {
+      mockQueryBuilder.getOne.mockResolvedValueOnce(seedVoidableSale());
+      mockManager.count.mockResolvedValue(1);
+
+      const err = await service
+        .voidSale('sale-1', voidApproval, validDto)
+        .catch((e: unknown) => e);
+
+      expect(err).toBeInstanceOf(ConflictException);
+      expect((err as ConflictException).getResponse()).toMatchObject({
+        code: 'SALE_HAS_RETURNS',
+      });
+      expect(mockManager.count).toHaveBeenCalledWith(SaleReturn, {
+        where: { sale_id: 'sale-1' },
+      });
+      expect(mockStockService.incrementForReversal).not.toHaveBeenCalled();
+      expect(mockManager.query).not.toHaveBeenCalled();
+    });
+
     it('voids a COMPLETED sale: re-increments stock, marks payments reversed, flips to VOIDED', async () => {
       mockQueryBuilder.getOne.mockResolvedValueOnce(seedVoidableSale());
       arrangeManagerFind([
@@ -5282,6 +5449,25 @@ describe('SalesService', () => {
           service.voidWithApproval('missing', cashierAtBranch1, approvalDto),
         ).rejects.toThrow(NotFoundException);
         expect(mockApprovalsService.verify).not.toHaveBeenCalled();
+      });
+
+      it('409 SALE_HAS_RETURNS before any PIN check when the sale has a return (P7-11)', async () => {
+        mockSalesRepo.findOne.mockResolvedValue(seedVoidableSale());
+        mockSaleReturnsRepo.count.mockResolvedValue(1);
+
+        const err = await service
+          .voidWithApproval('sale-1', cashierAtBranch1, approvalDto)
+          .catch((e: unknown) => e);
+
+        expect(err).toBeInstanceOf(ConflictException);
+        expect((err as ConflictException).getResponse()).toMatchObject({
+          code: 'SALE_HAS_RETURNS',
+        });
+        expect(mockSaleReturnsRepo.count).toHaveBeenCalledWith({
+          where: { sale_id: 'sale-1' },
+        });
+        expect(mockApprovalsService.verify).not.toHaveBeenCalled();
+        expect(mockDataSource.transaction).not.toHaveBeenCalled();
       });
 
       it('400 before any PIN check when the sale is not COMPLETED', async () => {

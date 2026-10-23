@@ -3,6 +3,7 @@ import { getDataSourceToken } from '@nestjs/typeorm';
 import { EntityManager } from 'typeorm';
 import { DateTime } from 'luxon';
 import { SaleNumberCountersService } from './sale-number-counters.service';
+import { SaleNumberKind } from './enums/sale-number-kind.enum';
 
 describe('SaleNumberCountersService', () => {
   let service: SaleNumberCountersService;
@@ -205,6 +206,84 @@ describe('SaleNumberCountersService', () => {
       await service.peekNext('branch-1');
 
       expect(mockQueryBuilder.setLock).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('kind (Phase 6.4 P7-10)', () => {
+    it('formats RET-YYYYMMDD-NNNN for kind RETURN', async () => {
+      mockQueryBuilder.getOne.mockResolvedValue(null);
+      mockManager.query.mockResolvedValue([{ last_number: 3 }]);
+
+      const result = await service.generateNext(
+        'branch-1',
+        undefined,
+        SaleNumberKind.RETURN,
+      );
+
+      expect(result).toBe('RET-20260825-0003');
+    });
+
+    it('formats RET- when enlisted in the caller transaction', async () => {
+      const outerManager = {
+        createQueryBuilder: jest.fn().mockReturnValue(mockQueryBuilder),
+        query: jest.fn().mockResolvedValue([{ last_number: 1 }]),
+      };
+
+      const result = await service.generateNext(
+        'branch-1',
+        outerManager as unknown as EntityManager,
+        SaleNumberKind.RETURN,
+      );
+
+      expect(result).toBe('RET-20260825-0001');
+      expect(mockDataSource.transaction).not.toHaveBeenCalled();
+    });
+
+    it('defaults to kind SALE in the lock and the upsert', async () => {
+      mockQueryBuilder.getOne.mockResolvedValue(null);
+      mockManager.query.mockResolvedValue([{ last_number: 1 }]);
+
+      await service.generateNext('branch-1');
+
+      expect(mockQueryBuilder.andWhere).toHaveBeenCalledWith(
+        'counter.kind = :kind',
+        { kind: SaleNumberKind.SALE },
+      );
+      expect(mockManager.query).toHaveBeenCalledWith(
+        expect.stringContaining('"UQ_sale_counter_branch_kind_date"'),
+        ['branch-1', SaleNumberKind.SALE, '2026-08-25'],
+      );
+    });
+
+    it('locks and upserts the RETURN row, never the SALE row', async () => {
+      mockQueryBuilder.getOne.mockResolvedValue(null);
+      mockManager.query.mockResolvedValue([{ last_number: 1 }]);
+
+      await service.generateNext('branch-1', undefined, SaleNumberKind.RETURN);
+
+      expect(mockQueryBuilder.andWhere).toHaveBeenCalledWith(
+        'counter.kind = :kind',
+        { kind: SaleNumberKind.RETURN },
+      );
+      expect(mockManager.query).toHaveBeenCalledWith(
+        expect.stringContaining('(branch_id, kind, counter_date, last_number)'),
+        ['branch-1', SaleNumberKind.RETURN, '2026-08-25'],
+      );
+    });
+
+    it('peekNext reads the row of the given kind', async () => {
+      mockRepo.findOne.mockResolvedValue({ last_number: 6 });
+
+      const result = await service.peekNext('branch-1', SaleNumberKind.RETURN);
+
+      expect(result).toBe('RET-20260825-0007');
+      expect(mockRepo.findOne).toHaveBeenCalledWith({
+        where: {
+          branch_id: 'branch-1',
+          kind: SaleNumberKind.RETURN,
+          counter_date: '2026-08-25',
+        },
+      });
     });
   });
 

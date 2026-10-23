@@ -94,6 +94,10 @@ import { WarrantyPeriod } from '../../products/enums/warranty-period.enum';
   'CHK_sale_lines_warranty',
   `warranty IN ('NO_WARRANTY', 'CHECKING', 'WEEK_1', 'WEEK_2', 'MONTH_1', 'MONTH_2', 'MONTH_3', 'MONTH_6', 'MONTH_12', 'MONTH_18', 'MONTH_24')`,
 )
+@Check(
+  'CHK_sale_lines_returned_qty',
+  `"returned_quantity" >= 0 AND "returned_quantity" <= "quantity"`,
+)
 export class SaleLine {
   @PrimaryGeneratedColumn('uuid')
   id!: string;
@@ -140,6 +144,14 @@ export class SaleLine {
 
   @Column({ type: 'integer' })
   quantity!: number;
+
+  /**
+   * How many of this line have come back on returns (Phase 6.4 P7-2),
+   * never more than quantity (CHK_sale_lines_returned_qty, the backstop
+   * under a race). The only column a return writes on a completed sale.
+   */
+  @Column({ type: 'integer', default: 0, name: 'returned_quantity' })
+  returned_quantity!: number;
 
   // Both discount_type and discount_value are NULL together (no discount),
   // or both set together (a discount was applied). See CHK_..._consistency.

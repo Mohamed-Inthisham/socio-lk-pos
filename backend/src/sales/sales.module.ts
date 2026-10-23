@@ -3,10 +3,15 @@ import { TypeOrmModule } from '@nestjs/typeorm';
 import { Sale } from './entities/sale.entity';
 import { SaleLine } from './entities/sale-line.entity';
 import { Payment } from './entities/payment.entity';
+import { SaleReturn } from './entities/sale-return.entity';
+import { SaleReturnLine } from './entities/sale-return-line.entity';
+import { SaleRefund } from './entities/sale-refund.entity';
 import { Branch } from '../branches/entities/branch.entity';
 import { User } from '../users/entities/user.entity';
 import { SalesService } from './sales.service';
 import { SalesController } from './sales.controller';
+import { SaleReturnsService } from './sale-returns.service';
+import { SaleReturnsController } from './sale-returns.controller';
 import { ProductsModule } from '../products/products.module';
 import { SuppliersModule } from '../suppliers/suppliers.module';
 import { StockModule } from '../stock/stock.module';
@@ -18,7 +23,16 @@ import { ApprovalsModule } from '../approvals/approvals.module';
 
 @Module({
   imports: [
-    TypeOrmModule.forFeature([Sale, SaleLine, Payment, Branch, User]),
+    TypeOrmModule.forFeature([
+      Sale,
+      SaleLine,
+      Payment,
+      SaleReturn,
+      SaleReturnLine,
+      SaleRefund,
+      Branch,
+      User,
+    ]),
     ProductsModule,
     CustomersModule,
     SuppliersModule,
@@ -28,8 +42,8 @@ import { ApprovalsModule } from '../approvals/approvals.module';
     PhonePurchasesModule,
     ApprovalsModule,
   ],
-  providers: [SalesService],
-  controllers: [SalesController],
+  providers: [SalesService, SaleReturnsService],
+  controllers: [SalesController, SaleReturnsController],
   exports: [SalesService],
 })
 export class SalesModule {}

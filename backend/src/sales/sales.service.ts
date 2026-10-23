@@ -17,6 +17,8 @@ import {
 import { Sale } from './entities/sale.entity';
 import { SaleLine } from './entities/sale-line.entity';
 import { Payment } from './entities/payment.entity';
+import { SaleReturn } from './entities/sale-return.entity';
+import { ReturnDisposition } from './enums/return-disposition.enum';
 import { ProductUnit } from '../product-units/entities/product-unit.entity';
 import { Product } from '../products/entities/product.entity';
 import { ProductUnitStatus } from '../product-units/enums/product-unit-status.enum';
@@ -66,6 +68,51 @@ import { UserRole } from '../users/enums/user-role.enum';
 import { AuditAction } from '../audit-log/enums/audit-action.enum';
 import { writeAuditEntry } from '../audit-log/utils/write-audit-entry';
 
+/**
+ * A return as GET /sales/:id shows it (Phase 6.4 P7-18): who approved and
+ * who asked as { id, full_name } only, and each returned phone as
+ * { id, imei }.
+ */
+export interface SaleReturnView {
+  id: string;
+  return_number: string;
+  created_at: Date;
+  reason: string;
+  override_reason: string | null;
+  out_of_warranty: boolean;
+  refund_due: string;
+  refund_total: string;
+  client_request_id: string;
+  approver: { id: string; full_name: string } | null;
+  requester: { id: string; full_name: string } | null;
+  lines: {
+    sale_line_id: string;
+    quantity: number;
+    refund_share: string;
+    out_of_warranty: boolean;
+    disposition: ReturnDisposition;
+    product_unit: { id: string; imei: string } | null;
+  }[];
+  refunds: {
+    method: string;
+    amount: string;
+    reference_number: string | null;
+    original_payment_id: string | null;
+  }[];
+}
+
+/** The hydrated sale every endpoint returns: findOne's shape. */
+export type SaleWithReturns = Sale & { returns: SaleReturnView[] };
+
+/** How much of a sale has come back (P7-18): none, some, or all of it. */
+export type ReturnState = 'NONE' | 'PARTIAL' | 'FULL';
+
+/** A GET /sales row: the sale plus its return state and refunds. */
+export type SaleListRow = Sale & {
+  return_state: ReturnState;
+  refunded_total: string;
+};
+
 /** The session user asking for a void (the AuthenticatedUser fields used). */
 export type VoidRequester = ApprovalCaller & { role: UserRole };
 
@@ -92,6 +139,19 @@ const withConflictDetail = (
   return new ConflictException({ ...body, ...detail });
 };
 
+/**
+ * 409 SALE_HAS_RETURNS (Phase 6.4 P7-11): a void would put back the full
+ * quantity of every line and move every sold phone to IN_STOCK, so after
+ * a return it would restock items twice. Returns are final too.
+ */
+const saleHasReturns = (): ConflictException =>
+  new ConflictException({
+    message:
+      "This sale can't be voided: it has returns. A mistaken return is " +
+      'put right with a new sale.',
+    code: 'SALE_HAS_RETURNS',
+  });
+
 @Injectable()
 export class SalesService {
   constructor(
@@ -101,6 +161,8 @@ export class SalesService {
     private readonly saleLinesRepository: Repository<SaleLine>,
     @InjectRepository(Payment)
     private readonly paymentsRepository: Repository<Payment>,
+    @InjectRepository(SaleReturn)
+    private readonly saleReturnsRepository: Repository<SaleReturn>,
     @InjectRepository(Branch)
     private readonly branchesRepository: Repository<Branch>,
     @InjectRepository(User)
@@ -241,7 +303,9 @@ export class SalesService {
    * sale with several matching lines or payments is one row and the page
    * and total stay right.
    */
-  async findAll(query: ListSalesQueryDto): Promise<PaginatedResponse<Sale>> {
+  async findAll(
+    query: ListSalesQueryDto,
+  ): Promise<PaginatedResponse<SaleListRow>> {
     const page = query.page ?? 1;
     const limit = query.limit ?? 50;
 
@@ -300,6 +364,12 @@ export class SalesService {
               'EXISTS (SELECT 1 FROM payments p ' +
                 'WHERE p.sale_id = sale.id AND p.trade_in_imei = :imei)',
               { imei: query.q },
+            )
+            // A RET- number finds the sale it was made on (P7-18).
+            .orWhere(
+              'EXISTS (SELECT 1 FROM sale_returns r ' +
+                'WHERE r.sale_id = sale.id AND r.return_number ILIKE :pattern)',
+              { pattern },
             );
         }),
       );
@@ -317,7 +387,49 @@ export class SalesService {
     qb.skip((page - 1) * limit).take(limit);
 
     const [rows, total] = await qb.getManyAndCount();
-    return paginate(rows, total, page, limit);
+    return paginate(await this.withReturnState(rows), total, page, limit);
+  }
+
+  /**
+   * Each row's return_state and refunded_total (Phase 6.4 P7-18), from one
+   * query over the page's sales: NONE when nothing came back, FULL when
+   * every unit did, PARTIAL in between.
+   */
+  private async withReturnState(rows: Sale[]): Promise<SaleListRow[]> {
+    const totals: {
+      sale_id: string;
+      quantity: number;
+      returned: number;
+      refunded: string;
+    }[] =
+      rows.length === 0
+        ? []
+        : await this.saleReturnsRepository.query(
+            `SELECT s.id AS sale_id,
+                    (SELECT COALESCE(SUM(l.quantity), 0)::int
+                       FROM sale_lines l WHERE l.sale_id = s.id) AS quantity,
+                    (SELECT COALESCE(SUM(l.returned_quantity), 0)::int
+                       FROM sale_lines l WHERE l.sale_id = s.id) AS returned,
+                    (SELECT COALESCE(SUM(r.refund_total), 0)::text
+                       FROM sale_returns r WHERE r.sale_id = s.id) AS refunded
+               FROM unnest($1::uuid[]) AS s(id)`,
+            [rows.map((sale) => sale.id)],
+          );
+    // Added to the page's own rows, in place.
+    for (const sale of rows) {
+      const t = totals.find((row) => row.sale_id === sale.id);
+      const returnState: ReturnState =
+        !t || t.returned === 0
+          ? 'NONE'
+          : t.returned >= t.quantity
+            ? 'FULL'
+            : 'PARTIAL';
+      Object.assign(sale, {
+        return_state: returnState,
+        refunded_total: fromCents(toCents(t?.refunded ?? 0)),
+      });
+    }
+    return rows as SaleListRow[];
   }
 
   /**
@@ -337,9 +449,13 @@ export class SalesService {
    * how a receipt shows split-tender payments (Rs. 400 card first, then
    * Rs. 550 cash, in the order the cashier processed them).
    *
+   * Returns (Phase 6.4 P7-18) come from their own query (loadReturns), so
+   * they don't multiply the lines × payments join; each line carries its
+   * returned_quantity column.
+   *
    * Throws 404 if the sale doesn't exist.
    */
-  async findOne(id: string): Promise<Sale> {
+  async findOne(id: string): Promise<SaleWithReturns> {
     const sale = await this.salesRepository.findOne({
       where: { id },
       // payments.trade_in_product: TRADE_IN rows show the traded-in
@@ -365,8 +481,69 @@ export class SalesService {
     if (!sale) {
       throw new NotFoundException('Sale not found');
     }
-    return sale;
+    return Object.assign(sale, { returns: await this.loadReturns(id) });
   }
+
+  /**
+   * A sale's returns, oldest first, as GET /sales/:id shows them
+   * (SaleReturnView): return lines in the sale's line order, refunds in
+   * the order recorded. withDeleted: a soft-deleted approver or requester
+   * is still named.
+   */
+  private async loadReturns(saleId: string): Promise<SaleReturnView[]> {
+    const returns = await this.saleReturnsRepository
+      .createQueryBuilder('ret')
+      .withDeleted()
+      .leftJoin('ret.approver', 'approver')
+      .addSelect(['approver.id', 'approver.full_name'])
+      .leftJoin('ret.requester', 'requester')
+      .addSelect(['requester.id', 'requester.full_name'])
+      .leftJoinAndSelect('ret.lines', 'line')
+      .leftJoin('line.sale_line', 'saleLine')
+      .addSelect(['saleLine.id', 'saleLine.line_number'])
+      .leftJoin('line.product_unit', 'unit')
+      .addSelect(['unit.id', 'unit.imei'])
+      .leftJoinAndSelect('ret.refunds', 'refund')
+      .where('ret.sale_id = :saleId', { saleId })
+      .orderBy('ret.created_at', 'ASC')
+      .addOrderBy('saleLine.line_number', 'ASC')
+      .addOrderBy('refund.created_at', 'ASC')
+      .addOrderBy('refund.id', 'ASC')
+      .getMany();
+
+    const person = (user?: { id: string; full_name: string }) =>
+      user ? { id: user.id, full_name: user.full_name } : null;
+    return returns.map((ret) => ({
+      id: ret.id,
+      return_number: ret.return_number,
+      created_at: ret.created_at,
+      reason: ret.reason,
+      override_reason: ret.override_reason,
+      out_of_warranty: ret.out_of_warranty,
+      refund_due: ret.refund_due,
+      refund_total: ret.refund_total,
+      client_request_id: ret.client_request_id,
+      approver: person(ret.approver),
+      requester: person(ret.requester),
+      lines: (ret.lines ?? []).map((line) => ({
+        sale_line_id: line.sale_line_id,
+        quantity: line.quantity,
+        refund_share: line.refund_share,
+        out_of_warranty: line.out_of_warranty,
+        disposition: line.disposition,
+        product_unit: line.product_unit
+          ? { id: line.product_unit.id, imei: line.product_unit.imei }
+          : null,
+      })),
+      refunds: (ret.refunds ?? []).map((refund) => ({
+        method: refund.method,
+        amount: refund.amount,
+        reference_number: refund.reference_number,
+        original_payment_id: refund.original_payment_id,
+      })),
+    }));
+  }
+
   /**
    * Partial update on a DRAFT sale. Only notes and customer_id can be
    * changed via this endpoint. Attempting to update a COMPLETED or
@@ -1526,6 +1703,14 @@ export class SalesService {
         );
       }
 
+      // 2b. No returns (P7-11), again under the sale lock: a return commits
+      //     only while holding this row, so none can slip in after this.
+      if (
+        (await manager.count(SaleReturn, { where: { sale_id: saleId } })) > 0
+      ) {
+        throw saleHasReturns();
+      }
+
       // 3. reason already validated at DTO + line above; nothing more to check.
 
       // 4. Load lines and payments. Lines are needed for the stock
@@ -1711,9 +1896,10 @@ export class SalesService {
    * POST /sales/:id/void (Phase 6.4 P6-17): every void is approved with a
    * manager's or admin's PIN, a manager's own session included.
    *
-   * 1. Pre-check, no locks: the sale exists (404), is COMPLETED (400), and
-   *    the session user is at its branch (403; admins anywhere). A void
-   *    that can't happen never uses up a PIN attempt.
+   * 1. Pre-check, no locks: the sale exists (404), is COMPLETED (400), the
+   *    session user is at its branch (403; admins anywhere), and it has no
+   *    returns (409 SALE_HAS_RETURNS, P7-11; voidSale re-checks under the
+   *    lock). A void that can't happen never uses up a PIN attempt.
    * 2. ApprovalsService.verify: the PIN, in its own committed transaction
    *    (a wrong PIN's count survives whatever happens next).
    * 3. voidSale: the void's transaction, which re-checks COMPLETED under
@@ -1743,6 +1929,12 @@ export class SalesService {
         message: 'You can only void sales at your own branch.',
         code: 'VOID_WRONG_BRANCH',
       });
+    }
+    if (
+      (await this.saleReturnsRepository.count({ where: { sale_id: saleId } })) >
+      0
+    ) {
+      throw saleHasReturns();
     }
 
     const approver = await this.approvalsService.verify({

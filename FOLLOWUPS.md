@@ -62,7 +62,7 @@ Non-blocking issues and tech debt to address opportunistically. When you fix one
 
 ## Refactors and cleanups
 
-- **Rename `StockService.incrementForReversal` now that it has multiple callers.** Slice E is the second caller (void); P7 adds a third (Back to stock on a return) and a fourth (inspection pass). Kept out of P7 step 0c so that PR changes only lock order; do it on its own or with step 0a. "ForReversal" is narrower than what it does. Candidate: `increment(manager, productId, branchId, qty)` with a docstring covering the callers. _[Slice D]_
+- **Rename `StockService.incrementForReversal` now that it has multiple callers.** Slice E is the second caller (void); P7 added a third (Back to stock on a return, step 0b) and a fourth (inspection pass, step 0a). Kept out of P7 step 0c so that PR changes only lock order; do it on its own or with step 0a. "ForReversal" is narrower than what it does. Candidate: `increment(manager, productId, branchId, qty)` with a docstring covering the callers. _[Slice D]_
 
 - **`voidSale` reads its lines with no `ORDER BY`.** `manager.find(SaleLine, { where: { sale_id } })` in `SalesService.voidSale` has no order, so lines are reversed in whatever order Postgres returns them (`completeSale` orders by `line_number`). Since P7 step 0c this no longer affects locking (`lockInventoryRows` sorts the targets first), and the reversal's result doesn't depend on line order, so nothing is wrong today. Fix when `voidSale` is next touched: `order: { line_number: 'ASC' }`, for a predictable order in logs and tests. _[Phase 6.4 P7 step 0c recon]_
 
@@ -83,8 +83,6 @@ Non-blocking issues and tech debt to address opportunistically. When you fix one
 - **`SalesService` growth.** Currently ~1200 lines after Slice E. Consider splitting into `SaleLinesService` + `SalePaymentsService` + orchestrator. Slice G (trade-ins) will push it further. _[Phase 6.3, worsened Slice E]_
 
 ## Deferred features
-
-- **Customer-return re-stock.** **Scheduled: Phase 6.4 P7 — Returns and refunds**, planned in the planning doc section 8 "P7 decision log" (originally section 8 P6-24). **Step 0a shipped the status:** `INSPECTION`, non-sellable and live (in `uq_product_units_imei_live`, the entity `@Index` and `LIVE_UNIT_STATUSES`), and `POST /product-units/:id/inspection-pass` (P7-6, P7-7; docs/backend/used-phones.md). **Still open: the return itself (step 0b)**, which moves a returned phone SOLD → INSPECTION. Customer physically returns a phone; separate from a full sale void. After checking: no fault → IN_STOCK; faulty → back to its supplier (with the supplier-receiving phase below). RETURNED means "trade-in reversed; the phone is back with the customer" and stays out of the index so a voided trade-in can be re-rung. _[Slice D/E, revised buy-back PR, scheduled P6 planning]_
 
 - **Admin endpoint to update `ProductUnit.selling_price` post-intake.** The "price later" workflow (Cashier Option C from Slice D) requires this. Currently there's no way to set the per-unit price after intake if the cashier left it null. _[Slice D]_
 

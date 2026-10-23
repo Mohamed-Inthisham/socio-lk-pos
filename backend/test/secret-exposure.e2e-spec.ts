@@ -536,6 +536,192 @@ describe('Secret exposure (e2e)', () => {
     });
   });
 
+  describe('returns (Phase 6.4 P7; approver and requester as id and full_name only)', () => {
+    let saleId: string;
+    let lineId: string;
+    let phoneLineId: string;
+    let clientRequestId: string;
+
+    const returnBody = (pin: string, refund = 100) => ({
+      client_request_id: clientRequestId,
+      lines: [
+        { sale_line_id: lineId, quantity: 1, condition: 'RESALEABLE' },
+        { sale_line_id: phoneLineId, quantity: 1 },
+      ],
+      refunds: [{ method: PaymentMethod.CASH, amount: refund }],
+      reason: 'secret-exposure probe',
+      // These products have no warranty: every line is outside it (P7-23).
+      override_reason: 'secret-exposure override',
+      approval: { approver_id: manager.id, pin },
+    });
+
+    it('a completed sale with a stock line and a phone', async () => {
+      // The phone passed inspection above and is back in stock.
+      const units: { imei: string }[] = await dataSource.query(
+        `SELECT imei FROM product_units WHERE product_id = $1 AND status = 'IN_STOCK'`,
+        [serializedProduct.id],
+      );
+      const created = await http()
+        .post('/api/v1/sales')
+        .set('Cookie', cashierCookies)
+        .send({ branch_id: branch.id })
+        .expect(201);
+      saleId = created.body.id;
+      await pause(150);
+      await http()
+        .post(`/api/v1/sales/${saleId}/lines`)
+        .set('Cookie', cashierCookies)
+        .send({ product_id: product.id, quantity: 2 })
+        .expect(201);
+      await pause(150);
+      const withPhone = await http()
+        .post(`/api/v1/sales/${saleId}/lines`)
+        .set('Cookie', cashierCookies)
+        .send({
+          product_id: serializedProduct.id,
+          quantity: 1,
+          imei_snapshot: units[0].imei,
+        })
+        .expect(201);
+      lineId = withPhone.body.lines[0].id;
+      phoneLineId = withPhone.body.lines[1].id;
+      const total = Number(withPhone.body.total);
+      await pause(150);
+      await http()
+        .post(`/api/v1/sales/${saleId}/payments`)
+        .set('Cookie', cashierCookies)
+        .send({
+          payment_method: PaymentMethod.CASH,
+          amount: total,
+          cash_received: total,
+        })
+        .expect(201);
+      await pause(150);
+      await http()
+        .post(`/api/v1/sales/${saleId}/complete`)
+        .set('Cookie', cashierCookies)
+        .expect(200);
+      clientRequestId = '9f0f5a3e-6a43-4d54-9a8b-2a7c3d1e5b01';
+    });
+
+    it('POST /sales/:id/returns with a wrong PIN (403 body)', async () => {
+      const res = await http()
+        .post(`/api/v1/sales/${saleId}/returns`)
+        .set('Cookie', cashierCookies)
+        .send(returnBody('193728'))
+        .expect(403);
+      expect(res.body.code).toBe('WRONG_PIN');
+      expectNoSecrets(res);
+      expect(JSON.stringify(res.body)).not.toContain('193728');
+    });
+
+    it('POST /sales/:id/returns refused before the PIN (400 REFUND_TOO_HIGH body)', async () => {
+      const res = await http()
+        .post(`/api/v1/sales/${saleId}/returns`)
+        .set('Cookie', cashierCookies)
+        .send(returnBody(MANAGER_PIN, 999999))
+        .expect(400);
+      expect(res.body.code).toBe('REFUND_TOO_HIGH');
+      expectNoSecrets(res);
+    });
+
+    it("POST /sales/:id/returns (cashier's session, manager's PIN; 201)", async () => {
+      const res = await http()
+        .post(`/api/v1/sales/${saleId}/returns`)
+        .set('Cookie', cashierCookies)
+        .send(returnBody(MANAGER_PIN))
+        .expect(201);
+      const ret = res.body.sale.returns[0];
+      expect(ret.approver).toEqual({
+        id: manager.id,
+        full_name: manager.full_name,
+      });
+      expect(ret.requester).toEqual({
+        id: cashier.id,
+        full_name: cashier.full_name,
+      });
+      expect(ret.lines[1].product_unit).toEqual({
+        id: expect.any(String),
+        imei: expect.any(String),
+      });
+      expectNoSecrets(res);
+    });
+
+    it('POST /sales/:id/returns resent (200)', async () => {
+      const res = await http()
+        .post(`/api/v1/sales/${saleId}/returns`)
+        .set('Cookie', cashierCookies)
+        .send(returnBody(MANAGER_PIN))
+        .expect(200);
+      expectNoSecrets(res);
+    });
+
+    it('POST /sales/:id/returns with the id from another user (409 body)', async () => {
+      const res = await http()
+        .post(`/api/v1/sales/${saleId}/returns`)
+        .set('Cookie', managerCookies)
+        .send(returnBody(MANAGER_PIN))
+        .expect(409);
+      expect(res.body).toEqual({
+        message: expect.any(String),
+        code: 'CLIENT_REQUEST_ID_CONFLICT',
+      });
+      expectNoSecrets(res);
+    });
+
+    it('GET /sales/:id with returns', async () => {
+      const res = await http()
+        .get(`/api/v1/sales/${saleId}`)
+        .set('Cookie', cashierCookies)
+        .expect(200);
+      expect(Object.keys(res.body.returns[0].approver).sort()).toEqual([
+        'full_name',
+        'id',
+      ]);
+      expect(Object.keys(res.body.returns[0].requester).sort()).toEqual([
+        'full_name',
+        'id',
+      ]);
+      expectNoSecrets(res);
+    });
+
+    it('GET /sales with return_state', async () => {
+      const res = await http()
+        .get('/api/v1/sales')
+        .query({ branchId: branch.id })
+        .set('Cookie', cashierCookies)
+        .expect(200);
+      const rows = res.body.data as { id: string }[];
+      expect(rows.find((s) => s.id === saleId)).toMatchObject({
+        return_state: 'PARTIAL',
+      });
+      expectNoSecrets(res);
+    });
+
+    it('GET /sale-returns/inspection', async () => {
+      const res = await http()
+        .get('/api/v1/sale-returns/inspection')
+        .query({ branchId: branch.id })
+        .set('Cookie', managerCookies)
+        .expect(200);
+      expect(res.body).toHaveLength(1);
+      expectNoSecrets(res);
+    });
+
+    it('POST /sales/:id/void on a sale with a return (409 SALE_HAS_RETURNS body)', async () => {
+      const res = await http()
+        .post(`/api/v1/sales/${saleId}/void`)
+        .set('Cookie', cashierCookies)
+        .send({
+          void_reason: 'secret-exposure probe',
+          approval: { approver_id: manager.id, pin: MANAGER_PIN },
+        })
+        .expect(409);
+      expect(res.body.code).toBe('SALE_HAS_RETURNS');
+      expectNoSecrets(res);
+    });
+  });
+
   describe('users and audit log', () => {
     it('GET /users/:id returns no secrets', async () => {
       const res = await http()

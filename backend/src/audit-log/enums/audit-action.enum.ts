@@ -15,4 +15,6 @@ export enum AuditAction {
   APPROVAL_PIN_LOCKED = 'APPROVAL_PIN_LOCKED',
   // A returned phone checked and put back on sale (Phase 6.4 P7-7).
   INSPECTION_PASSED = 'INSPECTION_PASSED',
+  // A return on a completed sale, approved with a manager's PIN (P7-14).
+  RETURN = 'RETURN',
 }
