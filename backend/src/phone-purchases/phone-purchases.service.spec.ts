@@ -11,7 +11,12 @@ import { PhonePurchase } from './entities/phone-purchase.entity';
 import { ProductUnit } from '../product-units/entities/product-unit.entity';
 import { ProductUnitStatus } from '../product-units/enums/product-unit-status.enum';
 import { StockService } from '../stock/stock.service';
-import { In, QueryFailedError } from 'typeorm';
+import { EntityManager, In, QueryFailedError } from 'typeorm';
+import { lockInventoryRows } from '../stock/lock-inventory-rows';
+
+// The global lock order's helper takes its own queries on the manager;
+// mocked so the per-call manager mocks below stay exact (Phase 6.4 P7-25).
+jest.mock('../stock/lock-inventory-rows');
 
 // A Postgres unique violation (23505) on the named index/constraint, as
 // TypeORM surfaces it.
@@ -538,6 +543,91 @@ describe('PhonePurchasesService', () => {
 
       const firstArg = mockStockService.incrementForReversal.mock.calls[0][0];
       expect(firstArg).toBe(mockManager);
+    });
+
+    it('locks the stock row after the IMEI pre-check and before any insert (P7-25)', async () => {
+      setupHappyPathLookups();
+      mockManager.create.mockImplementation((_e, data) => data);
+      mockManager.save.mockImplementation((e) =>
+        Promise.resolve({ id: 'purchase-7', ...e }),
+      );
+      mockStockService.incrementForReversal.mockResolvedValue(undefined);
+      mockRepo.findOne.mockResolvedValue({ id: 'purchase-7' });
+
+      await service.create(validCreateDto(), 'cashier-1');
+
+      const lockMock = jest.mocked(lockInventoryRows);
+      expect(lockMock).toHaveBeenCalledTimes(1);
+      expect(lockMock).toHaveBeenCalledWith(mockManager, {
+        stock: [{ productId: 'prod-1', branchId: 'branch-1' }],
+      });
+      const lockOrder = lockMock.mock.invocationCallOrder[0];
+      // The 5th findOne is the IMEI pre-check.
+      expect(mockManager.findOne.mock.invocationCallOrder[4]).toBeLessThan(
+        lockOrder,
+      );
+      expect(lockOrder).toBeLessThan(
+        mockManager.save.mock.invocationCallOrder[0],
+      );
+    });
+
+    it('takes no lock when the IMEI pre-check refuses (P7-25)', async () => {
+      setupHappyPathLookups({
+        existingUnit: {
+          id: 'unit-9',
+          status: ProductUnitStatus.IN_STOCK,
+          product_id: 'prod-1',
+        },
+      });
+
+      await expect(
+        service.create(validCreateDto(), 'cashier-1'),
+      ).rejects.toThrow(ConflictException);
+      expect(lockInventoryRows).not.toHaveBeenCalled();
+    });
+  });
+
+  // ---- createForTradeIn ----
+
+  describe('createForTradeIn', () => {
+    const tradeInInput = () => ({
+      customer_id: 'cust-1',
+      branch_id: 'branch-1',
+      cashier_id: 'cashier-1',
+      product_id: 'prod-1',
+      imei: '356938035643809',
+      buying_price: '60000.00',
+      selling_price: null,
+      notes: null,
+    });
+
+    it('locks the stock row after the IMEI pre-check and before any insert (P7-25)', async () => {
+      mockManager.findOne
+        .mockResolvedValueOnce(validSerializedProduct())
+        .mockResolvedValueOnce(null);
+      mockManager.create.mockImplementation((_e, data) => data);
+      mockManager.save.mockImplementation((e) =>
+        Promise.resolve({ id: 'saved-1', ...e }),
+      );
+      mockStockService.incrementForReversal.mockResolvedValue(undefined);
+
+      await service.createForTradeIn(
+        mockManager as unknown as EntityManager,
+        tradeInInput(),
+      );
+
+      const lockMock = jest.mocked(lockInventoryRows);
+      expect(lockMock).toHaveBeenCalledTimes(1);
+      expect(lockMock).toHaveBeenCalledWith(mockManager, {
+        stock: [{ productId: 'prod-1', branchId: 'branch-1' }],
+      });
+      const lockOrder = lockMock.mock.invocationCallOrder[0];
+      expect(mockManager.findOne.mock.invocationCallOrder[1]).toBeLessThan(
+        lockOrder,
+      );
+      expect(lockOrder).toBeLessThan(
+        mockManager.save.mock.invocationCallOrder[0],
+      );
     });
   });
 

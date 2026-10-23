@@ -22,6 +22,7 @@ import { Product } from '../products/entities/product.entity';
 import { ProductUnitStatus } from '../product-units/enums/product-unit-status.enum';
 import { ProductUnitsService } from '../product-units/product-units.service';
 import { LIVE_UNIT_STATUSES } from '../product-units/live-imei';
+import { lockInventoryRows } from '../stock/lock-inventory-rows';
 import { SaleStatus } from './enums/sale-status.enum';
 import { SaleType } from './enums/sale-type.enum';
 import { DiscountType } from './enums/discount-type.enum';
@@ -1186,6 +1187,8 @@ export class SalesService {
    * Steps, in order:
    *   1. Load + lock the sale (pessimistic_write on the sales row)
    *   2. Run guards above
+   *   2d. Lock every Stock and ProductUnit row it will touch, in the
+   *      global order (lockInventoryRows, Phase 6.4 P7-25)
    *   3. For each line where external_supplier_id IS NULL: decrement
    *      stock via StockService.decrementForSale, enlisted in this
    *      transaction. Lines sourced from friendly shops
@@ -1259,6 +1262,34 @@ export class SalesService {
         );
       }
 
+      // 2d. Lock every Stock and ProductUnit row this complete will touch,
+      //     up front and in the global order (P7-25, lockInventoryRows):
+      //     the in-house lines' stock and the trade-ins' stock, then the
+      //     lines' units. Trade-in units don't exist yet (step 3b inserts
+      //     them after these locks). Locks only; every check below still
+      //     runs where it did.
+      const tradeInPayments = await manager.find(Payment, {
+        where: { sale_id: saleId, payment_method: PaymentMethod.TRADE_IN },
+        order: { created_at: 'ASC' },
+      });
+      await lockInventoryRows(manager, {
+        stock: [
+          ...lines
+            .filter((line) => line.external_supplier_id === null)
+            .map((line) => ({
+              productId: line.product_id,
+              branchId: sale.branch_id,
+            })),
+          ...tradeInPayments.map((payment) => ({
+            productId: payment.trade_in_product_id!,
+            branchId: sale.branch_id,
+          })),
+        ],
+        unitIds: lines
+          .map((line) => line.product_unit_id)
+          .filter((id): id is string => id !== null),
+      });
+
       // 3. Per-line state transitions for the sale being COMPLETED.
       //    Two orthogonal decisions per line (Slice E derived-from-Q4):
       //      Stock decrement: gated on `external_supplier_id === null`.
@@ -1269,9 +1300,9 @@ export class SalesService {
       //        serialized has product_unit_id=null (imei_snapshot is
       //        free text); non-serialized always has it null.
       //
-      //    Lock ordering per Q4: Stock row (coarser, per product+branch)
-      //    before ProductUnit row (finer, per single unit). Any throw
-      //    inside either call rolls back the whole transaction.
+      //    The rows are already locked (2d), so the order here no longer
+      //    matters for deadlocks. Any throw inside either call rolls back
+      //    the whole transaction.
       //
       //    Non-IN_STOCK PU here fires the cross-DRAFT race conflict
       //    (Q5) — two DRAFTs held the same IMEI, another sale completed
@@ -1304,13 +1335,9 @@ export class SalesService {
       //     ProductUnit / Stock exists yet. Here each one becomes real
       //     inventory via createForTradeIn (enlisted in this manager),
       //     and the PhonePurchase id is stamped back onto the payment.
-      //     Runs after the outgoing loop so outgoing Stock/PU locks are
-      //     taken first. An IMEI collision (409) or product change
-      //     (400) rolls back the whole sale.
-      const tradeInPayments = await manager.find(Payment, {
-        where: { sale_id: saleId, payment_method: PaymentMethod.TRADE_IN },
-        order: { created_at: 'ASC' },
-      });
+      //     The trade-in payments were read, and their stock rows locked,
+      //     in 2d. An IMEI collision (409) or product change (400) rolls
+      //     back the whole sale.
       if (tradeInPayments.length > 0 && sale.customer_id === null) {
         // addPayment requires a customer for TRADE_IN, but update() can
         // still clear it afterwards. PhonePurchase needs a customer.
@@ -1432,6 +1459,9 @@ export class SalesService {
    *   3. Guard void_reason is non-blank after trim.
    *   4. Load all lines and payments for this sale (need both for the
    *      mutations below; single-fetch each rather than one-by-one).
+   *   4b. Find the trade-in units, then lock every Stock and ProductUnit
+   *      row the void will touch, in the global order (lockInventoryRows,
+   *      Phase 6.4 P7-25).
    *   5. For each line where external_supplier_id IS NULL: re-increment
    *      stock via StockService.incrementForReversal; serialized lines
    *      also flip their PU SOLD → IN_STOCK, which is 409 if the phone
@@ -1509,15 +1539,58 @@ export class SalesService {
       // Any COMPLETED sale has at least one line — enforced by
       // completeSale's own guard — so we don't check length here.
 
+      // 4b. Lock every Stock and ProductUnit row this void will touch, up
+      //     front and in the global order (P7-25, lockInventoryRows): the
+      //     in-house lines' stock and the trade-in units' stock, then the
+      //     lines' units and the trade-in units. The trade-in units are
+      //     found by reading first, without a lock: a phone purchase's
+      //     unit, and that unit's product and branch, never change.
+      //     Nothing here throws: a payment never stamped, or a purchase
+      //     with no unit, is skipped and step 5b raises its integrity
+      //     error from the same place as before.
+      const tradeInPayments = await manager.find(Payment, {
+        where: { sale_id: saleId, payment_method: PaymentMethod.TRADE_IN },
+        order: { created_at: 'ASC' },
+      });
+      const tradeInUnits = new Map<string, ProductUnit>();
+      for (const payment of tradeInPayments) {
+        // Checked explicitly: TypeORM may drop a null where-condition,
+        // which would match an arbitrary unit.
+        if (payment.trade_in_phone_purchase_id === null) continue;
+        const unit = await manager.findOne(ProductUnit, {
+          where: { phone_purchase_id: payment.trade_in_phone_purchase_id },
+        });
+        if (unit) tradeInUnits.set(payment.id, unit);
+      }
+      await lockInventoryRows(manager, {
+        stock: [
+          ...lines
+            .filter((line) => line.external_supplier_id === null)
+            .map((line) => ({
+              productId: line.product_id,
+              branchId: sale.branch_id,
+            })),
+          ...[...tradeInUnits.values()].map((unit) => ({
+            productId: unit.product_id,
+            branchId: unit.branch_id,
+          })),
+        ],
+        unitIds: [
+          ...lines
+            .map((line) => line.product_unit_id)
+            .filter((id): id is string => id !== null),
+          ...[...tradeInUnits.values()].map((unit) => unit.id),
+        ],
+      });
+
       // 5. Per-line state REVERSALS for the sale being VOIDED. Symmetric
-      //    to completeSale's step 3, in the same lock order (Stock first,
-      //    then PU). Same two orthogonal gates:
+      //    to completeSale's step 3; the rows are already locked (4b).
+      //    Same two orthogonal gates:
       //      Stock re-increment: gated on `external_supplier_id === null`.
       //      PU flip SOLD → IN_STOCK: gated on `product_unit_id !== null`.
       //
-      //    Sequential (not Promise.all) so pessimistic_write locks
-      //    serialize cleanly per (product, branch) and per PU, matching
-      //    the completeSale pattern.
+      //    Sequential (not Promise.all), matching the completeSale
+      //    pattern.
       //
       //    Non-SOLD PU here is a 500 integrity error — a COMPLETED
       //    sale's serialized in-house lines MUST have their PUs in
@@ -1542,18 +1615,12 @@ export class SalesService {
 
       // 5b. Reverse trade-in intake (Slice G). Symmetric to completeSale's
       //     step 3b: each TRADE_IN payment's ProductUnit flips IN_STOCK →
-      //     RETURNED and its Stock is decremented. Same lock order as
-      //     intake (PU, then Stock). A SOLD PU means the trade-in phone
-      //     was resold on a later sale (Q7) — markReturnedForVoid throws
-      //     409 and the whole void rolls back. The PhonePurchase row
-      //     stays as history; the payment is reversed by step 6 below.
-      const tradeInPayments = await manager.find(Payment, {
-        where: { sale_id: saleId, payment_method: PaymentMethod.TRADE_IN },
-        order: { created_at: 'ASC' },
-      });
+      //     RETURNED and its Stock is decremented (both locked in 4b). A
+      //     SOLD PU means the trade-in phone was resold on a later sale
+      //     (Q7) — markReturnedForVoid throws 409 and the whole void rolls
+      //     back. The PhonePurchase row stays as history; the payment is
+      //     reversed by step 6 below.
       for (const payment of tradeInPayments) {
-        // Checked explicitly: TypeORM may drop a null where-condition,
-        // which would match an arbitrary unit.
         if (payment.trade_in_phone_purchase_id === null) {
           throw new Error(
             `TRADE_IN payment ${payment.id} on COMPLETED sale ${saleId} ` +
@@ -1561,9 +1628,7 @@ export class SalesService {
               `have stamped it — data integrity issue.`,
           );
         }
-        const linkedUnit = await manager.findOne(ProductUnit, {
-          where: { phone_purchase_id: payment.trade_in_phone_purchase_id },
-        });
+        const linkedUnit = tradeInUnits.get(payment.id);
         if (!linkedUnit) {
           throw new Error(
             `No ProductUnit linked to phone purchase ` +
