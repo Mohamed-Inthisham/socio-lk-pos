@@ -25,7 +25,8 @@ import { voidSummary } from "../../../utils/voidSummary";
  *   required for Other (voidSchema). Focus opens on the reason; Void is
  *   never focused on open and is enabled only once the form is valid.
  * - What the void does and what to hand back outside the system
- *   (utils/voidSummary.js); refunds aren't recorded until P7.
+ *   (utils/voidSummary.js); a void records no refund (returns do, P7), so
+ *   it points a customer returning items to Return items.
  * - Manager approval: ManagerApprovalFields (approver list fetched fresh
  *   on every open; the PIN field shared with D1).
  *
@@ -334,7 +335,8 @@ const VoidSaleDialog = ({ open, onClose, sale, onVoided, afterLeave }) => {
                 {!summary.cashBack && summary.referenced.length === 0 && <li>No money to hand back.</li>}
               </ul>
               <p className="mt-1.5 text-xs text-slate-500 dark:text-slate-400">
-                Refunds aren&apos;t recorded until returns ship (P7). Give the money back as listed.
+                A void doesn&apos;t record a refund. Give the money back as listed. If the customer is returning
+                items, close this and use Return items instead.
               </p>
             </Section>
 

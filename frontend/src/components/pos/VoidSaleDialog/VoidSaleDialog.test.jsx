@@ -208,7 +208,9 @@ describe("VoidSaleDialog: what the void does and what to hand back (P6-10, P6-12
     const giveBack = inDialog().getByTestId("void-give-back");
     expect(giveBack).toHaveTextContent(/LKR\s20,290\.00 cash\./);
     expect(giveBack).toHaveTextContent(/Reverse the Card payment of LKR\s10,000\.00 \(ref AUTH-482913\)\./);
-    expect(dialog()).toHaveTextContent("Refunds aren't recorded until returns ship (P7). Give the money back as listed.");
+    expect(dialog()).toHaveTextContent(
+      "A void doesn't record a refund. Give the money back as listed. If the customer is returning items, close this and use Return items instead.",
+    );
   });
 
   it("puts Hand back first, above what the void does to stock", async () => {
