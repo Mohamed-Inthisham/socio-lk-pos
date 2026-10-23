@@ -155,6 +155,39 @@ export const productUnitEntity = (overrides = {}) => ({
   ...overrides,
 });
 
+/**
+ * backend/src/stock/entities/stock.entity.ts as GET /stock?branchId=
+ * returns it (StockService.findAll): with product and branch, plus the
+ * computed low_stock_alert.
+ */
+export const stockEntity = ({ productId, name, manageStock = true, quantity = 5, ...overrides } = {}) => ({
+  id: `stock-${productId}`,
+  product_id: productId,
+  product: productEntity({ id: productId, name, is_serialized: false, product_type: "ACCESSORY" }),
+  branch_id: "branch-main",
+  branch: branchEntity(),
+  quantity,
+  min_quantity: 2,
+  manage_stock: manageStock,
+  created_at: "2026-09-01T04:00:00.000Z",
+  updated_at: "2026-10-21T09:02:00.000Z",
+  low_stock_alert: manageStock && quantity <= 2,
+  ...overrides,
+});
+
+/** GET /stock?branchId= for saleEntity's products; the cable isn't stock-tracked. */
+export const branchStockResponse = () => [
+  stockEntity({ productId: "p-case", name: "Silicone Case A15", quantity: 8 }),
+  stockEntity({ productId: "p-charger", name: "25W Charger", quantity: 4 }),
+  stockEntity({ productId: "p-cable", name: "USB-C Cable 1m", manageStock: false, quantity: 0 }),
+  stockEntity({
+    productId: "p-a15",
+    name: "Samsung Galaxy A15 128GB",
+    quantity: 3,
+    product: productEntity({ id: "p-a15", name: "Samsung Galaxy A15 128GB", phone_condition: "NEW" }),
+  }),
+];
+
 // ---------------------------------------------------------------------------
 // Errors
 // ---------------------------------------------------------------------------

@@ -6,9 +6,12 @@ import SaleDetail from ".";
 import { authState, branchesState, renderWithProviders } from "../../test/renderWithProviders";
 import { cashierUser, mainShop } from "../../test/fixtures";
 import { saleEntity, voidedSaleEntity } from "../../test/saleEntities";
+import { branchStockResponse, saleWithReturnsEntity } from "../../test/returnEntities";
 import * as salesService from "../../services/salesService";
+import * as stockService from "../../services/stockService";
 
 vi.mock("../../services/salesService");
+vi.mock("../../services/stockService");
 
 // 11:30 on Thu 22 Oct 2026 in Colombo
 const NOW = new Date("2026-10-22T06:00:00.000Z");
@@ -208,6 +211,100 @@ describe("SaleDetail: Reprint (P6-7)", () => {
 
     await waitFor(() => expect(print).toHaveBeenCalledTimes(1));
     expect(salesService.getSale).toHaveBeenCalledTimes(2); // the page load + one reprint
+  });
+});
+
+describe("SaleDetail: Return items (P7-16)", () => {
+  const returnButton = () => screen.getByRole("button", { name: "Return items" });
+  const returnDialog = () => screen.queryByRole("dialog", { name: /^Return items/ });
+
+  beforeEach(() => {
+    stockService.listStock.mockResolvedValue(branchStockResponse());
+  });
+
+  it("a cashier gets the button on a completed sale; it opens the dialog", async () => {
+    salesService.getSale.mockResolvedValue(saleEntity());
+    const user = userEvent.setup();
+    renderDetail();
+    await heading();
+
+    expect(returnButton()).toBeEnabled();
+    expect(returnButton()).toHaveAttribute("title", "Return items (R)");
+    await user.click(returnButton());
+
+    expect(await screen.findByRole("dialog", { name: /^Return items · INV-20261021-0007/ })).toBeInTheDocument();
+  });
+
+  it("R opens it; Alt+R does not (the terminal's Recent sales key)", async () => {
+    salesService.getSale.mockResolvedValue(saleEntity());
+    const user = userEvent.setup();
+    renderDetail();
+    await heading();
+
+    await user.keyboard("{Alt>}r{/Alt}");
+    expect(returnDialog()).not.toBeInTheDocument();
+
+    await user.keyboard("r");
+    expect(await screen.findByRole("dialog", { name: /^Return items/ })).toBeInTheDocument();
+  });
+
+  it("R is ignored while another dialog is open", async () => {
+    salesService.getSale.mockResolvedValue(saleEntity());
+    const user = userEvent.setup();
+    renderWithProviders(
+      <>
+        <div role="dialog" aria-label="Set approval PIN" />
+        <Routes>
+          <Route path="/pos/sales/:id" element={<SaleDetail />} />
+        </Routes>
+      </>,
+      { route: "/pos/sales/sale-7", preloadedState: { auth: authState(cashierUser), branches: branchesState([mainShop]) } },
+    );
+    await heading();
+
+    await user.keyboard("r");
+
+    expect(returnDialog()).not.toBeInTheDocument();
+    expect(stockService.listStock).not.toHaveBeenCalled();
+  });
+
+  it("everything returned: the button stays, disabled, and R does nothing", async () => {
+    const sale = saleWithReturnsEntity();
+    sale.lines = sale.lines.map((line) => ({ ...line, returned_quantity: line.quantity }));
+    salesService.getSale.mockResolvedValue(sale);
+    const user = userEvent.setup();
+    renderDetail();
+    await heading();
+
+    expect(returnButton()).toBeDisabled();
+    expect(returnButton()).toHaveAttribute("title", "Everything on this sale has been returned");
+    await user.keyboard("r");
+    expect(returnDialog()).not.toBeInTheDocument();
+  });
+
+  it("a voided sale has no Return items", async () => {
+    salesService.getSale.mockResolvedValue(voidedSaleEntity());
+    const user = userEvent.setup();
+    renderDetail();
+    await heading();
+
+    expect(screen.queryByRole("button", { name: "Return items" })).not.toBeInTheDocument();
+    await user.keyboard("r");
+    expect(returnDialog()).not.toBeInTheDocument();
+  });
+
+  it("Cancel hands focus back to the button", async () => {
+    salesService.getSale.mockResolvedValue(saleEntity());
+    const user = userEvent.setup();
+    renderDetail();
+    await heading();
+    await user.click(returnButton());
+    const dialog = await screen.findByRole("dialog", { name: /^Return items/ });
+
+    await user.click(within(dialog).getByRole("button", { name: "Cancel" }));
+
+    await waitFor(() => expect(returnDialog()).not.toBeInTheDocument());
+    await waitFor(() => expect(returnButton()).toHaveFocus());
   });
 });
 

@@ -6,6 +6,8 @@ import {
   buildReturnPayload,
   buildReturnReason,
   buildReturnSchema,
+  itemsIssues,
+  refundIssues,
   refundTotalCents,
   returnContext,
   returnFormDefaults,
@@ -256,6 +258,26 @@ describe("buildReturnSchema", () => {
       approver_id: "Pick who approves",
       pin: "PIN must be 6 digits",
     });
+  });
+});
+
+describe("itemsIssues and refundIssues (the dialog's two steps)", () => {
+  const paths = (list) => list.map((i) => i.path.join("."));
+
+  it("the items step checks only the items: the refund step's empty fields don't count", () => {
+    const itemsOnly = valid({ reason_preset: "", reason_detail: "", override_reason: "", refunds: [], pin: "" });
+    expect(itemsIssues(itemsOnly, contextFor())).toEqual([]);
+    expect(paths(itemsIssues(valid({ conditions: { "line-case": "" } }), contextFor()))).toEqual(["conditions.line-case"]);
+  });
+
+  it("the refund step checks the refunds, the reason and the override, never the items", () => {
+    const noCondition = valid({ conditions: { "line-case": "" }, override_reason: "", refunds: [], reason_detail: "" });
+    expect(paths(refundIssues(noCondition, contextFor()))).toEqual(["reason_detail", "override_reason"]);
+  });
+
+  it("the schema reports both", () => {
+    const both = valid({ conditions: { "line-case": "" }, override_reason: "" });
+    expect(Object.keys(issues(both))).toEqual(["conditions.line-case", "override_reason"]);
   });
 });
 

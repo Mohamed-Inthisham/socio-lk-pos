@@ -115,7 +115,130 @@ export const returnContext = (sale, { stockTracked = {}, serverOutsideIds = [], 
   };
 };
 
-const issue = (ctx, path, message) => ctx.addIssue({ code: "custom", path, message });
+/**
+ * The items step's checks (P7-2, P7-8): at least one item, each no more
+ * than is left of its line, a condition where the cashier picks one.
+ * Next on the items step runs these alone; buildReturnSchema runs them
+ * with refundIssues.
+ *
+ * @param {Object} values - the form's values
+ * @param {ReturnType<typeof returnContext>} context
+ * @returns {Array<{ path: (string|number)[], message: string }>}
+ */
+export const itemsIssues = (values, context) => {
+  const issues = [];
+  const add = (path, message) => issues.push({ path, message });
+  const { sale } = context;
+  const { quantities } = values;
+
+  const selected = sale.lines.filter((line) => (quantities[line.id] ?? 0) > 0);
+  if (selected.length === 0) add(["quantities"], "Pick at least one item to return");
+  for (const line of selected) {
+    const left = returnableQuantity(line);
+    if (quantities[line.id] > left) {
+      add(["quantities", line.id], left === 0 ? "Already returned" : `At most ${left}`);
+    }
+    const condition = values.conditions[line.id] ?? "";
+    if (context.needsCondition(line)) {
+      if (!RETURN_CONDITIONS.some((c) => c.value === condition)) {
+        add(["conditions", line.id], "Back to stock or damaged?");
+      }
+    }
+  }
+  for (const id of Object.keys(quantities)) {
+    if (quantities[id] > 0 && !sale.lines.some((line) => line.id === id)) {
+      add(["quantities", id], "Not on this sale");
+    }
+  }
+  return issues;
+};
+
+/**
+ * The refund step's checks (P7-3, P7-4, P7-23): the refund rows, the
+ * reason and the override reason. The approver and PIN are the schema's.
+ *
+ * @param {Object} values - the form's values
+ * @param {ReturnType<typeof returnContext>} context
+ * @returns {Array<{ path: (string|number)[], message: string }>}
+ */
+export const refundIssues = (values, context) => {
+  const issues = [];
+  const add = (path, message) => issues.push({ path, message });
+  const { payments } = context;
+  const { quantities } = values;
+
+  // Refunds
+  const dueCents = context.refundDueCents(quantities);
+  let totalCents = 0;
+  const perPayment = new Map();
+  let cashRows = 0;
+  values.refunds.forEach((row, i) => {
+    const cents = amountCents(row.amount);
+    if (Number.isNaN(cents)) {
+      add(["refunds", i, "amount"], "Enter an amount like 1500 or 1499.80");
+    } else if (cents <= 0) {
+      add(["refunds", i, "amount"], "Amount must be more than 0");
+    } else {
+      totalCents += cents;
+    }
+
+    if (row.method === CASH) {
+      cashRows += 1;
+      if (cashRows > 1) add(["refunds", i, "method"], "Cash is already on another row");
+      if (row.payment_id || row.reference.trim()) {
+        add(["refunds", i, "method"], "A cash refund has no payment or reference");
+      }
+      return;
+    }
+
+    const payment = payments.find((p) => p.id === row.payment_id);
+    if (!payment || payment.method !== row.method) {
+      add(["refunds", i, "payment_id"], "Pick a card, bank, Koko or Mintpay payment of this sale");
+      return;
+    }
+    if (perPayment.has(payment.id)) {
+      add(["refunds", i, "payment_id"], "This payment is already on another row");
+      return;
+    }
+    perPayment.set(payment.id, true);
+    const reference = row.reference.trim();
+    if (reference.length === 0) {
+      add(["refunds", i, "reference"], "Enter the reversal's reference");
+    } else if (reference.length > REFERENCE_MAX) {
+      add(["refunds", i, "reference"], `At most ${REFERENCE_MAX} characters`);
+    }
+    if (!Number.isNaN(cents) && cents > payment.refundableCents) {
+      add(["refunds", i, "amount"], `At most ${formatLKR(fromCents(payment.refundableCents))} can go back to this payment`);
+    }
+  });
+  if (totalCents > dueCents) {
+    add(["refunds"], `The refund can be at most ${formatLKR(fromCents(dueCents))}`);
+  }
+
+  // Reason
+  const detail = values.reason_detail.trim();
+  if (values.reason_preset === OTHER && detail.length < REASON_MIN) {
+    add(["reason_detail"], "Say what happened (at least 3 characters)");
+  } else if (totalCents < dueCents && detail.length < REASON_MIN) {
+    add(["reason_detail"], LOWER_REFUND_MESSAGE);
+  } else {
+    const length = buildReturnReason(values).length;
+    if (length > RETURN_REASON_MAX) {
+      add(["reason_detail"], `The reason must be ${RETURN_REASON_MAX} characters or fewer (now ${length})`);
+    }
+  }
+
+  // Override reason (P7-23)
+  if (context.outsideIds(quantities).length > 0) {
+    const override = values.override_reason.trim();
+    if (override.length < REASON_MIN) {
+      add(["override_reason"], "Outside warranty: give the override reason (at least 3 characters)");
+    } else if (override.length > RETURN_REASON_MAX) {
+      add(["override_reason"], `At most ${RETURN_REASON_MAX} characters (now ${override.length})`);
+    }
+  }
+  return issues;
+};
 
 /**
  * The schema for one sale. Rebuild it when the context changes (a re-read
@@ -146,103 +269,8 @@ export const buildReturnSchema = (context) =>
       pin: z.string().regex(PIN_SHAPE, "PIN must be 6 digits"),
     })
     .superRefine((values, ctx) => {
-      const { sale, payments } = context;
-      const { quantities } = values;
-
-      // Items
-      const selected = sale.lines.filter((line) => (quantities[line.id] ?? 0) > 0);
-      if (selected.length === 0) issue(ctx, ["quantities"], "Pick at least one item to return");
-      for (const line of selected) {
-        const left = returnableQuantity(line);
-        if (quantities[line.id] > left) {
-          issue(ctx, ["quantities", line.id], left === 0 ? "Already returned" : `At most ${left}`);
-        }
-        const condition = values.conditions[line.id] ?? "";
-        if (context.needsCondition(line)) {
-          if (!RETURN_CONDITIONS.some((c) => c.value === condition)) {
-            issue(ctx, ["conditions", line.id], "Back to stock or damaged?");
-          }
-        }
-      }
-      for (const id of Object.keys(quantities)) {
-        if (quantities[id] > 0 && !sale.lines.some((line) => line.id === id)) {
-          issue(ctx, ["quantities", id], "Not on this sale");
-        }
-      }
-
-      // Refunds
-      const dueCents = context.refundDueCents(quantities);
-      let totalCents = 0;
-      const perPayment = new Map();
-      let cashRows = 0;
-      values.refunds.forEach((row, i) => {
-        const cents = amountCents(row.amount);
-        if (Number.isNaN(cents)) {
-          issue(ctx, ["refunds", i, "amount"], "Enter an amount like 1500 or 1499.80");
-        } else if (cents <= 0) {
-          issue(ctx, ["refunds", i, "amount"], "Amount must be more than 0");
-        } else {
-          totalCents += cents;
-        }
-
-        if (row.method === CASH) {
-          cashRows += 1;
-          if (cashRows > 1) issue(ctx, ["refunds", i, "method"], "Cash is already on another row");
-          if (row.payment_id || row.reference.trim()) {
-            issue(ctx, ["refunds", i, "method"], "A cash refund has no payment or reference");
-          }
-          return;
-        }
-
-        const payment = payments.find((p) => p.id === row.payment_id);
-        if (!payment || payment.method !== row.method) {
-          issue(ctx, ["refunds", i, "payment_id"], "Pick a card, bank, Koko or Mintpay payment of this sale");
-          return;
-        }
-        if (perPayment.has(payment.id)) {
-          issue(ctx, ["refunds", i, "payment_id"], "This payment is already on another row");
-          return;
-        }
-        perPayment.set(payment.id, true);
-        const reference = row.reference.trim();
-        if (reference.length === 0) {
-          issue(ctx, ["refunds", i, "reference"], "Enter the reversal's reference");
-        } else if (reference.length > REFERENCE_MAX) {
-          issue(ctx, ["refunds", i, "reference"], `At most ${REFERENCE_MAX} characters`);
-        }
-        if (!Number.isNaN(cents) && cents > payment.refundableCents) {
-          issue(
-            ctx,
-            ["refunds", i, "amount"],
-            `At most ${formatLKR(fromCents(payment.refundableCents))} can go back to this payment`,
-          );
-        }
-      });
-      if (totalCents > dueCents) {
-        issue(ctx, ["refunds"], `The refund can be at most ${formatLKR(fromCents(dueCents))}`);
-      }
-
-      // Reason
-      const detail = values.reason_detail.trim();
-      if (values.reason_preset === OTHER && detail.length < REASON_MIN) {
-        issue(ctx, ["reason_detail"], "Say what happened (at least 3 characters)");
-      } else if (totalCents < dueCents && detail.length < REASON_MIN) {
-        issue(ctx, ["reason_detail"], LOWER_REFUND_MESSAGE);
-      } else {
-        const length = buildReturnReason(values).length;
-        if (length > RETURN_REASON_MAX) {
-          issue(ctx, ["reason_detail"], `The reason must be ${RETURN_REASON_MAX} characters or fewer (now ${length})`);
-        }
-      }
-
-      // Override reason (P7-23)
-      if (context.outsideIds(quantities).length > 0) {
-        const override = values.override_reason.trim();
-        if (override.length < REASON_MIN) {
-          issue(ctx, ["override_reason"], "Outside warranty: give the override reason (at least 3 characters)");
-        } else if (override.length > RETURN_REASON_MAX) {
-          issue(ctx, ["override_reason"], `At most ${RETURN_REASON_MAX} characters (now ${override.length})`);
-        }
+      for (const { path, message } of [...itemsIssues(values, context), ...refundIssues(values, context)]) {
+        ctx.addIssue({ code: "custom", path, message });
       }
     });
 

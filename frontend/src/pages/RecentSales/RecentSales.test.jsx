@@ -6,6 +6,7 @@ import RecentSales from ".";
 import SaleDetail from "../SaleDetail";
 import { authState, branchesState, renderWithProviders } from "../../test/renderWithProviders";
 import { cashierUser, mainShop } from "../../test/fixtures";
+import { paymentEntity, saleEntity, saleLineEntity } from "../../test/saleEntities";
 import * as salesService from "../../services/salesService";
 
 vi.mock("../../services/salesService");
@@ -75,6 +76,20 @@ const listRow = (n, overrides = {}) => ({
   customer: null,
   ...overrides,
 });
+
+/**
+ * GET /sales/:id for a list row: the row's own figures (1,500.00) on the
+ * hydrated shape, with the one line and payment they add up to, and
+ * returns[] (the detail page's Return items reads them).
+ */
+const detailOf = (id) =>
+  saleEntity({
+    ...listRow(Number(id.split("-")[1])),
+    id,
+    lines: [saleLineEntity({ sale_id: id })],
+    payments: [paymentEntity({ sale_id: id })],
+    returns: [],
+  });
 
 const page = (rows, total = rows.length) => ({ data: rows, meta: { total, page: 1 } });
 
@@ -388,9 +403,7 @@ describe("RecentSales: Load more (P6-5)", () => {
 describe("RecentSales: keys (P6-1 – P6-5)", () => {
   beforeEach(() => {
     salesService.listSales.mockResolvedValue(page(rowsFrom(1, 3)));
-    salesService.getSale.mockImplementation((id) =>
-      Promise.resolve({ ...listRow(Number(id.split("-")[1])), id }),
-    );
+    salesService.getSale.mockImplementation((id) => Promise.resolve(detailOf(id)));
   });
 
   it("opens with focus on the list, not the search box, so ←/→ work at once", async () => {
@@ -485,9 +498,7 @@ describe("RecentSales: keys (P6-1 – P6-5)", () => {
 
 describe("RecentSales: back from a sale (P6-13)", () => {
   beforeEach(() => {
-    salesService.getSale.mockImplementation((id) =>
-      Promise.resolve({ ...listRow(Number(id.split("-")[1])), id }),
-    );
+    salesService.getSale.mockImplementation((id) => Promise.resolve(detailOf(id)));
   });
 
   it("Esc on the detail page restores the day, the search and the active row, and re-reads the rows", async () => {

@@ -2,14 +2,16 @@ import { useEffect, useRef, useState } from "react";
 import { useHotkeys } from "react-hotkeys-hook";
 import { useSelector } from "react-redux";
 import { useLocation, useNavigate, useParams } from "react-router-dom";
-import { AlertTriangle, ArrowLeft, Ban, Printer } from "lucide-react";
+import { AlertTriangle, ArrowLeft, Ban, Printer, Undo2 } from "lucide-react";
 import Button from "../../components/common/Button";
 import SaleDetailView from "../../components/pos/SaleDetailView";
+import ReturnDialog from "../../components/pos/ReturnDialog";
 import VoidSaleDialog from "../../components/pos/VoidSaleDialog";
 import { PERMISSIONS, hasPermission } from "../../constants/rolePermissions";
 import { getSale } from "../../services/salesService";
 import { colomboToday } from "../../utils/colomboDay";
 import { printReceipt } from "../../utils/printReceipt";
+import { returnableQuantity } from "../../utils/returnMath";
 
 /**
  * SaleDetail Page
@@ -23,6 +25,12 @@ import { printReceipt } from "../../utils/printReceipt";
  * on success the page shows the voided sale it returns (banner, Reversed
  * tenders, no Void button) and focus goes to Reprint, so a void slip is
  * one P away (printed on request, P6-13). A VOIDED sale has no Void button.
+ *
+ * RETURN ITEMS (R, or the button; P7-16): COMPLETED sales with something
+ * left to return, every role (REFUND_SALE; the approver's PIN is the
+ * authority). Shown disabled once everything has come back; not on a
+ * VOIDED sale. ReturnDialog makes the return; after Cancel, Headless UI
+ * hands focus back to the button.
  *
  * REPRINT (P, or the button): re-fetches the sale first, so a sale voided
  * since the page opened prints as voided (and the page shows it), then
@@ -59,10 +67,13 @@ const SaleDetail = () => {
   const [printing, setPrinting] = useState(false);
   const [printError, setPrintError] = useState(null);
   const [voidOpen, setVoidOpen] = useState(false);
+  const [returnOpen, setReturnOpen] = useState(false);
   const justVoided = useRef(false);
   const reprintRef = useRef(null);
   const role = useSelector((state) => state.auth.user?.role);
   const canVoid = hasPermission(role, PERMISSIONS.VOID_SALE) && sale?.status === "COMPLETED";
+  const leftToReturn = sale?.lines?.reduce((sum, line) => sum + returnableQuantity(line), 0) ?? 0;
+  const canReturn = hasPermission(role, PERMISSIONS.REFUND_SALE) && sale?.status === "COMPLETED" && leftToReturn > 0;
 
   useEffect(() => {
     let live = true;
@@ -133,6 +144,14 @@ const SaleDetail = () => {
     { preventDefault: true },
     [canVoid, printing],
   );
+  useHotkeys(
+    "r",
+    () => {
+      if (canReturn && !printing && !dialogOpen()) setReturnOpen(true);
+    },
+    { preventDefault: true },
+    [canReturn, printing],
+  );
 
   const onVoided = (voided) => {
     justVoided.current = true;
@@ -169,6 +188,17 @@ const SaleDetail = () => {
               />
               {sale.status !== "VOIDED" && (
                 <Button
+                  variant="secondary"
+                  icon={Undo2}
+                  label="Return items"
+                  title={canReturn ? "Return items (R)" : "Everything on this sale has been returned"}
+                  disabled={!canReturn || printing}
+                  onClick={() => setReturnOpen(true)}
+                  fullWidth
+                />
+              )}
+              {sale.status !== "VOIDED" && (
+                <Button
                   variant="danger"
                   icon={Ban}
                   label="Void sale"
@@ -196,6 +226,7 @@ const SaleDetail = () => {
           onVoided={onVoided}
           afterLeave={afterVoidLeave}
         />
+        <ReturnDialog open={returnOpen} onClose={() => setReturnOpen(false)} sale={sale} />
       </>
     );
   }
