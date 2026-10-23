@@ -145,10 +145,11 @@ const TerminalLayout = () => {
             <BranchChip
               name={branch?.name || "—"}
               title={`Terminal branch: ${branch?.name || "—"}`}
+              rounded="rounded-lg"
             />
           </div>
           <ThemeToggle />
-          <UserMenu />
+          <UserMenu rounded="rounded-lg" />
           <Link
             to="/dashboard"
             aria-label="Exit terminal"

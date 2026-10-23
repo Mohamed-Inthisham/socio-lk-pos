@@ -74,6 +74,22 @@ describe("TerminalLayout", () => {
     ).not.toBeInTheDocument();
   });
 
+  it("the branch chip has the header buttons' corners (rounded-lg), not a full pill", () => {
+    renderLayout(cashierUser);
+    const chip = screen.getByTitle("Terminal branch: Main Shop");
+    const sales = screen.getByRole("link", { name: "Recent sales" });
+    expect(chip.className).toContain("rounded-lg");
+    expect(chip.className).not.toContain("rounded-full");
+    expect(sales.className).toContain("rounded-lg");
+  });
+
+  it("the user menu button has the same corners (rounded-lg)", () => {
+    renderLayout(cashierUser);
+    const menu = screen.getByRole("button", { name: /Test Cashier/ });
+    expect(menu.className).toContain("rounded-lg");
+    expect(menu.className).not.toContain("rounded-full");
+  });
+
   it("links back to the dashboard", () => {
     renderLayout(cashierUser);
     expect(
