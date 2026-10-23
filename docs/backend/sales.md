@@ -266,7 +266,28 @@ Every failure leaves the sale a DRAFT with nothing changed. The 409s name what f
 
 #### Why sequential stock decrements instead of Promise.all
 
-The `SELECT ... FOR UPDATE` locks acquired on stock rows during decrement serialize per (product, branch). Sequential iteration lets these locks queue cleanly; `Promise.all` would fire all locks at once, potentially deadlocking against a concurrent transaction that acquired them in a different order.
+The `SELECT ... FOR UPDATE` locks acquired on stock rows during decrement serialize per (product, branch). Sequential iteration lets these locks queue cleanly; `Promise.all` would fire all locks at once, potentially deadlocking against a concurrent transaction that acquired them in a different order. Since Phase 6.4 P7-25 the rows are locked up front in one global order (next section), so the per-line loop no longer decides the lock order.
+
+### Lock order
+
+_(Phase 6.4 P7-25, step 0c.)_ Every transaction that changes stock or product units takes its row locks in one order:
+
+1. **Its sale row**, if it has one (at most one, always first).
+2. **Every Stock row it will touch, sorted by `(product_id, branch_id)`.**
+3. **Every ProductUnit row it will touch, sorted by `id`.**
+4. **Then everything else:** the changes and their checks, inserts (a new unit's insert may wait on `uq_product_units_imei_live`, always after the Stock locks), the sale-number counter, audit rows.
+
+Steps 2 and 3 are `lockInventoryRows(manager, { stock, unitIds })` (`backend/src/stock/lock-inventory-rows.ts`): one `SELECT … FOR UPDATE` per row, sorted and de-duplicated. It only locks. A row that doesn't exist is skipped, so the caller's existing code raises exactly what it raised before. `StockService` and `ProductUnitsService` methods lock their row again, which costs nothing once the transaction holds it. A transaction that needs only one kind of row passes only that kind. Each caller collects its targets before changing anything, after the checks that need no locks:
+
+| Caller | Stock rows | Units |
+|---|---|---|
+| `completeSale` | In-house lines' products; each trade-in's product (the trade-in payments are read before the line loop) | Lines' `product_unit_id` (trade-in units don't exist yet; they are inserted after the locks) |
+| `voidSale` | In-house lines' products; each trade-in unit's product | Lines' `product_unit_id`; the trade-in units, found by reading `phone_purchase_id` first without a lock (a purchase's unit and that unit's product and branch never change). A payment never stamped, or a purchase with no unit, is skipped here and raises its integrity error where it always did |
+| `PhonePurchasesService.create`, `createForTradeIn` | The phone's product, after the IMEI pre-check and before the inserts (so a race still gets the same 409) | — |
+
+#### Why
+
+Before, `completeSale` and `voidSale` locked rows line by line, and a trade-in void locked the unit before its stock while a sale locks stock before the unit. Two requests touching the same rows in a different order each held a row the other needed, and Postgres killed one with a deadlock (`40P01`, a 500 at the till): two sales with the same products in a different line order, a sale and a void, a trade-in void racing a sale of that phone, a trade-in and a sale of that model. With one order, whichever request gets the first shared row goes first and the other waits; it then gets exactly the result it would have had if it had been sent second (a 200, or the usual 409). `test/lock-order.e2e-spec.ts` forces each of those interleavings with a gate (a second connection holding one row) and checks that both requests finish, plus rounds of ungated opposite-order pairs. Any new code that changes stock or units (P7's inspection pass and returns) calls `lockInventoryRows` the same way.
 
 #### Why the invoice number is issued INSIDE the transaction
 

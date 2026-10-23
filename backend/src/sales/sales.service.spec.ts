@@ -32,6 +32,11 @@ import { ApprovalsService } from '../approvals/approvals.service';
 import { UserRole } from '../users/enums/user-role.enum';
 import { AuditAction } from '../audit-log/enums/audit-action.enum';
 import { WarrantyPeriod } from '../products/enums/warranty-period.enum';
+import { lockInventoryRows } from '../stock/lock-inventory-rows';
+
+// The global lock order's helper takes its own queries on the manager;
+// mocked so the per-call manager mocks below stay exact (Phase 6.4 P7-25).
+jest.mock('../stock/lock-inventory-rows');
 
 describe('SalesService', () => {
   let service: SalesService;
@@ -4187,6 +4192,189 @@ describe('SalesService', () => {
       );
 
       await expect(service.completeSale('sale-1')).rejects.toBe(inactive);
+    });
+  });
+
+  describe('global lock order (Phase 6.4 P7-25)', () => {
+    const lockMock = lockInventoryRows as jest.MockedFunction<
+      typeof lockInventoryRows
+    >;
+
+    const tradeInPayment = {
+      id: 'pay-ti-1',
+      sale_id: 'sale-1',
+      payment_method: PaymentMethod.TRADE_IN,
+      amount: '100.00',
+      trade_in_product_id: 'prod-used',
+      trade_in_imei: '356938035643809',
+      trade_in_buying_price: '100.00',
+      trade_in_selling_price: null,
+      trade_in_notes: null,
+      trade_in_phone_purchase_id: 'pp-1',
+    };
+
+    // Line 1: in-house, serialized. Line 2: from another shop. Line 3:
+    // in-house, not serialized.
+    const lines = [
+      {
+        id: 'line-1',
+        sale_id: 'sale-1',
+        line_number: 1,
+        product_id: 'prod-1',
+        product_name_snapshot: 'iPhone 15',
+        quantity: 1,
+        external_supplier_id: null,
+        product_unit_id: 'unit-1',
+      },
+      {
+        id: 'line-2',
+        sale_id: 'sale-1',
+        line_number: 2,
+        product_id: 'prod-2',
+        product_name_snapshot: 'Case (other shop)',
+        quantity: 1,
+        external_supplier_id: 'sup-1',
+        product_unit_id: null,
+      },
+      {
+        id: 'line-3',
+        sale_id: 'sale-1',
+        line_number: 3,
+        product_id: 'prod-3',
+        product_name_snapshot: 'Cable',
+        quantity: 2,
+        external_supplier_id: null,
+        product_unit_id: null,
+      },
+    ];
+
+    it('completeSale locks the in-house lines and trade-ins stock, then the lines units, before any change', async () => {
+      mockQueryBuilder.getOne.mockResolvedValueOnce({
+        id: 'sale-1',
+        status: SaleStatus.DRAFT,
+        branch_id: 'branch-1',
+        cashier_id: 'cashier-1',
+        customer_id: 'cust-1',
+        total: '500.00',
+        amount_paid: '500.00',
+      });
+      arrangeManagerFind(lines, [
+        { ...tradeInPayment, trade_in_phone_purchase_id: null },
+      ]);
+      mockManager.findOne.mockResolvedValue({
+        id: 'cust-1',
+        nic: '199012345678',
+      });
+      mockStockService.decrementForSale.mockResolvedValue(undefined);
+      mockProductUnitsService.markSoldForSale.mockResolvedValue(undefined);
+      mockPhonePurchasesService.createForTradeIn.mockResolvedValue({
+        phone_purchase: { id: 'pp-1' },
+        product_unit: { id: 'unit-ti' },
+      });
+      mockSaleNumberCountersService.generateNext.mockResolvedValue(
+        'INV-20261023-0001',
+      );
+      mockManager.query.mockResolvedValue(undefined);
+
+      await service.completeSale('sale-1');
+
+      expect(lockMock).toHaveBeenCalledTimes(1);
+      expect(lockMock).toHaveBeenCalledWith(mockManager, {
+        stock: [
+          { productId: 'prod-1', branchId: 'branch-1' },
+          { productId: 'prod-3', branchId: 'branch-1' },
+          { productId: 'prod-used', branchId: 'branch-1' },
+        ],
+        unitIds: ['unit-1'],
+      });
+      expect(lockMock.mock.invocationCallOrder[0]).toBeLessThan(
+        mockStockService.decrementForSale.mock.invocationCallOrder[0],
+      );
+      expect(lockMock.mock.invocationCallOrder[0]).toBeLessThan(
+        mockPhonePurchasesService.createForTradeIn.mock.invocationCallOrder[0],
+      );
+    });
+
+    it('completeSale takes no inventory locks when a check fails first', async () => {
+      mockQueryBuilder.getOne.mockResolvedValueOnce({
+        id: 'sale-1',
+        status: SaleStatus.DRAFT,
+        branch_id: 'branch-1',
+        total: '500.00',
+        amount_paid: '400.00',
+      });
+      arrangeManagerFind(lines);
+
+      await expect(service.completeSale('sale-1')).rejects.toThrow(
+        BadRequestException,
+      );
+      expect(lockMock).not.toHaveBeenCalled();
+    });
+
+    it('voidSale locks the lines and trade-in units stock, then the lines and trade-in units, before any change', async () => {
+      mockQueryBuilder.getOne.mockResolvedValueOnce({
+        id: 'sale-1',
+        status: SaleStatus.COMPLETED,
+        branch_id: 'branch-1',
+      });
+      arrangeManagerFind(lines, [tradeInPayment]);
+      const tradeInUnit = {
+        id: 'unit-ti',
+        product_id: 'prod-used',
+        branch_id: 'branch-1',
+        status: ProductUnitStatus.IN_STOCK,
+      };
+      mockManager.findOne.mockResolvedValue(tradeInUnit);
+      mockStockService.incrementForReversal.mockResolvedValue(undefined);
+      mockStockService.decrementForVoidedTradeIn.mockResolvedValue(undefined);
+      mockProductUnitsService.markAvailableForReversal.mockResolvedValue(
+        undefined,
+      );
+      mockProductUnitsService.markReturnedForVoid.mockResolvedValue(
+        tradeInUnit,
+      );
+      mockManager.query.mockResolvedValue(undefined);
+
+      await service.voidSale('sale-1', voidApproval, {
+        void_reason: 'Wrong item rung up',
+      });
+
+      expect(mockManager.findOne).toHaveBeenCalledWith(ProductUnit, {
+        where: { phone_purchase_id: 'pp-1' },
+      });
+      expect(lockMock).toHaveBeenCalledTimes(1);
+      expect(lockMock).toHaveBeenCalledWith(mockManager, {
+        stock: [
+          { productId: 'prod-1', branchId: 'branch-1' },
+          { productId: 'prod-3', branchId: 'branch-1' },
+          { productId: 'prod-used', branchId: 'branch-1' },
+        ],
+        unitIds: ['unit-1', 'unit-ti'],
+      });
+      expect(lockMock.mock.invocationCallOrder[0]).toBeLessThan(
+        mockStockService.incrementForReversal.mock.invocationCallOrder[0],
+      );
+      // The unit found for locking is the one step 5b reverses (one read).
+      expect(mockManager.findOne).toHaveBeenCalledTimes(1);
+      expect(mockProductUnitsService.markReturnedForVoid).toHaveBeenCalledWith(
+        mockManager,
+        'unit-ti',
+      );
+    });
+
+    it('voidSale takes no inventory locks when the sale is not COMPLETED', async () => {
+      mockQueryBuilder.getOne.mockResolvedValueOnce({
+        id: 'sale-1',
+        status: SaleStatus.VOIDED,
+        branch_id: 'branch-1',
+      });
+
+      await expect(
+        service.voidSale('sale-1', voidApproval, {
+          void_reason: 'Wrong item rung up',
+        }),
+      ).rejects.toThrow(BadRequestException);
+      expect(lockMock).not.toHaveBeenCalled();
     });
   });
 
