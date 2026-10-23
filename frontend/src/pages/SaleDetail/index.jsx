@@ -116,10 +116,17 @@ const SaleDetail = () => {
     };
   }, [id, requestKey]);
 
-  const backToList = () =>
+  // Back (and Esc) to where the sale was opened from: Phones to check passes
+  // its own path (P7-7); Recent sales passes its search and rows to restore.
+  const backToList = () => {
+    if (from?.path) {
+      navigate(from.path);
+      return;
+    }
     navigate(`/pos/sales${from?.search ?? ""}`, {
       state: from ? { restore: { pages: from.pages, activeId: from.activeId } } : undefined,
     });
+  };
 
   const reprint = async () => {
     if (printing || slipPrinting || status !== "ready") return;
@@ -242,7 +249,8 @@ const SaleDetail = () => {
           sale={sale}
           today={colomboToday()}
           onBack={backToList}
-          initialTab={initialTabFor(sale, from?.search)}
+          backLabel={from?.label}
+          initialTab={location.state?.tab === "returns" ? "returns" : initialTabFor(sale, from?.search)}
           returnActions={{
             onReprint: reprintSlip,
             reprinting: slipPrinting,

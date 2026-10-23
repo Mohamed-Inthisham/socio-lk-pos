@@ -57,6 +57,8 @@ export const PERMISSIONS = {
   // Your own manager approval PIN (P6-18); cashiers never hold one
   SET_APPROVAL_PIN: "set_approval_pin",
   REFUND_SALE: "refund_sale",
+  // Phones to check: pass a returned phone back to stock (P7-7)
+  PASS_INSPECTION: "pass_inspection",
   APPLY_DISCOUNT: "apply_discount",
 
   // ===== CUSTOMERS =====
@@ -105,6 +107,7 @@ export const ROLE_PERMISSIONS = {
     PERMISSIONS.CREATE_SALE,
     PERMISSIONS.VOID_SALE,
     PERMISSIONS.REFUND_SALE,
+    PERMISSIONS.PASS_INSPECTION,
     PERMISSIONS.APPLY_DISCOUNT,
     PERMISSIONS.SET_APPROVAL_PIN,
 
@@ -142,6 +145,7 @@ export const ROLE_PERMISSIONS = {
     PERMISSIONS.CREATE_SALE,
     PERMISSIONS.VOID_SALE,
     PERMISSIONS.REFUND_SALE,
+    PERMISSIONS.PASS_INSPECTION,
     PERMISSIONS.APPLY_DISCOUNT,
     PERMISSIONS.SET_APPROVAL_PIN,
 

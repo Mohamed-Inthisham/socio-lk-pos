@@ -22,6 +22,7 @@ import { CASH } from "../../../schemas/paymentSchema";
 import { createReturn, getSale } from "../../../services/salesService";
 import { listStock } from "../../../services/stockService";
 import { printReturnSlip } from "../../../utils/printReceipt";
+import { announceInspectionChange } from "../../../hooks/useInspectionCount";
 import { colomboToday } from "../../../utils/colomboDay";
 import { formatLKR, fromCents, toCents } from "../../../utils/money";
 import { formatSlPhone } from "../../../utils/phone";
@@ -424,6 +425,8 @@ const ReturnDialog = ({ open, onClose, sale, onReturned, onSaleChanged, afterLea
     // Every way to a recorded return prints: a 201, a resend answered 200,
     // a lost response found on re-read (nothing was printed for those).
     printSlip(fresh, ret.id);
+    // A phone went to inspection: the header's Phones to check count reads again (P7-7).
+    if (ret.lines.some((l) => l.disposition === "INSPECTION")) announceInspectionChange();
   };
 
   // Lost response, timeout, 5xx: re-read and look for this request id.

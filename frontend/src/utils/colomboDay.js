@@ -50,6 +50,17 @@ export const colomboToday = (now = new Date()) => toDay(new Date(now.getTime() +
 export const shiftColomboDay = (day, delta) =>
   toDay(new Date(parseDay(day).getTime() + delta * DAY_MS));
 
+/**
+ * Whole Colombo days from a moment to a day: 0 on the same Colombo date,
+ * 1 the next day (Phones to check: days waiting, P7-7).
+ *
+ * @param {string} iso - an ISO timestamp
+ * @param {string} [today] - "YYYY-MM-DD" in Colombo
+ * @returns {number}
+ */
+export const colomboDaysSince = (iso, today = colomboToday()) =>
+  Math.round((parseDay(today).getTime() - parseDay(colomboToday(new Date(iso))).getTime()) / DAY_MS);
+
 const timeFormat = new Intl.DateTimeFormat("en-GB", {
   timeZone: "Asia/Colombo",
   hour: "2-digit",

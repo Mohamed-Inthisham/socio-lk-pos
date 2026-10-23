@@ -469,6 +469,45 @@ describe("SaleDetail: a sale with returns (P7-11, P7-18)", () => {
   });
 });
 
+describe("SaleDetail: opened from Phones to check (P7-7)", () => {
+  const fromInspection = {
+    pathname: "/pos/sales/sale-7",
+    state: { tab: "returns", from: { path: "/pos/inspection", label: "Phones to check" } },
+  };
+  const renderFromInspection = () =>
+    renderWithProviders(
+      <>
+        <Where />
+        <Routes>
+          <Route path="/pos/inspection" element={<p>phones to check</p>} />
+          <Route path="/pos/sales" element={<p>sales list</p>} />
+          <Route path="/pos/sales/:id" element={<SaleDetail />} />
+        </Routes>
+      </>,
+      { route: fromInspection, preloadedState: { auth: authState(cashierUser), branches: branchesState([mainShop]) } },
+    );
+
+  it("opens on the Returns tab", async () => {
+    salesService.getSale.mockResolvedValue(saleWithReturnsEntity());
+    renderFromInspection();
+    await heading();
+    expect(screen.getByRole("tab", { name: /^Returns/ })).toHaveAttribute("aria-selected", "true");
+  });
+
+  it("the back button says Phones to check and goes back there; so does Esc", async () => {
+    salesService.getSale.mockResolvedValue(saleWithReturnsEntity());
+    const user = userEvent.setup();
+    renderFromInspection();
+    await heading();
+
+    const back = screen.getByRole("button", { name: "Phones to check" });
+    expect(back).toHaveAttribute("title", "Back to Phones to check (Esc)");
+    await user.keyboard("{Escape}");
+    expect(await screen.findByText("phones to check")).toBeInTheDocument();
+    expect(screen.getByTestId("where")).toHaveTextContent("/pos/inspection");
+  });
+});
+
 describe("SaleDetail: back to the list", () => {
   it("Esc goes back to the list it came from, handing back the rows to restore", async () => {
     salesService.getSale.mockResolvedValue(saleEntity());

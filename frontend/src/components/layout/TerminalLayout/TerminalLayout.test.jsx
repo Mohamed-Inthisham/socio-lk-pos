@@ -1,6 +1,9 @@
-import { fireEvent, screen } from "@testing-library/react";
+import { vi } from "vitest";
+import { fireEvent, screen, waitFor, within } from "@testing-library/react";
 import { Route, Routes, useLocation } from "react-router-dom";
 import TerminalLayout from "./index";
+import * as saleReturnsService from "../../../services/saleReturnsService";
+import { inspectionRow } from "../../../test/returnEntities";
 import useActiveBranchStore from "../../../store/zustand/activeBranchStore";
 import {
   authState,
@@ -13,6 +16,12 @@ import {
   cityShop,
   mainShop,
 } from "../../../test/fixtures";
+
+// Admins and managers read the phones to check on mount (useInspectionCount).
+vi.mock("../../../services/saleReturnsService");
+beforeEach(() => {
+  vi.mocked(saleReturnsService.listInspection).mockReset().mockResolvedValue([]);
+});
 
 const renderLayout = (user) =>
   renderWithProviders(
@@ -78,6 +87,46 @@ describe("TerminalLayout", () => {
     expect(
       screen.queryByRole("link", { name: /products/i }),
     ).not.toBeInTheDocument();
+  });
+});
+
+describe("TerminalLayout: Phones to check (P7-7)", () => {
+  const managerUser = { ...cashierUser, id: "user-manager", role: "manager", name: "Test Manager" };
+  const link = () => screen.queryByRole("link", { name: /^Phones to check/ });
+  const rows = (n) => Array.from({ length: n }, (_, i) => inspectionRow({ product_unit: { id: `u-${i}`, imei: `3500000000000${i}`, product_name: "Phone" } }));
+
+  it("a manager gets the link with the number of phones waiting at the branch", async () => {
+    saleReturnsService.listInspection.mockResolvedValue(rows(3));
+    renderLayout(managerUser);
+
+    await waitFor(() => expect(link()).toHaveAccessibleName("Phones to check, 3 waiting"));
+    expect(link()).toHaveAttribute("href", "/pos/inspection");
+    expect(within(link()).getByTestId("inspection-count")).toHaveTextContent("3");
+    expect(saleReturnsService.listInspection).toHaveBeenCalledWith("branch-main");
+  });
+
+  it("an admin too, for the terminal branch", async () => {
+    useActiveBranchStore.setState({ activeBranchId: cityShop.id });
+    saleReturnsService.listInspection.mockResolvedValue(rows(1));
+    renderLayout(adminUser);
+
+    await waitFor(() => expect(link()).toHaveAccessibleName("Phones to check, 1 waiting"));
+    expect(saleReturnsService.listInspection).toHaveBeenCalledWith(cityShop.id);
+  });
+
+  it("none waiting, or a failed read: the link without a count", async () => {
+    saleReturnsService.listInspection.mockRejectedValue(new Error("Network Error"));
+    renderLayout(managerUser);
+
+    await waitFor(() => expect(saleReturnsService.listInspection).toHaveBeenCalled());
+    expect(link()).toHaveAccessibleName("Phones to check");
+    expect(screen.queryByTestId("inspection-count")).not.toBeInTheDocument();
+  });
+
+  it("a cashier has no link, and nothing is read", () => {
+    renderLayout(cashierUser);
+    expect(link()).not.toBeInTheDocument();
+    expect(saleReturnsService.listInspection).not.toHaveBeenCalled();
   });
 });
 

@@ -329,6 +329,17 @@ export const returnTimeoutError = () =>
 export const returnNetworkError = () =>
   Object.assign(new Error("Network Error"), { code: "ERR_NETWORK", config: { data: RETURN_BODY } });
 
+/** POST /product-units/:id/inspection-pass by a manager of another branch */
+export const inspectionWrongBranchError = () =>
+  axiosError(403, {
+    message: "You can only pass inspection for phones at your own branch.",
+    code: "INSPECTION_WRONG_BRANCH",
+  });
+
+/** POST /product-units/:id/inspection-pass for a unit that doesn't exist */
+export const unitNotFoundError = () =>
+  axiosError(404, { statusCode: 404, message: "Product unit not found", error: "Not Found" });
+
 /** POST /product-units/:id/inspection-pass on a unit that isn't in INSPECTION */
 export const notInInspectionError = (status = "IN_STOCK") =>
   axiosError(409, {

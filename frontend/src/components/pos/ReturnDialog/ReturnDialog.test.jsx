@@ -27,6 +27,7 @@ import * as salesService from "../../../services/salesService";
 import * as stockService from "../../../services/stockService";
 import * as requestId from "../../../utils/requestId";
 import * as printing from "../../../utils/printReceipt";
+import { INSPECTION_CHANGED } from "../../../hooks/useInspectionCount";
 import { formatLKR } from "../../../utils/money";
 
 // formatLKR puts a no-break space after LKR; toHaveTextContent folds it to a space.
@@ -829,6 +830,22 @@ describe("ReturnDialog: the return slip (P7-17)", () => {
     expect(printing.printReturnSlip).toHaveBeenCalledTimes(1);
     expect(printing.printReturnSlip).toHaveBeenCalledWith(response.sale, "ret-1");
     expect(within(dialog()).getByRole("button", { name: "Done" })).toHaveFocus();
+  });
+
+  it("a phone sent to inspection tells the header's Phones to check to read again (P7-7)", async () => {
+    const user = userEvent.setup();
+    const seen = [];
+    const listen = (e) => seen.push(e.detail?.count);
+    window.addEventListener(INSPECTION_CHANGED, listen);
+    salesService.createReturn.mockResolvedValue({ ...createReturnResponse(), resent: false }); // the phone → INSPECTION
+    try {
+      renderDialog();
+      await send(user);
+      await within(dialog()).findByTestId("return-recorded");
+      expect(seen).toEqual([undefined]); // no count: the header reads it again
+    } finally {
+      window.removeEventListener(INSPECTION_CHANGED, listen);
+    }
   });
 
   it("says it's printing while the copies go out", async () => {

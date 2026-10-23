@@ -42,6 +42,8 @@ import { receiptDateTime } from "../../../utils/receipt";
  * - sale: the hydrated sale (GET /sales/:id)
  * - today: "YYYY-MM-DD" in Colombo (warranty Expired tags)
  * - onBack: () => void — back to the list (Esc)
+ * - backLabel: the back button's label, "Sales" by default ("Phones to
+ *   check" when opened from there)
  * - actions: ReactNode for the actions dock
  * - returnActions: { onReprint, reprinting, errors, disabled } for the
  *   Returns tab's Reprint slip (SaleDetailReturns)
@@ -79,7 +81,15 @@ const TAB_CLASS = `
   focus:outline-none data-focus:ring-2 data-focus:ring-cyan-500
 `;
 
-const SaleDetailView = ({ sale, today, onBack, actions, returnActions = {}, initialTab = "items" }) => {
+const SaleDetailView = ({
+  sale,
+  today,
+  onBack,
+  backLabel = "Sales",
+  actions,
+  returnActions = {},
+  initialTab = "items",
+}) => {
   const voided = sale.status === "VOIDED";
   const lines = sale.lines ?? [];
   const payments = sale.payments ?? [];
@@ -106,7 +116,7 @@ const SaleDetailView = ({ sale, today, onBack, actions, returnActions = {}, init
       <div className="min-h-full lg:h-full flex flex-col gap-3 p-3 sm:p-4">
         <Card className="px-4 py-3">
           <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
-            <Button size="sm" variant="ghost" icon={ArrowLeft} label="Sales" title="Back to the sales list (Esc)" onClick={onBack} className="-ml-2" />
+            <Button size="sm" variant="ghost" icon={ArrowLeft} label={backLabel} title={backLabel === "Sales" ? "Back to the sales list (Esc)" : `Back to ${backLabel} (Esc)`} onClick={onBack} className="-ml-2" />
             <h1 className="text-lg font-semibold tabular-nums">{sale.sale_number}</h1>
             <SaleStatusBadge state={voided ? "VOIDED" : "COMPLETED"} />
             {returnState !== "NONE" && <SaleStatusBadge state={returnState} />}
