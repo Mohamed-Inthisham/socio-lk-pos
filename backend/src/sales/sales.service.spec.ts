@@ -2016,6 +2016,60 @@ describe('SalesService', () => {
       }
     });
 
+    it('rejects an external line IMEI the shop holds in any live status, naming the status (P7 step 0a)', async () => {
+      mockQueryBuilder.getOne
+        .mockResolvedValueOnce(seedDraftSale({ branch_id: 'branch-1' }))
+        .mockResolvedValueOnce({
+          id: 'unit-inspection',
+          imei: '999888777666555',
+          status: ProductUnitStatus.INSPECTION,
+          product_id: 'prod-inhouse',
+          branch_id: 'branch-1',
+        });
+      mockManager.findOne.mockResolvedValue({
+        id: 'line-1',
+        sale_id: 'sale-1',
+        product_id: 'prod-1',
+        external_supplier_id: 'supplier-1',
+        product_unit_id: null,
+        quantity: 1,
+        unit_price: '250000.00',
+        discount_type: null,
+        discount_value: null,
+        imei_snapshot: '111222333444555',
+      });
+      mockProductsService.findOne.mockResolvedValue(
+        seedProduct({ is_serialized: true }),
+      );
+
+      await expect(
+        service.updateLine('sale-1', 'line-1', {
+          imei_snapshot: '999888777666555',
+        }),
+      ).rejects.toMatchObject({
+        response: {
+          message:
+            "IMEI '999888777666555' is currently in your stock (status: INSPECTION). " +
+            'If you meant to sell your own inventory, remove external_supplier_id.',
+          existing_unit: {
+            id: 'unit-inspection',
+            product_id: 'prod-inhouse',
+            branch_id: 'branch-1',
+          },
+        },
+      });
+      expect(mockQueryBuilder.andWhere).toHaveBeenCalledWith(
+        'unit.status IN (:...statuses)',
+        {
+          statuses: [
+            ProductUnitStatus.IN_STOCK,
+            ProductUnitStatus.WRITTEN_OFF,
+            ProductUnitStatus.INSPECTION,
+          ],
+        },
+      );
+    });
+
     it('rejects nulling imei_snapshot on a serialized external line', async () => {
       mockQueryBuilder.getOne.mockResolvedValue(seedDraftSale());
       mockManager.findOne.mockResolvedValue({
@@ -2802,7 +2856,7 @@ describe('SalesService', () => {
       }
     });
 
-    it('checks the TRADE_IN IMEI against live units only (IN_STOCK, WRITTEN_OFF)', async () => {
+    it('checks the TRADE_IN IMEI against live units only (IN_STOCK, WRITTEN_OFF, INSPECTION)', async () => {
       primeTradeInSale();
       primeTradeInReferences();
       mockManager.create.mockImplementation((_e, data) => data);
@@ -2818,6 +2872,7 @@ describe('SalesService', () => {
           status: In([
             ProductUnitStatus.IN_STOCK,
             ProductUnitStatus.WRITTEN_OFF,
+            ProductUnitStatus.INSPECTION,
           ]),
         },
       });
@@ -5671,7 +5726,11 @@ describe('SalesService', () => {
     expect(mockManager.findOne).toHaveBeenCalledWith(ProductUnit, {
       where: {
         imei: '354789102345678',
-        status: In([ProductUnitStatus.IN_STOCK, ProductUnitStatus.WRITTEN_OFF]),
+        status: In([
+          ProductUnitStatus.IN_STOCK,
+          ProductUnitStatus.WRITTEN_OFF,
+          ProductUnitStatus.INSPECTION,
+        ]),
       },
     });
     // The live row was found, so the newest-row fallback never ran.

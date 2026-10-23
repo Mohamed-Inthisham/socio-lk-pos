@@ -432,7 +432,7 @@ describe('PhonePurchasesService', () => {
       expect(mockStockService.incrementForReversal).not.toHaveBeenCalled();
     });
 
-    it('checks IMEI collisions against live units only (IN_STOCK, WRITTEN_OFF)', async () => {
+    it('checks IMEI collisions against live units only (IN_STOCK, WRITTEN_OFF, INSPECTION)', async () => {
       setupHappyPathLookups();
       mockManager.create.mockImplementation((_e, data) => data);
       mockManager.save.mockImplementation((e) =>
@@ -449,6 +449,7 @@ describe('PhonePurchasesService', () => {
           status: In([
             ProductUnitStatus.IN_STOCK,
             ProductUnitStatus.WRITTEN_OFF,
+            ProductUnitStatus.INSPECTION,
           ]),
         },
       });

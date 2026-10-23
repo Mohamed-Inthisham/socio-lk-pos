@@ -14,8 +14,9 @@ import { MigrationInterface, QueryRunner } from 'typeorm';
  *
  * SOLD (with the buyer) and RETURNED (trade-in reversed, phone back
  * with the customer) rows stay as history; a new acquisition of the
- * same IMEI inserts a new row. A future customer-return flow must use a
- * new status (e.g. RETURN_PENDING) and add it to this WHERE clause.
+ * same IMEI inserts a new row. The customer-return flow uses a new
+ * status, INSPECTION, added to this WHERE clause by
+ * AddProductUnitInspectionStatus (Phase 6.4 P7-6).
  *
  * The old unique index name is reused for a plain lookup index, so it is
  * dropped first.

@@ -1,10 +1,11 @@
 import {
   ConflictException,
+  ForbiddenException,
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
-import { InjectRepository } from '@nestjs/typeorm';
-import { EntityManager, Repository } from 'typeorm';
+import { InjectDataSource, InjectRepository } from '@nestjs/typeorm';
+import { DataSource, EntityManager, Repository } from 'typeorm';
 import { ProductUnitStatus } from './enums/product-unit-status.enum';
 import { ProductUnit } from './entities/product-unit.entity';
 import { ListProductUnitsQueryDto } from './dto/list-product-units-query.dto';
@@ -13,6 +14,14 @@ import {
   paginate,
   PaginatedResponse,
 } from '../common/dto/paginated-response.dto';
+import { StockService } from '../stock/stock.service';
+import { lockInventoryRows } from '../stock/lock-inventory-rows';
+import { UserRole } from '../users/enums/user-role.enum';
+import { AuditAction } from '../audit-log/enums/audit-action.enum';
+import {
+  AuditActor,
+  writeAuditEntry,
+} from '../audit-log/utils/write-audit-entry';
 
 /**
  * Relations eagerly hydrated on findOne / findAll. Includes the parent
@@ -44,11 +53,26 @@ export type VoidBlockReason =
 /** The later sale a void 409 points at: void it first. */
 type LaterSale = { id: string; sale_number: string };
 
+/** 409 NOT_IN_INSPECTION unless the unit is waiting for a check (P7-7). */
+const assertInInspection = (unit: ProductUnit): void => {
+  if (unit.status !== ProductUnitStatus.INSPECTION) {
+    throw new ConflictException({
+      message:
+        `This phone (IMEI ${unit.imei}) is not waiting for inspection ` +
+        `(status: ${unit.status}).`,
+      code: 'NOT_IN_INSPECTION',
+      status: unit.status,
+    });
+  }
+};
+
 @Injectable()
 export class ProductUnitsService {
   constructor(
     @InjectRepository(ProductUnit)
     private readonly productUnitsRepository: Repository<ProductUnit>,
+    @InjectDataSource() private readonly dataSource: DataSource,
+    private readonly stockService: StockService,
   ) {}
 
   /**
@@ -110,6 +134,87 @@ export class ProductUnitsService {
       throw new NotFoundException('Product unit not found');
     }
     return unit;
+  }
+
+  /**
+   * POST /product-units/:id/inspection-pass (Phase 6.4 P7-7): a returned
+   * phone checked and found without fault goes back on sale. INSPECTION →
+   * IN_STOCK, stock +1, audited (INSPECTION_PASSED). A faulty phone stays
+   * in INSPECTION until the supplier-receiving phase.
+   *
+   * 1. Checks without locks, so a pass that can't happen changes nothing:
+   *    404 unknown unit; 403 INSPECTION_WRONG_BRANCH for a manager of
+   *    another branch (admins: any branch); 409 NOT_IN_INSPECTION.
+   * 2. One transaction, in the global lock order (lockInventoryRows):
+   *    the unit's Stock row, then the unit. Re-check INSPECTION under the
+   *    lock (a second pass at the same moment gets the same 409), flip
+   *    the status, add the phone back to stock, write the audit row.
+   *
+   * Returns the unit as GET /product-units/:id does.
+   */
+  async passInspection(
+    id: string,
+    user: AuditActor & { role: UserRole; branch_id: string | null },
+    ip?: string | null,
+  ): Promise<ProductUnit> {
+    const unit = await this.productUnitsRepository.findOne({
+      where: { id },
+      relations: ['product'],
+    });
+    if (!unit) {
+      throw new NotFoundException('Product unit not found');
+    }
+    if (user.role !== UserRole.ADMIN && user.branch_id !== unit.branch_id) {
+      throw new ForbiddenException({
+        message: 'You can only pass inspection for phones at your own branch.',
+        code: 'INSPECTION_WRONG_BRANCH',
+      });
+    }
+    assertInInspection(unit);
+
+    await this.dataSource.transaction(async (manager) => {
+      await lockInventoryRows(manager, {
+        stock: [{ productId: unit.product_id, branchId: unit.branch_id }],
+        unitIds: [unit.id],
+      });
+      const locked = await manager.findOneOrFail(ProductUnit, {
+        where: { id },
+      });
+      assertInInspection(locked);
+
+      await manager.query(
+        `UPDATE product_units
+         SET status = $1,
+             updated_at = now()
+         WHERE id = $2`,
+        [ProductUnitStatus.IN_STOCK, id],
+      );
+      await this.stockService.incrementForReversal(
+        manager,
+        unit.product_id,
+        unit.branch_id,
+        1,
+      );
+      await writeAuditEntry(manager, {
+        actor: user,
+        action: AuditAction.INSPECTION_PASSED,
+        entityType: 'ProductUnit',
+        entityId: id,
+        description:
+          `Inspection passed: IMEI ${unit.imei}` +
+          (unit.product ? ` (${unit.product.name})` : '') +
+          ` back in stock`,
+        changes: {
+          status: {
+            old: ProductUnitStatus.INSPECTION,
+            new: ProductUnitStatus.IN_STOCK,
+          },
+        },
+        ip,
+      });
+    });
+
+    return this.findOne(id);
   }
 
   /**
@@ -216,9 +321,10 @@ export class ProductUnitsService {
    *     A concurrent re-acquisition between the check and the UPDATE
    *     hits uq_product_units_imei_live and is mapped to the same 409.
    *
-   * Note: does NOT transition to RETURNED. RETURNED is a separate flow
-   * (customer physically returns the phone, not a full sale void).
-   * That endpoint is a tracked followup.
+   * Note: does NOT transition to RETURNED or INSPECTION. A customer
+   * physically returning the phone is a return, not a void: P7 returns
+   * (step 0b) move it SOLD → INSPECTION (Phase 6.4 P7-6), and a sale with
+   * a return can't be voided (P7-11).
    *
    * Concurrency: same setLock pattern as markSoldForSale.
    *
@@ -372,12 +478,11 @@ export class ProductUnitsService {
    * for the paired stockService.decrementForVoidedTradeIn call, and a
    * second read to hydrate them would be wasteful).
    *
-   * Note: this is the FIRST path in the codebase that transitions a
-   * PU to RETURNED. A separate customer-return endpoint (someone
-   * physically brings a sold phone back for a refund) is still a
-   * followup — that path would need its own method (e.g.
-   * markReturnedForCustomerReturn) with different preconditions
-   * (SOLD → RETURNED, not IN_STOCK → RETURNED).
+   * Note: this is the only path that transitions a PU to RETURNED
+   * ("trade-in reversed; the phone is back with the customer"). A
+   * customer bringing a sold phone back for a refund is a different
+   * flow: P7 returns (step 0b) move it SOLD → INSPECTION, a live status,
+   * and passInspection moves it on to IN_STOCK (Phase 6.4 P7-6, P7-7).
    *
    * Concurrency: same setLock pattern as the siblings. Serializes
    * concurrent operations on the same PU (e.g. two operators trying

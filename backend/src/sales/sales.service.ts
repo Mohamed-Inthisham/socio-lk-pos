@@ -2326,7 +2326,8 @@ export class SalesService {
 
   /**
    * Guard for external-sourced serialized lines: reject if the free-text
-   * imei_snapshot happens to match a ProductUnit currently in IN_STOCK.
+   * imei_snapshot matches a ProductUnit the shop holds (LIVE_UNIT_STATUSES:
+   * IN_STOCK, WRITTEN_OFF, INSPECTION).
    *
    * Rationale (Slice E Q7): catches the specific inventory-drift failure
    * mode where a UI bug or misclick sets external_supplier_id on a line
@@ -2334,9 +2335,11 @@ export class SalesService {
    * skips stock decrement AND skips PU flip — physical phone leaves the
    * shop but both stock and PU status say we still have it.
    *
-   * Only IN_STOCK is diagnostic. SOLD/RETURNED/WRITTEN_OFF matches are
-   * historical coincidences (or genuine IMEI-uniqueness violations
-   * outside our control) and not something to block a sale on.
+   * Only live units are diagnostic: the shop has that phone, so another
+   * shop can't be selling it (Phase 6.4 P7 step 0a widened this from
+   * IN_STOCK, so a written-off or under-inspection phone can't leave as
+   * another shop's). SOLD/RETURNED matches are history and not something
+   * to block a sale on.
    *
    * Runs inside the caller's transaction, so the collision check and the
    * subsequent insert both see the same snapshot.
@@ -2348,15 +2351,15 @@ export class SalesService {
     const conflicting = await manager
       .createQueryBuilder(ProductUnit, 'unit')
       .where('unit.imei = :imei', { imei })
-      .andWhere('unit.status = :status', {
-        status: ProductUnitStatus.IN_STOCK,
+      .andWhere('unit.status IN (:...statuses)', {
+        statuses: [...LIVE_UNIT_STATUSES],
       })
       .getOne();
 
     if (conflicting) {
       throw new ConflictException({
         message:
-          `IMEI '${imei}' is currently in your stock (status: IN_STOCK). ` +
+          `IMEI '${imei}' is currently in your stock (status: ${conflicting.status}). ` +
           `If you meant to sell your own inventory, remove external_supplier_id.`,
         existing_unit: {
           id: conflicting.id,
