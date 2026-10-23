@@ -40,14 +40,13 @@ export const itemLines = (ret, sale) =>
 
 /**
  * The trade-in share of a recorded return (P7-5), against the refunds of
- * the returns before it; never more than its own refund.
+ * the returns before it (tradeInShareCents keeps it within its own refund).
  */
 export const recordedTradeInCents = (ret, sale) => {
   const { nonTradeInPaidCents } = saleRefundContext(sale);
   const before = sale.returns.slice(0, sale.returns.findIndex((r) => r.id === ret.id));
   const earlierCents = before.reduce((sum, r) => sum + toCents(r.refund_total), 0);
-  const total = toCents(ret.refund_total);
-  return Math.min(total, tradeInShareCents(total, nonTradeInPaidCents, earlierCents));
+  return tradeInShareCents(toCents(ret.refund_total), nonTradeInPaidCents, earlierCents);
 };
 
 export const lkr = (cents) => formatLKR(fromCents(cents));

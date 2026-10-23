@@ -101,6 +101,12 @@ describe('tradeInShareCents (P7-5)', () => {
     // 15,000 refunded before; 20,000 more now: 15,000 of it is trade-in.
     expect(tradeInShareCents(2000000, 2000000, 1500000)).toBe(1500000);
   });
+
+  it('earlier refunds above the non-trade-in money: never more than the refund', () => {
+    // 65,590 refunded before against 30,290 non-trade-in; 1,600 more now:
+    // all of it is trade-in money (1,600), not 1,600 − (30,290 − 65,590).
+    expect(tradeInShareCents(160000, 3029000, 6559000)).toBe(160000);
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -227,9 +233,8 @@ describe("saleTradeInShareCents (P7-5)", () => {
 
   it("counts the earlier returns’ refunds, and is never more than the refund", () => {
     // 65,590.00 went back before, more than the 30,290.00 non-trade-in
-    // money: all of a further 1,600.00 is trade-in money. The server's
-    // formula alone gives 1,600 − (30,290 − 65,590) = 36,900.00.
-    expect(tradeInShareCents(160000, 3029000, 6559000)).toBe(3690000);
+    // money: all of a further 1,600.00 is trade-in money (the server's
+    // tradeInShareCents caps it at the refund, as the copied case above).
     expect(saleTradeInShareCents(saleWithReturnsEntity(), 160000)).toBe(160000);
   });
 
