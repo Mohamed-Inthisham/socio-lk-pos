@@ -332,6 +332,26 @@ describe("SaleDetail: Return items (P7-16)", () => {
     expect(salesService.getSale).toHaveBeenCalledTimes(1); // the page load: the answer is shown as is
   });
 
+  it("after a return on the page: the Items and Returns tabs appear, Void gives way to the note", async () => {
+    salesService.getSale.mockResolvedValue(saleEntity());
+    salesService.createReturn.mockResolvedValue({ return_id: "ret-1", sale: saleWithReturnsEntity(), resent: false });
+    approvalsService.listApprovers.mockResolvedValue(approversResponse());
+    const user = userEvent.setup();
+    renderDetail();
+    await heading();
+    expect(screen.queryByRole("tablist")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Void sale" })).toBeInTheDocument();
+
+    const dialog = await returnPhone(user);
+    await user.click(within(dialog).getByRole("button", { name: "Done" }));
+    await waitFor(() => expect(returnDialog()).not.toBeInTheDocument());
+
+    expect(screen.getByRole("tab", { name: "Items · 5" })).toHaveAttribute("aria-selected", "true");
+    expect(screen.getByRole("tab", { name: "Returns · 1" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Void sale" })).not.toBeInTheDocument();
+    expect(screen.getByTestId("no-void-note")).toHaveTextContent("Sales with returns can't be voided.");
+  });
+
   it("after a return of everything left: Return items disables itself and focus goes to Reprint", async () => {
     salesService.getSale.mockResolvedValue(saleEntity());
     const answered = saleWithReturnsEntity();
@@ -363,6 +383,89 @@ describe("SaleDetail: Return items (P7-16)", () => {
 
     await waitFor(() => expect(returnDialog()).not.toBeInTheDocument());
     await waitFor(() => expect(returnButton()).toHaveFocus());
+  });
+});
+
+describe("SaleDetail: a sale with returns (P7-11, P7-18)", () => {
+  /** Opened from Recent sales with this search, as the list does. */
+  const renderFromSearch = (search) =>
+    renderWithProviders(
+      <Routes>
+        <Route path="/pos/sales/:id" element={<SaleDetail />} />
+      </Routes>,
+      {
+        route: { pathname: "/pos/sales/sale-7", state: { from: { search, pages: 1, activeId: "sale-7" } } },
+        preloadedState: { auth: authState(cashierUser), branches: branchesState([mainShop]) },
+      },
+    );
+  const returnsTab = () => screen.getByRole("tab", { name: /^Returns/ });
+
+  it("no Void button: a note says why, and V does nothing", async () => {
+    salesService.getSale.mockResolvedValue(saleWithReturnsEntity());
+    const user = userEvent.setup();
+    renderDetail();
+    await heading();
+
+    expect(screen.queryByRole("button", { name: "Void sale" })).not.toBeInTheDocument();
+    expect(screen.getByTestId("no-void-note")).toHaveTextContent("Sales with returns can't be voided.");
+    await user.keyboard("v");
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+  });
+
+  it("opens on Items by default", async () => {
+    salesService.getSale.mockResolvedValue(saleWithReturnsEntity());
+    renderDetail();
+    await heading();
+    expect(screen.getByRole("tab", { name: /^Items/ })).toHaveAttribute("aria-selected", "true");
+  });
+
+  it("opens on Returns when it came from a search for one of its RET numbers", async () => {
+    salesService.getSale.mockResolvedValue(saleWithReturnsEntity());
+    renderFromSearch("?q=ret-20261023-0001");
+    await heading();
+    expect(returnsTab()).toHaveAttribute("aria-selected", "true");
+  });
+
+  it.each([
+    ["an invoice search", "?q=INV-20261021"],
+    ["a RET number of another sale", "?q=RET-20261099-0001"],
+    ["a day list (no search)", "?day=2026-10-21"],
+  ])("opens on Items after %s", async (_, search) => {
+    salesService.getSale.mockResolvedValue(saleWithReturnsEntity());
+    renderFromSearch(search);
+    await heading();
+    expect(returnsTab()).toHaveAttribute("aria-selected", "false");
+  });
+
+  it("Reprint slip re-reads the sale, then prints both copies marked REPRINT", async () => {
+    const fresh = saleWithReturnsEntity();
+    salesService.getSale.mockResolvedValue(fresh);
+    const user = userEvent.setup();
+    renderDetail();
+    await heading();
+    await user.click(returnsTab());
+
+    await user.click(within(screen.getByRole("listitem", { name: "RET-20261023-0001" })).getByRole("button", { name: "Reprint slip" }));
+
+    await waitFor(() => expect(print).toHaveBeenCalledTimes(2));
+    expect(salesService.getSale).toHaveBeenCalledTimes(2); // the page load + the re-read
+    // the shop copy is the last one rendered
+    expect(receiptText()).toContain("SHOP COPY");
+    expect(receiptText()).toContain("REPRINT · 22 Oct 2026, 11:30");
+  });
+
+  it("a failed re-read prints nothing and says so on that return", async () => {
+    salesService.getSale.mockResolvedValueOnce(saleWithReturnsEntity()).mockRejectedValueOnce(new Error("Network Error"));
+    const user = userEvent.setup();
+    renderDetail();
+    await heading();
+    await user.click(returnsTab());
+
+    const entry = screen.getByRole("listitem", { name: "RET-20261023-0001" });
+    await user.click(within(entry).getByRole("button", { name: "Reprint slip" }));
+
+    expect(await within(entry).findByRole("alert")).toHaveTextContent("Couldn't load the sale. Nothing was printed.");
+    expect(print).not.toHaveBeenCalled();
   });
 });
 

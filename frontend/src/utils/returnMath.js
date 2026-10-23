@@ -55,6 +55,36 @@ const TRADE_IN = "TRADE_IN";
 export const returnableQuantity = (line) => line.quantity - (line.returned_quantity ?? 0);
 
 /**
+ * A sale's return state from its lines, as GET /sales works out each
+ * row's `return_state` (P7-18): NONE, PARTIAL when some but not all units
+ * came back, FULL when every unit did. GET /sales/:id has no such field.
+ *
+ * @returns {"NONE"|"PARTIAL"|"FULL"}
+ */
+export const saleReturnState = (sale) => {
+  const lines = sale.lines ?? [];
+  const sold = lines.reduce((sum, l) => sum + l.quantity, 0);
+  const returned = lines.reduce((sum, l) => sum + (l.returned_quantity ?? 0), 0);
+  if (returned === 0) return "NONE";
+  return returned >= sold ? "FULL" : "PARTIAL";
+};
+
+/**
+ * A Recent sales row's one status badge (P7-18): VOIDED, else its
+ * return_state (PARTIAL / FULL), else COMPLETED.
+ *
+ * @returns {"VOIDED"|"PARTIAL"|"FULL"|"COMPLETED"}
+ */
+export const saleListStatus = (row) => {
+  if (row.status === "VOIDED") return "VOIDED";
+  if (row.return_state === "PARTIAL" || row.return_state === "FULL") return row.return_state;
+  return "COMPLETED";
+};
+
+/** The sum of a sale's returns' refund_total, in cents. */
+export const refundedCents = (sale) => (sale.returns ?? []).reduce((sum, r) => sum + toCents(r.refund_total), 0);
+
+/**
  * The most that may be refunded for a selection (P7-3): the sum of the
  * selected lines' shares. Lines with 0 or no quantity are skipped.
  *

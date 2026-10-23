@@ -1,5 +1,8 @@
 import { render, screen, within } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import SaleDetailView from ".";
+import { returnLineView, saleReturnView, saleWithReturnsEntity } from "../../../test/returnEntities";
+import { formatLKR } from "../../../utils/money";
 import {
   paymentEntity,
   saleEntity,
@@ -16,6 +19,8 @@ const renderView = (sale, today = TODAY) =>
 const line = (name) => screen.getByRole("listitem", { name });
 const tender = (name) => within(screen.getByRole("list", { name: "Tenders" })).getByRole("listitem", { name });
 const banner = () => screen.queryByRole("region", { name: "Voided" });
+// formatLKR puts a no-break space after LKR; toHaveTextContent folds it to a space.
+const lkr = (value) => formatLKR(value).replace(/\s/g, " ");
 
 describe("SaleDetailView: header (P6-6)", () => {
   it("shows the sale number, Completed, the completion time, cashier, and the customer's name and phone", () => {
@@ -189,5 +194,92 @@ describe("SaleDetailView: a voided sale (P6-6, P6-17)", () => {
   it("doesn't tag payments on a completed sale", () => {
     renderView(saleEntity());
     expect(screen.queryByText("Reversed")).not.toBeInTheDocument();
+  });
+});
+
+describe("SaleDetailView: returns (P7-18)", () => {
+  const BADGE = /^(Completed|Part returned|Returned|Voided)$/;
+  const header = () => screen.getByRole("heading", { level: 1 }).parentElement;
+  const allBack = () =>
+    saleWithReturnsEntity(
+      [saleReturnView()],
+      { lines: saleEntity().lines.map((l) => ({ ...l, returned_quantity: l.quantity })) },
+    );
+
+  it("the header: Completed, and Part returned or Returned next to it", () => {
+    renderView(saleWithReturnsEntity());
+    expect(within(header()).getAllByText(BADGE).map((b) => b.textContent)).toEqual(["Completed", "Part returned"]);
+  });
+
+  it("a sale with every unit back reads Returned; one with none, Completed alone", () => {
+    const { unmount } = renderView(allBack());
+    expect(within(header()).getAllByText(BADGE).map((b) => b.textContent)).toEqual(["Completed", "Returned"]);
+    unmount();
+    renderView(saleEntity());
+    expect(within(header()).getAllByText(BADGE).map((b) => b.textContent)).toEqual(["Completed"]);
+  });
+
+  it("Returned N of M sits on the line's qty × price row; all back reads Returned", () => {
+    renderView(saleWithReturnsEntity());
+    const kase = line("Silicone Case A15");
+    const tag = within(kase).getByTestId("detail-line-returned");
+    expect(tag).toHaveTextContent("Returned 1 of 2");
+    // the same row as "2 × 2,000.00", not a row of its own
+    expect(tag.parentElement).toHaveTextContent(/^2 × 2,000\.00/);
+    expect(within(line("Samsung Galaxy A15 128GB")).getByTestId("detail-line-returned")).toHaveTextContent(/^Returned$/);
+    expect(within(line("25W Charger")).queryByTestId("detail-line-returned")).not.toBeInTheDocument();
+  });
+
+  it("the totals keep the sale's own figures and add what was refunded", () => {
+    renderView(saleWithReturnsEntity());
+    const totals = screen.getByLabelText("Totals");
+    expect(totals).toHaveTextContent(`Total${lkr("70290.00")}`);
+    expect(totals).toHaveTextContent(`Refunded${lkr("65590.00")}`);
+  });
+
+  it("no returns: no tabs, the card reads Items as before", () => {
+    renderView(saleEntity());
+    expect(screen.queryByRole("tablist")).not.toBeInTheDocument();
+    expect(screen.getByText("Items · 5")).toBeInTheDocument();
+  });
+
+  it("with returns: two tabs, Items first; arrow keys move between them", async () => {
+    const user = userEvent.setup();
+    renderView(saleWithReturnsEntity());
+    const items = screen.getByRole("tab", { name: "Items · 5" });
+    const returns = screen.getByRole("tab", { name: "Returns · 1" });
+    expect(items).toHaveAttribute("aria-selected", "true");
+    expect(screen.getByRole("list", { name: "Items" })).toBeInTheDocument();
+    expect(screen.queryByRole("list", { name: "Returns" })).not.toBeInTheDocument();
+
+    items.focus();
+    await user.keyboard("{ArrowRight}");
+    expect(returns).toHaveAttribute("aria-selected", "true");
+    expect(returns).toHaveFocus();
+    expect(screen.getByRole("list", { name: "Returns" })).toBeInTheDocument();
+    await user.keyboard("{ArrowLeft}");
+    expect(items).toHaveAttribute("aria-selected", "true");
+  });
+
+  it("opens on Returns when asked (a RET-number search)", () => {
+    render(
+      <SaleDetailView sale={saleWithReturnsEntity()} today={TODAY} onBack={() => {}} actions={null} initialTab="returns" />,
+    );
+    expect(screen.getByRole("tab", { name: "Returns · 1" })).toHaveAttribute("aria-selected", "true");
+  });
+
+  it("stays on its tab when the sale changes (a return made on the page); the count updates", async () => {
+    const user = userEvent.setup();
+    const props = { today: TODAY, onBack: () => {}, actions: null };
+    const { rerender } = render(<SaleDetailView sale={saleWithReturnsEntity()} {...props} />);
+    await user.click(screen.getByRole("tab", { name: "Returns · 1" }));
+
+    const second = saleReturnView({
+      id: "ret-2",
+      return_number: "RET-20261024-0001",
+      lines: [returnLineView({ sale_line_id: "line-charger", refund_share: "1600.00" })],
+    });
+    rerender(<SaleDetailView sale={saleWithReturnsEntity([saleReturnView(), second])} {...props} />);
+    expect(screen.getByRole("tab", { name: "Returns · 2" })).toHaveAttribute("aria-selected", "true");
   });
 });

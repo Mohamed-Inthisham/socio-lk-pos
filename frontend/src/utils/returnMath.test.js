@@ -4,8 +4,10 @@ import {
   lineWarrantyStatus,
   refundDueCents,
   refundShareCents,
+  refundedCents,
   returnableQuantity,
   saleRefundContext,
+  saleReturnState,
   saleTradeInShareCents,
   selectionOutsideWarranty,
   tradeInShareCents,
@@ -114,6 +116,21 @@ describe("returnableQuantity", () => {
   it("is what is left of the line", () => {
     expect(returnableQuantity(saleLineEntity({ quantity: 3, returned_quantity: 1 }))).toBe(2);
     expect(returnableQuantity(saleLineEntity({ quantity: 2, returned_quantity: 2 }))).toBe(0);
+  });
+});
+
+describe("saleReturnState and refundedCents (P7-18)", () => {
+  it("NONE, PARTIAL and FULL by returned units, as the list's return_state", () => {
+    expect(saleReturnState(saleEntity())).toBe("NONE");
+    expect(saleReturnState(saleWithReturnsEntity())).toBe("PARTIAL");
+    const all = saleEntity({ lines: saleEntity().lines.map((l) => ({ ...l, returned_quantity: l.quantity })) });
+    expect(saleReturnState(all)).toBe("FULL");
+  });
+
+  it("refundedCents sums what went back, not what was due", () => {
+    expect(refundedCents(saleEntity())).toBe(0);
+    const lowered = saleReturnView({ id: "ret-2", refund_due: "1600.00", refund_total: "1000.00" });
+    expect(refundedCents(saleWithReturnsEntity([saleReturnView(), lowered]))).toBe(6659000);
   });
 });
 
