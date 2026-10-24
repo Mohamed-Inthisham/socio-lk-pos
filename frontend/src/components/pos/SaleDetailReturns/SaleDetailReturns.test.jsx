@@ -47,7 +47,7 @@ describe("SaleDetailReturns (P7-18)", () => {
       "RET-20261024-0001",
       "RET-20261024-0002",
     ]);
-    expect(entry("RET-20261023-0001")).toHaveTextContent("RET-20261023-0001 · 23 Oct 2026, 10:40");
+    expect(entry("RET-20261023-0001")).toHaveTextContent("RET-20261023-0001 · 23 Oct 2026, 10:40 AM");
     expect(entry("RET-20261023-0001")).toHaveTextContent(`Refund ${lkr("65590.00")}`);
   });
 

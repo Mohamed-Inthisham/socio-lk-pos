@@ -29,9 +29,9 @@ describe("ReturnSlip (P7-17)", () => {
   it("the return, the original invoice, who made and approved it, the customer — never the NIC", () => {
     const text = renderSlip().textContent;
     expect(text).toContain("ReturnRET-20261023-0001");
-    expect(text).toContain("Date23 Oct 2026, 10:40");
+    expect(text).toContain("Date23 Oct 2026, 10:40 AM");
     expect(text).toContain("InvoiceINV-20261021-0007");
-    expect(text).toContain("Sold21 Oct 2026, 14:32");
+    expect(text).toContain("Sold21 Oct 2026, 2:32 PM");
     expect(text).toContain("CashierNimal Silva");
     expect(text).toContain("Approved byAsha Perera");
     expect(text).toContain("CustomerKamal Perera");
@@ -128,6 +128,6 @@ describe("ReturnSlip (P7-17)", () => {
   it("a reprint is marked REPRINT with when it was printed; the first print isn't", () => {
     expect(within(renderSlip()).queryByTestId("slip-reprint")).not.toBeInTheDocument();
     const slip = renderSlip({ copy: "shop", reprintedAt: "2026-10-24T03:15:00.000Z" });
-    expect(within(slip).getByTestId("slip-reprint")).toHaveTextContent("REPRINT · 24 Oct 2026, 08:45");
+    expect(within(slip).getByTestId("slip-reprint")).toHaveTextContent("REPRINT · 24 Oct 2026, 8:45 AM");
   });
 });

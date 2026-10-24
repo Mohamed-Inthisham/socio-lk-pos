@@ -33,10 +33,10 @@ describe("receipt formatting (P5-11, P5-18, P5-19, P5-20)", () => {
   });
 
   it("prints the completion time in Colombo, whatever the till's own zone", () => {
-    // 09:02 UTC = 14:32 in Colombo (UTC+5:30)
-    expect(receiptDateTime("2026-10-21T09:02:00.000Z")).toBe("21 Oct 2026, 14:32");
-    // 20:00 UTC on 31 Jan = 01:30 on 1 Feb in Colombo
-    expect(receiptDateTime("2026-01-31T20:00:00.000Z")).toBe("01 Feb 2026, 01:30");
+    // 09:02 UTC = 2:32 PM in Colombo (UTC+5:30)
+    expect(receiptDateTime("2026-10-21T09:02:00.000Z")).toBe("21 Oct 2026, 2:32 PM");
+    // 20:00 UTC on 31 Jan = 1:30 AM on 1 Feb in Colombo
+    expect(receiptDateTime("2026-01-31T20:00:00.000Z")).toBe("01 Feb 2026, 1:30 AM");
     expect(receiptDateTime(null)).toBe("");
   });
 

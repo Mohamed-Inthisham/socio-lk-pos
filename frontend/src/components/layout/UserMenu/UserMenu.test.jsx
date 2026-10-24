@@ -41,7 +41,7 @@ describe("UserMenu: Approval PIN (P6-18)", () => {
     renderMenu(adminSessionUser({ has_approval_pin: true, approval_pin_set_at: "2026-10-22T09:05:00.000Z" }));
     await openMenu(user, "Ruwan Fernando");
 
-    expect(pinItem()).toHaveTextContent("Approval PINSet on 22 Oct 2026, 14:35");
+    expect(pinItem()).toHaveTextContent("Approval PINSet on 22 Oct 2026, 2:35 PM");
   });
 
   it("a cashier doesn't see it at all", async () => {
@@ -70,6 +70,6 @@ describe("UserMenu: Approval PIN (P6-18)", () => {
     await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
 
     await openMenu(user, "Asha Perera");
-    expect(pinItem()).toHaveTextContent("Set on 22 Oct 2026, 14:35");
+    expect(pinItem()).toHaveTextContent("Set on 22 Oct 2026, 2:35 PM");
   });
 });

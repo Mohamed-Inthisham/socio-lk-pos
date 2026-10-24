@@ -115,7 +115,7 @@ describe("SaleDetail: Reprint (P6-7)", () => {
     await waitFor(() => expect(print).toHaveBeenCalledTimes(1));
     expect(salesService.getSale).toHaveBeenCalledWith("sale-7");
     expect(receiptText()).toContain("INV-20261021-0007");
-    expect(receiptText()).toContain("REPRINT · 22 Oct 2026, 11:30");
+    expect(receiptText()).toContain("REPRINT · 22 Oct 2026, 11:30 AM");
     expect(receiptText()).not.toContain("VOIDED");
   });
 
@@ -451,7 +451,7 @@ describe("SaleDetail: a sale with returns (P7-11, P7-18)", () => {
     expect(salesService.getSale).toHaveBeenCalledTimes(2); // the page load + the re-read
     // the shop copy is the last one rendered
     expect(receiptText()).toContain("SHOP COPY");
-    expect(receiptText()).toContain("REPRINT · 22 Oct 2026, 11:30");
+    expect(receiptText()).toContain("REPRINT · 22 Oct 2026, 11:30 AM");
   });
 
   it("a failed re-read prints nothing and says so on that return", async () => {

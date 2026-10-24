@@ -106,7 +106,7 @@ describe("voidSale is never resent", () => {
   it("one POST on a 423 PIN_LOCKED, and no token refresh", async () => {
     voidReply = {
       status: 423,
-      body: { message: "Asha's PIN is locked until 14:32.", code: "PIN_LOCKED" },
+      body: { message: "Asha's PIN is locked until 2:32 PM.", code: "PIN_LOCKED" },
     };
 
     await expect(voidSale("sale-1", voidPayload)).rejects.toMatchObject({

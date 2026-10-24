@@ -111,7 +111,7 @@ describe("PhonesToCheck: who and what (P7-7)", () => {
     expect(screen.getByRole("heading", { name: "Phones to check · 3" })).toBeInTheDocument();
 
     const [first, second, third] = bodyRows();
-    expect(first).toHaveTextContent("25 Oct 2026, 10:40");
+    expect(first).toHaveTextContent("25 Oct 2026, 10:40 AM");
     expect(first).toHaveTextContent("9 days waiting");
     expect(first).toHaveTextContent("Samsung Galaxy A15 128GB");
     expect(first).toHaveTextContent("IMEI 356789012345601");

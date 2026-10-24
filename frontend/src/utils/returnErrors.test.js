@@ -160,7 +160,7 @@ describe("returnErrorView", () => {
     expect(view(() => wrongPinError(3))).toMatchObject({ field: "pin", message: "Wrong PIN. 3 attempts left." });
     expect(view(() => pinLockedError())).toMatchObject({
       field: "pin",
-      message: "Asha Perera's PIN is locked until 14:32. Another manager can approve, or an admin can clear the PIN.",
+      message: "Asha Perera's PIN is locked until 2:32 PM. Another manager can approve, or an admin can clear the PIN.",
     });
   });
 

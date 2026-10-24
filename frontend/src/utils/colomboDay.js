@@ -61,13 +61,6 @@ export const shiftColomboDay = (day, delta) =>
 export const colomboDaysSince = (iso, today = colomboToday()) =>
   Math.round((parseDay(today).getTime() - parseDay(colomboToday(new Date(iso))).getTime()) / DAY_MS);
 
-const timeFormat = new Intl.DateTimeFormat("en-GB", {
-  timeZone: "Asia/Colombo",
-  hour: "2-digit",
-  minute: "2-digit",
-  hourCycle: "h23",
-});
-
 const dayLabelFormat = new Intl.DateTimeFormat("en-GB", {
   timeZone: "UTC",
   weekday: "short",
@@ -75,9 +68,6 @@ const dayLabelFormat = new Intl.DateTimeFormat("en-GB", {
   month: "short",
   year: "numeric",
 });
-
-/** An ISO timestamp → "14:32", Colombo time. "" for none. */
-export const formatColomboTime = (iso) => (iso ? timeFormat.format(new Date(iso)) : "");
 
 /**
  * "2026-10-22" → "Thu 22 Oct 2026" (the day itself; no zone shift). Built

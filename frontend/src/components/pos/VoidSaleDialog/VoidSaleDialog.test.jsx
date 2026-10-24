@@ -447,7 +447,7 @@ describe("VoidSaleDialog: errors in the dialog (P6-11, P6-19, P6-22)", () => {
     await voidWith(user, pinLockedError());
 
     expect(await inDialog().findByText(
-      "Asha Perera's PIN is locked until 14:32. Another manager can approve, or an admin can clear the PIN.",
+      "Asha Perera's PIN is locked until 2:32 PM. Another manager can approve, or an admin can clear the PIN.",
     )).toBeInTheDocument();
     expect(pin()).toHaveValue("");
   });

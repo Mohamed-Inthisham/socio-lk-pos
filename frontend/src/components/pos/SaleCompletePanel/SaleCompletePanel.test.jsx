@@ -58,6 +58,8 @@ describe("SaleCompletePanel", () => {
     renderPanel();
 
     expect(within(panel()).getByTestId("sale-number")).toHaveTextContent("INV-20261020-0007");
+    // 09:15 UTC = 2:45 PM in Colombo
+    expect(within(panel()).getByTestId("sale-number").parentElement).toHaveTextContent("INV-20261020-0007 · 20 Oct, 2:45 PM");
     expect(within(panel()).getByTestId("sale-complete-change")).toHaveTextContent("500.00");
     expect(within(panel()).getByTestId("sale-complete-total")).toHaveTextContent("3,000.00");
     expect(within(panel()).getByTestId("sale-complete-paid")).toHaveTextContent("3,000.00");

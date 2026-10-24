@@ -14,9 +14,9 @@ import {
   colomboDayBounds,
   colomboToday,
   formatColomboDayLabel,
-  formatColomboTime,
   shiftColomboDay,
 } from "../../utils/colomboDay";
+import { formatColomboTime } from "../../utils/colomboTime";
 import { formatLKR } from "../../utils/money";
 import { receiptDateTime } from "../../utils/receipt";
 

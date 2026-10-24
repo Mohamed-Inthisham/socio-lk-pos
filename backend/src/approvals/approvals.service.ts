@@ -17,6 +17,7 @@ import {
   writeAuditEntry,
 } from '../audit-log/utils/write-audit-entry';
 import { TypedConfigService } from '../config/typed-config.service';
+import { formatColomboTime } from '../common/utils/colombo-time';
 import { isWeakPin } from './weak-pin';
 import { SetApprovalPinDto } from './dto/set-approval-pin.dto';
 
@@ -90,13 +91,6 @@ const returnedRows = <T>(result: unknown): T[] =>
   (Array.isArray(result) && Array.isArray(result[0])
     ? result[0]
     : result) as T[];
-
-const lockTimeFormat = new Intl.DateTimeFormat('en-GB', {
-  timeZone: 'Asia/Colombo',
-  hour: '2-digit',
-  minute: '2-digit',
-  hourCycle: 'h23',
-});
 
 /**
  * Manager approval PIN (Phase 6.4 P6-15 – P6-21): checking one, setting
@@ -291,7 +285,7 @@ export class ApprovalsService {
   private lockedError(name: string, until: Date, prefix = ''): HttpException {
     return new HttpException(
       {
-        message: `${prefix}${name}'s PIN is locked until ${lockTimeFormat.format(until)}.`,
+        message: `${prefix}${name}'s PIN is locked until ${formatColomboTime(until)}.`,
         code: 'PIN_LOCKED' satisfies ApprovalErrorCode,
         locked_until: until.toISOString(),
       },
