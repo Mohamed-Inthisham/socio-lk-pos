@@ -1,13 +1,22 @@
 import { vi } from "vitest";
 import { fireEvent, screen, waitFor, within } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { Route, Routes, useLocation } from "react-router-dom";
 import TerminalLayout from "./index";
 import * as saleReturnsService from "../../../services/saleReturnsService";
+import * as cashDaysService from "../../../services/cashDaysService";
 import { inspectionRow } from "../../../test/returnEntities";
+import {
+  cashDaySummaryEntity,
+  closedCashDayEntity,
+  currentCashDayResponse,
+  openCashDayEntity,
+} from "../../../test/cashDayEntities";
 import useActiveBranchStore from "../../../store/zustand/activeBranchStore";
 import {
   authState,
   branchesState,
+  cashDayState,
   renderWithProviders,
 } from "../../../test/renderWithProviders";
 import {
@@ -19,9 +28,27 @@ import {
 
 // Admins and managers read the phones to check on mount (useInspectionCount).
 vi.mock("../../../services/saleReturnsService");
+// The day gate (P9-7) reads today's cash day on mount: today is open.
+vi.mock("../../../services/cashDaysService");
 beforeEach(() => {
   vi.mocked(saleReturnsService.listInspection).mockReset().mockResolvedValue([]);
+  vi.mocked(cashDaysService.getCurrentCashDay)
+    .mockReset()
+    .mockResolvedValue(currentCashDayResponse({ today: openCashDayEntity() }));
 });
+
+/** Today already open at the user's terminal branch, so the gate shows the page at once. */
+const openDayFor = (user) => {
+  const branchId = user.role === "admin" ? useActiveBranchStore.getState().activeBranchId : user.branch_id;
+  return cashDayState({
+    branchId,
+    current: {
+      status: "open",
+      businessDate: "2026-10-20",
+      today: openCashDayEntity({ branch_id: branchId }),
+    },
+  });
+};
 
 const renderLayout = (user) =>
   renderWithProviders(
@@ -35,6 +62,7 @@ const renderLayout = (user) =>
       preloadedState: {
         auth: authState(user),
         branches: branchesState([mainShop, cityShop]),
+        cashDay: openDayFor(user),
       },
     },
   );
@@ -166,7 +194,11 @@ describe("TerminalLayout: recent sales (P6-1)", () => {
       </>,
       {
         route,
-        preloadedState: { auth: authState(cashierUser), branches: branchesState([mainShop]) },
+        preloadedState: {
+          auth: authState(cashierUser),
+          branches: branchesState([mainShop]),
+          cashDay: openDayFor(cashierUser),
+        },
       },
     );
 
@@ -213,5 +245,111 @@ describe("TerminalLayout: recent sales (P6-1)", () => {
     altR();
 
     expect(where()).toBe("/pos/sales?day=2026-10-20&q=Kamal");
+  });
+});
+
+describe("TerminalLayout: the cash day in the status strip (P9-13)", () => {
+  const renderWithDay = (current) =>
+    renderWithProviders(
+      <Routes>
+        <Route element={<TerminalLayout />}>
+          <Route path="/pos" element={<p>terminal page</p>} />
+        </Route>
+      </Routes>,
+      {
+        route: "/pos",
+        preloadedState: {
+          auth: authState(cashierUser),
+          branches: branchesState([mainShop]),
+          cashDay: cashDayState({ branchId: "branch-main", current }),
+        },
+      },
+    );
+
+  it("while today is open: Opened 9:02 AM and a Close day button, the time hidden below sm", () => {
+    renderWithDay({ status: "open", businessDate: "2026-10-20", today: openCashDayEntity() });
+
+    const status = screen.getByTestId("day-status");
+    expect(screen.getByRole("contentinfo")).toContainElement(status);
+    expect(within(status).getByText("Opened 9:02 AM")).toHaveClass("hidden", "sm:inline");
+    const button = within(status).getByRole("button", { name: "Close day" });
+    expect(button).toBeVisible();
+    expect(button).not.toHaveClass("hidden");
+  });
+
+  it("Close day looks like a button: the outlined secondary style at 24px, with an icon", () => {
+    renderWithDay({ status: "open", businessDate: "2026-10-20", today: openCashDayEntity() });
+
+    const button = within(screen.getByTestId("day-status")).getByRole("button", { name: "Close day" });
+    expect(button).toHaveClass("border", "h-6", "bg-white", "dark:bg-slate-800");
+    expect(button).toHaveClass("focus-visible:ring-2");
+    expect(button.querySelector("svg")).not.toBeNull();
+  });
+
+  it("Close day opens the close dialog on today's figures", async () => {
+    const user = userEvent.setup();
+    cashDaysService.getCashDaySummary.mockResolvedValue(cashDaySummaryEntity());
+    renderWithDay({ status: "open", businessDate: "2026-10-20", today: openCashDayEntity() });
+
+    await user.click(screen.getByRole("button", { name: "Close day" }));
+
+    expect(await screen.findByRole("dialog", { name: "Close the day" })).toBeInTheDocument();
+    expect(cashDaysService.getCashDaySummary).toHaveBeenCalledWith("day-1020");
+  });
+
+  it("once closed: Closed 6:15 PM, and no Close day", () => {
+    cashDaysService.getCurrentCashDay.mockResolvedValue(currentCashDayResponse({ today: closedCashDayEntity() }));
+    renderWithDay({ status: "closed", businessDate: "2026-10-20", today: closedCashDayEntity() });
+
+    expect(screen.getByTestId("day-status")).toHaveTextContent("Closed 6:15 PM");
+    expect(screen.queryByRole("button", { name: "Close day" })).not.toBeInTheDocument();
+  });
+
+  it("nothing while the day isn't open", () => {
+    cashDaysService.getCurrentCashDay.mockResolvedValue(currentCashDayResponse());
+    renderWithDay({ status: "no_day", businessDate: "2026-10-20", today: null });
+
+    expect(screen.queryByTestId("day-status")).not.toBeInTheDocument();
+  });
+});
+
+describe("TerminalLayout: day gate (P9-7)", () => {
+  const renderGated = () =>
+    renderWithProviders(
+      <Routes>
+        <Route element={<TerminalLayout />}>
+          <Route path="/pos" element={<p>terminal page</p>} />
+        </Route>
+      </Routes>,
+      {
+        route: "/pos",
+        preloadedState: { auth: authState(cashierUser), branches: branchesState([mainShop]) },
+      },
+    );
+
+  it("while today isn't open the gate replaces the page inside <main>, and the header stays usable", async () => {
+    cashDaysService.getCurrentCashDay.mockResolvedValue(currentCashDayResponse());
+    renderGated();
+
+    const gate = await screen.findByRole("dialog", { name: "Open the day" });
+    expect(screen.getByRole("main")).toContainElement(gate);
+    expect(screen.queryByText("terminal page")).not.toBeInTheDocument();
+    for (const control of [
+      screen.getByRole("link", { name: "Exit terminal" }),
+      screen.getByRole("link", { name: "Recent sales" }),
+      screen.getByRole("button", { name: /Switch to (light|dark) mode/ }),
+      screen.getByRole("button", { name: /Test Cashier/ }),
+    ]) {
+      expect(control).toBeEnabled();
+      expect(control.closest("[inert], [aria-hidden='true']")).toBeNull();
+    }
+    expect(screen.getByRole("contentinfo")).toHaveTextContent("Main Shop");
+  });
+
+  it("shows the routed page once the read says today is open", async () => {
+    renderGated();
+
+    expect(await screen.findByText("terminal page")).toBeInTheDocument();
+    expect(cashDaysService.getCurrentCashDay).toHaveBeenCalledWith("branch-main");
   });
 });

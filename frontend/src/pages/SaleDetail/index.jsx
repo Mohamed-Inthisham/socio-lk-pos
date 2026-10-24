@@ -12,6 +12,7 @@ import { getSale } from "../../services/salesService";
 import { colomboToday } from "../../utils/colomboDay";
 import { printReceipt, printReturnSlip } from "../../utils/printReceipt";
 import { returnableQuantity } from "../../utils/returnMath";
+import { GATE, selectCashDayGate } from "../../store/slices/cashDaySlice";
 
 /**
  * SaleDetail Page
@@ -92,13 +93,18 @@ const SaleDetail = () => {
   const reprintRef = useRef(null);
   const returnRef = useRef(null);
   const role = useSelector((state) => state.auth.user?.role);
+  // P9-14: once today is closed the sale stays readable and reprintable,
+  // but Void and Return items (and V / R) are gone until tomorrow's opening.
+  const dayClosed = useSelector(selectCashDayGate) === GATE.CLOSED;
   // A sale with a return can't be voided (P7-11): no Void button, V does nothing.
   const hasReturns = (sale?.returns?.length ?? 0) > 0;
-  const canVoid = hasPermission(role, PERMISSIONS.VOID_SALE) && sale?.status === "COMPLETED" && !hasReturns;
+  const canVoid =
+    hasPermission(role, PERMISSIONS.VOID_SALE) && sale?.status === "COMPLETED" && !hasReturns && !dayClosed;
   const [slipPrinting, setSlipPrinting] = useState(null); // the return whose slip is reprinting
   const [slipErrors, setSlipErrors] = useState({});
   const leftToReturn = sale?.lines?.reduce((sum, line) => sum + returnableQuantity(line), 0) ?? 0;
-  const canReturn = hasPermission(role, PERMISSIONS.REFUND_SALE) && sale?.status === "COMPLETED" && leftToReturn > 0;
+  const canReturn =
+    hasPermission(role, PERMISSIONS.REFUND_SALE) && sale?.status === "COMPLETED" && leftToReturn > 0 && !dayClosed;
 
   useEffect(() => {
     let live = true;
@@ -269,7 +275,12 @@ const SaleDetail = () => {
                 onClick={reprint}
                 fullWidth
               />
-              {sale.status !== "VOIDED" && (
+              {dayClosed && sale.status !== "VOIDED" && (
+                <p className="text-xs text-slate-500 dark:text-slate-400" data-testid="day-closed-note">
+                  Today is closed: no voids or returns until tomorrow&apos;s opening.
+                </p>
+              )}
+              {sale.status !== "VOIDED" && !dayClosed && (
                 <Button
                   ref={returnRef}
                   variant="secondary"
@@ -281,12 +292,12 @@ const SaleDetail = () => {
                   fullWidth
                 />
               )}
-              {sale.status !== "VOIDED" && hasReturns && (
+              {sale.status !== "VOIDED" && hasReturns && !dayClosed && (
                 <p className="text-xs text-slate-500 dark:text-slate-400" data-testid="no-void-note">
                   Sales with returns can&apos;t be voided.
                 </p>
               )}
-              {sale.status !== "VOIDED" && !hasReturns && (
+              {sale.status !== "VOIDED" && !hasReturns && !dayClosed && (
                 <Button
                   variant="danger"
                   icon={Ban}

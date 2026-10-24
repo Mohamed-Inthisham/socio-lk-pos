@@ -36,7 +36,7 @@ export const CASH_SHORT_MESSAGE = "Cash received is less than the amount";
 export const DUPLICATE_IMEI_MESSAGE = "This IMEI is already on another trade-in on this sale";
 
 // Up to 2 decimals, no sign, no thousands separators.
-const MONEY_SHAPE = /^\d+(\.\d{1,2})?$/;
+export const MONEY_SHAPE = /^\d+(\.\d{1,2})?$/;
 // AddPaymentDto trade_in_imei: 8–50 letters or digits.
 export const IMEI_SHAPE = /^[A-Za-z0-9]{8,50}$/;
 

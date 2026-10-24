@@ -4,6 +4,7 @@ import branchesReducer from "./slices/branchesSlice";
 import brandsReducer from "./slices/brandsSlice";
 import categoriesReducer from "./slices/categoriesSlice";
 import posTerminalReducer from "./slices/posTerminalSlice";
+import cashDayReducer from "./slices/cashDaySlice";
 
 /**
  * Redux Store Configuration
@@ -27,6 +28,7 @@ export const store = configureStore({
     brands: brandsReducer,
     categories: categoriesReducer,
     posTerminal: posTerminalReducer,
+    cashDay: cashDayReducer,
   },
 
   // Development tools (auto-enabled in dev, disabled in production)
