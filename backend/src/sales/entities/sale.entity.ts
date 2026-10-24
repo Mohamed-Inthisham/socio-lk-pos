@@ -63,6 +63,10 @@ import { Payment } from './payment.entity';
 )
 // Recent sales: one branch's sales completed on one day (Phase 6.4 P6-2).
 @Index('idx_sales_branch_completed_at', ['branch_id', 'completed_at'])
+// Cash day summary: one branch's sales voided on one day (Phase 6.4 P9-6).
+@Index('idx_sales_branch_voided_at', ['branch_id', 'voided_at'], {
+  where: `"voided_at" IS NOT NULL`,
+})
 export class Sale {
   @PrimaryGeneratedColumn('uuid')
   id!: string;

@@ -17,4 +17,7 @@ export enum AuditAction {
   INSPECTION_PASSED = 'INSPECTION_PASSED',
   // A return on a completed sale, approved with a manager's PIN (P7-14).
   RETURN = 'RETURN',
+  // The day's opening and closing balance (Phase 6.4 P9-19).
+  DAY_OPEN = 'DAY_OPEN',
+  DAY_CLOSE = 'DAY_CLOSE',
 }
