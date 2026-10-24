@@ -7,6 +7,7 @@ import branchesReducer from "../store/slices/branchesSlice";
 import brandsReducer from "../store/slices/brandsSlice";
 import categoriesReducer from "../store/slices/categoriesSlice";
 import posTerminalReducer from "../store/slices/posTerminalSlice";
+import cashDayReducer from "../store/slices/cashDaySlice";
 
 /**
  * Test helpers: a fresh Redux store per test, plus a MemoryRouter.
@@ -21,6 +22,7 @@ export const createTestStore = (preloadedState) =>
       brands: brandsReducer,
       categories: categoriesReducer,
       posTerminal: posTerminalReducer,
+      cashDay: cashDayReducer,
     },
     preloadedState,
   });
@@ -52,6 +54,19 @@ export const renderWithProviders = (
     </Provider>,
   ),
 });
+
+/** cashDay slice, deep-merged per part (e.g. { branchId, current: { status: "open", today } }). */
+export const cashDayState = (overrides = {}) => {
+  const base = cashDayReducer(undefined, { type: "@@INIT" });
+  return {
+    ...base,
+    ...overrides,
+    current: { ...base.current, ...overrides.current },
+    open: { ...base.open, ...overrides.open },
+    close: { ...base.close, ...overrides.close },
+    pastDays: { ...base.pastDays, ...overrides.pastDays },
+  };
+};
 
 /** posTerminal slice with an open draft (pass overrides, e.g. { draftSale }). */
 export const posTerminalState = (overrides = {}) => {

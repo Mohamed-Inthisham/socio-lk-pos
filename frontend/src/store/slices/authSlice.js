@@ -8,6 +8,7 @@ import { clearBranches } from "./branchesSlice";
 import { clearBrands } from "./brandsSlice";
 import { clearCategories } from "./categoriesSlice";
 import { clearPosTerminal } from "./posTerminalSlice";
+import { clearCashDay } from "./cashDaySlice";
 import useActiveBranchStore from "../zustand/activeBranchStore";
 import useTerminalSessionStore from "../zustand/terminalSessionStore";
 /**
@@ -45,6 +46,7 @@ export const logoutUser = createAsyncThunk(
       dispatch(clearBrands());
       dispatch(clearCategories());
       dispatch(clearPosTerminal());
+      dispatch(clearCashDay());
       useActiveBranchStore.getState().clear();
       useTerminalSessionStore.getState().clear();
     };
