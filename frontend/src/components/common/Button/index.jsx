@@ -15,6 +15,7 @@
  * SIZES:
  * - md: 40px height, default
  * - sm: 32px height, for table row actions
+ * - xs: 24px height, for the terminal's status strip
  *
  * ICON-ONLY BUTTONS:
  * - Set iconOnly=true and provide `aria-label` for accessibility.
@@ -56,15 +57,20 @@ const VARIANT_CLASSES = {
   `,
 };
 
+// xs fits inside the terminal's 32px status strip (Close day, P9-13).
 const SIZE_CLASSES = {
   md: "h-10 px-4 text-sm gap-2",
   sm: "h-8 px-3 text-xs gap-1.5",
+  xs: "h-6 px-2 text-xs gap-1",
 };
 
 const ICON_ONLY_SIZE_CLASSES = {
   md: "w-10 h-10",
   sm: "w-8 h-8",
+  xs: "w-6 h-6",
 };
+
+const ICON_SIZES = { md: 16, sm: 14, xs: 12 };
 
 const Button = ({
   label,
@@ -108,7 +114,7 @@ const Button = ({
       {loading && (
         <span className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin" />
       )}
-      {!loading && Icon && <Icon size={size === "sm" ? 14 : 16} />}
+      {!loading && Icon && <Icon size={ICON_SIZES[size] ?? 16} />}
       {!iconOnly && (label || children)}
     </button>
   );

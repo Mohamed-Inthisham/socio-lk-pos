@@ -12,10 +12,12 @@
  * - title: the heading text
  * - titleId: id for the heading, so a panel with role="dialog" can be
  *   aria-labelledby it
+ * - titleTabIndex: -1 to let focus be put on the heading (the Day closed
+ *   screen, after the close dialog)
  * - any other prop (role, aria-*) goes on the card
  */
 
-const TerminalPanel = ({ icon: Icon, tone = "neutral", title, titleId, children, ...rest }) => (
+const TerminalPanel = ({ icon: Icon, tone = "neutral", title, titleId, titleTabIndex, children, ...rest }) => (
   <div
     className="w-full max-w-md rounded-2xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 shadow-sm p-6"
     {...rest}
@@ -32,7 +34,7 @@ const TerminalPanel = ({ icon: Icon, tone = "neutral", title, titleId, children,
     >
       <Icon size={22} aria-hidden="true" />
     </div>
-    <h1 id={titleId} className="text-lg font-semibold text-slate-900 dark:text-slate-100">
+    <h1 id={titleId} tabIndex={titleTabIndex} className="text-lg font-semibold text-slate-900 dark:text-slate-100 focus:outline-none">
       {title}
     </h1>
     {children}

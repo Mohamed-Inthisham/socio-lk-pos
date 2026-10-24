@@ -231,8 +231,7 @@ export const cashDayErrorView = (error) => {
     case CASH_DAY_ERROR.EXPECTED_CHANGED:
       return {
         ...view,
-        message:
-          "The figures changed while you were closing (a sale, void or return went through). Check the new expected cash and close again.",
+        message: "A sale, void or return changed the figures. Check them and close again.",
       };
     case CASH_DAY_ERROR.REASON_REQUIRED:
       return {

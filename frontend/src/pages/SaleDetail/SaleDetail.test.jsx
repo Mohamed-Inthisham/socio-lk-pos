@@ -3,7 +3,7 @@ import { screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { Route, Routes, useLocation } from "react-router-dom";
 import SaleDetail from ".";
-import { authState, branchesState, renderWithProviders } from "../../test/renderWithProviders";
+import { authState, branchesState, cashDayState, renderWithProviders } from "../../test/renderWithProviders";
 import { cashierUser, mainShop } from "../../test/fixtures";
 import { saleEntity, voidedSaleEntity } from "../../test/saleEntities";
 import { branchStockResponse, saleWithReturnsEntity } from "../../test/returnEntities";
@@ -535,5 +535,57 @@ describe("SaleDetail: back to the list", () => {
     await user.click(screen.getByRole("button", { name: "Sales" }));
 
     expect(screen.getByTestId("where")).toHaveTextContent(/^\/pos\/sales$/);
+  });
+});
+
+describe("SaleDetail: on a closed day (P9-14)", () => {
+  const renderOnDay = (status) =>
+    renderWithProviders(
+      <Routes>
+        <Route path="/pos/sales/:id" element={<SaleDetail />} />
+      </Routes>,
+      {
+        route: "/pos/sales/sale-7",
+        preloadedState: {
+          auth: authState(cashierUser),
+          branches: branchesState([mainShop]),
+          cashDay: cashDayState({ branchId: mainShop.id, current: { status } }),
+        },
+      },
+    );
+
+  it("stays readable and reprintable, with no Void or Return items, and says why", async () => {
+    salesService.getSale.mockResolvedValue(saleEntity());
+    renderOnDay("closed");
+
+    await heading();
+    expect(reprintButton()).toBeEnabled();
+    expect(screen.queryByRole("button", { name: "Void sale" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Return items" })).not.toBeInTheDocument();
+    expect(screen.getByTestId("day-closed-note")).toHaveTextContent(
+      "Today is closed: no voids or returns until tomorrow's opening.",
+    );
+  });
+
+  it("V and R do nothing on a closed day", async () => {
+    const user = userEvent.setup();
+    salesService.getSale.mockResolvedValue(saleEntity());
+    renderOnDay("closed");
+    await heading();
+
+    await user.keyboard("v");
+    await user.keyboard("r");
+
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+  });
+
+  it("an open day keeps Void and Return items", async () => {
+    salesService.getSale.mockResolvedValue(saleEntity());
+    renderOnDay("open");
+
+    await heading();
+    expect(screen.getByRole("button", { name: "Void sale" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "Return items" })).toBeEnabled();
+    expect(screen.queryByTestId("day-closed-note")).not.toBeInTheDocument();
   });
 });

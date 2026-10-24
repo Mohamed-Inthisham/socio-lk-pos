@@ -1,14 +1,17 @@
 import { useCallback, useEffect } from "react";
 import { useDispatch, useSelector } from "react-redux";
-import { Link } from "react-router-dom";
-import { AlertTriangle, Lock } from "lucide-react";
+import { Link, useLocation } from "react-router-dom";
+import { AlertTriangle } from "lucide-react";
 import Button from "../../common/Button";
 import TerminalPanel from "../TerminalPanel";
 import OpenDayDialog from "../OpenDayDialog";
 import EarlierDayPanel from "../EarlierDayPanel";
+import DayClosedScreen from "../DayClosedScreen";
 import useTerminalBranch from "../../../hooks/useTerminalBranch";
 import {
   GATE,
+  beginCloseDay,
+  fetchCloseSummary,
   fetchCurrentCashDay,
   gateStatusOf,
   selectCashDayCurrent,
@@ -32,9 +35,11 @@ import { cashDayErrorView } from "../../../utils/cashDayErrors";
  * STATES (cashDaySlice current.status):
  * - idle / loading, no answer yet: a spinner
  * - no_day: OpenDayDialog
- * - earlier_open: EarlierDayPanel (closing it arrives with step C)
+ * - earlier_open: EarlierDayPanel, whose Close button opens the close
+ *   dialog for that day; once closed, the re-read shows the opening
  * - open: the page
- * - closed: a placeholder until step C's Day closed screen
+ * - closed: on /pos the Day closed screen; the other terminal pages
+ *   (Recent sales, Sale detail, Phones to check) stay (P9-14)
  * - error, no answer yet: the error with Try again
  *
  * A FAILED RE-READ keeps the last good answer on screen (the till keeps
@@ -46,6 +51,8 @@ import { cashDayErrorView } from "../../../utils/cashDayErrors";
  * coming and going never remounts the page or the opening dialog (which
  * would lose the cart, or make a new request id).
  */
+
+const TILL_PATH = "/pos";
 
 const Centred = ({ children }) => (
   <div className="h-full overflow-y-auto">
@@ -92,6 +99,11 @@ const DayGate = ({ children }) => {
   const branchId = branch?.id;
   const current = useSelector(selectCashDayCurrent);
   const open = useSelector(selectOpenDay);
+  const onTill = useLocation().pathname.replace(/\/+$/, "") === TILL_PATH;
+  const startClosing = (dayId) => {
+    dispatch(beginCloseDay(dayId));
+    dispatch(fetchCloseSummary({ dayId }));
+  };
 
   const read = useCallback(() => {
     if (branchId) dispatch(fetchCurrentCashDay({ branchId }));
@@ -140,19 +152,23 @@ const DayGate = ({ children }) => {
     case GATE.EARLIER_OPEN:
       body = (
         <Centred>
-          <EarlierDayPanel businessDate={current.earlierOpen.business_date} today={current.businessDate} />
+          <EarlierDayPanel
+            businessDate={current.earlierOpen.business_date}
+            today={current.businessDate}
+            onCloseDay={() => startClosing(current.earlierOpen.id)}
+          />
         </Centred>
       );
       break;
     case GATE.CLOSED:
-      body = (
+      // P9-14: only the sale screen is closed; Recent sales, Sale detail
+      // (without Void and Return items) and Phones to check stay open.
+      body = onTill ? (
         <Centred>
-          <TerminalPanel icon={Lock} title="Today is closed">
-            <p className="mt-2 text-sm text-slate-600 dark:text-slate-400">
-              Sales open again after tomorrow&apos;s opening.
-            </p>
-          </TerminalPanel>
+          <DayClosedScreen day={current.today} />
         </Centred>
+      ) : (
+        children
       );
       break;
     case GATE.ERROR:

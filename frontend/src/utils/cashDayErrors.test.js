@@ -199,7 +199,7 @@ describe("cashDayErrorView", () => {
       "C8",
       expectedChangedError,
       CLOSE,
-      "The figures changed while you were closing (a sale, void or return went through). Check the new expected cash and close again.",
+      "A sale, void or return changed the figures. Check them and close again.",
     ],
     [
       "C9, with the thousands separator",

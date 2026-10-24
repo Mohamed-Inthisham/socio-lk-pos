@@ -1,6 +1,6 @@
 import { useEffect } from "react";
 import { vi } from "vitest";
-import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { Route, Routes, useLocation } from "react-router-dom";
 import DayGate from "./index";
@@ -13,6 +13,7 @@ import { authState, branchesState, renderWithProviders } from "../../../test/ren
 import { adminUser, cashierUser, cityShop, mainShop } from "../../../test/fixtures";
 import {
   cashDayNetworkError,
+  cashDaySummaryEntity,
   cashDayTimeoutError,
   closedCashDayEntity,
   currentCashDayResponse,
@@ -52,7 +53,7 @@ const renderGate = (user = cashierUser) =>
     <DayGate>
       <Page />
     </DayGate>,
-    { preloadedState: { auth: authState(user), branches: branchesState([mainShop, cityShop]) } },
+    { route: "/pos", preloadedState: { auth: authState(user), branches: branchesState([mainShop, cityShop]) } },
   );
 
 const defineVisibility = (state) =>
@@ -107,23 +108,29 @@ describe("DayGate states (P9-7)", () => {
     expect(mounts).toBe(1);
   });
 
-  it("closed: the placeholder, and no page", async () => {
+  it("closed, on /pos: the Day closed screen, and no page", async () => {
     cashDaysService.getCurrentCashDay.mockResolvedValue(todayClosed());
     renderGate();
 
-    expect(await screen.findByRole("heading", { name: "Today is closed" })).toBeInTheDocument();
-    expect(screen.getByText("Sales open again after tomorrow's opening.")).toBeInTheDocument();
+    expect(await screen.findByRole("heading", { name: "Day closed" })).toBeInTheDocument();
+    expect(screen.getByTestId("day-closed-screen")).toBeInTheDocument();
     expect(mounts).toBe(0);
   });
 
-  it("earlier day open: names the day, with no Close button yet (step C)", async () => {
+  it("earlier day open: names the day; Close Mon 19 Oct starts closing that day", async () => {
+    const user = userEvent.setup();
     cashDaysService.getCurrentCashDay.mockResolvedValue(earlierOpen());
-    renderGate();
+    cashDaysService.getCashDaySummary.mockReturnValue(new Promise(() => {}));
+    const { store } = renderGate();
 
     expect(await screen.findByRole("heading", { name: "An earlier day is still open" })).toBeInTheDocument();
     expect(screen.getByText("Mon 19 Oct 2026 was not closed. Close it before opening today.")).toBeInTheDocument();
-    expect(screen.queryByRole("button")).not.toBeInTheDocument();
     expect(mounts).toBe(0);
+
+    await user.click(screen.getByRole("button", { name: "Close Mon 19 Oct" }));
+
+    expect(store.getState().cashDay.close.dayId).toBe("day-1019");
+    expect(cashDaysService.getCashDaySummary).toHaveBeenCalledWith("day-1019");
   });
 
   it("a failed first read: the error screen with Try again, which reads again", async () => {
@@ -179,7 +186,7 @@ describe("DayGate re-reads", () => {
   });
 
   it.each([
-    ["closed", todayClosed, "Today is closed"],
+    ["closed", todayClosed, "Day closed"],
     ["an earlier day open", earlierOpen, "An earlier day is still open"],
   ])("a re-read that says %s replaces the till", async (_, answer, heading) => {
     cashDaysService.getCurrentCashDay.mockResolvedValueOnce(todayOpen()).mockResolvedValueOnce(answer());
@@ -233,7 +240,7 @@ describe("DayGate inside the terminal", () => {
         <Routes>
           <Route element={<TerminalLayout />}>
             <Route path="/pos" element={<Page />} />
-            <Route path="/pos/sales" element={<p>sales list</p>} />
+            <Route path="/pos/sales" element={<h1>sales list</h1>} />
             <Route path="/pos/sales/:id" element={<p>sale detail</p>} />
             <Route path="/pos/inspection" element={<p>phones to check</p>} />
           </Route>
@@ -264,6 +271,125 @@ describe("DayGate inside the terminal", () => {
 
     expect(screen.getByTestId("where").textContent).toBe("/pos");
     expect(mounts).toBe(0);
+  });
+});
+
+describe("DayGate on a closed day (P9-14)", () => {
+  const renderAt = (route) =>
+    renderWithProviders(
+      <Routes>
+        <Route element={<TerminalLayout />}>
+          <Route path="/pos" element={<Page />} />
+          <Route path="/pos/sales" element={<h1>sales list</h1>} />
+          <Route path="/pos/sales/:id" element={<p>sale detail</p>} />
+          <Route path="/pos/inspection" element={<p>phones to check</p>} />
+        </Route>
+      </Routes>,
+      {
+        route,
+        preloadedState: {
+          auth: authState({ ...cashierUser, id: "user-manager", role: "manager", name: "Test Manager" }),
+          branches: branchesState([mainShop]),
+        },
+      },
+    );
+
+  it("/pos shows the Day closed screen, not the till", async () => {
+    cashDaysService.getCurrentCashDay.mockResolvedValue(todayClosed());
+    renderAt("/pos");
+
+    expect(await screen.findByRole("heading", { name: "Day closed" })).toBeInTheDocument();
+    expect(mounts).toBe(0);
+  });
+
+  it.each([
+    ["/pos/sales", "sales list"],
+    ["/pos/sales/sale-1", "sale detail"],
+    ["/pos/inspection", "phones to check"],
+  ])("%s stays open", async (route, page) => {
+    cashDaysService.getCurrentCashDay.mockResolvedValue(todayClosed());
+    renderAt(route);
+
+    expect(await screen.findByText(page)).toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: "Day closed" })).not.toBeInTheDocument();
+  });
+});
+
+describe("Closing a day: where focus goes after Done", () => {
+  const renderAt = (route) =>
+    renderWithProviders(
+      <Routes>
+        <Route element={<TerminalLayout />}>
+          <Route path="/pos" element={<Page />} />
+          <Route path="/pos/sales" element={<h1>sales list</h1>} />
+        </Route>
+      </Routes>,
+      { route, preloadedState: { auth: authState(cashierUser), branches: branchesState([mainShop]) } },
+    );
+
+  /** The count, the confirm, Close day, then Done on the closed stage. */
+  const closeWith = async (user, count) => {
+    await user.type(await screen.findByRole("textbox", { name: "Counted cash" }), count);
+    const dialog = screen.getByRole("dialog");
+    await user.click(within(dialog).getByRole("button", { name: "Close day…" }));
+    // The status strip has its own Close day button behind the dialog.
+    await user.click(await within(dialog).findByRole("button", { name: "Close day" }));
+    await user.click(await within(dialog).findByRole("button", { name: "Done" }));
+  };
+
+  beforeEach(() => {
+    cashDaysService.getCashDaySummary.mockResolvedValue(cashDaySummaryEntity());
+    cashDaysService.closeCashDay.mockResolvedValue(closedCashDayEntity());
+  });
+
+  it("closing today on /pos: the Day closed screen's heading", async () => {
+    const user = userEvent.setup();
+    cashDaysService.getCurrentCashDay.mockResolvedValueOnce(todayOpen()).mockResolvedValue(todayClosed());
+    renderAt("/pos");
+    await screen.findByText("terminal page");
+
+    await user.click(screen.getByRole("button", { name: "Close day" }));
+    await closeWith(user, "15500");
+
+    await waitFor(() => expect(screen.getByRole("heading", { name: "Day closed" })).toHaveFocus());
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+  });
+
+  it("closing today on /pos/sales: that page's main heading", async () => {
+    const user = userEvent.setup();
+    cashDaysService.getCurrentCashDay.mockResolvedValueOnce(todayOpen()).mockResolvedValue(todayClosed());
+    renderAt("/pos/sales");
+    await screen.findByRole("heading", { name: "sales list" });
+
+    await user.click(screen.getByRole("button", { name: "Close day" }));
+    await closeWith(user, "15500");
+
+    await waitFor(() => expect(screen.getByRole("heading", { name: "sales list" })).toHaveFocus());
+  });
+
+  it("closing an earlier day: the opening dialog's amount, with yesterday's count on its line", async () => {
+    const user = userEvent.setup();
+    cashDaysService.getCurrentCashDay
+      .mockResolvedValueOnce(earlierOpen())
+      .mockResolvedValue(
+        currentCashDayResponse({ last_closed: { business_date: "2026-10-19", counted_balance: "15500.00" } }),
+      );
+    cashDaysService.getCashDaySummary.mockResolvedValue(
+      cashDaySummaryEntity({ cash_day_id: "day-1019", business_date: "2026-10-19" }),
+    );
+    cashDaysService.closeCashDay.mockResolvedValue(
+      closedCashDayEntity({ id: "day-1019", business_date: "2026-10-19", counted_balance: "15500.00", difference: "0.00", difference_reason: null }),
+    );
+    renderAt("/pos");
+
+    await user.click(await screen.findByRole("button", { name: "Close Mon 19 Oct" }));
+    expect(await screen.findByRole("dialog", { name: "Close Mon 19 Oct" })).toBeInTheDocument();
+    await closeWith(user, "15500");
+
+    const amount = await screen.findByRole("textbox", { name: "Cash in the box" });
+    await waitFor(() => expect(amount).toHaveFocus());
+    expect(screen.getByTestId("last-closed")).toHaveTextContent("Yesterday closed with");
+    expect(cashDaysService.closeCashDay).toHaveBeenCalledWith("day-1019", expect.anything());
   });
 });
 

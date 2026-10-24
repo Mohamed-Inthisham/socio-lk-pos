@@ -1,12 +1,20 @@
 import { Link, NavLink, Outlet, useLocation, useNavigate } from "react-router-dom";
-import { useSelector } from "react-redux";
+import { useDispatch, useSelector } from "react-redux";
 import { useHotkeys } from "react-hotkeys-hook";
-import { ClipboardCheck, LogOut, ReceiptText, Store, User } from "lucide-react";
+import { ClipboardCheck, LogOut, MoonStar, ReceiptText, Store, User } from "lucide-react";
+import Button from "../../common/Button";
 import HeaderLogo from "../HeaderLogo";
 import BranchChip from "../BranchChip";
 import ThemeToggle from "../../common/ThemeToggle";
 import UserMenu from "../UserMenu";
 import DayGate from "../../pos/DayGate";
+import CloseDayDialog from "../../pos/CloseDayDialog";
+import {
+  beginCloseDay,
+  fetchCloseSummary,
+  selectCashDayCurrent,
+} from "../../../store/slices/cashDaySlice";
+import { formatColomboTime } from "../../../utils/colomboTime";
 import useInspectionCount from "../../../hooks/useInspectionCount";
 import useTerminalBranch from "../../../hooks/useTerminalBranch";
 import { PERMISSIONS, ROLE_INFO, hasPermission } from "../../../constants/rolePermissions";
@@ -20,7 +28,12 @@ import { PERMISSIONS, ROLE_INFO, hasPermission } from "../../../constants/rolePe
  * - <Outlet /> for the terminal pages (fills the remaining height),
  *   inside DayGate: until today's cash day is open the gate shows instead
  *   (P9-7)
- * - Bottom status strip: branch + signed-in user
+ * - Bottom status strip: branch + signed-in user, and today's cash day
+ *   (P9-13): "Opened 9:02 AM" and a Close day button (Button secondary,
+ *   size xs, so the strip keeps its 32px) while open (below sm only the
+ *   button), "Closed 6:15 PM" once closed. No hotkey.
+ * - CloseDayDialog, the one host for closing a day (from the strip, or an
+ *   earlier day from the day gate)
  *
  * Rendered inside BranchContextGuard, so a branch is always resolved here.
  *
@@ -59,6 +72,12 @@ const TerminalLayout = () => {
   const onInspection = pathname === INSPECTION_PATH;
   const canInspect = hasPermission(user?.role, PERMISSIONS.PASS_INSPECTION);
   const count = useInspectionCount(branch?.id, canInspect);
+  const dispatch = useDispatch();
+  const today = useSelector(selectCashDayCurrent).today;
+  const startClosingToday = () => {
+    dispatch(beginCloseDay(today.id));
+    dispatch(fetchCloseSummary({ dayId: today.id }));
+  };
 
   useHotkeys(
     "alt+r",
@@ -202,7 +221,20 @@ const TerminalLayout = () => {
             </span>
           )}
         </span>
+        {today && !today.closed_at && (
+          <span className="ml-auto flex-shrink-0 flex items-center gap-2" data-testid="day-status">
+            <span className="hidden sm:inline">Opened {formatColomboTime(today.opened_at)}</span>
+            <Button variant="secondary" size="xs" icon={MoonStar} label="Close day" onClick={startClosingToday} />
+          </span>
+        )}
+        {today?.closed_at && (
+          <span className="ml-auto flex-shrink-0" data-testid="day-status">
+            Closed {formatColomboTime(today.closed_at)}
+          </span>
+        )}
       </footer>
+
+      <CloseDayDialog />
     </div>
   );
 };

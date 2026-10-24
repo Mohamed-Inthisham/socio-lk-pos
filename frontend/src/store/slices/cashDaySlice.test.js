@@ -8,6 +8,7 @@ import {
   clearCashDay,
   clearCloseError,
   closeDay,
+  endCloseDay,
   fetchCloseSummary,
   fetchCurrentCashDay,
   fetchPastDays,
@@ -592,6 +593,21 @@ describe("cashDaySlice close (P9-11, P9-18)", () => {
     service.closeCashDay.mockRejectedValueOnce(expectedChangedError());
     await store.dispatch(closeDay());
     expect(cashDay(store).close).toMatchObject({ unconfirmed: false, sentBody: null });
+  });
+
+  it("endCloseDay ends the dialog, and a late answer to its send is ignored", async () => {
+    const store = await storeWithCloseDialog();
+    const pending = deferred();
+    service.closeCashDay.mockReturnValueOnce(pending.promise);
+    service.getCurrentCashDay.mockResolvedValue(todayClosed());
+    const sending = store.dispatch(closeDay({ countedCents: 1550000 }));
+
+    store.dispatch(endCloseDay());
+    expect(cashDay(store).close).toMatchObject({ dayId: null, clientRequestId: null, summary: null, status: "idle" });
+    pending.resolve(closedCashDayEntity());
+    await sending;
+
+    expect(cashDay(store).close).toMatchObject({ dayId: null, status: "idle", closedDay: null });
   });
 
   it("a new beginCloseDay makes a new id and ends unconfirmed", async () => {

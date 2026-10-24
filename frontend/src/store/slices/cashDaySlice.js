@@ -38,7 +38,8 @@ import { newClientRequestId } from "../../utils/requestId";
  * does (clearCashDay, authSlice logoutUser).
  *
  * OPEN AND CLOSE (P9-18):
- * Each dialog starts with beginOpenDay / beginCloseDay, which make its
+ * Each dialog starts with beginOpenDay / beginCloseDay (the close dialog
+ * is open while close.dayId is set; endCloseDay ends it), which make its
  * client_request_id (utils/requestId.js). Every attempt from that dialog
  * sends the same id: Try again, the attempt after EXPECTED_CHANGED or
  * REASON_REQUIRED, the resend after a lost answer. Only the next begin…
@@ -348,6 +349,11 @@ const cashDaySlice = createSlice({
       },
       prepare: (dayId) => ({ payload: { dayId, clientRequestId: newClientRequestId() } }),
     },
+    // The close dialog went away: Cancel, Esc or Done. A late answer to its
+    // send or figures read is ignored (sendId / summaryReadId are cleared).
+    endCloseDay: (state) => {
+      state.close = initialClose();
+    },
     clearOpenError: (state) => {
       state.open.error = null;
       if (state.open.status === "error") state.open.status = "idle";
@@ -477,6 +483,7 @@ export const {
   clearCashDay,
   beginOpenDay,
   beginCloseDay,
+  endCloseDay,
   clearOpenError,
   clearCloseError,
 } = cashDaySlice.actions;
