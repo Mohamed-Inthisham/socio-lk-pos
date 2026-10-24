@@ -76,7 +76,7 @@ export const wrongPinError = (attemptsLeft = 4) =>
 /** 423; the 5th wrong PIN in a row prefixes "Wrong PIN. " */
 export const pinLockedError = ({ name = "Asha Perera", until = "2026-10-22T09:02:00.000Z", fifth = false } = {}) =>
   axiosError(423, {
-    message: `${fifth ? "Wrong PIN. " : ""}${name}'s PIN is locked until 14:32.`,
+    message: `${fifth ? "Wrong PIN. " : ""}${name}'s PIN is locked until 2:32 PM.`,
     code: "PIN_LOCKED",
     locked_until: until,
   });

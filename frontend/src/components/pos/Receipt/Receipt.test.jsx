@@ -23,7 +23,7 @@ describe("Receipt (P5-11, P5-18)", () => {
     render(<Receipt sale={completedSaleForReceipt()} />);
 
     expect(text()).toContain("InvoiceINV-20261021-0007");
-    expect(text()).toContain("Date21 Oct 2026, 14:32");
+    expect(text()).toContain("Date21 Oct 2026, 2:32 PM");
     expect(text()).toContain("CashierNimal Silva");
     expect(text()).toContain("CustomerKamal Perera");
     expect(text()).toContain("Phone077 123 4567");
@@ -141,8 +141,8 @@ describe("Receipt markings (P6-7)", () => {
   it("a detail-page reprint prints REPRINT with the time printed (Colombo), under the invoice number", () => {
     render(<Receipt sale={saleEntity()} reprintedAt="2026-10-22T06:05:00.000Z" />);
 
-    expect(screen.getByTestId("receipt-reprint")).toHaveTextContent("REPRINT · 22 Oct 2026, 11:35");
-    expect(text()).toContain("InvoiceINV-20261021-0007REPRINT · 22 Oct 2026, 11:35Date21 Oct 2026, 14:32");
+    expect(screen.getByTestId("receipt-reprint")).toHaveTextContent("REPRINT · 22 Oct 2026, 11:35 AM");
+    expect(text()).toContain("InvoiceINV-20261021-0007REPRINT · 22 Oct 2026, 11:35 AMDate21 Oct 2026, 2:32 PM");
   });
 
   it("a voided sale prints VOIDED — NOT VALID first on the paper and again above the footer", () => {
@@ -152,7 +152,7 @@ describe("Receipt markings (P6-7)", () => {
     const bottom = screen.getByTestId("receipt-voided-bottom");
     for (const block of [top, bottom]) {
       expect(block.textContent).toBe(
-        "VOIDED — NOT VALIDVoided 22 Oct 2026, 10:15Reason: Wrong price — rang 64,990, was 59,990",
+        "VOIDED — NOT VALIDVoided 22 Oct 2026, 10:15 AMReason: Wrong price — rang 64,990, was 59,990",
       );
     }
     const content = receipt().firstElementChild;

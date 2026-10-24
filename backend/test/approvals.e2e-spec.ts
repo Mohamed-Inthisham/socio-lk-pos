@@ -649,7 +649,7 @@ describe('Approval PIN (e2e)', () => {
       ).expect(423);
       expect(fifth.body).toMatchObject({ code: 'PIN_LOCKED' });
       expect(fifth.body.message).toMatch(
-        /^Wrong PIN\. Shop Manager's PIN is locked until \d\d:\d\d\.$/,
+        /^Wrong PIN\. Shop Manager's PIN is locked until \d{1,2}:\d\d [AP]M\.$/,
       );
       // Locked for 15 minutes on the DB clock
       const [{ ok }] = await dataSource.query(

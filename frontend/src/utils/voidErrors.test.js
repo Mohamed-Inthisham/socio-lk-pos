@@ -27,9 +27,9 @@ describe("voidErrorView: what the dialog shows (P6-11, P6-19, P6-20, P6-22)", ()
   it("PIN_LOCKED: the unlock time, and what to do instead, under the PIN", () => {
     expect(view(pinLockedError())).toMatchObject({
       field: "pin",
-      message: "Asha Perera's PIN is locked until 14:32. Another manager can approve, or an admin can clear the PIN.",
+      message: "Asha Perera's PIN is locked until 2:32 PM. Another manager can approve, or an admin can clear the PIN.",
     });
-    expect(view(pinLockedError({ fifth: true })).message).toMatch(/^Wrong PIN\. Asha Perera's PIN is locked until 14:32\./);
+    expect(view(pinLockedError({ fifth: true })).message).toMatch(/^Wrong PIN\. Asha Perera's PIN is locked until 2:32 PM\./);
   });
 
   it.each(["APPROVER_NOT_FOUND", "APPROVER_INACTIVE", "APPROVER_NOT_MANAGER", "APPROVER_WRONG_BRANCH", "APPROVER_NO_PIN"])(
@@ -218,7 +218,7 @@ describe("classifyVoidError: the PIN", () => {
     expect(
       classifyVoidError(
         httpError(423, {
-          message: "Wrong PIN. Asha Perera's PIN is locked until 14:32.",
+          message: "Wrong PIN. Asha Perera's PIN is locked until 2:32 PM.",
           code: "PIN_LOCKED",
           locked_until: "2026-10-22T09:02:00.000Z",
         }),

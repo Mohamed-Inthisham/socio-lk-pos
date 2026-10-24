@@ -17,6 +17,7 @@ import useTerminalBranch from "../../hooks/useTerminalBranch";
 import { isTouchOnly } from "../../utils/device";
 import { printReceipt } from "../../utils/printReceipt";
 import { POS_RETURN_FOCUS_EVENT } from "../../utils/posFocus";
+import { formatColomboTime } from "../../utils/colomboTime";
 import { getSale } from "../../services/salesService";
 import useTerminalSessionStore from "../../store/zustand/terminalSessionStore";
 import {
@@ -99,13 +100,7 @@ const Card = ({ className = "", children }) => (
   </div>
 );
 
-const formatStarted = (iso) =>
-  iso
-    ? new Date(iso).toLocaleTimeString("en-LK", {
-        hour: "2-digit",
-        minute: "2-digit",
-      })
-    : null;
+const formatStarted = (iso) => formatColomboTime(iso) || null;
 
 const inDialog = () => !!document.activeElement?.closest('[role="dialog"]');
 // Any open Headless UI dialog — not just one holding focus.

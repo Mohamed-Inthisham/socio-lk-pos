@@ -29,7 +29,7 @@ describe("SaleDetailView: header (P6-6)", () => {
     expect(screen.getByRole("heading", { name: "INV-20261021-0007" })).toBeInTheDocument();
     expect(screen.getByText("Completed", { selector: "span" })).toBeInTheDocument();
     const meta = screen.getByTestId("detail-meta");
-    expect(meta).toHaveTextContent("21 Oct 2026, 14:32");
+    expect(meta).toHaveTextContent("21 Oct 2026, 2:32 PM");
     expect(meta).toHaveTextContent("Nimal Silva");
     expect(meta).toHaveTextContent("Kamal Perera · 077 123 4567");
   });
@@ -171,7 +171,7 @@ describe("SaleDetailView: a voided sale (P6-6, P6-17)", () => {
     renderView(voidedSaleEntity());
 
     expect(screen.getAllByText("Voided", { selector: "span" }).length).toBeGreaterThan(0);
-    expect(banner()).toHaveTextContent("Voided 22 Oct 2026, 10:15 — Wrong price — rang 64,990, was 59,990");
+    expect(banner()).toHaveTextContent("Voided 22 Oct 2026, 10:15 AM — Wrong price — rang 64,990, was 59,990");
     expect(banner()).toHaveTextContent("Approved by Asha Perera · requested on Nimal Silva's session");
   });
 

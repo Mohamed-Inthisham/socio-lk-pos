@@ -4,6 +4,7 @@ import { AlertCircle, CheckCircle2, Loader2, Printer, User } from "lucide-react"
 import Button from "../../common/Button";
 import { methodLabel, tenderDetail } from "../PaymentDialog/methods";
 import { formatLKR } from "../../../utils/money";
+import { formatColomboDayTime } from "../../../utils/colomboTime";
 import {
   selectLastCompletedSale,
   selectNextDraft,
@@ -37,15 +38,7 @@ import {
 // the fold at ~640px (measured at Checkpoint D).
 const MAX_TENDERS = 3;
 
-const formatTime = (iso) =>
-  iso
-    ? new Date(iso).toLocaleString("en-LK", {
-        day: "numeric",
-        month: "short",
-        hour: "2-digit",
-        minute: "2-digit",
-      })
-    : null;
+const formatTime = (iso) => formatColomboDayTime(iso) || null;
 
 const Row = ({ label, value, testId }) => (
   <div className="flex items-baseline justify-between gap-4 text-sm">

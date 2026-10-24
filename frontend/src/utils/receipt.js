@@ -2,6 +2,7 @@ import { warrantyLabel } from "../constants/warranty";
 import { fromCents, toCents } from "./money";
 import { CHECKING_ONLY_TEXT } from "../constants/receipt";
 import { discountShortLabel } from "./discount";
+import { formatColomboDateTime } from "./colomboTime";
 
 /**
  * Formatting for the printed receipt (P5-11). Pure functions, so the
@@ -16,18 +17,8 @@ const amountFormat = new Intl.NumberFormat("en-LK", {
 /** "1500" / "1500.00" → "1,500.00" (no currency; the TOTAL line adds it). */
 export const receiptAmount = (value) => amountFormat.format(Number(value ?? 0));
 
-const dateTimeFormat = new Intl.DateTimeFormat("en-GB", {
-  timeZone: "Asia/Colombo",
-  day: "2-digit",
-  month: "short",
-  year: "numeric",
-  hour: "2-digit",
-  minute: "2-digit",
-  hourCycle: "h23",
-});
-
-/** An ISO timestamp → "21 Oct 2026, 14:32", in Colombo time whatever the till's clock zone. */
-export const receiptDateTime = (iso) => (iso ? dateTimeFormat.format(new Date(iso)) : "");
+/** An ISO timestamp → "21 Oct 2026, 2:32 PM", in Colombo time whatever the till's clock zone. */
+export const receiptDateTime = formatColomboDateTime;
 
 const dateFormat = new Intl.DateTimeFormat("en-GB", {
   timeZone: "UTC",

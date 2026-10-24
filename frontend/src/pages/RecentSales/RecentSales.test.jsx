@@ -171,7 +171,7 @@ describe("RecentSales: the day list (P6-2, P6-5)", () => {
 
     await findSale("INV-20261022-0002");
     const [first, second] = bodyRows();
-    expect(within(first).getByText("10:02")).toBeInTheDocument();
+    expect(within(first).getByText("10:02 AM")).toBeInTheDocument();
     expect(within(first).getByText("Kamal Perera")).toBeInTheDocument();
     expect(within(first).getByText(/LKR\s60,000\.00/)).toBeInTheDocument();
     expect(within(first).queryByText("Voided")).not.toBeInTheDocument();
@@ -550,7 +550,7 @@ describe("RecentSales: search (P6-3)", () => {
     expect(params).not.toHaveProperty("completedTo");
     expect(where()).toBe("/pos/sales?q=0042");
     // Across dates: the row shows its date; the stepper says so
-    expect(within(bodyRows()[0]).getByText("02 Jul 2026, 14:32")).toBeInTheDocument();
+    expect(within(bodyRows()[0]).getByText("02 Jul 2026, 2:32 PM")).toBeInTheDocument();
     expect(screen.getByTestId("day-label")).toHaveTextContent("All dates");
     expect(screen.getByRole("button", { name: "Previous day" })).toBeDisabled();
     expect(screen.getByText("1 match for “0042”, all dates")).toBeInTheDocument();

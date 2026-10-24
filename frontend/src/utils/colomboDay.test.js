@@ -3,20 +3,8 @@ import {
   colomboDaysSince,
   colomboToday,
   formatColomboDayLabel,
-  formatColomboTime,
   shiftColomboDay,
 } from "./colomboDay";
-
-describe("formatColomboTime", () => {
-  it("shows a UTC timestamp in Colombo time, 24-hour", () => {
-    expect(formatColomboTime("2026-10-22T09:02:00.000Z")).toBe("14:32");
-    expect(formatColomboTime("2026-10-21T18:30:00.000Z")).toBe("00:00");
-  });
-
-  it("is empty for no timestamp", () => {
-    expect(formatColomboTime(null)).toBe("");
-  });
-});
 
 describe("formatColomboDayLabel", () => {
   it("names the day itself, without shifting it", () => {

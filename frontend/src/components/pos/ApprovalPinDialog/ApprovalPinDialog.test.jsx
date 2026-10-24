@@ -110,7 +110,7 @@ describe("ApprovalPinDialog: the form (P6-18)", () => {
     await openDialog(user);
 
     expect(within(dialog()).getByRole("heading", { name: "Change approval PIN" })).toBeInTheDocument();
-    expect(dialog()).toHaveTextContent("Set on 20 Oct 2026, 08:30.");
+    expect(dialog()).toHaveTextContent("Set on 20 Oct 2026, 8:30 AM.");
   });
 
   it("keeps digits only in the PIN fields", async () => {
@@ -257,7 +257,7 @@ describe("ApprovalPinDialog: saving", () => {
     await user.keyboard("{Enter}");
 
     const status = await within(dialog()).findByRole("status");
-    expect(status).toHaveTextContent("PIN set on 22 Oct 2026, 14:35. You can now approve voids with it.");
+    expect(status).toHaveTextContent("PIN set on 22 Oct 2026, 2:35 PM. You can now approve voids with it.");
     expect(approvalsService.setApprovalPin).toHaveBeenCalledWith({ current_password: PASSWORD, pin: PIN });
     expect(store.getState().auth.user).toMatchObject({
       has_approval_pin: true,

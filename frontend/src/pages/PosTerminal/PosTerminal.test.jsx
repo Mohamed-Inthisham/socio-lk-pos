@@ -133,6 +133,13 @@ describe("PosTerminal layout", () => {
     expect(cartCard).toHaveClass("flex-1", "lg:min-h-40");
   });
 
+  it("shows when the current sale started, as a 12-hour Colombo time", async () => {
+    // 09:15 UTC = 2:45 PM in Colombo
+    salesService.createSale.mockResolvedValue(draftSale({ lines, created_at: "2026-10-15T09:15:00.000Z" }));
+    await renderTerminal();
+    expect(screen.getByTestId("sale-meta")).toHaveTextContent("Draft · 3 items · started 2:45 PM");
+  });
+
   it("renders no Payments card before the first tender", async () => {
     await renderTerminal();
     expect(screen.queryByTestId("payments-card")).not.toBeInTheDocument();

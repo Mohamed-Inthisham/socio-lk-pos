@@ -254,7 +254,7 @@ describe('ApprovalsService (Phase 6.4 P6-15 – P6-21)', () => {
 
       expect(err.getStatus()).toBe(HttpStatus.LOCKED);
       expect(err.getResponse()).toEqual({
-        message: "Shop Manager's PIN is locked until 14:45.",
+        message: "Shop Manager's PIN is locked until 2:45 PM.",
         code: 'PIN_LOCKED',
         locked_until: until.toISOString(),
       });
@@ -316,7 +316,7 @@ describe('ApprovalsService (Phase 6.4 P6-15 – P6-21)', () => {
 
       expect(err.getStatus()).toBe(HttpStatus.LOCKED);
       expect(err.getResponse()).toEqual({
-        message: "Wrong PIN. Shop Manager's PIN is locked until 14:45.",
+        message: "Wrong PIN. Shop Manager's PIN is locked until 2:45 PM.",
         code: 'PIN_LOCKED',
         locked_until: until.toISOString(),
       });
