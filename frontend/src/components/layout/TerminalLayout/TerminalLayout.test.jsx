@@ -3,11 +3,14 @@ import { fireEvent, screen, waitFor, within } from "@testing-library/react";
 import { Route, Routes, useLocation } from "react-router-dom";
 import TerminalLayout from "./index";
 import * as saleReturnsService from "../../../services/saleReturnsService";
+import * as cashDaysService from "../../../services/cashDaysService";
 import { inspectionRow } from "../../../test/returnEntities";
+import { currentCashDayResponse, openCashDayEntity } from "../../../test/cashDayEntities";
 import useActiveBranchStore from "../../../store/zustand/activeBranchStore";
 import {
   authState,
   branchesState,
+  cashDayState,
   renderWithProviders,
 } from "../../../test/renderWithProviders";
 import {
@@ -19,9 +22,27 @@ import {
 
 // Admins and managers read the phones to check on mount (useInspectionCount).
 vi.mock("../../../services/saleReturnsService");
+// The day gate (P9-7) reads today's cash day on mount: today is open.
+vi.mock("../../../services/cashDaysService");
 beforeEach(() => {
   vi.mocked(saleReturnsService.listInspection).mockReset().mockResolvedValue([]);
+  vi.mocked(cashDaysService.getCurrentCashDay)
+    .mockReset()
+    .mockResolvedValue(currentCashDayResponse({ today: openCashDayEntity() }));
 });
+
+/** Today already open at the user's terminal branch, so the gate shows the page at once. */
+const openDayFor = (user) => {
+  const branchId = user.role === "admin" ? useActiveBranchStore.getState().activeBranchId : user.branch_id;
+  return cashDayState({
+    branchId,
+    current: {
+      status: "open",
+      businessDate: "2026-10-20",
+      today: openCashDayEntity({ branch_id: branchId }),
+    },
+  });
+};
 
 const renderLayout = (user) =>
   renderWithProviders(
@@ -35,6 +56,7 @@ const renderLayout = (user) =>
       preloadedState: {
         auth: authState(user),
         branches: branchesState([mainShop, cityShop]),
+        cashDay: openDayFor(user),
       },
     },
   );
@@ -166,7 +188,11 @@ describe("TerminalLayout: recent sales (P6-1)", () => {
       </>,
       {
         route,
-        preloadedState: { auth: authState(cashierUser), branches: branchesState([mainShop]) },
+        preloadedState: {
+          auth: authState(cashierUser),
+          branches: branchesState([mainShop]),
+          cashDay: openDayFor(cashierUser),
+        },
       },
     );
 
@@ -213,5 +239,46 @@ describe("TerminalLayout: recent sales (P6-1)", () => {
     altR();
 
     expect(where()).toBe("/pos/sales?day=2026-10-20&q=Kamal");
+  });
+});
+
+describe("TerminalLayout: day gate (P9-7)", () => {
+  const renderGated = () =>
+    renderWithProviders(
+      <Routes>
+        <Route element={<TerminalLayout />}>
+          <Route path="/pos" element={<p>terminal page</p>} />
+        </Route>
+      </Routes>,
+      {
+        route: "/pos",
+        preloadedState: { auth: authState(cashierUser), branches: branchesState([mainShop]) },
+      },
+    );
+
+  it("while today isn't open the gate replaces the page inside <main>, and the header stays usable", async () => {
+    cashDaysService.getCurrentCashDay.mockResolvedValue(currentCashDayResponse());
+    renderGated();
+
+    const gate = await screen.findByRole("dialog", { name: "Open the day" });
+    expect(screen.getByRole("main")).toContainElement(gate);
+    expect(screen.queryByText("terminal page")).not.toBeInTheDocument();
+    for (const control of [
+      screen.getByRole("link", { name: "Exit terminal" }),
+      screen.getByRole("link", { name: "Recent sales" }),
+      screen.getByRole("button", { name: /Switch to (light|dark) mode/ }),
+      screen.getByRole("button", { name: /Test Cashier/ }),
+    ]) {
+      expect(control).toBeEnabled();
+      expect(control.closest("[inert], [aria-hidden='true']")).toBeNull();
+    }
+    expect(screen.getByRole("contentinfo")).toHaveTextContent("Main Shop");
+  });
+
+  it("shows the routed page once the read says today is open", async () => {
+    renderGated();
+
+    expect(await screen.findByText("terminal page")).toBeInTheDocument();
+    expect(cashDaysService.getCurrentCashDay).toHaveBeenCalledWith("branch-main");
   });
 });

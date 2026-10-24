@@ -6,6 +6,7 @@ import HeaderLogo from "../HeaderLogo";
 import BranchChip from "../BranchChip";
 import ThemeToggle from "../../common/ThemeToggle";
 import UserMenu from "../UserMenu";
+import DayGate from "../../pos/DayGate";
 import useInspectionCount from "../../../hooks/useInspectionCount";
 import useTerminalBranch from "../../../hooks/useTerminalBranch";
 import { PERMISSIONS, ROLE_INFO, hasPermission } from "../../../constants/rolePermissions";
@@ -16,7 +17,9 @@ import { PERMISSIONS, ROLE_INFO, hasPermission } from "../../../constants/rolePe
  * Full-screen shell for the POS terminal (planning doc Q7, option a) —
  * no sidebar, so the screen goes to the cart. Composes:
  * - Top bar: brand, read-only branch chip, theme toggle, user menu, Exit link
- * - <Outlet /> for the terminal pages (fills the remaining height)
+ * - <Outlet /> for the terminal pages (fills the remaining height),
+ *   inside DayGate: until today's cash day is open the gate shows instead
+ *   (P9-7)
  * - Bottom status strip: branch + signed-in user
  *
  * Rendered inside BranchContextGuard, so a branch is always resolved here.
@@ -171,7 +174,9 @@ const TerminalLayout = () => {
       </header>
 
       <main className="flex-1 min-h-0 overflow-hidden">
-        <Outlet />
+        <DayGate>
+          <Outlet />
+        </DayGate>
       </main>
 
       <footer

@@ -16,6 +16,8 @@ import { Eye, EyeOff, Mail, Lock, ChevronDown } from "lucide-react";
  * - rows: passed through to textarea (default 3)
  * - required: shows a small asterisk on the label
  * - hint: helper text shown below input when there's no error
+ * - readOnly: the disabled look (muted, not-allowed cursor) on a field
+ *   that stays focusable and readable (text inputs)
  */
 
 const InputField = ({
@@ -36,6 +38,7 @@ const InputField = ({
   required = false,
   hint,
   disabled = false,
+  readOnly = false,
   className = "",
   ...rest
 }) => {
@@ -58,7 +61,9 @@ const InputField = ({
     : focused
       ? "border-cyan-500 dark:border-cyan-400 ring-2 ring-cyan-500/20 dark:ring-cyan-400/20"
       : "border-slate-300 dark:border-slate-600";
-  const wrapperState = disabled ? "opacity-60 cursor-not-allowed" : "";
+  // A read-only field looks like a disabled one but stays focusable and is
+  // still read by screen readers (native readonly, not disabled).
+  const wrapperState = disabled || readOnly ? "opacity-60 cursor-not-allowed" : "";
 
   const wrapperClass = `${wrapperBase} ${wrapperBg} border ${wrapperBorder} ${wrapperState}`;
 
@@ -102,6 +107,7 @@ const InputField = ({
             onFocus={handleFocus}
             onBlur={handleBlur}
             disabled={disabled}
+            readOnly={readOnly}
             rows={rows}
             className={`${inputBase} resize-y`}
             {...rest}
@@ -171,11 +177,12 @@ const InputField = ({
             onFocus={handleFocus}
             onBlur={handleBlur}
             disabled={disabled}
+            readOnly={readOnly}
             min={isNumber ? min : undefined}
             max={isNumber ? max : undefined}
             step={isNumber ? step : undefined}
             inputMode={isNumber ? "decimal" : undefined}
-            className={inputBase}
+            className={`${inputBase} ${readOnly ? "cursor-not-allowed" : ""}`}
             {...rest}
           />
 

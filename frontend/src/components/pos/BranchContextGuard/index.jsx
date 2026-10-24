@@ -3,6 +3,7 @@ import { Link } from "react-router-dom";
 import { Store, AlertTriangle } from "lucide-react";
 import Button from "../../common/Button";
 import AppLayout from "../../layout/AppLayout";
+import Panel from "../TerminalPanel";
 import useTerminalBranch from "../../../hooks/useTerminalBranch";
 import {
   fetchBranches,
@@ -27,27 +28,6 @@ import {
  * Here that would open the till on whichever branch is first without the
  * admin choosing; the terminal must only unlock after an explicit pick.
  */
-
-const Panel = ({ icon: Icon, tone = "neutral", title, children }) => (
-  <div className="w-full max-w-md rounded-2xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 shadow-sm p-6">
-    <div
-      className={`
-        w-11 h-11 rounded-xl flex items-center justify-center mb-4
-        ${
-          tone === "warning"
-            ? "bg-amber-100 text-amber-700 dark:bg-amber-900/40 dark:text-amber-300"
-            : "bg-cyan-50 text-cyan-700 dark:bg-cyan-900/40 dark:text-cyan-300"
-        }
-      `}
-    >
-      <Icon size={22} aria-hidden="true" />
-    </div>
-    <h1 className="text-lg font-semibold text-slate-900 dark:text-slate-100">
-      {title}
-    </h1>
-    {children}
-  </div>
-);
 
 const FullScreen = ({ children }) => (
   <div className="min-h-dvh flex items-center justify-center p-4 bg-slate-50 dark:bg-slate-950">
