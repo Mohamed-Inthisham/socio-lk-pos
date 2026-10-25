@@ -64,6 +64,27 @@ describe("describeCompleteError", () => {
     });
   });
 
+  it("DAY_CLOSED (P9-9): the date, give any payment back, the cart is kept; no fix, no reload", () => {
+    expect(describeCompleteError({ kind: "day_closed", business_date: "2026-10-25" })).toEqual({
+      title: "Today is closed",
+      body: "Sun 25 Oct 2026 was closed, so this sale can't be completed. Nothing was saved. If the customer already paid, give the payment back. The cart is kept.",
+      fix: null,
+      reload: false,
+      nic: false,
+      dayRefused: true,
+    });
+  });
+
+  it("DAY_NOT_OPEN (P9-9): count without this sale's cash, open, then complete", () => {
+    expect(describeCompleteError({ kind: "day_not_open", business_date: "2026-10-25" })).toMatchObject({
+      title: "Today isn't open yet",
+      body: "Sun 25 Oct 2026 hasn't been opened, so this sale can't be completed. Nothing was saved. Count the box without this sale's cash, enter the opening balance, then complete it. The cart and its payments are kept.",
+      fix: null,
+      reload: false,
+      dayRefused: true,
+    });
+  });
+
   it("missing NIC asks for the NIC form, not a message", () => {
     expect(describeCompleteError({ kind: "nic_required" })).toMatchObject({ nic: true, fix: null, body: null });
   });

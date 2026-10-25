@@ -213,6 +213,38 @@ export const reasonRequiredError = (difference = "-1500.00") =>
     difference,
   });
 
+/**
+ * C10, C11 (backend 0b): complete, void or return refused because today
+ * isn't open, from backend/src/cash-days/day-gate.ts assertDayOpen
+ * (ConflictException(object): the body is the object as given). Default:
+ * Tue 20 Oct 2026. `body` is the refused request's, as axios keeps it.
+ */
+export const dayNotOpenError = (businessDate = "2026-10-20", body = "{}") =>
+  Object.assign(new Error("Request failed with status code 409"), {
+    response: {
+      status: 409,
+      data: {
+        message: `Today (${businessDate}) hasn't been opened. Enter the opening balance first.`,
+        code: "DAY_NOT_OPEN",
+        business_date: businessDate,
+      },
+    },
+    config: { data: body },
+  });
+
+export const dayClosedError = (businessDate = "2026-10-20", body = "{}") =>
+  Object.assign(new Error("Request failed with status code 409"), {
+    response: {
+      status: 409,
+      data: {
+        message: `Today (${businessDate}) is closed. No sales, voids or returns until tomorrow's opening.`,
+        code: "DAY_CLOSED",
+        business_date: businessDate,
+      },
+    },
+    config: { data: body },
+  });
+
 /** The refresh failed after a 401 (api.js rejects with the refresh's error). */
 export const cashDayUnauthenticatedError = () =>
   axiosError(401, { statusCode: 401, message: "Unauthorized" });

@@ -26,8 +26,8 @@ import type { CashDayBreakdown } from '../cash-day-math';
  * rounding rule: the shop counts whole rupees). expected_balance may be
  * negative.
  *
- * summary is the rest of the printout, frozen at close so a reprint
- * matches the original (P9-15): non-cash tenders, trade-in value, counts.
+ * summary holds the detailed closing information, frozen at close
+ * (P9-15): non-cash tenders, trade-in value, counts.
  *
  * open_client_request_id and close_client_request_id are the till's ids
  * for the open and close attempts (P9-18): unique, so a resend finds the

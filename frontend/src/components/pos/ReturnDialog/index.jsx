@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useFieldArray, useForm, useWatch } from "react-hook-form";
-import { useSelector } from "react-redux";
+import { useDispatch, useSelector } from "react-redux";
 import { AlertCircle } from "lucide-react";
 import Dialog from "../../common/Dialog";
 import Button from "../../common/Button";
@@ -21,6 +21,8 @@ import {
 import { CASH } from "../../../schemas/paymentSchema";
 import { createReturn, getSale } from "../../../services/salesService";
 import { listStock } from "../../../services/stockService";
+import { recheckCashDay } from "../../../store/slices/cashDaySlice";
+import { whenDayRechecked } from "../../../utils/posFocus";
 import { printReturnSlip } from "../../../utils/printReceipt";
 import { announceInspectionChange } from "../../../hooks/useInspectionCount";
 import { colomboToday } from "../../../utils/colomboDay";
@@ -77,6 +79,12 @@ import {
  * server had recorded after all comes back 200 and shows as recorded.
  * If the re-read fails too: Check again, which only re-reads.
  *
+ * TODAY NOT OPEN (409 DAY_NOT_OPEN / DAY_CLOSED, P9-9): checked before the
+ * PIN, so nothing was recorded under the request id and no attempt was
+ * spent; nothing is resent. The reason shows as the alert and the footer
+ * is only Close, focused. Closing drops the request id (the next opening
+ * makes a new one) and re-reads the day gate (recheckCashDay).
+ *
  * 3 RECORDED (ReturnRecorded): what to hand over and where the items go,
  * read from the sale the server answered with; Done is focused. The
  * return slip prints on its own, two copies (printReturnSlip, P7-17);
@@ -98,7 +106,10 @@ import {
  * - sale: the COMPLETED sale (hydrated, with returned_quantity and returns[])
  * - onReturned: (sale) => void — the sale the server answered with
  * - onSaleChanged: (sale) => void — a re-read after a refusal
- * - afterLeave: forwarded to Dialog (the page hands focus on)
+ * - afterLeave: ({ dayRecheck }) => void, once the dialog has gone (the
+ *   page hands focus on); dayRecheck, after a day refusal, is the gate's
+ *   re-read (utils/posFocus.js whenDayRechecked: true when the gate took
+ *   the focus), else null
  */
 
 const STEP_ITEMS = "items";
@@ -162,6 +173,7 @@ const focusApproval = (id) =>
   }, 0);
 
 const ReturnDialog = ({ open, onClose, sale, onReturned, onSaleChanged, afterLeave }) => {
+  const dispatch = useDispatch();
   const sessionUser = useSelector((state) => state.auth.user);
   const [step, setStep] = useState(STEP_ITEMS);
   const [stock, setStock] = useState({ status: "loading", tracked: {} });
@@ -173,6 +185,7 @@ const ReturnDialog = ({ open, onClose, sale, onReturned, onSaleChanged, afterLea
   const [phase, setPhase] = useState("form"); // form | sending | checking | unknown | done
   const [alert, setAlert] = useState(null); // { message, laterSale, lead, tail }
   const [blocked, setBlocked] = useState(false);
+  const [dayRefused, setDayRefused] = useState(false);
   const [notRecorded, setNotRecorded] = useState(false);
   const [serverErrors, setServerErrors] = useState({});
   const [serverOutsideIds, setServerOutsideIds] = useState([]);
@@ -185,6 +198,8 @@ const ReturnDialog = ({ open, onClose, sale, onReturned, onSaleChanged, afterLea
   const sending = useRef(false);
   const refundBasis = useRef(null);
   const doneRef = useRef(null);
+  const closeRef = useRef(null);
+  const dayRecheck = useRef(null);
 
   const { register, reset, setValue, getValues, control } = useForm({ defaultValues: returnFormDefaults(sale) });
   const { fields: refundRows, append, remove, replace } = useFieldArray({ control, name: "refunds" });
@@ -231,6 +246,11 @@ const ReturnDialog = ({ open, onClose, sale, onReturned, onSaleChanged, afterLea
   useEffect(() => {
     if (phase === "done") doneRef.current?.focus();
   }, [phase]);
+
+  // A day refusal leaves only Close: it takes the focus.
+  useEffect(() => {
+    if (dayRefused) closeRef.current?.focus();
+  }, [dayRefused]);
 
   const retryStock = () => {
     setStock({ status: "loading", tracked: {} });
@@ -319,8 +339,18 @@ const ReturnDialog = ({ open, onClose, sale, onReturned, onSaleChanged, afterLea
 
   const close = () => {
     if (busy) return;
+    // P9-9: the cashier has read why; now the gate re-reads and moves on.
+    if (dayRefused && !dayRecheck.current) dayRecheck.current = whenDayRechecked(dispatch(recheckCashDay()));
     clearAll();
     onClose();
+  };
+
+  // dayRefused is reset only here, so the footer stays Close while it fades.
+  const onAfterLeave = () => {
+    const recheck = dayRecheck.current;
+    dayRecheck.current = null;
+    setDayRefused(false);
+    afterLeave?.({ dayRecheck: recheck });
   };
 
   const next = () => {
@@ -502,6 +532,7 @@ const ReturnDialog = ({ open, onClose, sale, onReturned, onSaleChanged, afterLea
       setPhase("form");
       setNotRecorded(false);
       if (view.blocks) setBlocked(true);
+      if (view.dayRefused) setDayRefused(true);
       if (view.refresh) {
         await refresh(error, view);
       } else if (view.field === "pin") {
@@ -561,6 +592,9 @@ const ReturnDialog = ({ open, onClose, sale, onReturned, onSaleChanged, afterLea
   const footer = () => {
     if (phase === "done") {
       return <Button ref={doneRef} type="button" variant="accent" label="Done" onClick={close} />;
+    }
+    if (dayRefused) {
+      return <Button ref={closeRef} type="button" variant="accent" label="Close" onClick={close} />;
     }
     if (step === STEP_ITEMS) {
       return (
@@ -716,7 +750,7 @@ const ReturnDialog = ({ open, onClose, sale, onReturned, onSaleChanged, afterLea
     <Dialog
       open={open}
       onClose={close}
-      afterLeave={afterLeave}
+      afterLeave={onAfterLeave}
       title={`Return items · ${sale.sale_number}`}
       description={`${customerLine(sale)} · ${soldLine(sale, today)}`}
       // xl: a picked line's controls sit beside its full name (ReturnLineRow)

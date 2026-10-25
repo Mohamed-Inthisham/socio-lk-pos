@@ -22,6 +22,7 @@ import {
   saleWithReturnsEntity,
 } from "../test/returnEntities";
 import { saleEntity } from "../test/saleEntities";
+import { dayClosedError, dayNotOpenError } from "../test/cashDayEntities";
 
 const FLAGS = { reconcile: false, refresh: false, blocks: false, field: null };
 
@@ -110,6 +111,20 @@ describe("classifyReturnError", () => {
       imei: "356789012345671",
       reason,
       ...expected,
+    });
+  });
+
+  it.each([
+    ["C10 DAY_NOT_OPEN", dayNotOpenError, RETURN_ERROR.DAY_NOT_OPEN],
+    ["C11 DAY_CLOSED", dayClosedError, RETURN_ERROR.DAY_CLOSED],
+  ])("%s: by its code, blocks, no reconcile (nothing recorded under the request id)", (_, make, kind) => {
+    expect(classifyReturnError(make())).toEqual({
+      ...FLAGS,
+      kind,
+      status: 409,
+      message: expect.any(String),
+      blocks: true,
+      business_date: "2026-10-20",
     });
   });
 
@@ -230,6 +245,29 @@ describe("returnErrorView", () => {
     [returnWrongBranchError, "You can only make returns on sales at your own branch."],
   ])("%o blocks the dialog", (make, message) => {
     expect(view(make)).toMatchObject({ message, blocks: true });
+  });
+
+  it("DAY_CLOSED: the date built here (never the ISO message), blocks, never reconciled or refreshed", () => {
+    const v = view(dayClosedError);
+    expect(v).toMatchObject({
+      field: null,
+      message:
+        "Tue 20 Oct 2026 is closed: no returns until tomorrow's opening. Nothing was changed and no PIN attempt was used.",
+      blocks: true,
+      refresh: false,
+      reconcile: false,
+      dayRefused: true,
+    });
+    expect(v.message).not.toContain("2026-10-20");
+  });
+
+  it("DAY_NOT_OPEN: open the day, then make the return", () => {
+    expect(view(dayNotOpenError)).toMatchObject({
+      message:
+        "Tue 20 Oct 2026 hasn't been opened yet. Nothing was changed and no PIN attempt was used. Enter the opening balance, then make the return.",
+      blocks: true,
+      dayRefused: true,
+    });
   });
 
   it.each([returnTimeoutError, returnNetworkError, returnServerError])("%o reconciles", (make) => {

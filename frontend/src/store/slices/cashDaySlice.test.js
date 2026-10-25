@@ -13,6 +13,7 @@ import {
   fetchCurrentCashDay,
   fetchPastDays,
   openDay,
+  recheckCashDay,
 } from "./cashDaySlice";
 import * as service from "../../services/cashDaysService";
 import { CASH_DAY_ERROR, CASH_DAY_OP } from "../../utils/cashDayErrors";
@@ -76,6 +77,28 @@ const closeBodies = () => service.closeCashDay.mock.calls.map(([, body]) => body
 
 beforeEach(() => {
   vi.resetAllMocks();
+});
+
+describe("cashDaySlice recheckCashDay (after DAY_NOT_OPEN / DAY_CLOSED, P9-9)", () => {
+  it("re-reads current for the slice's branch, and settles once the gate has the answer", async () => {
+    const store = await storeWithGate(todayOpen());
+    service.getCurrentCashDay.mockResolvedValueOnce(todayClosed());
+
+    await store.dispatch(recheckCashDay());
+
+    expect(service.getCurrentCashDay).toHaveBeenCalledTimes(2);
+    expect(service.getCurrentCashDay).toHaveBeenLastCalledWith(BRANCH_ID);
+    expect(cashDay(store).current.status).toBe(GATE.CLOSED);
+  });
+
+  it("reads nothing before any branch was read", async () => {
+    const store = createTestStore();
+
+    await store.dispatch(recheckCashDay());
+
+    expect(service.getCurrentCashDay).not.toHaveBeenCalled();
+    expect(cashDay(store).current.status).toBe(GATE.IDLE);
+  });
 });
 
 describe("cashDaySlice fetchCurrentCashDay (the day gate, P9-7)", () => {

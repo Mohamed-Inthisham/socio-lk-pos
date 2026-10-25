@@ -62,6 +62,10 @@ import { newClientRequestId } from "../../utils/requestId";
  * - EXPECTED_CHANGED replaces `close.summary` with the fresh one from the
  *   409 body; nothing is resent until the user confirms again.
  *
+ * DAY REFUSALS (P9-9): after a complete, void or return refused
+ * DAY_NOT_OPEN / DAY_CLOSED, the dialog dispatches recheckCashDay as it
+ * closes; the gate follows that read.
+ *
  * Errors are classified by status and `code` (utils/cashDayErrors.js);
  * `refresh` ones (DAY_ALREADY_OPEN, EARLIER_DAY_NOT_CLOSED,
  * DAY_ALREADY_CLOSED, a missing day) re-read current.
@@ -201,6 +205,18 @@ export const fetchCurrentCashDay = createAsyncThunk(
     }
   },
 );
+
+/**
+ * Re-read current for the slice's branch after a complete, void or return
+ * was refused DAY_NOT_OPEN / DAY_CLOSED (P9-7, P9-9; utils/dayRefusal.js).
+ * The refused dialog dispatches it when it closes, so the cashier reads
+ * why before the gate moves the till on. Resolves once the read settles;
+ * nothing is read before any branch was.
+ */
+export const recheckCashDay = createAsyncThunk("cashDay/recheck", async (_, { dispatch, getState }) => {
+  const { branchId } = getState().cashDay;
+  if (branchId) await dispatch(fetchCurrentCashDay({ branchId }));
+});
 
 /**
  * Open today with the opening balance, in cents (P9-7). Resolves with

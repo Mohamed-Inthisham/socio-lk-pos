@@ -1,3 +1,5 @@
+import { DAY_ACTION, DAY_REFUSAL, dayRefusalOf, dayRefusalText } from "./dayRefusal";
+
 /**
  * Void errors (planning doc P6-11, P6-19, P6-22)
  *
@@ -22,7 +24,8 @@
  *   ({ id, sale_number } or null), existing_unit (resold,
  *   taken_back_on_sale, bought_back_on_purchase, taken_back); permanent
  *   (bought_back_on_purchase: never voidable); sale_status
- *   (not_completed)
+ *   (not_completed); business_date (day_not_open, day_closed: P9-9,
+ *   checked before the PIN, so no attempt was spent; utils/dayRefusal.js)
  */
 
 export const VOID_ERROR = {
@@ -38,6 +41,8 @@ export const VOID_ERROR = {
   BOUGHT_BACK_ON_PURCHASE: "bought_back_on_purchase", // V6, a phone purchase
   TAKEN_BACK: "taken_back", // V6, a race caught only by the live-IMEI index
   INTEGRITY: "integrity", // V7: rolled back, nothing changed
+  DAY_NOT_OPEN: "day_not_open", // 409 DAY_NOT_OPEN (C10)
+  DAY_CLOSED: "day_closed", // 409 DAY_CLOSED (C11)
   SERVER: "server", // 5xx, V8: outcome unknown until re-fetched
   NETWORK: "network", // no response
   TIMEOUT: "timeout", // VOID_TIMEOUT_MS passed
@@ -119,6 +124,14 @@ export const classifyVoidError = (error) => {
   }
 
   if (status === 409) {
+    const day = dayRefusalOf(response);
+    if (day) {
+      return {
+        ...base,
+        kind: day.code === DAY_REFUSAL.CLOSED ? VOID_ERROR.DAY_CLOSED : VOID_ERROR.DAY_NOT_OPEN,
+        business_date: day.business_date,
+      };
+    }
     // Later-transaction bodies always carry `reason` (null in the race);
     // V7's plain-string 409 never does.
     if (data && "reason" in data) {
@@ -168,6 +181,8 @@ const LOCKED_SUFFIX = " Another manager can approve, or an admin can clear the P
  *   lead: string|null, tail: string|null,  // the text around the link
  *   blocksVoid: boolean,            // Void stays disabled until closed
  *   reconcile: boolean,             // re-fetch the sale, never resend
+ *   dayRefused?: true,              // today isn't open: only Close; the
+ *                                   // gate re-reads when the dialog closes
  * }}
  */
 export const voidErrorView = (error, { approverIsSelf = false } = {}) => {
@@ -207,6 +222,20 @@ export const voidErrorView = (error, { approverIsSelf = false } = {}) => {
       return { ...view, message: "This sale no longer exists.", blocksVoid: true };
     case VOID_ERROR.INTEGRITY:
       return { ...view, message: "Couldn't void. Nothing was changed." };
+    case VOID_ERROR.DAY_NOT_OPEN:
+    case VOID_ERROR.DAY_CLOSED:
+      return {
+        ...view,
+        message: dayRefusalText(
+          {
+            code: error.kind === VOID_ERROR.DAY_CLOSED ? DAY_REFUSAL.CLOSED : DAY_REFUSAL.NOT_OPEN,
+            business_date: error.business_date ?? null,
+          },
+          DAY_ACTION.VOID,
+        ).message,
+        blocksVoid: true,
+        dayRefused: true,
+      };
     case VOID_ERROR.FORBIDDEN:
       return { ...view, message: "You can't void this sale." };
     case VOID_ERROR.NETWORK:

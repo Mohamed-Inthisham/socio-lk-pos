@@ -21,6 +21,8 @@ import {
   selectLastCompletedSale,
   selectStockWarnings,
 } from "../../../store/slices/posTerminalSlice";
+import { recheckCashDay } from "../../../store/slices/cashDaySlice";
+import { whenDayRechecked } from "../../../utils/posFocus";
 
 /**
  * CompleteSaleDialog Component
@@ -57,13 +59,22 @@ import {
  *     once saved, Complete is focused again.
  *   - a connection / server failure: Complete stays focused to try again
  *     (safe: a sale is never completed twice).
+ *   - today isn't open (409 DAY_NOT_OPEN / DAY_CLOSED, P9-9): the reason,
+ *     and only Close, focused. Nothing was saved; the draft, its lines and
+ *     payments stay as they are. Closing re-reads the day gate
+ *     (recheckCashDay), so the till moves on after the cashier has read
+ *     it: the Day closed screen, or the opening dialog. After the next
+ *     opening the terminal reloads the same draft.
  *
  * PROPS:
  * - open
  * - onClose: back without completing (Esc, backdrop, Back) and after success
  * - onCompleted: (sale) => void — the sale completed (the terminal prints
  *   its receipt once the dialog has gone, P5-12)
- * - afterLeave: runs once the close transition ends (focus hand-off)
+ * - afterLeave: ({ dayRecheck }) => void, once the close transition ends
+ *   (focus hand-off); dayRecheck, after a day refusal, is the gate's
+ *   re-read (utils/posFocus.js whenDayRechecked: true when the gate took
+ *   the focus), else null
  */
 
 // The stock check's state for this opening. "idle" = not answered yet:
@@ -90,6 +101,8 @@ const CompleteSaleDialog = ({ open, onClose, onCompleted, afterLeave }) => {
   const completeRef = useRef(null);
   const fixRef = useRef(null);
   const nicRef = useRef(null);
+  const closeRef = useRef(null);
+  const dayRecheck = useRef(null);
 
   // After success the draft is gone; keep showing that sale while the dialog fades out.
   const sale = draft ?? lastCompleted;
@@ -129,7 +142,8 @@ const CompleteSaleDialog = ({ open, onClose, onCompleted, afterLeave }) => {
   const issue = completeError && !completeError.gone ? describeCompleteError(completeError) : null;
   const checking = check === CHECK_IDLE;
   const shortOfStock = check === CHECK_DONE && shortfall.length > 0;
-  const blocked = shortOfStock || !!issue?.fix || !!issue?.nic;
+  const dayRefused = !!issue?.dayRefused;
+  const blocked = shortOfStock || !!issue?.fix || !!issue?.nic || dayRefused;
 
   // React to a new failure: point the cashier at the way out, and bring
   // the terminal's data up to date where the failure says it is stale.
@@ -138,20 +152,29 @@ const CompleteSaleDialog = ({ open, onClose, onCompleted, afterLeave }) => {
   useEffect(() => {
     if (!completeError || completeError.gone || completeError === handledError.current) return;
     handledError.current = completeError;
-    const { fix, reload, nic } = describeCompleteError(completeError);
+    const { fix, reload, nic, dayRefused: refused } = describeCompleteError(completeError);
     if (completeError.kind === COMPLETE_ERROR.OUT_OF_STOCK && branchId && productIdsKey) {
       dispatch(refreshCartStock({ branchId, productIds: productIdsKey.split(",") }));
     }
     if (reload) dispatch(reloadDraftSale());
     if (nic) nicRef.current?.focus();
     else if (fix) fixRef.current?.focus();
+    else if (refused) closeRef.current?.focus();
   }, [completeError, branchId, productIdsKey, dispatch]);
 
   const close = () => {
     if (completing) return;
     checkRequest.current = null;
     setCheck(CHECK_IDLE);
+    // P9-9: the cashier has read why; now the gate re-reads and moves on.
+    if (dayRefused && !dayRecheck.current) dayRecheck.current = whenDayRechecked(dispatch(recheckCashDay()));
     onClose();
+  };
+
+  const onAfterLeave = () => {
+    const recheck = dayRecheck.current;
+    dayRecheck.current = null;
+    afterLeave?.({ dayRecheck: recheck });
   };
 
   const checkAgain = () => {
@@ -186,24 +209,28 @@ const CompleteSaleDialog = ({ open, onClose, onCompleted, afterLeave }) => {
       title="Complete this sale?"
       size="sm"
       dismissible={!completing}
-      afterLeave={afterLeave}
+      afterLeave={onAfterLeave}
       footer={
-        <>
-          <Button variant="secondary" label="Back" onClick={close} disabled={completing} />
-          <Button
-            ref={completeRef}
-            variant="accent"
-            onClick={complete}
-            aria-disabled={completing || blocked}
-            aria-busy={completing}
-            aria-keyshortcuts="Enter"
-            className="aria-disabled:opacity-50 aria-disabled:cursor-not-allowed"
-            data-autofocus
-          >
-            {completing && <Loader2 size={16} aria-hidden="true" className="animate-spin" />}
-            Complete sale
-          </Button>
-        </>
+        dayRefused ? (
+          <Button ref={closeRef} variant="accent" label="Close" onClick={close} />
+        ) : (
+          <>
+            <Button variant="secondary" label="Back" onClick={close} disabled={completing} />
+            <Button
+              ref={completeRef}
+              variant="accent"
+              onClick={complete}
+              aria-disabled={completing || blocked}
+              aria-busy={completing}
+              aria-keyshortcuts="Enter"
+              className="aria-disabled:opacity-50 aria-disabled:cursor-not-allowed"
+              data-autofocus
+            >
+              {completing && <Loader2 size={16} aria-hidden="true" className="animate-spin" />}
+              Complete sale
+            </Button>
+          </>
+        )
       }
     >
       <dl className="space-y-1.5 text-sm">

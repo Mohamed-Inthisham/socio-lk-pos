@@ -1,6 +1,4 @@
-import { vi } from "vitest";
 import { screen } from "@testing-library/react";
-import userEvent from "@testing-library/user-event";
 import DayClosedScreen from "./index";
 import { renderWithProviders } from "../../../test/renderWithProviders";
 import { closedCashDayEntity } from "../../../test/cashDayEntities";
@@ -22,19 +20,14 @@ describe("DayClosedScreen (P9-14)", () => {
     expect(screen.getByRole("link", { name: "Recent sales" })).toHaveAttribute("href", "/pos/sales");
   });
 
-  it("has no Reprint summary or Past days until steps E and F pass them", () => {
+  it("has no Past days link until step F", () => {
     renderWithProviders(<DayClosedScreen day={closedCashDayEntity()} />);
     expect(screen.queryByRole("button", { name: "Reprint summary" })).not.toBeInTheDocument();
     expect(screen.queryByRole("link", { name: "Past days" })).not.toBeInTheDocument();
   });
 
-  it("offers them when given", async () => {
-    const user = userEvent.setup();
-    const onReprint = vi.fn();
-    renderWithProviders(<DayClosedScreen day={closedCashDayEntity()} onReprint={onReprint} pastDaysTo="/pos/days" />);
-
-    await user.click(screen.getByRole("button", { name: "Reprint summary" }));
-    expect(onReprint).toHaveBeenCalledTimes(1);
+  it("links to Past days when given", () => {
+    renderWithProviders(<DayClosedScreen day={closedCashDayEntity()} pastDaysTo="/pos/days" />);
     expect(screen.getByRole("link", { name: "Past days" })).toHaveAttribute("href", "/pos/days");
   });
 });
