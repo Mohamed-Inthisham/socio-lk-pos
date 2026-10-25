@@ -123,6 +123,7 @@ describe('CashDaysService', () => {
     today: string;
     branches: string[];
     days: CashDay[];
+    openSales: { id: string }[];
     sales: MethodTotalRow[];
     refunds: MethodTotalRow[];
     earlierVoids: MethodTotalRow[];
@@ -178,6 +179,7 @@ describe('CashDaysService', () => {
           counted_balance: d.counted_balance,
         }));
     }
+    if (sql.includes('FOR UPDATE OF s')) return fixtures.openSales;
     if (sql.includes('-- cash day: sales')) return fixtures.sales;
     if (sql.includes('-- cash day: refunds')) return fixtures.refunds;
     if (sql.includes('-- cash day: earlier voids'))
@@ -251,7 +253,8 @@ describe('CashDaysService', () => {
       (c) => c[0] as { action: string; changes: Record<string, unknown> },
     );
   const whereCalls = () => mockLock.where.mock.calls as unknown[][];
-  const updates = () => queries.filter((q) => q.sql.includes('UPDATE'));
+  const updates = () =>
+    queries.filter((q) => q.sql.trimStart().startsWith('UPDATE '));
 
   beforeEach(async () => {
     jest.resetAllMocks();
@@ -259,6 +262,7 @@ describe('CashDaysService', () => {
       today: '2026-10-20',
       branches: ['branch-1', 'branch-2'],
       days: [],
+      openSales: [],
       // P9-5: sale A paid 12,000.00 cash (B, voided the same day, is left
       // out by the SQL); the return refunds CARD 500.00 + CASH 1,500.00.
       sales: [{ method: PaymentMethod.CASH, total: '12000.00' }],
@@ -474,6 +478,23 @@ describe('CashDaysService', () => {
   describe('close', () => {
     beforeEach(() => {
       fixtures.days.push(openDay());
+    });
+
+    it('refuses close while this cash day has an unfinished sale', async () => {
+      fixtures.openSales = [{ id: 'draft-sale-1' }];
+
+      const { body } = await refusal(
+        service.close('day-1', closeDto(), cashier),
+      );
+
+      expect(body).toMatchObject({ code: 'OPEN_SALES', sale_count: 1 });
+      expect(queries.find((q) => q.sql.includes('FOR UPDATE OF s'))?.params).toEqual([
+        'branch-1',
+        openDay().opened_at,
+      ]);
+      expect(updates().some((q) => q.sql.includes('UPDATE cash_days'))).toBe(
+        false,
+      );
     });
 
     it('closes: FOR UPDATE by id with no closed_at filter, the snapshot and DAY_CLOSE', async () => {
