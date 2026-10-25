@@ -397,18 +397,35 @@ export class SalesService {
     const [row] = await this.dataSource.manager.query(
       `SELECT (SELECT COUNT(*)::int FROM sales s
                WHERE s.branch_id = $1 AND s.status = 'COMPLETED'
-                 AND (s.completed_at AT TIME ZONE 'Asia/Colombo')::date BETWEEN $2::date AND $3::date) AS sales_count,
+                 AND s.completed_at >= ($2::date::timestamp AT TIME ZONE 'Asia/Colombo')
+                 AND s.completed_at < (($3::date + 1)::timestamp AT TIME ZONE 'Asia/Colombo')) AS sales_count,
               (SELECT COALESCE(SUM(s.total), 0)::text FROM sales s
                WHERE s.branch_id = $1 AND s.status = 'COMPLETED'
-                 AND (s.completed_at AT TIME ZONE 'Asia/Colombo')::date BETWEEN $2::date AND $3::date) AS sales_amount,
+                 AND s.completed_at >= ($2::date::timestamp AT TIME ZONE 'Asia/Colombo')
+                 AND s.completed_at < (($3::date + 1)::timestamp AT TIME ZONE 'Asia/Colombo')) AS sales_amount,
               (SELECT COALESCE(SUM(l.quantity), 0)::int FROM sale_lines l
                 JOIN sales s ON s.id = l.sale_id
                WHERE s.branch_id = $1 AND s.status = 'COMPLETED'
-                 AND (s.completed_at AT TIME ZONE 'Asia/Colombo')::date BETWEEN $2::date AND $3::date) AS quantity_count,
+                 AND s.completed_at >= ($2::date::timestamp AT TIME ZONE 'Asia/Colombo')
+                 AND s.completed_at < (($3::date + 1)::timestamp AT TIME ZONE 'Asia/Colombo')) AS quantity_count,
               (SELECT COALESCE(SUM(l.quantity * l.cost_price_snapshot), 0)::text FROM sale_lines l
                 JOIN sales s ON s.id = l.sale_id
                WHERE s.branch_id = $1 AND s.status = 'COMPLETED'
-                 AND (s.completed_at AT TIME ZONE 'Asia/Colombo')::date BETWEEN $2::date AND $3::date) AS cost_of_sales`,
+                 AND s.completed_at >= ($2::date::timestamp AT TIME ZONE 'Asia/Colombo')
+                 AND s.completed_at < (($3::date + 1)::timestamp AT TIME ZONE 'Asia/Colombo')) AS cost_of_sales,
+              (SELECT COUNT(*)::int FROM sale_returns r
+               WHERE r.branch_id = $1
+                 AND r.created_at >= ($2::date::timestamp AT TIME ZONE 'Asia/Colombo')
+                 AND r.created_at < (($3::date + 1)::timestamp AT TIME ZONE 'Asia/Colombo')) AS return_count,
+              (SELECT COALESCE(SUM(rl.quantity), 0)::int
+                 FROM sale_return_lines rl JOIN sale_returns r ON r.id = rl.sale_return_id
+                WHERE r.branch_id = $1
+                  AND r.created_at >= ($2::date::timestamp AT TIME ZONE 'Asia/Colombo')
+                  AND r.created_at < (($3::date + 1)::timestamp AT TIME ZONE 'Asia/Colombo')) AS return_quantity,
+              (SELECT COUNT(*)::int FROM sales s
+               WHERE s.branch_id = $1 AND s.status = 'VOIDED'
+                 AND s.voided_at >= ($2::date::timestamp AT TIME ZONE 'Asia/Colombo')
+                 AND s.voided_at < (($3::date + 1)::timestamp AT TIME ZONE 'Asia/Colombo')) AS voided_count`,
       [query.branchId, query.from, query.to],
     );
     return {
@@ -416,6 +433,9 @@ export class SalesService {
       sales_amount: row.sales_amount,
       quantity_count: Number(row.quantity_count),
       cost_of_sales: row.cost_of_sales,
+      return_count: Number(row.return_count),
+      return_quantity: Number(row.return_quantity),
+      voided_count: Number(row.voided_count),
     };
   }
 

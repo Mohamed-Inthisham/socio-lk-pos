@@ -283,6 +283,9 @@ describe('SalesService', () => {
       sales_amount: '12500.00',
       quantity_count: 7,
       cost_of_sales: '9000.00',
+      return_count: 2,
+      return_quantity: 3,
+      voided_count: 1,
     }]);
 
     await expect(service.dailySummary({
@@ -294,6 +297,9 @@ describe('SalesService', () => {
       sales_amount: '12500.00',
       quantity_count: 7,
       cost_of_sales: '9000.00',
+      return_count: 2,
+      return_quantity: 3,
+      voided_count: 1,
     });
     expect(mockReadManager.query).toHaveBeenCalledWith(
       expect.stringContaining("AT TIME ZONE 'Asia/Colombo'"),

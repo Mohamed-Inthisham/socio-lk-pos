@@ -19,6 +19,9 @@ describe("SalesOverview", () => {
       sales_amount: "12500.00",
       quantity_count: 7,
       cost_of_sales: "9000.00",
+      return_count: 2,
+      return_quantity: 3,
+      voided_count: 1,
     });
   });
 
@@ -29,6 +32,9 @@ describe("SalesOverview", () => {
     expect(screen.getByText("Sales count").parentElement.parentElement).toHaveTextContent("4");
     expect(screen.getByText("Items sold").parentElement.parentElement).toHaveTextContent("7");
     expect(screen.getByText("LKR 9,000.00")).toBeInTheDocument();
+    expect(screen.getByText("Return sales count").parentElement.parentElement).toHaveTextContent("2");
+    expect(screen.getByText("Return sales quantity").parentElement.parentElement).toHaveTextContent("3");
+    expect(screen.getByText("Voided sales count").parentElement.parentElement).toHaveTextContent("1");
     expect(screen.getByRole("link", { name: /See all sales/ })).toHaveAttribute("href", "/sales/history");
     expect(salesService.getDailySalesSummary).toHaveBeenCalledWith(expect.objectContaining({ branchId: BRANCH_ID }));
   });
@@ -64,7 +70,8 @@ describe("SalesOverview", () => {
     renderWithProviders(<SalesOverview />, { preloadedState, route: "/sales?date=2026-10-20" });
     await screen.findByText("LKR 12,500.00");
 
-    fireEvent.change(screen.getByRole("combobox", { name: "Sales date range" }), { target: { value: "last-week" } });
+    fireEvent.click(screen.getByRole("button", { name: "Selected date" }));
+    fireEvent.click(screen.getByRole("option", { name: "Last week" }));
     await waitFor(() => expect(salesService.getDailySalesSummary).toHaveBeenLastCalledWith({
       branchId: BRANCH_ID,
       from: "2026-10-12",

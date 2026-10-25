@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { Link, useSearchParams } from "react-router-dom";
 import { ArrowRight, Banknote, CalendarDays, CircleDollarSign, PackageCheck, ReceiptText } from "lucide-react";
+import Select from "../../components/common/Select";
 import useTerminalBranch from "../../hooks/useTerminalBranch";
 import { getDailySalesSummary } from "../../services/salesService";
 import { colomboToday, formatColomboDayLabel, shiftColomboDay } from "../../utils/colomboDay";
@@ -57,6 +58,9 @@ const tiles = [
   { key: "sales_amount", title: "Sales amount", caption: "Completed sale totals", icon: CircleDollarSign, format: formatLKR },
   { key: "quantity_count", title: "Items sold", caption: "Total item quantity", icon: PackageCheck, format: (v) => Number(v).toLocaleString() },
   { key: "cost_of_sales", title: "Cost of sales", caption: "Cost of sold items", icon: Banknote, format: formatLKR },
+  { key: "return_count", title: "Return sales count", caption: "Return transactions", icon: ReceiptText, format: (v) => Number(v).toLocaleString() },
+  { key: "return_quantity", title: "Return sales quantity", caption: "Items returned", icon: PackageCheck, format: (v) => Number(v).toLocaleString() },
+  { key: "voided_count", title: "Voided sales count", caption: "Sales voided", icon: ReceiptText, format: (v) => Number(v).toLocaleString() },
 ];
 
 const pickerClass = "h-10 rounded-lg border border-slate-300 bg-white px-3 text-sm text-slate-800 shadow-sm focus:outline-none focus-visible:ring-2 focus-visible:ring-cyan-500 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-100 scheme-light dark:scheme-dark";
@@ -114,19 +118,22 @@ export default function SalesOverview() {
         </Link>
       </header>
 
-      <section aria-label="Sales date range" className="flex flex-wrap items-end gap-3 rounded-xl border border-slate-200 bg-white p-4 dark:border-slate-800 dark:bg-slate-900">
-        <label className="flex flex-col gap-1.5 text-xs font-medium text-slate-500 dark:text-slate-400">
-          Period
-          <select aria-label="Sales date range" className={`${pickerClass} min-w-44`} value={selectedPeriod} onChange={(event) => pickPeriod(event.target.value)}>
-            {periods.map(([key, label]) => <option key={key} value={key}>{label}</option>)}
-            {selectedPeriod === "custom" && <option value="custom">Selected date</option>}
-          </select>
-        </label>
-        <label className="flex flex-col gap-1.5 text-xs font-medium text-slate-500 dark:text-slate-400">
+      <section aria-label="Sales date range" className="grid gap-4 rounded-xl border border-slate-200 bg-white p-4 dark:border-slate-800 dark:bg-slate-900 sm:grid-cols-2 sm:items-end">
+        <Select
+          label="Period"
+          value={selectedPeriod}
+          onChange={(event) => pickPeriod(event.target.value)}
+          options={[
+            ...periods.map(([value, label]) => ({ value, label })),
+            ...(selectedPeriod === "custom" ? [{ value: "custom", label: "Selected date" }] : []),
+          ]}
+          className="w-full"
+        />
+        <label className="flex w-full flex-col gap-1.5 text-xs font-semibold uppercase tracking-widest text-slate-500 dark:text-slate-400">
           Or choose a date
-          <input aria-label="Choose sales date" className={pickerClass} type="date" max={today} value={pickerValue} onChange={(event) => pickDate(event.target.value)} />
+          <input aria-label="Choose sales date" className={`${pickerClass} w-full`} type="date" max={today} value={pickerValue} onChange={(event) => pickDate(event.target.value)} />
         </label>
-        <p className="pb-2 text-xs text-slate-500 dark:text-slate-400">Weeks start Monday. Rolling periods include today.</p>
+        <p className="text-xs text-slate-500 dark:text-slate-400 sm:col-span-2">Weeks start Monday. Rolling periods include today.</p>
       </section>
 
       {state.status === "error" ? (
