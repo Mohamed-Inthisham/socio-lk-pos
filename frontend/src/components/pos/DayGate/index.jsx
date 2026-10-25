@@ -168,7 +168,7 @@ const DayGate = ({ children }) => {
       // (without Void and Return items) and Phones to check stay open.
       body = onTill ? (
         <Centred>
-          <DayClosedScreen day={current.today} />
+          <DayClosedScreen day={current.today} pastDaysTo="/cash-days" />
         </Centred>
       ) : (
         children

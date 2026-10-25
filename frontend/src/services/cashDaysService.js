@@ -127,8 +127,8 @@ export const closeCashDay = async (id, payload) => {
  * @returns {Promise<{ data: Object[], meta: { total: number, page: number,
  *   limit: number, totalPages: number, hasNext: boolean, hasPrev: boolean } }>}
  */
-export const listCashDays = async ({ branchId, page, limit }) => {
-  const response = await api.get("/cash-days", { params: { branchId, page, limit } });
+export const listCashDays = async ({ branchId, page, limit, date }) => {
+  const response = await api.get("/cash-days", { params: { branchId, page, limit, date } });
   return response.data;
 };
 

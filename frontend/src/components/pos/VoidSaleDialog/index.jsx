@@ -72,7 +72,7 @@ const Section = ({ title, children }) => (
   </section>
 );
 
-const VoidSaleDialog = ({ open, onClose, sale, onVoided, afterLeave }) => {
+const VoidSaleDialog = ({ open, onClose, sale, onVoided, afterLeave, salesPath = "/pos/sales" }) => {
   const dispatch = useDispatch();
   const sessionUser = useSelector((state) => state.auth.user);
   const [phase, setPhase] = useState("form"); // form | voiding | checking | unknown
@@ -263,7 +263,7 @@ const VoidSaleDialog = ({ open, onClose, sale, onVoided, afterLeave }) => {
                 <>
                   {alert.lead}
                   <Link
-                    to={`/pos/sales/${alert.laterSale.id}`}
+                    to={`${salesPath}/${alert.laterSale.id}`}
                     onClick={close}
                     className="font-semibold underline underline-offset-2"
                   >

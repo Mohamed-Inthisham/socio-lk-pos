@@ -172,7 +172,7 @@ const focusApproval = (id) =>
     });
   }, 0);
 
-const ReturnDialog = ({ open, onClose, sale, onReturned, onSaleChanged, afterLeave }) => {
+const ReturnDialog = ({ open, onClose, sale, onReturned, onSaleChanged, afterLeave, salesPath = "/pos/sales" }) => {
   const dispatch = useDispatch();
   const sessionUser = useSelector((state) => state.auth.user);
   const [step, setStep] = useState(STEP_ITEMS);
@@ -740,6 +740,7 @@ const ReturnDialog = ({ open, onClose, sale, onReturned, onSaleChanged, afterLea
             serverErrors={serverErrors}
             approval={{ sessionUser, setApprover, onStatus: setApprovers }}
             busy={busy || phase === "unknown"}
+            salesPath={salesPath}
           />
         </ScrollFade>
       </form>

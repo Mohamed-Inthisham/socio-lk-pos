@@ -80,6 +80,7 @@ const RefundStep = ({
   serverErrors,
   approval,
   busy,
+  salesPath = "/pos/sales",
 }) => {
   const reasonGroup = useRef(null);
   const seen = (path) => touched.has(path) || touched.has("*");
@@ -347,7 +348,7 @@ export const RefundNotices = ({ sale, alert, onLeave, checking }) => (
             <>
               {alert.lead}
               <Link
-                to={`/pos/sales/${alert.laterSale.id}`}
+                to={`${salesPath}/${alert.laterSale.id}`}
                 onClick={onLeave}
                 className="font-semibold underline underline-offset-2"
               >

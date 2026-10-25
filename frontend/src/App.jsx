@@ -18,6 +18,9 @@ import PosTerminal from "./pages/PosTerminal";
 import PhonesToCheck from "./pages/PhonesToCheck";
 import RecentSales from "./pages/RecentSales";
 import SaleDetail from "./pages/SaleDetail";
+import CashDays from "./pages/CashDays";
+import SalesArea from "./components/layout/SalesArea";
+import SalesOverview from "./pages/SalesOverview";
 import { restoreSession } from "./store/slices/authSlice";
 import { fetchBranches } from "./store/slices/branchesSlice";
 
@@ -133,6 +136,16 @@ function App() {
 
         <Route path="/brands" element={<ManageBrands />} />
         <Route path="/categories" element={<ManageCategories />} />
+        <Route element={<SalesArea />}>
+          <Route
+            path="/sales"
+            element={<SalesOverview />}
+          />
+          <Route path="/sales/history" element={<RecentSales salesPath="/sales/history" exitPath="/sales" exitLabel="Sales overview" />} />
+          <Route path="/sales/history/:id" element={<SaleDetail salesPath="/sales/history" requireOpenDay />} />
+          <Route path="/cash-days" element={<CashDays />} />
+          <Route path="/cash-days/:id" element={<CashDays />} />
+        </Route>
       </Route>
 
       {/*

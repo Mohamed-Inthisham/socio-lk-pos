@@ -33,6 +33,7 @@ import { PaymentMethod } from './enums/payment-method.enum';
 import { CreateSaleDto } from './dto/create-sale.dto';
 import { UpdateSaleDto } from './dto/update-sale.dto';
 import { ListSalesQueryDto } from './dto/list-sales-query.dto';
+import { SalesDailySummaryQueryDto } from './dto/sales-daily-summary-query.dto';
 import { AddSaleLineDto } from './dto/add-sale-line.dto';
 import { UpdateSaleLineDto } from './dto/update-sale-line.dto';
 import { AddPaymentDto } from './dto/add-payment.dto';
@@ -389,6 +390,53 @@ export class SalesService {
 
     const [rows, total] = await qb.getManyAndCount();
     return paginate(await this.withReturnState(rows), total, page, limit);
+  }
+
+  /** Sales overview cards across every completed sale in the selected date range. */
+  async dailySummary(query: SalesDailySummaryQueryDto) {
+    const [row] = await this.dataSource.manager.query(
+      `SELECT (SELECT COUNT(*)::int FROM sales s
+               WHERE s.branch_id = $1 AND s.status = 'COMPLETED'
+                 AND s.completed_at >= ($2::date::timestamp AT TIME ZONE 'Asia/Colombo')
+                 AND s.completed_at < (($3::date + 1)::timestamp AT TIME ZONE 'Asia/Colombo')) AS sales_count,
+              (SELECT COALESCE(SUM(s.total), 0)::text FROM sales s
+               WHERE s.branch_id = $1 AND s.status = 'COMPLETED'
+                 AND s.completed_at >= ($2::date::timestamp AT TIME ZONE 'Asia/Colombo')
+                 AND s.completed_at < (($3::date + 1)::timestamp AT TIME ZONE 'Asia/Colombo')) AS sales_amount,
+              (SELECT COALESCE(SUM(l.quantity), 0)::int FROM sale_lines l
+                JOIN sales s ON s.id = l.sale_id
+               WHERE s.branch_id = $1 AND s.status = 'COMPLETED'
+                 AND s.completed_at >= ($2::date::timestamp AT TIME ZONE 'Asia/Colombo')
+                 AND s.completed_at < (($3::date + 1)::timestamp AT TIME ZONE 'Asia/Colombo')) AS quantity_count,
+              (SELECT COALESCE(SUM(l.quantity * l.cost_price_snapshot), 0)::text FROM sale_lines l
+                JOIN sales s ON s.id = l.sale_id
+               WHERE s.branch_id = $1 AND s.status = 'COMPLETED'
+                 AND s.completed_at >= ($2::date::timestamp AT TIME ZONE 'Asia/Colombo')
+                 AND s.completed_at < (($3::date + 1)::timestamp AT TIME ZONE 'Asia/Colombo')) AS cost_of_sales,
+              (SELECT COUNT(*)::int FROM sale_returns r
+               WHERE r.branch_id = $1
+                 AND r.created_at >= ($2::date::timestamp AT TIME ZONE 'Asia/Colombo')
+                 AND r.created_at < (($3::date + 1)::timestamp AT TIME ZONE 'Asia/Colombo')) AS return_count,
+              (SELECT COALESCE(SUM(rl.quantity), 0)::int
+                 FROM sale_return_lines rl JOIN sale_returns r ON r.id = rl.sale_return_id
+                WHERE r.branch_id = $1
+                  AND r.created_at >= ($2::date::timestamp AT TIME ZONE 'Asia/Colombo')
+                  AND r.created_at < (($3::date + 1)::timestamp AT TIME ZONE 'Asia/Colombo')) AS return_quantity,
+              (SELECT COUNT(*)::int FROM sales s
+               WHERE s.branch_id = $1 AND s.status = 'VOIDED'
+                 AND s.voided_at >= ($2::date::timestamp AT TIME ZONE 'Asia/Colombo')
+                 AND s.voided_at < (($3::date + 1)::timestamp AT TIME ZONE 'Asia/Colombo')) AS voided_count`,
+      [query.branchId, query.from, query.to],
+    );
+    return {
+      sales_count: Number(row.sales_count),
+      sales_amount: row.sales_amount,
+      quantity_count: Number(row.quantity_count),
+      cost_of_sales: row.cost_of_sales,
+      return_count: Number(row.return_count),
+      return_quantity: Number(row.return_quantity),
+      voided_count: Number(row.voided_count),
+    };
   }
 
   /**

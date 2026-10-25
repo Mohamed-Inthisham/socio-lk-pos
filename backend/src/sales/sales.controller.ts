@@ -23,6 +23,7 @@ import { SalesService } from './sales.service';
 import { CreateSaleDto } from './dto/create-sale.dto';
 import { UpdateSaleDto } from './dto/update-sale.dto';
 import { ListSalesQueryDto } from './dto/list-sales-query.dto';
+import { SalesDailySummaryQueryDto } from './dto/sales-daily-summary-query.dto';
 import { AddSaleLineDto } from './dto/add-sale-line.dto';
 import { UpdateSaleLineDto } from './dto/update-sale-line.dto';
 import { AddPaymentDto } from './dto/add-payment.dto';
@@ -67,6 +68,13 @@ export class SalesController {
   @ApiResponse({ status: 401, description: 'Not authenticated' })
   async findAll(@Query() query: ListSalesQueryDto) {
     return this.salesService.findAll(query);
+  }
+
+  @Get('daily-summary')
+  @Roles(UserRole.ADMIN, UserRole.MANAGER, UserRole.CASHIER)
+  @ApiOperation({ summary: 'Daily completed sales overview totals' })
+  async dailySummary(@Query() query: SalesDailySummaryQueryDto) {
+    return this.salesService.dailySummary(query);
   }
 
   @Get(':id')

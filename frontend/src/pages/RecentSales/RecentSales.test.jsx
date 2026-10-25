@@ -143,6 +143,30 @@ afterEach(() => {
 });
 
 describe("RecentSales: the day list (P6-2, P6-5)", () => {
+  it("supports the app-shell Sales history route", async () => {
+    const user = userEvent.setup();
+    salesService.listSales.mockResolvedValue(page([listRow(1)]));
+    renderWithProviders(
+      <>
+        <Where />
+        <Routes>
+          <Route
+            path="/sales"
+            element={<RecentSales salesPath="/sales" exitPath="/dashboard" exitLabel="Dashboard" />}
+          />
+          <Route path="/sales/:id" element={<p>sale detail</p>} />
+          <Route path="/dashboard" element={<p>dashboard</p>} />
+        </Routes>
+      </>,
+      providers("/sales"),
+    );
+
+    await findSale("INV-20261022-0001");
+    expect(screen.getByRole("button", { name: "Dashboard" })).toBeInTheDocument();
+    await user.click(sale("INV-20261022-0001"));
+    expect(where()).toBe("/sales/sale-1");
+  });
+
   it("loads today's completed sales for the terminal branch, newest completion first", async () => {
     salesService.listSales.mockResolvedValue(page([listRow(1)]));
     renderList();

@@ -358,7 +358,10 @@ export class CashDaysService {
     const page = query.page ?? 1;
     const limit = query.limit ?? 50;
     const [days, total] = await manager.findAndCount(CashDay, {
-      where: { branch_id: query.branchId },
+      where: {
+        branch_id: query.branchId,
+        ...(query.date ? { business_date: query.date } : {}),
+      },
       relations: PEOPLE,
       order: { business_date: 'DESC' },
       skip: (page - 1) * limit,
