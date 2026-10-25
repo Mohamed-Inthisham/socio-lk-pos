@@ -7,6 +7,7 @@ import {
   FolderTree,
   ReceiptText,
   UsersRound,
+  Truck,
   CalendarDays,
   ChevronsLeft,
   ChevronsRight,
@@ -76,6 +77,11 @@ const NAV_ITEMS = [
     label: "Customers",
     icon: UsersRound,
     permission: "view_customers",
+  },
+  {
+    to: "/suppliers",
+    label: "Suppliers",
+    icon: Truck,
   },
   {
     label: "Sales",
