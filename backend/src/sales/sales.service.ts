@@ -326,6 +326,14 @@ export class SalesService {
         cashierId: query.cashierId,
       });
     }
+    if (query.customerId) {
+      qb.andWhere('sale.customer_id = :customerId', { customerId: query.customerId });
+      if (!query.status) {
+        qb.andWhere('sale.status IN (:...customerHistoryStatuses)', {
+          customerHistoryStatuses: [SaleStatus.COMPLETED, SaleStatus.VOIDED],
+        });
+      }
+    }
     if (query.status) {
       qb.andWhere('sale.status = :status', { status: query.status });
     }

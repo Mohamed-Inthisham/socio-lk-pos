@@ -1,13 +1,13 @@
 import { useState } from "react";
-import { AlertTriangle, Power } from "lucide-react";
+import { AlertTriangle, Power, Trash2 } from "lucide-react";
 import Dialog from "../Dialog";
 import Button from "../Button";
 
 /**
  * ConfirmDialog Component
  *
- * A specialised confirmation dialog for deactivate/reactivate actions on a
- * named entity (product, brand, category, etc). Built on top of common/Dialog.
+ * A specialised confirmation dialog for delete/deactivate/reactivate actions
+ * on a named entity (product, brand, category, customer, etc).
  *
  * WHY THIS ABSTRACTION EXISTS:
  * Extracted from three near-identical deactivate dialogs (Product, Brand,
@@ -18,7 +18,7 @@ import Button from "../Button";
  * the same shape three times, the variation was clear enough to abstract
  * without guessing.
  *
- * WHY IT'S DEACTIVATE/REACTIVATE-SPECIFIC (not a fully generic ConfirmDialog):
+ * WHY IT'S LIFECYCLE-SPECIFIC (not a fully generic ConfirmDialog):
  * A fully generic version would push every string, colour, and icon back to
  * the caller and become a very thin wrapper over Dialog — saving little. This
  * captures the *actual* repeated pattern: "confirm a soft-lifecycle action on
@@ -38,7 +38,7 @@ import Button from "../Button";
  * - onConfirm: () => Promise<void>. Called on confirm click. Its rejection
  *   is caught and surfaced in the error banner; its resolution triggers
  *   onSuccess. The service call is the caller's concern.
- * - action: 'deactivate' | 'reactivate'
+ * - action: 'delete' | 'deactivate' | 'reactivate'
  * - entityLabel: string, singular noun for the entity ('brand', 'category',
  *   'product'). Used in the title, button, and "You're about to X <label>"
  *   sentence. Keep it lowercase.
@@ -51,6 +51,15 @@ import Button from "../Button";
  */
 
 const ACTION_CONFIG = {
+  delete: {
+    titlePrefix: "Delete",
+    confirmLabel: "Yes, delete",
+    confirmVariant: "danger",
+    defaultDescription: (label) => `The ${label} will be removed from the active list.`,
+    icon: Trash2,
+    iconTone: "bg-red-100 dark:bg-red-900/40 text-red-600 dark:text-red-400",
+    defaultErrorFallback: (label) => `Couldn't delete the ${label}.`,
+  },
   deactivate: {
     titlePrefix: "Deactivate",
     confirmLabel: "Yes, deactivate",

@@ -6,6 +6,7 @@ import {
   Tag,
   FolderTree,
   ReceiptText,
+  UsersRound,
   CalendarDays,
   ChevronsLeft,
   ChevronsRight,
@@ -69,6 +70,12 @@ const NAV_ITEMS = [
     to: "/pos",
     label: "POS terminal",
     icon: ScanBarcode,
+  },
+  {
+    to: "/customers",
+    label: "Customers",
+    icon: UsersRound,
+    permission: "view_customers",
   },
   {
     label: "Sales",

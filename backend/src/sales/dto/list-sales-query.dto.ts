@@ -51,6 +51,8 @@ export type SaleListSort = (typeof SALE_LIST_SORTS)[number];
  * q (P6-3) matches the sale number or the customer's name or phone
  * (case-insensitive substring), or an exact IMEI on a sale line or a
  * trade-in payment.
+ * customerId is used by the customer detail page; when status is omitted,
+ * it returns completed and voided sales and excludes draft carts.
  */
 export class ListSalesQueryDto extends PaginationQueryDto {
   @ApiPropertyOptional({
@@ -68,6 +70,11 @@ export class ListSalesQueryDto extends PaginationQueryDto {
   @IsOptional()
   @IsUUID()
   cashierId?: string;
+
+  @ApiPropertyOptional({ description: 'Filter sales for one customer', format: 'uuid' })
+  @IsOptional()
+  @IsUUID()
+  customerId?: string;
 
   @ApiPropertyOptional({
     description: 'Filter to sales in this lifecycle state',

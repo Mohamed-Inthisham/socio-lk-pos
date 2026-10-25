@@ -47,7 +47,7 @@ export class SalesController {
   @ApiOperation({
     summary: 'List sales (paginated, filterable)',
     description:
-      'All authenticated roles can list sales. Filters: branchId, cashierId, ' +
+      'All authenticated roles can list sales. Filters: branchId, cashierId, customerId, ' +
       'status (DRAFT/COMPLETED/VOIDED), from, to (created_at), ' +
       'completedFrom, completedTo (completed_at; timestamps with an offset, ' +
       'date-only is a 400; excludes drafts), and q (sale number, customer ' +

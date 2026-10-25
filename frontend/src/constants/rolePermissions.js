@@ -153,6 +153,7 @@ export const ROLE_PERMISSIONS = {
     PERMISSIONS.VIEW_CUSTOMERS,
     PERMISSIONS.CREATE_CUSTOMER,
     PERMISSIONS.EDIT_CUSTOMER,
+    PERMISSIONS.DELETE_CUSTOMER,
 
     // Users - View only
     PERMISSIONS.VIEW_USERS,
@@ -183,9 +184,10 @@ export const ROLE_PERMISSIONS = {
     // Line discounts at the till: any cashier, no limit (Q11, P5-20)
     PERMISSIONS.APPLY_DISCOUNT,
 
-    // Customers - View and create only
+    // Customers - View, create and edit; deletion needs supervisor authority
     PERMISSIONS.VIEW_CUSTOMERS,
     PERMISSIONS.CREATE_CUSTOMER,
+    PERMISSIONS.EDIT_CUSTOMER,
   ],
 };
 
