@@ -1,6 +1,6 @@
-# POS till setup — receipt printer and browser
+# POS till setup — receipt printer, browser, and daily cash routine
 
-How to set up a till so the POS terminal (`/pos`) prints its 80mm receipt with no print dialog and one cut per sale. Section 6 covers going live with Phase 6.4 P6 (recent sales, reprints, voids with a manager's PIN); section 7 covers P7 (returns, refunds, return slips, phones to check). Planning doc §8 P5-13, P5-16. The settings below were worked out on the shop's printer in October 2026; if they change, change them here.
+How to set up a till so the POS terminal (`/pos`) prints its 80mm receipt with no print dialog and one cut per sale. Section 6 covers going live with Phase 6.4 P6 (recent sales, reprints, voids with a manager's PIN); section 7 covers P7 (returns, refunds, return slips, phones to check); section 8 covers P9 (the daily cash count). Planning doc §8 P5-13, P5-16. The settings below were worked out on the shop's printer in October 2026; if they change, change them here.
 
 **Hardware:** Xprinter XP-80 (XP-80T), 80mm thermal paper, USB, Windows driver. No cash drawer.
 
@@ -223,3 +223,22 @@ The till **records** the refund; it doesn't move any money. Before pressing Retu
 ### 7.7 Voids after a return
 
 A sale with a return **can't be voided**: Sale detail shows "Sales with returns can't be voided." instead of the Void button. A return is final; a mistaken return is put right with a new sale.
+
+## 8. Going live with P9 (daily opening and closing balance)
+
+P9 stores one cash-day record per branch and Colombo calendar date. The closing figures and summary are saved with that record and can be reviewed later from **Sales → Cash days**. The cash-day summary is stored in the app; it does not print a separate day receipt.
+
+### 8.1 Before deploying the P9 backend
+
+Apply the `CreateCashDays` migration before starting the new backend. From `backend/`, with the deployment environment configured, check pending migrations with `npm run migration:show`, apply them with `npm run migration:run`, then check again to confirm `CreateCashDays` is applied. Follow the normal database backup and migration procedure. Do this before staff use the new backend.
+
+### 8.2 Opening and closing each day
+
+1. **First day after go-live:** count the cash physically held for the branch and enter that amount as the opening balance when the POS prompts. It becomes the starting cash for that business day.
+2. **Each morning:** use the POS for the correct branch. Enter the opening cash balance when prompted before making sales, returns, or voids. If an earlier day is still open, close it before opening today.
+3. **Before closing:** finish or discard every unfinished sale that has items or payments. The POS disables day closing while any remain.
+4. **Count the cash:** use **Close the day** in the till, count the cash physically on hand, and enter the counted amount. Review the opening balance, cash sales, cash refunds, earlier-sale void cash back, expected balance, and difference. Enter a reason when the POS requires one.
+5. **Confirm close:** closing is final; a closed day cannot be changed or reopened. The POS saves the closing figures and activity summary with the cash-day record.
+6. **Review later:** use **Sales → Cash days** to choose a date and open its saved figures. Use **Sales → Sales overview** for date and period totals, or **See all sales** for the searchable sale history.
+
+See [Cash Days](../backend/cash-days.md) for the saved fields, expected-cash rules, and API behavior.
