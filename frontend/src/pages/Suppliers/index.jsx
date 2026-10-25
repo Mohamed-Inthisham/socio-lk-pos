@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { Pencil, Plus, Search, ToggleLeft, ToggleRight, Truck } from "lucide-react";
+import { Eye, Pencil, Plus, Search, ToggleLeft, ToggleRight, Truck } from "lucide-react";
 import Button from "../../components/common/Button";
 import ConfirmDialog from "../../components/common/ConfirmDialog";
+import Dialog from "../../components/common/Dialog";
 import InputField from "../../components/common/InputField";
 import Table from "../../components/common/Table";
 import usePermissions from "../../hooks/usePermissions";
@@ -21,6 +22,7 @@ export default function Suppliers() {
   const [page, setPage] = useState(1);
   const [editing, setEditing] = useState(null);
   const [formOpen, setFormOpen] = useState(false);
+  const [viewing, setViewing] = useState(null);
   const [changingStatus, setChangingStatus] = useState(null);
 
   const load = useCallback(() => {
@@ -53,6 +55,7 @@ export default function Suppliers() {
     { key: "status", header: "Status", render: (row) => <span className={`rounded-full px-2.5 py-1 text-xs font-medium ${row.is_active ? "bg-emerald-50 text-emerald-700 dark:bg-emerald-950/50 dark:text-emerald-300" : "bg-slate-100 text-slate-600 dark:bg-slate-800 dark:text-slate-300"}`}>{row.is_active ? "Active" : "Inactive"}</span> },
     { key: "actions", header: "Actions", align: "right", render: (row) => (
       <div className="flex justify-end gap-1" onClick={(event) => event.stopPropagation()}>
+        <Button size="sm" variant="ghost" icon={Eye} label="View" aria-label={`View ${row.name}`} onClick={() => setViewing(row)} />
         {isAdmin && <>
           <Button size="sm" variant="ghost" icon={Pencil} label="Edit" aria-label={`Edit ${row.name}`} onClick={() => { setEditing(row); setFormOpen(true); }} />
           <Button size="sm" variant="ghost" icon={row.is_active ? ToggleLeft : ToggleRight} label={row.is_active ? "Deactivate" : "Reactivate"} aria-label={`${row.is_active ? "Deactivate" : "Reactivate"} ${row.name}`} onClick={() => setChangingStatus(row)} />
@@ -102,7 +105,7 @@ export default function Suppliers() {
         {error ? (
           <div className="p-5 text-center"><p role="alert" className="text-sm text-red-600 dark:text-red-400">{error}</p><Button className="mt-3" size="sm" variant="secondary" label="Try again" onClick={load} /></div>
         ) : (
-          <Table columns={columns} data={rows} loading={status === "loading"} ariaLabel="Suppliers" emptyMessage={search.trim() ? "No suppliers match your search." : "No suppliers have been added yet."} dense />
+          <Table columns={columns} data={rows} loading={status === "loading"} onRowClick={setViewing} ariaLabel="Suppliers" emptyMessage={search.trim() ? "No suppliers match your search." : "No suppliers have been added yet."} dense />
         )}
         {pages > 1 && <nav aria-label="Supplier pages" className="flex items-center justify-center gap-3 border-t border-slate-200 p-3 dark:border-slate-800">
           <Button size="sm" variant="secondary" label="Previous" disabled={page <= 1 || status === "loading"} onClick={() => setPage((current) => Math.max(1, current - 1))} />
@@ -112,9 +115,42 @@ export default function Suppliers() {
       </section>
 
       <SupplierFormDialog open={formOpen} supplier={editing} onClose={() => setFormOpen(false)} onSaved={load} />
+      <SupplierProfileDialog supplier={viewing} onClose={() => setViewing(null)} />
       <ConfirmDialog open={!!changingStatus} onClose={() => setChangingStatus(null)} onSuccess={() => { setChangingStatus(null); load(); }}
         onConfirm={submitStatusChange} action={changingStatus?.is_active ? "deactivate" : "reactivate"} entityLabel="supplier" entityName={changingStatus?.name ?? ""}
         descriptionOverride={changingStatus?.is_active ? "This supplier will be removed from active supplier lists. Existing sale records remain intact." : undefined} />
     </div>
+  );
+}
+
+function SupplierProfileDialog({ supplier, onClose }) {
+  const details = [
+    ["Contact person", supplier?.contact_person],
+    ["Phone", supplier?.phone],
+    ["Email", supplier?.email],
+    ["Address", supplier?.address],
+  ];
+
+  return (
+    <Dialog open={!!supplier} onClose={onClose} title={supplier?.name ?? "Supplier profile"}
+      description="Supplier profile and contact information." size="md"
+      footer={<Button variant="secondary" label="Close" onClick={onClose} />}>
+      {supplier && <div className="space-y-4">
+        <div className="flex items-center justify-between rounded-lg border border-slate-200 px-4 py-3 dark:border-slate-700">
+          <span className="text-sm text-slate-500 dark:text-slate-400">Status</span>
+          <span className={`rounded-full px-2.5 py-1 text-xs font-medium ${supplier.is_active ? "bg-emerald-50 text-emerald-700 dark:bg-emerald-950/50 dark:text-emerald-300" : "bg-slate-100 text-slate-600 dark:bg-slate-800 dark:text-slate-300"}`}>{supplier.is_active ? "Active" : "Inactive"}</span>
+        </div>
+        <dl className="grid gap-3 sm:grid-cols-2">
+          {details.map(([label, value]) => <div key={label} className="rounded-lg bg-slate-50 p-3 dark:bg-slate-800/70">
+            <dt className="text-xs font-medium uppercase tracking-wide text-slate-500 dark:text-slate-400">{label}</dt>
+            <dd className="mt-1 break-words text-sm text-slate-900 dark:text-slate-100">{value || "—"}</dd>
+          </div>)}
+        </dl>
+        <div className="rounded-lg bg-slate-50 p-3 dark:bg-slate-800/70">
+          <p className="text-xs font-medium uppercase tracking-wide text-slate-500 dark:text-slate-400">Notes</p>
+          <p className="mt-1 whitespace-pre-wrap text-sm text-slate-900 dark:text-slate-100">{supplier.notes || "—"}</p>
+        </div>
+      </div>}
+    </Dialog>
   );
 }
