@@ -144,7 +144,7 @@ describe('SalesService', () => {
   };
 
   // The data source's own manager: the lock-free reads before the PIN.
-  const mockReadManager = { name: 'read-manager' };
+  const mockReadManager = { name: 'read-manager', query: jest.fn() };
 
   const mockDataSource = {
     transaction: jest.fn(),
@@ -275,6 +275,30 @@ describe('SalesService', () => {
 
   it('should be defined', () => {
     expect(service).toBeDefined();
+  });
+
+  it('aggregates all completed sales for the selected Colombo date range', async () => {
+    mockReadManager.query.mockResolvedValueOnce([{
+      sales_count: 3,
+      sales_amount: '12500.00',
+      quantity_count: 7,
+      cost_of_sales: '9000.00',
+    }]);
+
+    await expect(service.dailySummary({
+      branchId: 'branch-1',
+      from: '2026-10-20',
+      to: '2026-10-25',
+    })).resolves.toEqual({
+      sales_count: 3,
+      sales_amount: '12500.00',
+      quantity_count: 7,
+      cost_of_sales: '9000.00',
+    });
+    expect(mockReadManager.query).toHaveBeenCalledWith(
+      expect.stringContaining("AT TIME ZONE 'Asia/Colombo'"),
+      ['branch-1', '2026-10-20', '2026-10-25'],
+    );
   });
 
   describe('create', () => {

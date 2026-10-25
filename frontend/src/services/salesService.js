@@ -62,8 +62,8 @@ export const listSales = async (params = {}) => {
   return response.data;
 };
 
-export const getDailySalesSummary = async ({ branchId, date }) => {
-  const response = await api.get("/sales/daily-summary", { params: { branchId, date } });
+export const getDailySalesSummary = async ({ branchId, from, to }) => {
+  const response = await api.get("/sales/daily-summary", { params: { branchId, from, to } });
   return response.data;
 };
 

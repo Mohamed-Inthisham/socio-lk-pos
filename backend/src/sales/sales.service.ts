@@ -392,24 +392,24 @@ export class SalesService {
     return paginate(await this.withReturnState(rows), total, page, limit);
   }
 
-  /** Daily overview cards, aggregated across every completed sale, not one page. */
+  /** Sales overview cards across every completed sale in the selected date range. */
   async dailySummary(query: SalesDailySummaryQueryDto) {
     const [row] = await this.dataSource.manager.query(
       `SELECT (SELECT COUNT(*)::int FROM sales s
                WHERE s.branch_id = $1 AND s.status = 'COMPLETED'
-                 AND (s.completed_at AT TIME ZONE 'Asia/Colombo')::date = $2::date) AS sales_count,
+                 AND (s.completed_at AT TIME ZONE 'Asia/Colombo')::date BETWEEN $2::date AND $3::date) AS sales_count,
               (SELECT COALESCE(SUM(s.total), 0)::text FROM sales s
                WHERE s.branch_id = $1 AND s.status = 'COMPLETED'
-                 AND (s.completed_at AT TIME ZONE 'Asia/Colombo')::date = $2::date) AS sales_amount,
+                 AND (s.completed_at AT TIME ZONE 'Asia/Colombo')::date BETWEEN $2::date AND $3::date) AS sales_amount,
               (SELECT COALESCE(SUM(l.quantity), 0)::int FROM sale_lines l
                 JOIN sales s ON s.id = l.sale_id
                WHERE s.branch_id = $1 AND s.status = 'COMPLETED'
-                 AND (s.completed_at AT TIME ZONE 'Asia/Colombo')::date = $2::date) AS quantity_count,
+                 AND (s.completed_at AT TIME ZONE 'Asia/Colombo')::date BETWEEN $2::date AND $3::date) AS quantity_count,
               (SELECT COALESCE(SUM(l.quantity * l.cost_price_snapshot), 0)::text FROM sale_lines l
                 JOIN sales s ON s.id = l.sale_id
                WHERE s.branch_id = $1 AND s.status = 'COMPLETED'
-                 AND (s.completed_at AT TIME ZONE 'Asia/Colombo')::date = $2::date) AS cost_of_sales`,
-      [query.branchId, query.date],
+                 AND (s.completed_at AT TIME ZONE 'Asia/Colombo')::date BETWEEN $2::date AND $3::date) AS cost_of_sales`,
+      [query.branchId, query.from, query.to],
     );
     return {
       sales_count: Number(row.sales_count),
