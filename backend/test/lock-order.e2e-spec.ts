@@ -23,6 +23,7 @@ import { ProductUnit } from '../src/product-units/entities/product-unit.entity';
 import { ProductUnitStatus } from '../src/product-units/enums/product-unit-status.enum';
 import { PhonePurchase } from '../src/phone-purchases/entities/phone-purchase.entity';
 import { approvalFor, giveApprovalPin } from './approval-pin.helper';
+import { openToday } from './cash-day.helper';
 
 type Response = request.Response;
 
@@ -86,6 +87,8 @@ describe('Lock order (e2e)', () => {
     );
     // Every void needs an approval PIN (P6-17).
     await giveApprovalPin(dataSource, admin.id);
+    // Today's cash day (P9, backend 0b), so completes and voids go through.
+    await openToday(dataSource, branch.id, admin.id);
     const customer = await dataSource.getRepository(Customer).save(
       dataSource.getRepository(Customer).create({
         name: 'Kamal Perera',

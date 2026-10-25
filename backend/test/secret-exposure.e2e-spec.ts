@@ -3,6 +3,7 @@ import request, { Response } from 'supertest';
 import * as bcrypt from 'bcrypt';
 import { DataSource } from 'typeorm';
 import { createTestApp, truncateAllTables } from './setup';
+import { openToday } from './cash-day.helper';
 import { User } from '../src/users/entities/user.entity';
 import { UserRole } from '../src/users/enums/user-role.enum';
 import { Branch } from '../src/branches/entities/branch.entity';
@@ -169,6 +170,9 @@ describe('Secret exposure (e2e)', () => {
     admin = await seedUser(UserRole.ADMIN, 'admin@sec.test', null);
     manager = await seedUser(UserRole.MANAGER, 'manager@sec.test', branch.id);
     cashier = await seedUser(UserRole.CASHIER, 'cashier@sec.test', branch.id);
+    // Today's cash day (P9, backend 0b): the sales below complete, void
+    // and return.
+    await openToday(dataSource, branch.id, admin.id);
     customer = await dataSource
       .getRepository(Customer)
       // NIC: POST /phone-purchases needs the seller's (P4-13)

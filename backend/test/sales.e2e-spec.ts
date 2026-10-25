@@ -27,6 +27,7 @@ import { ProductUnit } from '../src/product-units/entities/product-unit.entity';
 import { ProductUnitStatus } from '../src/product-units/enums/product-unit-status.enum';
 import { PhonePurchase } from '../src/phone-purchases/entities/phone-purchase.entity';
 import { approvalFor, giveApprovalPin } from './approval-pin.helper';
+import { openToday } from './cash-day.helper';
 
 describe('Sales (e2e)', () => {
   let app: INestApplication;
@@ -128,7 +129,7 @@ describe('Sales (e2e)', () => {
 
   async function seedSale(overrides: Partial<Sale>): Promise<Sale> {
     const repo = dataSource.getRepository(Sale);
-    return repo.save(
+    const sale = await repo.save(
       repo.create({
         sale_type: SaleType.RETAIL,
         status: SaleStatus.DRAFT,
@@ -141,6 +142,10 @@ describe('Sales (e2e)', () => {
         ...overrides,
       }),
     );
+    // Today's cash day at the sale's branch (P9, backend 0b), so complete,
+    // void and return go through.
+    await openToday(dataSource, sale.branch_id, sale.cashier_id);
+    return sale;
   }
 
   /**

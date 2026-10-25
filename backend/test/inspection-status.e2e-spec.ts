@@ -3,6 +3,7 @@ import request from 'supertest';
 import * as bcrypt from 'bcrypt';
 import { DataSource, QueryFailedError } from 'typeorm';
 import { createTestApp, truncateAllTables } from './setup';
+import { openToday } from './cash-day.helper';
 import { User } from '../src/users/entities/user.entity';
 import { UserRole } from '../src/users/enums/user-role.enum';
 import { Sale } from '../src/sales/entities/sale.entity';
@@ -179,6 +180,8 @@ describe('INSPECTION status (e2e)', () => {
     cashier: User,
     customer: Customer | null = null,
   ): Promise<Sale> {
+    // Today's cash day (P9, backend 0b), so a complete goes through.
+    await openToday(dataSource, branch.id, cashier.id);
     return dataSource.getRepository(Sale).save(
       dataSource.getRepository(Sale).create({
         sale_type: SaleType.RETAIL,

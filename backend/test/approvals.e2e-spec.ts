@@ -4,6 +4,7 @@ import * as bcrypt from 'bcrypt';
 import { DataSource } from 'typeorm';
 import { createTestApp, truncateAllTables } from './setup';
 import { approvalFor, giveApprovalPin, TEST_PIN } from './approval-pin.helper';
+import { openToday } from './cash-day.helper';
 import { User } from '../src/users/entities/user.entity';
 import { UserRole } from '../src/users/enums/user-role.enum';
 import { UsersService } from '../src/users/users.service';
@@ -156,6 +157,9 @@ describe('Approval PIN (e2e)', () => {
         warranty: WarrantyPeriod.NO_WARRANTY,
       }),
     );
+    // Today's cash day at the branch (P9, backend 0b): the void's day check
+    // runs before the PIN check these tests are about.
+    await openToday(dataSource, branchId, cashierId);
     return sale;
   }
 

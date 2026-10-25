@@ -28,10 +28,27 @@ import { SaleNumberKind } from '../sale-number-counters/enums/sale-number-kind.e
 import { ApprovalsService } from '../approvals/approvals.service';
 import { UserRole } from '../users/enums/user-role.enum';
 import { AuditAction } from '../audit-log/enums/audit-action.enum';
+import { lockInventoryRows } from '../stock/lock-inventory-rows';
+import { assertDayOpen } from '../cash-days/day-gate';
 
 // The lock helper takes its own queries; mocked so the manager mock stays
 // exact (as in sales.service.spec.ts).
 jest.mock('../stock/lock-inventory-rows');
+// The day gate (P9-9, P9-10) likewise; mocked, today is open.
+jest.mock('../cash-days/day-gate');
+
+const lockMock = lockInventoryRows as jest.MockedFunction<
+  typeof lockInventoryRows
+>;
+const dayMock = assertDayOpen as jest.MockedFunction<typeof assertDayOpen>;
+
+/** The gate's refusal, as assertDayOpen throws it. */
+const dayRefusal = (code: 'DAY_NOT_OPEN' | 'DAY_CLOSED') =>
+  new ConflictException({
+    message: `Today (2026-10-25) ${code === 'DAY_CLOSED' ? 'is closed' : 'hasn’t been opened'}.`,
+    code,
+    business_date: '2026-10-25',
+  });
 
 /**
  * The order of a return's checks (Phase 6.4 P7, R1 – R12; P7-27, P7-34)
@@ -577,6 +594,84 @@ describe('SaleReturnsService', () => {
       });
       expectNoPin();
     });
+
+    // ---- Today's cash day (Phase 6.4 P9-9) ----
+
+    it('checks todays cash day lock-free after R5, before R6 and the PIN', async () => {
+      await service.createReturn('sale-1', dto(), cashier);
+
+      expect(dayMock).toHaveBeenNthCalledWith(1, mockManager, 'branch-1', {
+        lock: false,
+      });
+      const preCheck = dayMock.mock.invocationCallOrder[0];
+      // R6 starts with the sale's lines (plan's first read).
+      expect(preCheck).toBeLessThan(
+        mockManager.find.mock.invocationCallOrder[0],
+      );
+      expect(preCheck).toBeLessThan(
+        mockApprovals.verify.mock.invocationCallOrder[0],
+      );
+    });
+
+    it.each(['DAY_NOT_OPEN', 'DAY_CLOSED'] as const)(
+      '409 %s before R6 and the PIN: no PIN attempt, no transaction',
+      async (code) => {
+        dayMock.mockRejectedValueOnce(dayRefusal(code));
+
+        const { err, body } = await refusal(
+          service.createReturn('sale-1', dto(), cashier),
+        );
+
+        expect(err).toBeInstanceOf(ConflictException);
+        expect(body).toMatchObject({ code, business_date: '2026-10-25' });
+        expect(mockManager.find).not.toHaveBeenCalled();
+        expectNoPin();
+      },
+    );
+
+    it.each([
+      ['R2, no sale', () => mockSalesRepo.findOne.mockResolvedValue(null)],
+      [
+        'R4, not COMPLETED',
+        () =>
+          mockSalesRepo.findOne.mockResolvedValue(
+            sale({ status: SaleStatus.VOIDED }),
+          ),
+      ],
+      [
+        'R5, another branch',
+        () =>
+          mockSalesRepo.findOne.mockResolvedValue(
+            sale({ branch_id: 'branch-2' }),
+          ),
+      ],
+    ])('%s comes before the day check', async (_label, arrange) => {
+      arrange();
+
+      await expect(
+        service.createReturn('sale-1', dto(), cashier),
+      ).rejects.toThrow();
+      expect(dayMock).not.toHaveBeenCalled();
+    });
+
+    it('R3: a resend still gets the recorded return when today is closed', async () => {
+      fixtures.recorded = {
+        id: 'ret-9',
+        sale_id: 'sale-1',
+        requested_by: 'cashier-1',
+      };
+      dayMock.mockRejectedValue(dayRefusal('DAY_CLOSED'));
+
+      const result = await service.createReturn('sale-1', dto(), cashier);
+
+      expect(result).toEqual({
+        created: false,
+        return_id: 'ret-9',
+        sale: { id: 'sale-1' },
+      });
+      expect(dayMock).not.toHaveBeenCalled();
+      expectNoPin();
+    });
   });
 
   describe('the PIN and the transaction', () => {
@@ -698,6 +793,77 @@ describe('SaleReturnsService', () => {
       );
 
       expect(body.code).toBe('CLIENT_REQUEST_ID_CONFLICT');
+    });
+
+    // ---- Today's cash day: lock-order step 4 (Phase 6.4 P9-10) ----
+
+    it('takes todays cash day FOR SHARE after the inventory locks and before any change', async () => {
+      await service.createReturn('sale-1', dto(), cashier);
+
+      expect(dayMock).toHaveBeenCalledTimes(2);
+      expect(dayMock).toHaveBeenNthCalledWith(2, mockManager, 'branch-1', {
+        lock: true,
+      });
+      const inTransaction = dayMock.mock.invocationCallOrder[1];
+      expect(mockApprovals.verify.mock.invocationCallOrder[0]).toBeLessThan(
+        inTransaction,
+      );
+      expect(lockMock.mock.invocationCallOrder[0]).toBeLessThan(inTransaction);
+      expect(inTransaction).toBeLessThan(
+        mockStockService.incrementForReversal.mock.invocationCallOrder[0],
+      );
+      expect(inTransaction).toBeLessThan(
+        mockCounters.generateNext.mock.invocationCallOrder[0],
+      );
+      expect(inTransaction).toBeLessThan(
+        mockManager.save.mock.invocationCallOrder[0],
+      );
+      expect(inTransaction).toBeLessThan(
+        mockAuditRepo.save.mock.invocationCallOrder[0],
+      );
+    });
+
+    it('a day closed after the pre-check is refused in the transaction, before the re-checks, writing nothing', async () => {
+      // Open before the PIN; closed by the time the transaction holds its
+      // locks. The re-check would also refuse (R7), but the day comes first.
+      dayMock
+        .mockResolvedValueOnce(undefined)
+        .mockRejectedValueOnce(dayRefusal('DAY_CLOSED'));
+      mockDataSource.transaction.mockImplementation(
+        (cb: (m: typeof mockManager) => unknown) => {
+          fixtures.lines = [stockLine({ returned_quantity: 3 })];
+          return cb(mockManager);
+        },
+      );
+
+      const { body } = await refusal(
+        service.createReturn('sale-1', dto(), cashier),
+      );
+
+      expect(body).toMatchObject({
+        code: 'DAY_CLOSED',
+        business_date: '2026-10-25',
+      });
+      expect(mockApprovals.verify).toHaveBeenCalled();
+      expect(mockStockService.incrementForReversal).not.toHaveBeenCalled();
+      expect(mockCounters.generateNext).not.toHaveBeenCalled();
+      expect(mockManager.save).not.toHaveBeenCalled();
+      expect(mockAuditRepo.save).not.toHaveBeenCalled();
+    });
+
+    it('a second send answered as R3 in the transaction does not reach the day gate there', async () => {
+      mockManager.findOne.mockResolvedValueOnce(null).mockResolvedValueOnce({
+        id: 'ret-1',
+        sale_id: 'sale-1',
+        requested_by: 'cashier-1',
+      });
+
+      await service.createReturn('sale-1', dto(), cashier);
+
+      expect(dayMock).toHaveBeenCalledTimes(1);
+      expect(dayMock).toHaveBeenCalledWith(mockManager, 'branch-1', {
+        lock: false,
+      });
     });
   });
 });

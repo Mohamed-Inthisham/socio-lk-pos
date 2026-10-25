@@ -19,6 +19,7 @@ import { SaleLine } from '../src/sales/entities/sale-line.entity';
 import { Stock } from '../src/stock/entities/stock.entity';
 import { PaymentMethod } from '../src/sales/enums/payment-method.enum';
 import { approvalFor, giveApprovalPin } from './approval-pin.helper';
+import { openToday } from './cash-day.helper';
 
 describe('Suppliers (e2e)', () => {
   let app: INestApplication;
@@ -220,6 +221,8 @@ describe('Suppliers (e2e)', () => {
         change_due: '0',
       }),
     );
+    // Today's cash day (P9, backend 0b), so the complete and void go through.
+    await openToday(dataSource, branch.id, cashierId);
 
     await request(app.getHttpServer())
       .post(`/api/v1/sales/${sale.id}/lines`)
@@ -599,6 +602,8 @@ describe('Suppliers (e2e)', () => {
           change_due: '0',
         }),
       );
+      // Today's cash day (P9, backend 0b), so the complete goes through.
+      await openToday(dataSource, branch.id, user.id);
       // Three lines, all from the same supplier
       for (const p of [productA, productB, productC]) {
         await request(app.getHttpServer())

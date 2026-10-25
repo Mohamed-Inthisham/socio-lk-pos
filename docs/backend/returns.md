@@ -75,6 +75,7 @@ Checked in this order (P7-34). Everything before the PIN runs without locks, so 
 | R3 | `client_request_id` already used: same sale and session user → the recorded return, **200, nothing else checked, no PIN**; otherwise | 409 `CLIENT_REQUEST_ID_CONFLICT` (only `{ message, code }`) |
 | R4 | Sale COMPLETED | 400 `SALE_NOT_COMPLETED` |
 | R5 | Session user at the sale's branch (admins: any) | 403 `RETURN_WRONG_BRANCH` |
+| — | Today's cash day at the sale's branch is open (Phase 6.4 P9-9; today, whenever the sale was made) | 409 `DAY_NOT_OPEN` / `DAY_CLOSED` + `business_date` |
 | R6 | Every line is this sale's | 400 `LINE_NOT_ON_SALE` + `sale_line_id` |
 | — | Condition (P7-27) | 400 `RETURN_CONDITION_INVALID` + `sale_line_id` |
 | R7 | Quantity ≤ what is left | 409 `RETURN_QTY_EXCEEDED` + `sale_line_id`, `returnable` |
@@ -90,7 +91,7 @@ Checked in this order (P7-34). Everything before the PIN runs without locks, so 
 In the global lock order ([sales.md](./sales.md) "Lock order"):
 
 1. Lock the sale row. Look up `client_request_id` again: a second send that waited on this lock sees the first one's return and is answered as R3, writing nothing.
-2. R4 again. Then `lockInventoryRows`: the Stock rows of the lines going back to stock, then the returned phones.
+2. R4 again. Then `lockInventoryRows`: the Stock rows of the lines going back to stock, then the returned phones. Then today's cash day `FOR SHARE` (lock-order step 4, P9-10) and the day check again: a day closed after the check before the PIN is refused here, before the re-checks, writing nothing.
 3. R6 – R12 again under the locks (`returned_quantity`, a phone's later acquisition, the warranty date, the shares (P7-28), prior refunds, and stock tracking (P7-29: a `manage_stock` change meanwhile gives the same `RETURN_CONDITION_INVALID`)).
 4. `returned_quantity += k` per line; stock + quantity for `RESTOCKED`; SOLD → INSPECTION for phones.
 5. The `RET-YYYYMMDD-NNNN` number (`generateNext(branchId, manager, 'RETURN')`, per branch and Colombo day, no gaps on rollback; P7-10, P7-32).
@@ -99,7 +100,7 @@ In the global lock order ([sales.md](./sales.md) "Lock order"):
 
 ### Lost responses and resends (P7-15, P7-24)
 
-The till makes one `client_request_id` per return dialog and resends it with every attempt. A resend from the same sale and session user gets the recorded return back with 200, without the PIN check, so no attempt or audit row is spent twice; its body is ignored. From another sale or another user: 409, never revealing that return. Two first sends at the same moment: one 201, one 200, one return. Accepted: with a wrong PIN, two simultaneous first sends each run `verify` and count two attempts (P7-36). A clash on the unique key (the same id sent at once on another sale) is answered as R3.
+The till makes one `client_request_id` per return dialog and resends it with every attempt. A resend from the same sale and session user gets the recorded return back with 200, without the PIN check or the day check (so also after the day is closed), so no attempt or audit row is spent twice; its body is ignored. From another sale or another user: 409, never revealing that return. Two first sends at the same moment: one 201, one 200, one return. Accepted: with a wrong PIN, two simultaneous first sends each run `verify` and count two attempts (P7-36). A clash on the unique key (the same id sent at once on another sale) is answered as R3.
 
 ## Read side (P7-18)
 
@@ -109,4 +110,4 @@ The till makes one `client_request_id` per return dialog and resends it with eve
 
 ## Tests
 
-`src/sales/return-math.spec.ts` (shares and the trade-in part), `src/sales/sale-returns.service.spec.ts` (the check order; every refusal before the PIN leaves `verify` uncalled), `test/returns.e2e-spec.ts` (31 tests: partial and parallel returns, shares, caps, trade-ins, dispositions, INSPECTION and a phone's second life, buy-backs, warranty overrides, no PIN spent, `client_request_id`, void refused, RET- numbering, the read side), and the returns block in `test/secret-exposure.e2e-spec.ts`.
+`src/sales/return-math.spec.ts` (shares and the trade-in part), `src/sales/sale-returns.service.spec.ts` (the check order; every refusal before the PIN leaves `verify` uncalled), `test/returns.e2e-spec.ts` (31 tests: partial and parallel returns, shares, caps, trade-ins, dispositions, INSPECTION and a phone's second life, buy-backs, warranty overrides, no PIN spent, `client_request_id`, void refused, RET- numbering, the read side), and the returns block in `test/secret-exposure.e2e-spec.ts`. The day check: `test/cash-days-enforcement.e2e-spec.ts` ([cash-days.md](./cash-days.md#enforcement-backend-0b)).

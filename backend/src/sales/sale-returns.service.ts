@@ -29,6 +29,7 @@ import { refundShareCents, tradeInShareCents } from './return-math';
 import { Stock } from '../stock/entities/stock.entity';
 import { StockService } from '../stock/stock.service';
 import { lockInventoryRows } from '../stock/lock-inventory-rows';
+import { assertDayOpen } from '../cash-days/day-gate';
 import { ProductUnit } from '../product-units/entities/product-unit.entity';
 import { ProductUnitStatus } from '../product-units/enums/product-unit-status.enum';
 import { ProductUnitsService } from '../product-units/product-units.service';
@@ -128,7 +129,8 @@ export class SaleReturnsService {
    *
    *   R2 404; R3 client_request_id already used (same sale and user: the
    *   recorded return, 200, nothing else checked, no PIN; otherwise 409);
-   *   R4 not COMPLETED; R5 wrong branch; then the plan (R6 – R12, with the
+   *   R4 not COMPLETED; R5 wrong branch; today's cash day open (409
+   *   DAY_NOT_OPEN / DAY_CLOSED, P9-9); then the plan (R6 – R12, with the
    *   condition check after R6); then ApprovalsService.verify in its own
    *   committed transaction; then the return's transaction.
    *
@@ -165,6 +167,11 @@ export class SaleReturnsService {
         code: 'RETURN_WRONG_BRANCH',
       });
     }
+    // Today's cash day must be open (P9-9), so a closed or unopened day
+    // never spends a PIN attempt; applyReturn checks again under its lock.
+    await assertDayOpen(this.dataSource.manager, sale.branch_id, {
+      lock: false,
+    });
     await this.plan(this.dataSource.manager, sale, dto);
 
     const approver = await this.approvalsService.verify({
@@ -560,7 +567,8 @@ export class SaleReturnsService {
   /**
    * The return's transaction, in the global lock order (docs/backend/
    * sales.md "Lock order"): the sale row; then every Stock row going back
-   * to stock and every returned phone (lockInventoryRows); then the
+   * to stock and every returned phone (lockInventoryRows); then today's
+   * cash day FOR SHARE (assertDayOpen, P9-10); then the
    * re-checks (plan), the changes, the RET- number, the rows and the
    * RETURN audit row. The PIN was checked before it opened.
    */
@@ -616,6 +624,10 @@ export class SaleReturnsService {
         .map((line) => line.product_unit_id)
         .filter((id): id is string => id !== null),
     });
+
+    // Today's cash day: FOR SHARE, lock-order step 4 (P9-10), then 409
+    // DAY_NOT_OPEN / DAY_CLOSED (P9-9).
+    await assertDayOpen(manager, sale.branch_id, { lock: true });
 
     const plan = await this.plan(manager, sale, dto);
 

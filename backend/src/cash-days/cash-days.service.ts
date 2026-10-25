@@ -108,8 +108,9 @@ const isClash = (err: unknown, key: string): boolean =>
   (err.driverError as { constraint?: string }).constraint === key;
 
 // Today in Colombo by the database clock (P9-4): the transaction's now(),
-// the same value that stamps completed_at, voided_at and returns.
-const TODAY_SQL = `SELECT to_char((now() AT TIME ZONE 'Asia/Colombo')::date, 'YYYY-MM-DD') AS today`;
+// the same value that stamps completed_at, voided_at and returns. Also
+// read by the day gate (day-gate.ts).
+export const TODAY_SQL = `SELECT to_char((now() AT TIME ZONE 'Asia/Colombo')::date, 'YYYY-MM-DD') AS today`;
 
 // The day's bounds for $2 (a date), as timestamptz: Colombo midnights, the
 // same instants as "+05:30" bounds. Constant within a query, so the range

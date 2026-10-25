@@ -1,8 +1,8 @@
 # Cash Days (daily opening and closing balance)
 
-One record per branch per Colombo business date: the opening balance, and at close the counted cash, the expected cash worked out by the server, the difference and its reason. Phase 6.4 P9; the decisions are in the planning doc [phase-6.4-pos-terminal.md](../frontend/phase-6.4-pos-terminal.md) section 8 "P9 decision log" (P9-1 – P9-24, errors C1 – C11). Code: `backend/src/cash-days/` (`cash-days.service.ts`, `cash-days.controller.ts`, `cash-day-math.ts`). Related: [sales.md](./sales.md) (lock order, void), [returns.md](./returns.md) (refunds).
+One record per branch per Colombo business date: the opening balance, and at close the counted cash, the expected cash worked out by the server, the difference and its reason. Phase 6.4 P9; the decisions are in the planning doc [phase-6.4-pos-terminal.md](../frontend/phase-6.4-pos-terminal.md) section 8 "P9 decision log" (P9-1 – P9-24, errors C1 – C11). Code: `backend/src/cash-days/` (`cash-days.service.ts`, `cash-days.controller.ts`, `cash-day-math.ts`, `day-gate.ts`). Related: [sales.md](./sales.md) (lock order, void), [returns.md](./returns.md) (refunds).
 
-**Backend 0a (this step) is additive:** the table, the six endpoints and the audit rows. Nothing in sales, void or returns checks the day yet. `DAY_NOT_OPEN` / `DAY_CLOSED` (C10, C11) and the `FOR SHARE` lock in complete, void and return are backend 0b.
+Backend 0a added the table, the six endpoints and the audit rows. Backend 0b made complete, void and return refuse unless today is open ([Enforcement](#enforcement-backend-0b) below).
 
 ## The model
 
@@ -132,15 +132,35 @@ A clash on `UQ_cash_days_open_client_request_id` (the same id sent at once) is a
 
 A closed day is never edited and never reopened. Every 4xx body is `{ message, code, … }`.
 
+## Enforcement (backend 0b)
+
+**Complete, void and return need today open** (P9-9, C10, C11). "Today" is `(now() AT TIME ZONE 'Asia/Colombo')::date` on the database clock, read inside the action's own transaction: the same `now()` that stamps `completed_at`, `voided_at` and `sale_returns.created_at`, so the day that lets an action through is the day the summary dates it by. The day is the **sale's branch's**, and always **today's**, whenever the sale was made: voiding or returning an earlier day's sale needs today open, and its cash counts on today (P9-6).
+
+| # | Cause | Status, `code` and extra fields |
+|---|---|---|
+| C10 | Today has no record at the sale's branch | 409 `DAY_NOT_OPEN` + `business_date` (today) |
+| C11 | Today's record is closed | 409 `DAY_CLOSED` + `business_date` (today) |
+
+One function decides both: `assertDayOpen(manager, branchId, { lock })` in `day-gate.ts`. It reads today first (`TODAY_SQL`, exported from the service), then selects the row by `(branch_id, business_date)` with **no `closed_at` filter**, and decides open or closed in code on the row returned.
+
+- **In the transaction, `FOR SHARE`, as step 4 of the global lock order** ([sales.md](./sales.md) "Lock order"): right after `lockInventoryRows` in `completeSale`, `voidSale` and the return's transaction, before any change. Sales don't block one another. A close (`FOR UPDATE`, above) waits for the sales already holding the row and counts their cash; a sale that arrives while a close holds it waits, then gets the row as the close left it (READ COMMITTED) and answers `DAY_CLOSED`. A `closed_at` filter would drop the re-checked row and wrongly answer `DAY_NOT_OPEN`. Close holds no other row, so there is no deadlock cycle.
+- **Before the PIN, without a lock**, in void and return, so a closed or unopened day never spends a PIN attempt (`ApprovalsService.verify` commits its own transaction before the action's opens). Void: 404, 400 not COMPLETED, 403 `VOID_WRONG_BRANCH`, 409 `SALE_HAS_RETURNS`, **then the day**, then the PIN. Return: R2, R3, R4, R5, **then the day**, then R6 – R12 and the PIN ([returns.md](./returns.md)). A return resend (R3) still answers its recorded 200 on a closed day. The check in the transaction stays the authority.
+- Complete has no check before its transaction (no PIN): 404, the three 400s (not DRAFT, no lines, amount), the locks, then the day.
+
+Not checked: drafts, their lines and payments (no cash until complete); the inspection pass; `POST /phone-purchases` (P9-24, FOLLOWUPS).
+
 ## Tests
 
 - `src/cash-days/cash-day-math.spec.ts`: expected (the P9-5 and P9-6 numbers, negative), the reason rule with the rounding boundaries (0, 0.99, −0.99, 1.00, −1.00), tender totals.
 - `src/cash-days/cash-days.service.spec.ts`: the order of the checks (C3 before C2, C8 before C9), the advisory lock first in the open, `FOR UPDATE` by id without `closed_at`, the summary inside the lock, what is written and audited.
 - `test/cash-days.e2e-spec.ts`: the endpoints against the test database, the summary SQL with the P9-5 and P9-6 examples, and the frozen-day rule (yesterday's live figures recomputed equal its snapshot). The tests use the database clock's today; a run crossing midnight Colombo time can fail spuriously.
+- `src/cash-days/day-gate.spec.ts`: today read first, `FOR SHARE` only with `lock`, no `closed_at` in the WHERE, the two refusals' bodies. `src/sales/sales.service.spec.ts` and `src/sales/sale-returns.service.spec.ts`: the gate's place in each check order and lock order, and that a refusal changes nothing and spends no PIN.
+- `test/cash-days-enforcement.e2e-spec.ts` (backend 0b): complete, void and return refused with `DAY_NOT_OPEN` and `DAY_CLOSED`, nothing changed; a wrong PIN on a closed or unopened day leaves the attempt count at 0; close racing a sale in both orders, forced with a gate (close first: the waiting sale gets `DAY_CLOSED`; sale first: the close's snapshot includes it, or a stale `expected_seen` gets `EXPECTED_CHANGED` with it); an earlier day's sale gated by today's day; the inspection pass on a closed day; a return resend after the close.
+- Every other e2e spec that completes, voids or returns opens today first with `openToday` (`test/cash-day.helper.ts`: a SQL insert, `ON CONFLICT DO NOTHING`, no audit row).
 
 ## Corrections to the planning doc (for step G)
 
-Decided during backend 0a; the planning doc's section 8 is updated in step G, not before:
+Decided during backends 0a and 0b; the planning doc's section 8 is updated in step G, not before:
 
 1. **`idx_sales_branch_voided_at`** is added (P9-4 said the existing indexes serve every query; earlier voids by `voided_at` had none).
 2. **Open takes `pg_advisory_xact_lock(hashtext('cash_days:' || branch_id))`** first in its transaction (P9-10 covers close and sales, not two opens around midnight).
@@ -152,3 +172,7 @@ Decided during backend 0a; the planning doc's section 8 is updated in step G, no
 8. **C3 before C2**, as returns do.
 9. **Expected may be negative**: no CHECK forbids it.
 10. **The rounding rule** (business change, 2026-10-24): P9-11 and C9 change from "a non-zero difference needs a reason" to "a difference of 1.00 or more either way needs a reason; under 1.00 (0 included) the reason is ignored and stored null; the difference is stored exactly". `CHK_cash_days_reason` uses `abs(difference) < 1`. The frontend's close dialog (P9-11) shows "Rounding LKR X" under 1.00, "Exact" only at 0, and the reason box only from 1.00.
+11. **P9-10: close selects the row by `id`**, not by `(branch_id, business_date)` as "both locks" says; it is the same row, with no `closed_at` filter either way. The sales' `FOR SHARE` selects by `(branch_id, business_date)`. _(0b)_
+12. **P9-23 / the 0b step row: the `openToday` helper's scope** is every e2e spec that completes, voids or returns, not only "sales, returns, void and lock-order": also approvals (its PIN tests void a seeded sale, and the day check runs before the PIN), secret-exposure, suppliers and inspection-status. It is a SQL insert, not the endpoint. _(0b)_
+13. **P9-9: where the check before the PIN sits.** Void: after `SALE_HAS_RETURNS`. Return: after R5, before R6 (so an R3 resend still answers 200 on a closed day). In each transaction the day comes right after `lockInventoryRows`, so the order matches the check before the PIN. _(0b)_
+14. **P9-10 / lock order: the `cash_days` row is step 4 and "everything else" becomes step 5** in `docs/backend/sales.md` "Lock order" (it was step 4 there). _(0b)_
