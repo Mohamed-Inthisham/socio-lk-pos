@@ -33,6 +33,7 @@ import { PaymentMethod } from './enums/payment-method.enum';
 import { CreateSaleDto } from './dto/create-sale.dto';
 import { UpdateSaleDto } from './dto/update-sale.dto';
 import { ListSalesQueryDto } from './dto/list-sales-query.dto';
+import { SalesDailySummaryQueryDto } from './dto/sales-daily-summary-query.dto';
 import { AddSaleLineDto } from './dto/add-sale-line.dto';
 import { UpdateSaleLineDto } from './dto/update-sale-line.dto';
 import { AddPaymentDto } from './dto/add-payment.dto';
@@ -389,6 +390,33 @@ export class SalesService {
 
     const [rows, total] = await qb.getManyAndCount();
     return paginate(await this.withReturnState(rows), total, page, limit);
+  }
+
+  /** Daily overview cards, aggregated across every completed sale, not one page. */
+  async dailySummary(query: SalesDailySummaryQueryDto) {
+    const [row] = await this.dataSource.manager.query(
+      `SELECT (SELECT COUNT(*)::int FROM sales s
+               WHERE s.branch_id = $1 AND s.status = 'COMPLETED'
+                 AND (s.completed_at AT TIME ZONE 'Asia/Colombo')::date = $2::date) AS sales_count,
+              (SELECT COALESCE(SUM(s.total), 0)::text FROM sales s
+               WHERE s.branch_id = $1 AND s.status = 'COMPLETED'
+                 AND (s.completed_at AT TIME ZONE 'Asia/Colombo')::date = $2::date) AS sales_amount,
+              (SELECT COALESCE(SUM(l.quantity), 0)::int FROM sale_lines l
+                JOIN sales s ON s.id = l.sale_id
+               WHERE s.branch_id = $1 AND s.status = 'COMPLETED'
+                 AND (s.completed_at AT TIME ZONE 'Asia/Colombo')::date = $2::date) AS quantity_count,
+              (SELECT COALESCE(SUM(l.quantity * l.cost_price_snapshot), 0)::text FROM sale_lines l
+                JOIN sales s ON s.id = l.sale_id
+               WHERE s.branch_id = $1 AND s.status = 'COMPLETED'
+                 AND (s.completed_at AT TIME ZONE 'Asia/Colombo')::date = $2::date) AS cost_of_sales`,
+      [query.branchId, query.date],
+    );
+    return {
+      sales_count: Number(row.sales_count),
+      sales_amount: row.sales_amount,
+      quantity_count: Number(row.quantity_count),
+      cost_of_sales: row.cost_of_sales,
+    };
   }
 
   /**

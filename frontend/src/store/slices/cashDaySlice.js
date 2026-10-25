@@ -74,7 +74,7 @@ import { newClientRequestId } from "../../utils/requestId";
  * the list, later pages append.
  */
 
-export const PAST_DAYS_LIMIT = 20;
+export const PAST_DAYS_LIMIT = 10;
 
 export const GATE = {
   IDLE: "idle",
@@ -331,9 +331,9 @@ export const closeDay = createAsyncThunk(
 /** One page of GET /cash-days for Past days (P9-16). */
 export const fetchPastDays = createAsyncThunk(
   "cashDay/fetchPastDays",
-  async ({ branchId, page = 1 }, { rejectWithValue }) => {
+  async ({ branchId, page = 1, date }, { rejectWithValue }) => {
     try {
-      return await listCashDays({ branchId, page, limit: PAST_DAYS_LIMIT });
+      return await listCashDays({ branchId, page, limit: PAST_DAYS_LIMIT, date });
     } catch (error) {
       return rejectWithValue(classifyCashDayError(error, CASH_DAY_OP.LIST));
     }
@@ -482,7 +482,7 @@ const cashDaySlice = createSlice({
       .addCase(fetchPastDays.fulfilled, (state, action) => {
         if (action.meta.requestId !== state.pastDays.readId) return;
         const { data, meta } = action.payload;
-        const firstPage = (action.meta.arg.page ?? 1) === 1;
+        const firstPage = (action.meta.arg.page ?? 1) === 1 || action.meta.arg.append === false;
         state.pastDays.status = "ready";
         state.pastDays.items = firstPage ? data : [...state.pastDays.items, ...data];
         state.pastDays.meta = meta;

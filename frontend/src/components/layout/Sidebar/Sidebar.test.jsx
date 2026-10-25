@@ -10,7 +10,7 @@ describe("Sidebar Sales group", () => {
 
     await user.click(screen.getByRole("button", { name: "Sales" }));
 
-    expect(screen.getByRole("link", { name: "Sales history" })).toHaveAttribute("href", "/sales");
+    expect(screen.getByRole("link", { name: "Sales overview" })).toHaveAttribute("href", "/sales");
     expect(screen.getByRole("link", { name: "Cash days" })).toHaveAttribute("href", "/cash-days");
   });
 

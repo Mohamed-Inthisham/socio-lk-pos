@@ -38,7 +38,7 @@ describe("CashDays", () => {
       "href",
       "/cash-days/day-1019",
     );
-    expect(cashDaysService.listCashDays).toHaveBeenCalledWith({ branchId: BRANCH_ID, page: 1, limit: 20 });
+    expect(cashDaysService.listCashDays).toHaveBeenCalledWith({ branchId: BRANCH_ID, page: 1, limit: 10, date: undefined });
   });
 
   it("shows a selected day's saved figures and breakdown", async () => {

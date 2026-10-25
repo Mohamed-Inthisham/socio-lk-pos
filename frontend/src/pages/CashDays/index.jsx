@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { Link, useParams } from "react-router-dom";
+import { Link, useParams, useSearchParams } from "react-router-dom";
 import { useDispatch, useSelector } from "react-redux";
 import { ArrowLeft, CalendarDays, ChevronRight } from "lucide-react";
 import Button from "../../components/common/Button";
@@ -127,16 +127,18 @@ const CashDays = () => {
   const dispatch = useDispatch();
   const { branchId } = useTerminalBranch();
   const pastDays = useSelector(selectPastDays);
+  const [searchParams, setSearchParams] = useSearchParams();
+  const selectedDate = searchParams.get("date") ?? "";
 
   useEffect(() => {
-    if (branchId) dispatch(fetchPastDays({ branchId, page: 1 }));
-  }, [branchId, dispatch]);
+    if (branchId) dispatch(fetchPastDays({ branchId, page: 1, date: selectedDate || undefined }));
+  }, [branchId, dispatch, selectedDate]);
 
   if (id) return <CashDayDetail key={id} id={id} />;
 
   const days = pastDays.items;
   const error = pastDays.error ? cashDayErrorView(pastDays.error).message : null;
-  const loadMore = () => dispatch(fetchPastDays({ branchId, page: (pastDays.meta?.page ?? 1) + 1 }));
+  const goToPage = (page) => dispatch(fetchPastDays({ branchId, page, date: selectedDate || undefined, append: false }));
 
   return (
     <div className="mx-auto max-w-5xl space-y-4 p-4 sm:p-6">
@@ -148,17 +150,26 @@ const CashDays = () => {
         </div>
       </header>
 
+      <label className={`${panelClass} flex w-fit items-center gap-3 px-3 py-2 text-sm`}>
+        <CalendarDays size={17} className="text-cyan-600 dark:text-cyan-400" aria-hidden="true" />
+        <span className="font-medium">Choose a date</span>
+        <input type="date" aria-label="Choose cash day date" value={selectedDate}
+          onChange={(event) => setSearchParams(event.target.value ? { date: event.target.value } : {})}
+          className="rounded-md border border-slate-300 bg-white px-2 py-1 text-slate-900 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-100 scheme-light dark:scheme-dark" />
+        {selectedDate && <button type="button" className={linkClass} onClick={() => setSearchParams({})}>Clear</button>}
+      </label>
+
       {pastDays.status === "loading" && days.length === 0 && (
         <p role="status" className="py-8 text-center text-sm text-slate-500 dark:text-slate-400">Loading cash days…</p>
       )}
       {pastDays.status === "error" && (
         <div className={`${panelClass} p-4`}>
           <p role="alert" className="text-sm text-red-600 dark:text-red-400">{error}</p>
-          <Button className="mt-3" size="sm" variant="secondary" label="Try again" onClick={() => dispatch(fetchPastDays({ branchId, page: 1 }))} />
+          <Button className="mt-3" size="sm" variant="secondary" label="Try again" onClick={() => dispatch(fetchPastDays({ branchId, page: 1, date: selectedDate || undefined }))} />
         </div>
       )}
       {pastDays.status === "ready" && days.length === 0 && (
-        <div className={`${panelClass} p-6 text-center text-sm text-slate-500 dark:text-slate-400`}>No cash days have been recorded for this branch yet.</div>
+        <div className={`${panelClass} p-6 text-center text-sm text-slate-500 dark:text-slate-400`}>{selectedDate ? "No cash day was recorded on this date." : "No cash days have been recorded for this branch yet."}</div>
       )}
 
       {days.length > 0 && (
@@ -179,10 +190,12 @@ const CashDays = () => {
           ))}
         </div>
       )}
-      {pastDays.meta?.hasNext && (
-        <div className="flex justify-center pt-2">
-          <Button variant="secondary" label="Load more" loading={pastDays.status === "loading"} onClick={loadMore} />
-        </div>
+      {pastDays.meta?.totalPages > 1 && (
+        <nav aria-label="Cash days pages" className="flex items-center justify-center gap-3 pt-2">
+          <Button size="sm" variant="secondary" label="Previous" disabled={!pastDays.meta.hasPrev || pastDays.status === "loading"} onClick={() => goToPage(pastDays.meta.page - 1)} />
+          <span aria-live="polite" className="text-sm tabular-nums text-slate-600 dark:text-slate-400">Page {pastDays.meta.page} of {pastDays.meta.totalPages}</span>
+          <Button size="sm" variant="secondary" label="Next" disabled={!pastDays.meta.hasNext || pastDays.status === "loading"} onClick={() => goToPage(pastDays.meta.page + 1)} />
+        </nav>
       )}
     </div>
   );

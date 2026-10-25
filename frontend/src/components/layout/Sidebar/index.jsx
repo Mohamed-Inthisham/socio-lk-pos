@@ -76,7 +76,7 @@ const NAV_ITEMS = [
     children: [
       {
         to: "/sales",
-        label: "Sales history",
+        label: "Sales overview",
         icon: ReceiptText,
       },
       {
