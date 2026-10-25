@@ -23,6 +23,7 @@ import SalesArea from "./components/layout/SalesArea";
 import SalesOverview from "./pages/SalesOverview";
 import Customers from "./pages/Customers";
 import CustomerDetail from "./pages/CustomerDetail";
+import Suppliers from "./pages/Suppliers";
 import { restoreSession } from "./store/slices/authSlice";
 import { fetchBranches } from "./store/slices/branchesSlice";
 
@@ -140,6 +141,7 @@ function App() {
         <Route path="/categories" element={<ManageCategories />} />
         <Route path="/customers" element={<Customers />} />
         <Route path="/customers/:id" element={<CustomerDetail />} />
+        <Route path="/suppliers" element={<Suppliers />} />
         <Route element={<SalesArea />}>
           <Route
             path="/sales"
