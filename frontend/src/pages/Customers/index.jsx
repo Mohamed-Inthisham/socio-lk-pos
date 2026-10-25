@@ -65,7 +65,6 @@ export default function Customers() {
           <h1 className="text-2xl font-semibold">Customers</h1>
           <p className="mt-1 text-sm text-slate-500 dark:text-slate-400">Customer details and their purchase history.</p>
         </div>
-        {can(PERMISSIONS.CREATE_CUSTOMER) && <Button variant="accent" icon={Plus} label="Add customer" onClick={openCreate} />}
       </header>
 
       <section aria-label="Customer count" className={`${panel} flex items-center justify-between gap-4 p-5 sm:max-w-sm`}>
@@ -78,11 +77,14 @@ export default function Customers() {
       </section>
 
       <section className={`${panel} overflow-hidden`} aria-label="Customer directory">
-        <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-200 p-4 dark:border-slate-800">
+        <div className="grid gap-3 border-b border-slate-200 p-4 dark:border-slate-800 sm:grid-cols-[1fr_auto] sm:items-center">
           <h2 className="font-semibold">All customers <span className="ml-1 text-sm font-normal text-slate-500">({result.total})</span></h2>
-          <div className="relative w-full sm:max-w-sm">
-            <Search size={16} aria-hidden="true" className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
-            <InputField aria-label="Search customers" name="customer-search" placeholder="Search name, phone, NIC or email" value={search} onChange={(event) => { setSearch(event.target.value); setPage(1); }} className="pl-9" />
+          <div className="flex flex-col gap-3 sm:flex-row sm:items-center">
+            <div className="relative w-full sm:w-72">
+              <Search size={16} aria-hidden="true" className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
+              <InputField aria-label="Search customers" name="customer-search" placeholder="Search name, phone, NIC or email" value={search} onChange={(event) => { setSearch(event.target.value); setPage(1); }} className="pl-9" />
+            </div>
+            {can(PERMISSIONS.CREATE_CUSTOMER) && <Button variant="accent" icon={Plus} label="Add customer" onClick={openCreate} className="shrink-0 self-start sm:self-auto" />}
           </div>
         </div>
         {result.error ? (
