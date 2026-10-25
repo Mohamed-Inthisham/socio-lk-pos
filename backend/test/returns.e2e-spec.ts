@@ -5,6 +5,7 @@ import { randomUUID } from 'crypto';
 import { DataSource } from 'typeorm';
 import { createTestApp, truncateAllTables } from './setup';
 import { approvalFor, giveApprovalPin } from './approval-pin.helper';
+import { openToday } from './cash-day.helper';
 import { User } from '../src/users/entities/user.entity';
 import { UserRole } from '../src/users/enums/user-role.enum';
 import { Branch } from '../src/branches/entities/branch.entity';
@@ -261,6 +262,9 @@ describe('Returns (e2e)', () => {
   ): Promise<SoldSale> {
     const cookies = opts.cookies ?? cashierACookies;
     const branch = opts.branch ?? branchA;
+    // Today's cash day at the branch (P9, backend 0b), so the complete and
+    // later voids and returns go through.
+    await openToday(dataSource, branch.id, admin.id);
     const created = await call('post', '/sales', cookies, {
       branch_id: branch.id,
       ...(opts.withCustomer ? { customer_id: customer.id } : {}),

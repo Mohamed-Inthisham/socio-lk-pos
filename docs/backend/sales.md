@@ -243,7 +243,7 @@ Inside one Postgres transaction with the sale row `pessimistic_write`-locked:
 
 1. Load + lock the sale, assert it's DRAFT.
 2. Load lines, assert at least one exists (400 otherwise).
-3. Assert `amount_paid === total` via cents-integer comparison (400 for underpayment; DB CHK stops overpayment separately).
+3. Assert `amount_paid === total` via cents-integer comparison (400 for underpayment; DB CHK stops overpayment separately). Then lock the Stock and ProductUnit rows ("Lock order" below), then **today's cash day at the sale's branch `FOR SHARE`**, refusing with 409 `DAY_NOT_OPEN` / `DAY_CLOSED` (Phase 6.4 P9, [cash-days.md](./cash-days.md#enforcement-backend-0b)).
 4. For each in-house line (`external_supplier_id IS NULL`): decrement stock via `StockService.decrementForSale`, enlisted in the same transaction. A serialized in-house line also flips its ProductUnit to SOLD.
 5. For each TRADE_IN payment: check the customer and their NIC, then materialize the trade-in (see [used-phones.md](./used-phones.md#trade-ins-slice-g)).
 6. Issue the invoice number via `SaleNumberCountersService.generateNext`, also enlisted.
@@ -262,6 +262,8 @@ Every failure leaves the sale a DRAFT with nothing changed. The 409s name what f
 | Not a DRAFT | 400 | `Cannot complete a COMPLETED sale. Only DRAFT sales can be completed.` (or VOIDED) |
 | No lines | 400 | `Cannot complete a sale with no lines. Add at least one line first.` |
 | `amount_paid` ≠ `total` | 400 | `Cannot complete sale: amount_paid X does not equal total Y` |
+| Today (database clock, Colombo) has no cash day at the sale's branch (Phase 6.4 P9, C10) | 409 | `{ message, code: 'DAY_NOT_OPEN', business_date }` |
+| Today's cash day is closed (C11) | 409 | `{ message, code: 'DAY_CLOSED', business_date }` |
 | Not enough stock (the first short line) | 409 | `{ message: 'Insufficient stock for "<name>": requested N, available M', product_id, sale_line_id }` |
 | A line's phone is no longer IN_STOCK (another sale sold it) | 409 | `{ message: "Cannot sell IMEI '<imei>'…", existing_unit }` — `existing_unit.id` is the line's `product_unit_id` |
 | TRADE_IN without a customer, or the customer has no NIC | 400 | `Cannot complete sale: TRADE_IN payments require a customer…` / `A trade-in needs the customer's NIC` |
@@ -274,12 +276,13 @@ The `SELECT ... FOR UPDATE` locks acquired on stock rows during decrement serial
 
 ### Lock order
 
-_(Phase 6.4 P7-25, step 0c.)_ Every transaction that changes stock or product units takes its row locks in one order:
+_(Phase 6.4 P7-25, step 0c; step 4 added in P9 backend 0b.)_ Every transaction that changes stock or product units takes its row locks in one order:
 
 1. **Its sale row**, if it has one (at most one, always first).
 2. **Every Stock row it will touch, sorted by `(product_id, branch_id)`.**
 3. **Every ProductUnit row it will touch, sorted by `id`.**
-4. **Then everything else:** the changes and their checks, inserts (a new unit's insert may wait on `uq_product_units_imei_live`, always after the Stock locks), the sale-number counter, audit rows.
+4. **Today's `cash_days` row at the sale's branch, `FOR SHARE`** (complete, void and return only; `assertDayOpen` in `backend/src/cash-days/day-gate.ts`, P9-10). Selected by `(branch_id, business_date)` with no `closed_at` filter; open or closed is decided in code on the row returned.
+5. **Then everything else:** the changes and their checks, inserts (a new unit's insert may wait on `uq_product_units_imei_live`, always after the Stock locks), the sale-number counter, audit rows.
 
 Steps 2 and 3 are `lockInventoryRows(manager, { stock, unitIds })` (`backend/src/stock/lock-inventory-rows.ts`): one `SELECT … FOR UPDATE` per row, sorted and de-duplicated. It only locks. A row that doesn't exist is skipped, so the caller's existing code raises exactly what it raised before. `StockService` and `ProductUnitsService` methods lock their row again, which costs nothing once the transaction holds it. A transaction that needs only one kind of row passes only that kind. Each caller collects its targets before changing anything, after the checks that need no locks:
 
@@ -290,6 +293,12 @@ Steps 2 and 3 are `lockInventoryRows(manager, { stock, unitIds })` (`backend/src
 | `PhonePurchasesService.create`, `createForTradeIn` | The phone's product, after the IMEI pre-check and before the inserts (so a race still gets the same 409) | — |
 | `SaleReturnsService` (a return, Phase 6.4 P7) | The lines going back to stock (in-house, not a phone, `condition: RESALEABLE`) | The returned phones' `product_unit_id` |
 | `ProductUnitsService.passInspection` | The unit's product | The unit |
+
+`completeSale`, `voidSale` and the return's transaction then take step 4; the phone purchase and the inspection pass don't (they move no drawer cash, P9-24).
+
+#### Why the cash day comes fourth, and why close can't deadlock
+
+_(Phase 6.4 P9-10.)_ Sales take `FOR SHARE`, so they never block one another. Closing a day (`POST /cash-days/:id/close`) takes `FOR UPDATE` on that row and nothing else before its summary, so it waits for the sales already holding the row and then counts their cash; a sale arriving while the close holds it waits, and under READ COMMITTED gets the row as the close left it: 409 `DAY_CLOSED`. That is why the lock has no `closed_at` filter: with one, the re-checked row would drop out and the sale would get `DAY_NOT_OPEN`. Taking the day after the sale, Stock and unit rows keeps one global order, and close holds only the day row, so no wait cycle is possible: a sale waiting on the day holds rows close never asks for, and anything holding step-5 resources (the counter) already holds its `FOR SHARE`. The close's other locks are `FOR KEY SHARE` on the closer's `users` row (the `closed_by` and audit foreign keys); the approval PIN check locks an approver's row `FOR UPDATE` only in its own transaction, committed before the void's or return's opens. `test/cash-days-enforcement.e2e-spec.ts` forces both orders with a gate.
 
 #### Why
 
@@ -350,7 +359,7 @@ Different callers hit different layers, and each layer has one job. A silent voi
 
 _(Revised Phase 6.4 P6-17; was "Void restricted to admin + manager".)_ `POST /sales/:id/void` takes `{ void_reason, approval: { approver_id, pin } }`, and `approval` is required on **every** void, a manager's or admin's own session included. Any role may call it, but only for a sale at their own branch (admins: any branch; otherwise 403 `VOID_WRONG_BRANCH`). The approver must be an active admin, or an active manager of the sale's branch, with an approval PIN; they may be the session user. The PIN check, its lockout and its error codes are in [approvals.md](./approvals.md).
 
-Order of work: a pre-check without locks (404, not COMPLETED 400, the branch check, then 409 `SALE_HAS_RETURNS` when the sale has any return, Phase 6.4 P7-11), so a void that can't happen never uses a PIN attempt; then the PIN check in **its own committed transaction**; then the void's transaction as before, which checks `SALE_HAS_RETURNS` again under the sale lock (a return holds that lock while it commits, so none can slip in).
+Order of work: a pre-check without locks (404, not COMPLETED 400, the branch check, then 409 `SALE_HAS_RETURNS` when the sale has any return, Phase 6.4 P7-11, then 409 `DAY_NOT_OPEN` / `DAY_CLOSED` when today's cash day at the sale's branch isn't open, P9-9), so a void that can't happen never uses a PIN attempt; then the PIN check in **its own committed transaction**; then the void's transaction as before, which checks `SALE_HAS_RETURNS` again under the sale lock (a return holds that lock while it commits, so none can slip in) and the day again under `FOR SHARE` (lock-order step 4). The day is **today's**, whenever the sale was completed: voiding an earlier day's sale needs today open, and its cash counts on today (P9-6).
 
 #### Why a sale with a return can't be voided
 
@@ -441,7 +450,7 @@ All endpoints are prefixed with `/api/v1` and require authentication via the `ac
 | Method | Path | Role | Purpose |
 |--------|------|------|---------|
 | POST | `/sales/:id/complete` | any | DRAFT → COMPLETED. Decrements stock, issues invoice number, sets completed_at. Auditable. |
-| POST | `/sales/:id/void` | any, at the sale's branch | COMPLETED → VOIDED with a manager's approval PIN (`approval: { approver_id, pin }`, required). Re-increments stock, stamps payments reversed, sets voided_at/by (approver)/reason and void_requested_by (session user). Audited in the void's transaction. 409 `SALE_HAS_RETURNS` once the sale has a return. |
+| POST | `/sales/:id/void` | any, at the sale's branch | COMPLETED → VOIDED with a manager's approval PIN (`approval: { approver_id, pin }`, required). Re-increments stock, stamps payments reversed, sets voided_at/by (approver)/reason and void_requested_by (session user). Audited in the void's transaction. 409 `SALE_HAS_RETURNS` once the sale has a return; 409 `DAY_NOT_OPEN` / `DAY_CLOSED` unless today's cash day is open. |
 | POST | `/sales/:id/returns` | any, at the sale's branch | A return with refunds, approved with a manager's PIN; the sale stays COMPLETED. 201 `{ return_id, sale }`, 200 on an accepted resend. See [returns.md](./returns.md) |
 | GET | `/sale-returns/inspection` | admin, manager (own branch) | Returned phones waiting for inspection at a branch. See [returns.md](./returns.md) |
 

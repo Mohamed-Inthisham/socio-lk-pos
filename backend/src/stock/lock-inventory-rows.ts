@@ -19,7 +19,9 @@ const byText = (a: string, b: string): number => (a < b ? -1 : a > b ? 1 : 0);
  *   1. its sale row, if it has one (at most one, already first everywhere);
  *   2. every Stock row it will touch, sorted by (product_id, branch_id);
  *   3. every ProductUnit row it will touch, sorted by id;
- *   4. then everything else: its changes, inserts (a new unit waits on
+ *   4. complete, void and return only: today's cash_days row at the sale's
+ *      branch, FOR SHARE (assertDayOpen, cash-days/day-gate.ts, P9-10);
+ *   5. then everything else: its changes, inserts (a new unit waits on
  *      uq_product_units_imei_live here, after the Stock locks), the
  *      sale-number counter, audit rows.
  *

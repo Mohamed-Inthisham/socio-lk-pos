@@ -34,10 +34,14 @@ import { UserRole } from '../users/enums/user-role.enum';
 import { AuditAction } from '../audit-log/enums/audit-action.enum';
 import { WarrantyPeriod } from '../products/enums/warranty-period.enum';
 import { lockInventoryRows } from '../stock/lock-inventory-rows';
+import { assertDayOpen } from '../cash-days/day-gate';
 
 // The global lock order's helper takes its own queries on the manager;
 // mocked so the per-call manager mocks below stay exact (Phase 6.4 P7-25).
 jest.mock('../stock/lock-inventory-rows');
+// The day gate (P9-9, P9-10) likewise: its own spec covers its queries.
+// Mocked, it resolves: today is open unless a test says otherwise.
+jest.mock('../cash-days/day-gate');
 
 describe('SalesService', () => {
   let service: SalesService;
@@ -139,8 +143,12 @@ describe('SalesService', () => {
     ip: '127.0.0.1',
   };
 
+  // The data source's own manager: the lock-free reads before the PIN.
+  const mockReadManager = { name: 'read-manager' };
+
   const mockDataSource = {
     transaction: jest.fn(),
+    manager: mockReadManager,
   };
 
   const mockProductsService = {
@@ -4579,6 +4587,188 @@ describe('SalesService', () => {
       ).rejects.toThrow(BadRequestException);
       expect(lockMock).not.toHaveBeenCalled();
     });
+
+    // ---- Today's cash day: lock-order step 4 (Phase 6.4 P9-9, P9-10) ----
+
+    const dayMock = assertDayOpen as jest.MockedFunction<typeof assertDayOpen>;
+    const dayClosed = () =>
+      new ConflictException({
+        message: 'Today (2026-10-25) is closed.',
+        code: 'DAY_CLOSED',
+        business_date: '2026-10-25',
+      });
+
+    it('completeSale takes todays cash day FOR SHARE after the inventory locks and before any change', async () => {
+      mockQueryBuilder.getOne.mockResolvedValueOnce({
+        id: 'sale-1',
+        status: SaleStatus.DRAFT,
+        branch_id: 'branch-1',
+        cashier_id: 'cashier-1',
+        customer_id: 'cust-1',
+        total: '500.00',
+        amount_paid: '500.00',
+      });
+      arrangeManagerFind(lines, [
+        { ...tradeInPayment, trade_in_phone_purchase_id: null },
+      ]);
+      mockManager.findOne.mockResolvedValue({
+        id: 'cust-1',
+        nic: '199012345678',
+      });
+      mockPhonePurchasesService.createForTradeIn.mockResolvedValue({
+        phone_purchase: { id: 'pp-1' },
+        product_unit: { id: 'unit-ti' },
+      });
+      mockSaleNumberCountersService.generateNext.mockResolvedValue(
+        'INV-20261023-0001',
+      );
+      mockManager.query.mockResolvedValue(undefined);
+
+      await service.completeSale('sale-1');
+
+      expect(dayMock).toHaveBeenCalledTimes(1);
+      expect(dayMock).toHaveBeenCalledWith(mockManager, 'branch-1', {
+        lock: true,
+      });
+      const day = dayMock.mock.invocationCallOrder[0];
+      expect(lockMock.mock.invocationCallOrder[0]).toBeLessThan(day);
+      expect(day).toBeLessThan(
+        mockStockService.decrementForSale.mock.invocationCallOrder[0],
+      );
+      expect(day).toBeLessThan(
+        mockProductUnitsService.markSoldForSale.mock.invocationCallOrder[0],
+      );
+      expect(day).toBeLessThan(
+        mockPhonePurchasesService.createForTradeIn.mock.invocationCallOrder[0],
+      );
+      expect(day).toBeLessThan(
+        mockSaleNumberCountersService.generateNext.mock.invocationCallOrder[0],
+      );
+      expect(day).toBeLessThan(mockManager.query.mock.invocationCallOrder[0]);
+    });
+
+    it('completeSale refused by the day gate changes nothing', async () => {
+      mockQueryBuilder.getOne.mockResolvedValueOnce({
+        id: 'sale-1',
+        status: SaleStatus.DRAFT,
+        branch_id: 'branch-1',
+        customer_id: 'cust-1',
+        total: '500.00',
+        amount_paid: '500.00',
+      });
+      arrangeManagerFind(lines, [
+        { ...tradeInPayment, trade_in_phone_purchase_id: null },
+      ]);
+      dayMock.mockRejectedValueOnce(dayClosed());
+
+      const err = await service.completeSale('sale-1').catch((e: unknown) => e);
+
+      expect(err).toBeInstanceOf(ConflictException);
+      expect((err as ConflictException).getResponse()).toMatchObject({
+        code: 'DAY_CLOSED',
+        business_date: '2026-10-25',
+      });
+      expect(mockStockService.decrementForSale).not.toHaveBeenCalled();
+      expect(mockProductUnitsService.markSoldForSale).not.toHaveBeenCalled();
+      expect(mockPhonePurchasesService.createForTradeIn).not.toHaveBeenCalled();
+      expect(mockSaleNumberCountersService.generateNext).not.toHaveBeenCalled();
+      expect(mockManager.query).not.toHaveBeenCalled();
+    });
+
+    it('completeSale does not reach the day gate when a check fails first', async () => {
+      mockQueryBuilder.getOne.mockResolvedValueOnce({
+        id: 'sale-1',
+        status: SaleStatus.DRAFT,
+        branch_id: 'branch-1',
+        total: '500.00',
+        amount_paid: '400.00',
+      });
+      arrangeManagerFind(lines);
+
+      await expect(service.completeSale('sale-1')).rejects.toThrow(
+        BadRequestException,
+      );
+      expect(dayMock).not.toHaveBeenCalled();
+    });
+
+    it('voidSale takes todays cash day FOR SHARE after the inventory locks and before any change', async () => {
+      mockQueryBuilder.getOne.mockResolvedValueOnce({
+        id: 'sale-1',
+        status: SaleStatus.COMPLETED,
+        branch_id: 'branch-1',
+      });
+      arrangeManagerFind(lines, [tradeInPayment]);
+      const tradeInUnit = {
+        id: 'unit-ti',
+        product_id: 'prod-used',
+        branch_id: 'branch-1',
+        status: ProductUnitStatus.IN_STOCK,
+      };
+      mockManager.findOne.mockResolvedValue(tradeInUnit);
+      mockProductUnitsService.markReturnedForVoid.mockResolvedValue(
+        tradeInUnit,
+      );
+      mockManager.query.mockResolvedValue(undefined);
+
+      await service.voidSale('sale-1', voidApproval, {
+        void_reason: 'Wrong item rung up',
+      });
+
+      expect(dayMock).toHaveBeenCalledTimes(1);
+      expect(dayMock).toHaveBeenCalledWith(mockManager, 'branch-1', {
+        lock: true,
+      });
+      const day = dayMock.mock.invocationCallOrder[0];
+      expect(lockMock.mock.invocationCallOrder[0]).toBeLessThan(day);
+      expect(day).toBeLessThan(
+        mockStockService.incrementForReversal.mock.invocationCallOrder[0],
+      );
+      expect(day).toBeLessThan(
+        mockProductUnitsService.markAvailableForReversal.mock
+          .invocationCallOrder[0],
+      );
+      expect(day).toBeLessThan(
+        mockProductUnitsService.markReturnedForVoid.mock.invocationCallOrder[0],
+      );
+      expect(day).toBeLessThan(mockManager.query.mock.invocationCallOrder[0]);
+    });
+
+    it('voidSale refused by the day gate changes nothing and writes no audit row', async () => {
+      mockQueryBuilder.getOne.mockResolvedValueOnce({
+        id: 'sale-1',
+        status: SaleStatus.COMPLETED,
+        branch_id: 'branch-1',
+      });
+      arrangeManagerFind(lines);
+      dayMock.mockRejectedValueOnce(dayClosed());
+
+      await expect(
+        service.voidSale('sale-1', voidApproval, {
+          void_reason: 'Wrong item rung up',
+        }),
+      ).rejects.toThrow(ConflictException);
+      expect(mockStockService.incrementForReversal).not.toHaveBeenCalled();
+      expect(
+        mockProductUnitsService.markAvailableForReversal,
+      ).not.toHaveBeenCalled();
+      expect(mockManager.query).not.toHaveBeenCalled();
+      expect(mockAuditRepo.save).not.toHaveBeenCalled();
+    });
+
+    it('voidSale does not reach the day gate when the sale is not COMPLETED', async () => {
+      mockQueryBuilder.getOne.mockResolvedValueOnce({
+        id: 'sale-1',
+        status: SaleStatus.VOIDED,
+        branch_id: 'branch-1',
+      });
+
+      await expect(
+        service.voidSale('sale-1', voidApproval, {
+          void_reason: 'Wrong item rung up',
+        }),
+      ).rejects.toThrow(BadRequestException);
+      expect(dayMock).not.toHaveBeenCalled();
+    });
   });
 
   describe('voidSale', () => {
@@ -5525,6 +5715,101 @@ describe('SalesService', () => {
         ).rejects.toThrow(ForbiddenException);
         expect(mockDataSource.transaction).not.toHaveBeenCalled();
       });
+
+      // ---- Today's cash day before the PIN (Phase 6.4 P9-9) ----
+
+      const dayMock = assertDayOpen as jest.MockedFunction<
+        typeof assertDayOpen
+      >;
+
+      it('checks todays cash day lock-free after SALE_HAS_RETURNS and before the PIN, then again in the transaction', async () => {
+        mockSalesRepo.findOne.mockResolvedValue(seedVoidableSale());
+        mockApprovalsService.verify.mockResolvedValue(manager);
+        mockQueryBuilder.getOne.mockResolvedValueOnce(seedVoidableSale());
+        arrangeManagerFind([seedVoidableLine()]);
+
+        await service.voidWithApproval('sale-1', cashierAtBranch1, approvalDto);
+
+        expect(dayMock).toHaveBeenCalledTimes(2);
+        expect(dayMock).toHaveBeenNthCalledWith(
+          1,
+          mockReadManager,
+          'branch-1',
+          {
+            lock: false,
+          },
+        );
+        expect(dayMock).toHaveBeenNthCalledWith(2, mockManager, 'branch-1', {
+          lock: true,
+        });
+        const [preCheck, inTransaction] = dayMock.mock.invocationCallOrder;
+        expect(
+          mockSaleReturnsRepo.count.mock.invocationCallOrder[0],
+        ).toBeLessThan(preCheck);
+        const verified =
+          mockApprovalsService.verify.mock.invocationCallOrder[0];
+        expect(preCheck).toBeLessThan(verified);
+        expect(verified).toBeLessThan(inTransaction);
+      });
+
+      it.each([
+        ['DAY_NOT_OPEN', 'hasn’t been opened'],
+        ['DAY_CLOSED', 'is closed'],
+      ])(
+        '409 %s before any PIN check: no PIN attempt, no transaction',
+        async (code, words) => {
+          mockSalesRepo.findOne.mockResolvedValue(seedVoidableSale());
+          dayMock.mockRejectedValueOnce(
+            new ConflictException({
+              message: `Today (2026-10-25) ${words}.`,
+              code,
+              business_date: '2026-10-25',
+            }),
+          );
+
+          const err = await service
+            .voidWithApproval('sale-1', cashierAtBranch1, approvalDto)
+            .catch((e: unknown) => e);
+
+          expect(err).toBeInstanceOf(ConflictException);
+          expect((err as ConflictException).getResponse()).toMatchObject({
+            code,
+            business_date: '2026-10-25',
+          });
+          expect(mockApprovalsService.verify).not.toHaveBeenCalled();
+          expect(mockDataSource.transaction).not.toHaveBeenCalled();
+        },
+      );
+
+      it.each([
+        ['404, no sale', null, cashierAtBranch1, 0],
+        [
+          '400, not COMPLETED',
+          { status: SaleStatus.VOIDED },
+          cashierAtBranch1,
+          0,
+        ],
+        [
+          '403, another branch',
+          {},
+          { ...cashierAtBranch1, branch_id: 'branch-2' },
+          0,
+        ],
+        ['409, has a return', {}, cashierAtBranch1, 1],
+      ])(
+        'the sale checks come before the day check (%s)',
+        async (_label, overrides, requestedBy, returns) => {
+          mockSalesRepo.findOne.mockResolvedValue(
+            overrides === null ? null : seedVoidableSale(overrides),
+          );
+          mockSaleReturnsRepo.count.mockResolvedValue(returns);
+
+          await expect(
+            service.voidWithApproval('sale-1', requestedBy, approvalDto),
+          ).rejects.toThrow();
+          expect(dayMock).not.toHaveBeenCalled();
+        },
+      );
     });
   });
 

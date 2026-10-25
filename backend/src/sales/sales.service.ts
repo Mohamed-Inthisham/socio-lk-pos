@@ -25,6 +25,7 @@ import { ProductUnitStatus } from '../product-units/enums/product-unit-status.en
 import { ProductUnitsService } from '../product-units/product-units.service';
 import { LIVE_UNIT_STATUSES } from '../product-units/live-imei';
 import { lockInventoryRows } from '../stock/lock-inventory-rows';
+import { assertDayOpen } from '../cash-days/day-gate';
 import { SaleStatus } from './enums/sale-status.enum';
 import { SaleType } from './enums/sale-type.enum';
 import { DiscountType } from './enums/discount-type.enum';
@@ -1366,6 +1367,8 @@ export class SalesService {
    *   2. Run guards above
    *   2d. Lock every Stock and ProductUnit row it will touch, in the
    *      global order (lockInventoryRows, Phase 6.4 P7-25)
+   *   2e. Today's cash day at the sale's branch: FOR SHARE (lock-order
+   *      step 4), 409 DAY_NOT_OPEN / DAY_CLOSED (assertDayOpen, P9-9)
    *   3. For each line where external_supplier_id IS NULL: decrement
    *      stock via StockService.decrementForSale, enlisted in this
    *      transaction. Lines sourced from friendly shops
@@ -1466,6 +1469,11 @@ export class SalesService {
           .map((line) => line.product_unit_id)
           .filter((id): id is string => id !== null),
       });
+
+      // 2e. Today's cash day at the sale's branch must be open (P9-9):
+      //     FOR SHARE, step 4 of the global lock order (P9-10), then
+      //     409 DAY_NOT_OPEN / DAY_CLOSED.
+      await assertDayOpen(manager, sale.branch_id, { lock: true });
 
       // 3. Per-line state transitions for the sale being COMPLETED.
       //    Two orthogonal decisions per line (Slice E derived-from-Q4):
@@ -1639,6 +1647,8 @@ export class SalesService {
    *   4b. Find the trade-in units, then lock every Stock and ProductUnit
    *      row the void will touch, in the global order (lockInventoryRows,
    *      Phase 6.4 P7-25).
+   *   4c. Today's cash day at the sale's branch: FOR SHARE (lock-order
+   *      step 4), 409 DAY_NOT_OPEN / DAY_CLOSED (assertDayOpen, P9-9).
    *   5. For each line where external_supplier_id IS NULL: re-increment
    *      stock via StockService.incrementForReversal; serialized lines
    *      also flip their PU SOLD → IN_STOCK, which is 409 if the phone
@@ -1767,6 +1777,11 @@ export class SalesService {
           ...[...tradeInUnits.values()].map((unit) => unit.id),
         ],
       });
+
+      // 4c. Today's cash day at the sale's branch must be open (P9-9),
+      //     whatever day the sale was completed: FOR SHARE, step 4 of the
+      //     global lock order (P9-10), then 409 DAY_NOT_OPEN / DAY_CLOSED.
+      await assertDayOpen(manager, sale.branch_id, { lock: true });
 
       // 5. Per-line state REVERSALS for the sale being VOIDED. Symmetric
       //    to completeSale's step 3; the rows are already locked (4b).
@@ -1899,7 +1914,9 @@ export class SalesService {
    * 1. Pre-check, no locks: the sale exists (404), is COMPLETED (400), the
    *    session user is at its branch (403; admins anywhere), and it has no
    *    returns (409 SALE_HAS_RETURNS, P7-11; voidSale re-checks under the
-   *    lock). A void that can't happen never uses up a PIN attempt.
+   *    lock), and today's cash day is open (409 DAY_NOT_OPEN / DAY_CLOSED,
+   *    P9-9; voidSale re-checks under FOR SHARE). A void that can't happen
+   *    never uses up a PIN attempt.
    * 2. ApprovalsService.verify: the PIN, in its own committed transaction
    *    (a wrong PIN's count survives whatever happens next).
    * 3. voidSale: the void's transaction, which re-checks COMPLETED under
@@ -1936,6 +1953,11 @@ export class SalesService {
     ) {
       throw saleHasReturns();
     }
+    // Today's cash day must be open (P9-9), so a closed or unopened day
+    // never spends a PIN attempt; voidSale checks again under its lock.
+    await assertDayOpen(this.dataSource.manager, sale.branch_id, {
+      lock: false,
+    });
 
     const approver = await this.approvalsService.verify({
       approverId: dto.approval.approver_id,
