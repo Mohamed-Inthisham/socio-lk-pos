@@ -1,9 +1,9 @@
 import { vi } from "vitest";
 import api from "./api";
-import { createCustomer, listCustomers, updateCustomer } from "./customersService";
+import { createCustomer, deleteCustomer, listCustomers, updateCustomer } from "./customersService";
 
 vi.mock("./api", () => ({
-  default: { get: vi.fn(), post: vi.fn(), patch: vi.fn() },
+  default: { get: vi.fn(), post: vi.fn(), patch: vi.fn(), delete: vi.fn() },
 }));
 
 describe("customersService", () => {
@@ -40,5 +40,11 @@ describe("customersService", () => {
       name: "Kamal Perera",
       phone: "+94771234567",
     });
+  });
+
+  it("soft-deletes a customer through the customer endpoint", async () => {
+    api.delete.mockResolvedValue({ status: 204 });
+    await expect(deleteCustomer("c1")).resolves.toBeUndefined();
+    expect(api.delete).toHaveBeenCalledWith("/customers/c1");
   });
 });

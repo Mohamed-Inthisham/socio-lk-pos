@@ -4,6 +4,12 @@ import Sidebar from "./index";
 import { renderWithProviders } from "../../../test/renderWithProviders";
 
 describe("Sidebar Sales group", () => {
+  it("shows the Customers destination", () => {
+    renderWithProviders(<Sidebar />);
+
+    expect(screen.getByRole("link", { name: "Customers" })).toHaveAttribute("href", "/customers");
+  });
+
   it("offers sales history and cash days under Sales", async () => {
     const user = userEvent.setup();
     renderWithProviders(<Sidebar />);

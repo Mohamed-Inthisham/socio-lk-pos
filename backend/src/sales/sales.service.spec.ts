@@ -551,6 +551,21 @@ describe('SalesService', () => {
       );
     });
 
+    it('filters a customer history to completed and voided sales', async () => {
+      mockQueryBuilder.getManyAndCount.mockResolvedValue([[], 0]);
+
+      await service.findAll({ customerId: 'customer-1' });
+
+      expect(mockQueryBuilder.andWhere).toHaveBeenCalledWith(
+        'sale.customer_id = :customerId',
+        { customerId: 'customer-1' },
+      );
+      expect(mockQueryBuilder.andWhere).toHaveBeenCalledWith(
+        'sale.status IN (:...customerHistoryStatuses)',
+        { customerHistoryStatuses: [SaleStatus.COMPLETED, SaleStatus.VOIDED] },
+      );
+    });
+
     it('applies status filter when provided', async () => {
       mockQueryBuilder.getManyAndCount.mockResolvedValue([[], 0]);
 

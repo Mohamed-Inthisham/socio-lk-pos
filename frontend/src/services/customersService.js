@@ -5,7 +5,7 @@ import api from "./api";
  *
  * Wraps the /customers endpoints the POS terminal needs: search and inline
  * create. All roles (cashier included) may list and create customers;
- * delete/restore are admin + manager only and not wrapped here.
+ * delete is a soft-delete action limited to admins and managers.
  *
  * Phone numbers accept 0771234567, +94771234567 or 94771234567 and come
  * back normalized to 0XXXXXXXXX. NIC is optional, stored upper-case, and
@@ -73,4 +73,9 @@ export const createCustomer = async (payload) => {
 export const updateCustomer = async (id, payload) => {
   const response = await api.patch(`/customers/${id}`, payload);
   return response.data;
+};
+
+/** Soft-delete a customer. Only admins and managers may do this. */
+export const deleteCustomer = async (id) => {
+  await api.delete(`/customers/${id}`);
 };
