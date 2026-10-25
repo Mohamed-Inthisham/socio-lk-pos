@@ -25,6 +25,21 @@ describe("Customers", () => {
     expect(screen.getByRole("button", { name: "Add customer" })).toBeInTheDocument();
     expect(screen.getAllByRole("button", { name: "View Kamal Perera" }).length).toBeGreaterThan(0);
     expect(screen.getAllByRole("button", { name: "Edit Kamal Perera" }).length).toBeGreaterThan(0);
+    expect(screen.getAllByRole("button", { name: "Delete Kamal Perera" }).length).toBeGreaterThan(0);
     expect(screen.getByRole("navigation", { name: "Customer pages" })).toHaveTextContent("Page 1 of 2");
+
+    screen.getByRole("button", { name: "Add customer" }).click();
+    expect(await screen.findByRole("dialog", { name: "Add customer" })).toBeInTheDocument();
+    expect(screen.queryByLabelText("Notes")).not.toBeInTheDocument();
+  });
+
+  it("shows edit for cashiers while explaining that delete needs a manager", async () => {
+    const preloadedState = { auth: authState({ id: "cashier-1", role: "cashier" }) };
+    renderWithProviders(<Customers />, { preloadedState, route: "/customers" });
+
+    await screen.findAllByText("Kamal Perera");
+    expect(screen.getAllByRole("button", { name: "Edit Kamal Perera" })[0]).toBeEnabled();
+    expect(screen.getAllByRole("button", { name: "Delete Kamal Perera" })[0]).toBeDisabled();
+    expect(screen.getAllByRole("button", { name: "Delete Kamal Perera" })[0]).toHaveAttribute("title", "Only managers and admins can delete customers");
   });
 });

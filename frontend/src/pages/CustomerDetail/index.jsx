@@ -1,12 +1,13 @@
 import { useEffect, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
-import { ArrowLeft, Mail, Pencil, Phone, UserRound } from "lucide-react";
+import { ArrowLeft, Mail, Pencil, Phone, Trash2, UserRound } from "lucide-react";
 import Button from "../../components/common/Button";
+import ConfirmDialog from "../../components/common/ConfirmDialog";
 import Table from "../../components/common/Table";
 import SaleStatusBadge from "../../components/pos/SaleStatusBadge";
 import usePermissions from "../../hooks/usePermissions";
 import { PERMISSIONS } from "../../constants/rolePermissions";
-import { getCustomer } from "../../services/customersService";
+import { deleteCustomer, getCustomer } from "../../services/customersService";
 import { listSales } from "../../services/salesService";
 import { saleListStatus } from "../../utils/returnMath";
 import { formatLKR } from "../../utils/money";
@@ -23,6 +24,7 @@ export default function CustomerDetail() {
   const [customer, setCustomer] = useState(null);
   const [customerState, setCustomerState] = useState("loading");
   const [editing, setEditing] = useState(false);
+  const [deleting, setDeleting] = useState(false);
   const [history, setHistory] = useState({ status: "loading", rows: [], total: 0, pages: 1, page: 1 });
 
   useEffect(() => {
@@ -70,7 +72,10 @@ export default function CustomerDetail() {
             {customer.notes && <p className="mt-3 max-w-3xl whitespace-pre-wrap text-sm text-slate-500 dark:text-slate-400">{customer.notes}</p>}
           </div>
         </div>
-        {can(PERMISSIONS.EDIT_CUSTOMER) && !customer.deleted_at && <Button variant="secondary" icon={Pencil} label="Edit customer" onClick={() => setEditing(true)} />}
+        {!customer.deleted_at && <div className="flex flex-wrap gap-2">
+          <Button variant="secondary" icon={Pencil} label="Edit customer" disabled={!can(PERMISSIONS.EDIT_CUSTOMER)} title={can(PERMISSIONS.EDIT_CUSTOMER) ? "Edit customer" : "You don’t have permission to edit customers"} onClick={() => setEditing(true)} />
+          <Button variant="danger" icon={Trash2} label="Delete customer" disabled={!can(PERMISSIONS.DELETE_CUSTOMER)} title={can(PERMISSIONS.DELETE_CUSTOMER) ? "Delete customer" : "Only managers and admins can delete customers"} onClick={() => setDeleting(true)} />
+        </div>}
       </header>
 
       <section aria-label="Customer sales history" className={`${panel} overflow-hidden`}>
@@ -88,6 +93,9 @@ export default function CustomerDetail() {
         </nav>}
       </section>
       <CustomerFormDialog open={editing} customer={customer} onClose={() => setEditing(false)} onSaved={setCustomer} />
+      <ConfirmDialog open={deleting} onClose={() => setDeleting(false)} action="delete" entityLabel="customer" entityName={customer.name}
+        descriptionOverride="This customer will be removed from the active list. Their existing sales records will be kept."
+        onConfirm={() => deleteCustomer(customer.id)} onSuccess={() => navigate("/customers")} />
     </div>
   );
 }

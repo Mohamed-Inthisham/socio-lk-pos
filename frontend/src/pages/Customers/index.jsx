@@ -51,9 +51,9 @@ export default function Customers() {
     { key: "email", header: "Email", render: (row) => row.email || <span className="text-slate-400">—</span> },
     { key: "actions", header: "Actions", align: "right", render: (row) => (
       <div className="flex justify-end gap-1" onClick={(event) => event.stopPropagation()}>
-        <Button size="sm" variant="ghost" icon={Eye} iconOnly aria-label={`View ${row.name}`} title="View customer" onClick={() => navigate(`/customers/${row.id}`)} />
-        {can(PERMISSIONS.EDIT_CUSTOMER) && <Button size="sm" variant="ghost" icon={Pencil} iconOnly aria-label={`Edit ${row.name}`} title="Edit customer" onClick={() => openEdit(row)} />}
-        {can(PERMISSIONS.DELETE_CUSTOMER) && <Button size="sm" variant="ghost" icon={Trash2} iconOnly aria-label={`Delete ${row.name}`} title="Delete customer" onClick={() => setDeleting(row)} />}
+        <Button size="sm" variant="ghost" icon={Eye} label="View" aria-label={`View ${row.name}`} onClick={() => navigate(`/customers/${row.id}`)} />
+        <Button size="sm" variant="ghost" icon={Pencil} label="Edit" aria-label={`Edit ${row.name}`} disabled={!can(PERMISSIONS.EDIT_CUSTOMER)} title={can(PERMISSIONS.EDIT_CUSTOMER) ? "Edit customer" : "You don’t have permission to edit customers"} onClick={() => openEdit(row)} />
+        <Button size="sm" variant="ghost" icon={Trash2} label="Delete" aria-label={`Delete ${row.name}`} disabled={!can(PERMISSIONS.DELETE_CUSTOMER)} title={can(PERMISSIONS.DELETE_CUSTOMER) ? "Delete customer" : "Only managers and admins can delete customers"} onClick={() => setDeleting(row)} />
       </div>
     ) },
   ], [can, navigate]);
@@ -98,7 +98,7 @@ export default function Customers() {
       </section>
 
       <CustomerFormDialog open={formOpen} customer={editing} onClose={() => setFormOpen(false)} onSaved={load} />
-      <ConfirmDialog open={!!deleting} onClose={() => setDeleting(null)} action="deactivate" entityLabel="customer" entityName={deleting?.name ?? ""}
+      <ConfirmDialog open={!!deleting} onClose={() => setDeleting(null)} action="delete" entityLabel="customer" entityName={deleting?.name ?? ""}
         descriptionOverride="This customer will be removed from the active list. Their existing sales records will be kept."
         onConfirm={async () => { await deleteCustomer(deleting.id); }} onSuccess={() => { setDeleting(null); load(); }} />
     </div>

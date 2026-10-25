@@ -47,7 +47,7 @@ export default function CustomerFormDialog({ open, customer, onClose, onSaved })
       phone: normalizeSlPhone(values.phone),
       nic: values.nic.trim() || null,
       email: values.email.trim().toLowerCase() || null,
-      notes: values.notes.trim() || null,
+      ...(customer ? { notes: values.notes.trim() || null } : {}),
     };
     try {
       const saved = customer
@@ -76,7 +76,7 @@ export default function CustomerFormDialog({ open, customer, onClose, onSaved })
           <InputField label="NIC" name="customer-nic" value={values.nic} onChange={setField("nic")} error={errors.nic} hint="Optional" />
           <InputField label="Email" name="customer-email" type="email" value={values.email} onChange={setField("email")} error={errors.email} hint="Optional" autoComplete="email" />
         </div>
-        <InputField label="Notes" name="customer-notes" type="textarea" rows={3} value={values.notes} onChange={setField("notes")} />
+        {customer && <InputField label="Notes" name="customer-notes" type="textarea" rows={3} value={values.notes} onChange={setField("notes")} />}
       </form>
     </Dialog>
   );
