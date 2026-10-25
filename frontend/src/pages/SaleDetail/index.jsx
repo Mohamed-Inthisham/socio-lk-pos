@@ -45,6 +45,11 @@ import { GATE, selectCashDayGate } from "../../store/slices/cashDaySlice";
  * since the page opened prints as voided (and the page shows it), then
  * prints it marked "REPRINT · <time>". A failed fetch prints nothing.
  *
+ * TODAY NOT OPEN (P9-9): a void or return refused DAY_CLOSED / DAY_NOT_OPEN
+ * says so in its dialog; closing it re-reads the day gate. On a closed day
+ * the page stays without Void and Return items and focus goes to Reprint;
+ * a day not opened shows the opening instead of the page.
+ *
  * Esc (or Back) returns to the list as it was: the list passed
  * { search, pages, activeId } when it opened this sale, and gets it back
  * as `restore`. Opened directly (no list state), Back goes to today's
@@ -222,9 +227,23 @@ const SaleDetail = () => {
     setVoidOpen(false);
   };
 
+  // After a void or return refused because today isn't open (P9-9): the
+  // gate's re-read focuses its own screen if it replaced the page (the
+  // opening); if the page stays, Reprint (on a closed day Void and Return
+  // items are gone, so Headless UI's return to the opener finds nothing).
+  // Deferred: Headless UI restores focus to the opener after afterLeave.
+  const focusAfterDayRefusal = (dayRecheck) =>
+    dayRecheck.then((gateFocused) => {
+      if (!gateFocused) setTimeout(() => reprintRef.current?.focus(), 0);
+    });
+
   // After a void, focus goes to Reprint (a void slip is one P away);
   // after Cancel, Headless UI returns it to the Void button.
-  const afterVoidLeave = () => {
+  const afterVoidLeave = ({ dayRecheck } = {}) => {
+    if (dayRecheck) {
+      focusAfterDayRefusal(dayRecheck);
+      return;
+    }
     if (!justVoided.current) return;
     justVoided.current = false;
     setTimeout(() => reprintRef.current?.focus(), 0);
@@ -242,7 +261,11 @@ const SaleDetail = () => {
   // After a return, focus goes back to Return items while something is
   // left to return, else to Reprint; after Cancel, Headless UI returns it
   // to the button.
-  const afterReturnLeave = () => {
+  const afterReturnLeave = ({ dayRecheck } = {}) => {
+    if (dayRecheck) {
+      focusAfterDayRefusal(dayRecheck);
+      return;
+    }
     if (!justReturned.current) return;
     justReturned.current = false;
     setTimeout(() => (canReturn ? returnRef.current : reprintRef.current)?.focus(), 0);

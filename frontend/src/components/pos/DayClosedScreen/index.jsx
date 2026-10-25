@@ -1,5 +1,5 @@
 import { Link } from "react-router-dom";
-import { CalendarCheck, Printer, ReceiptText, History } from "lucide-react";
+import { CalendarCheck, ReceiptText, History } from "lucide-react";
 import Button from "../../common/Button";
 import TerminalPanel from "../TerminalPanel";
 import { describeDifferenceForDisplay } from "../../../utils/cashDayMath";
@@ -19,7 +19,6 @@ import { formatLKR, toCents } from "../../../utils/money";
  *
  * PROPS:
  * - day: today's closed cash day
- * - onReprint: optional; when given, a Reprint summary button (step E)
  * - pastDaysTo: optional; when given, a Past days link (step F)
  */
 
@@ -31,7 +30,7 @@ const linkClass = `
   focus:outline-none focus-visible:ring-2 focus-visible:ring-cyan-500
 `;
 
-const DayClosedScreen = ({ day, onReprint, pastDaysTo }) => (
+const DayClosedScreen = ({ day, pastDaysTo }) => (
   <TerminalPanel icon={CalendarCheck} title="Day closed" titleTabIndex={-1} data-testid="day-closed-screen">
     <p className="mt-1 text-sm text-slate-500 dark:text-slate-400">
       {formatColomboDayLabel(day.business_date)} · closed at {formatColomboTime(day.closed_at)} by{" "}
@@ -53,7 +52,6 @@ const DayClosedScreen = ({ day, onReprint, pastDaysTo }) => (
       No more sales today. The till opens again with tomorrow&apos;s opening balance.
     </p>
     <div className="mt-5 flex flex-wrap items-center gap-3">
-      {onReprint && <Button variant="accent" icon={Printer} label="Reprint summary" onClick={onReprint} />}
       {pastDaysTo && (
         <Link to={pastDaysTo} className={linkClass}>
           <History size={16} aria-hidden="true" />

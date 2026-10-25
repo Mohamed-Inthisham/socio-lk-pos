@@ -55,6 +55,7 @@ export const CASH_DAY_ERROR = {
   ALREADY_CLOSED: "already_closed", // C7
   EXPECTED_CHANGED: "expected_changed", // C8
   REASON_REQUIRED: "reason_required", // C9
+  OPEN_SALES: "open_sales", // P9-12: finish or discard drafts before close
   UNAUTHENTICATED: "unauthenticated", // 401: the session could not be refreshed
   SERVER: "server", // 5xx: outcome unknown until re-read
   NETWORK: "network", // no response
@@ -100,6 +101,11 @@ const BY_CODE = {
     closed_at: data.closed_at ?? null,
   }),
   EXPECTED_CHANGED: (data) => ({ kind: CASH_DAY_ERROR.EXPECTED_CHANGED, summary: data.summary ?? null }),
+  OPEN_SALES: (data) => ({
+    kind: CASH_DAY_ERROR.OPEN_SALES,
+    blocks: true,
+    sale_count: data.sale_count ?? 1,
+  }),
   REASON_REQUIRED: (data) => ({
     kind: CASH_DAY_ERROR.REASON_REQUIRED,
     field: "reason",
@@ -233,6 +239,15 @@ export const cashDayErrorView = (error) => {
         ...view,
         message: "A sale, void or return changed the figures. Check them and close again.",
       };
+    case CASH_DAY_ERROR.OPEN_SALES: {
+      const count = error.sale_count ?? 1;
+      return {
+        ...view,
+        message: count === 1
+          ? "There is an unfinished sale. Complete or discard it before closing the day."
+          : `There are ${count} unfinished sales. Complete or discard them before closing the day.`,
+      };
+    }
     case CASH_DAY_ERROR.REASON_REQUIRED:
       return {
         ...view,

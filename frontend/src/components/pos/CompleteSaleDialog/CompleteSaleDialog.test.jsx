@@ -1,8 +1,19 @@
+import { useState } from "react";
 import { vi } from "vitest";
 import { screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import CompleteSaleDialog from ".";
-import { posTerminalState, renderWithProviders } from "../../../test/renderWithProviders";
+import { cashDayState, posTerminalState, renderWithProviders } from "../../../test/renderWithProviders";
+import {
+  BRANCH_ID,
+  closedCashDayEntity,
+  currentCashDayResponse,
+  dayClosedError,
+  dayNotOpenError,
+  openCashDayEntity,
+} from "../../../test/cashDayEntities";
+import { GATE } from "../../../store/slices/cashDaySlice";
+import * as cashDaysService from "../../../services/cashDaysService";
 import {
   cardPayment,
   cashPayment,
@@ -18,6 +29,7 @@ import * as customersService from "../../../services/customersService";
 vi.mock("../../../services/salesService");
 vi.mock("../../../services/stockService");
 vi.mock("../../../services/customersService");
+vi.mock("../../../services/cashDaysService");
 
 const deferred = () => {
   let resolve, reject;
@@ -422,6 +434,109 @@ describe("CompleteSaleDialog", () => {
       await user.keyboard("{Enter}");
       await waitFor(() => expect(onClose).toHaveBeenCalledTimes(1));
       expect(salesService.completeSale).toHaveBeenCalledTimes(2);
+    });
+  });
+
+  describe("today isn't open (P9-9, C10, C11)", () => {
+    // The terminal's gate had today open when the cashier pressed Complete.
+    // The host closes the dialog for real, so afterLeave runs.
+    const Host = ({ onClose, ...props }) => {
+      const [open, setOpen] = useState(true);
+      return (
+        <CompleteSaleDialog
+          open={open}
+          onClose={() => {
+            onClose();
+            setOpen(false);
+          }}
+          {...props}
+        />
+      );
+    };
+    const renderWithGate = (props = {}) => {
+      const onClose = vi.fn();
+      const utils = renderWithProviders(<Host onClose={onClose} {...props} />, {
+        preloadedState: {
+          posTerminal: posTerminalState({ draftSale: paidSale() }),
+          cashDay: cashDayState({
+            branchId: BRANCH_ID,
+            current: { status: GATE.OPEN, businessDate: "2026-10-20", today: openCashDayEntity() },
+          }),
+        },
+      });
+      return { ...utils, onClose };
+    };
+
+    const refuseWith = async (error, props) => {
+      const user = userEvent.setup();
+      salesService.completeSale.mockRejectedValueOnce(error);
+      const utils = renderWithGate(props);
+      await waitFor(() => expect(within(dialog()).queryByText("Checking stock…")).not.toBeInTheDocument());
+      await waitFor(() => expect(completeButton()).toHaveFocus());
+      await user.keyboard("{Enter}");
+      return { ...utils, user };
+    };
+
+    it("DAY_CLOSED: the date, give the payment back, the cart is kept; only Close, focused; nothing re-read yet", async () => {
+      const { store } = await refuseWith(dayClosedError());
+
+      const alert = await within(dialog()).findByRole("alert");
+      expect(alert).toHaveTextContent("Today is closed");
+      expect(alert).toHaveTextContent(
+        "Tue 20 Oct 2026 was closed, so this sale can't be completed. Nothing was saved. If the customer already paid, give the payment back. The cart is kept.",
+      );
+      expect(dialog()).not.toHaveTextContent("2026-10-20");
+      const close = within(dialog()).getByRole("button", { name: "Close" });
+      await waitFor(() => expect(close).toHaveFocus());
+      expect(within(dialog()).queryByRole("button", { name: /Complete sale/ })).not.toBeInTheDocument();
+      expect(within(dialog()).queryByRole("button", { name: "Back" })).not.toBeInTheDocument();
+      // The message comes first: the gate is re-read only once the dialog closes.
+      expect(cashDaysService.getCurrentCashDay).not.toHaveBeenCalled();
+      // The draft is untouched: not re-read, still the terminal's sale.
+      expect(salesService.getSale).not.toHaveBeenCalled();
+      expect(store.getState().posTerminal.draftSale).toMatchObject({ id: "sale-1", status: "DRAFT" });
+      expect(salesService.completeSale).toHaveBeenCalledTimes(1);
+    });
+
+    it("DAY_NOT_OPEN: count without this sale's cash, open, then complete", async () => {
+      await refuseWith(dayNotOpenError());
+
+      const alert = await within(dialog()).findByRole("alert");
+      expect(alert).toHaveTextContent("Today isn't open yet");
+      expect(alert).toHaveTextContent(
+        "Tue 20 Oct 2026 hasn't been opened, so this sale can't be completed. Nothing was saved. Count the box without this sale's cash, enter the opening balance, then complete it. The cart and its payments are kept.",
+      );
+      await waitFor(() => expect(within(dialog()).getByRole("button", { name: "Close" })).toHaveFocus());
+    });
+
+    it("Close re-reads the gate, and hands the re-read to afterLeave", async () => {
+      cashDaysService.getCurrentCashDay.mockResolvedValue(currentCashDayResponse({ today: closedCashDayEntity() }));
+      const afterLeave = vi.fn();
+      const { onClose, user, store } = await refuseWith(dayClosedError(), { afterLeave });
+      const close = await within(dialog()).findByRole("button", { name: "Close" });
+
+      await user.click(close);
+
+      expect(onClose).toHaveBeenCalledTimes(1);
+      expect(cashDaysService.getCurrentCashDay).toHaveBeenCalledWith(BRANCH_ID);
+      await waitFor(() => expect(store.getState().cashDay.current.status).toBe(GATE.CLOSED));
+      await waitFor(() => expect(afterLeave).toHaveBeenCalledTimes(1));
+      const { dayRecheck } = afterLeave.mock.calls[0][0];
+      // No gate screen here (no <main>): the page picks the focus.
+      await expect(dayRecheck).resolves.toBe(false);
+      expect(salesService.completeSale).toHaveBeenCalledTimes(1);
+    });
+
+    it("an ordinary Back hands afterLeave no re-read", async () => {
+      const afterLeave = vi.fn();
+      const user = userEvent.setup();
+      renderWithGate({ afterLeave });
+      await waitFor(() => expect(within(dialog()).queryByText("Checking stock…")).not.toBeInTheDocument());
+
+      await user.click(within(dialog()).getByRole("button", { name: "Back" }));
+
+      await waitFor(() => expect(afterLeave).toHaveBeenCalledWith({ dayRecheck: null }));
+      expect(cashDaysService.getCurrentCashDay).not.toHaveBeenCalled();
     });
   });
 

@@ -22,7 +22,7 @@ Migration `CreateCashDays`:
 | `counted_balance` | numeric(12,2) NULL | Typed at close |
 | `difference` | numeric(12,2) NULL | counted − expected; negative = short |
 | `difference_reason` | varchar(500) NULL | Set exactly when the difference is 1.00 or more either way ([the rounding rule](#the-rounding-rule)) |
-| `summary` | jsonb NULL | The rest of the printout, frozen at close ([below](#the-summary-jsonb)) |
+| `summary` | jsonb NULL | Detailed closing summary, frozen at close ([below](#the-summary-jsonb)) |
 | `closed_by` | uuid NULL | `FK_cash_days_closed_by` (RESTRICT) |
 | `closed_at` | timestamptz NULL | |
 | `close_client_request_id` | uuid NULL | `UQ_cash_days_close_client_request_id` |
@@ -66,9 +66,9 @@ In code the test is integer cents, `abs(differenceCents) >= 100` (`REASON_THRESH
 
 The till (frontend) shows **"Exact"** only at 0.00, **"Rounding LKR X"** under 1.00, and "Short LKR X" / "Over LKR X" from 1.00. The `DAY_CLOSE` audit description uses the same words (`describeDifference` in `cash-day-math.ts`).
 
-## The summary jsonb
+## The saved summary jsonb
 
-Frozen at close so a reprint matches the original print (P9-15). Money is a 2-decimal string; every non-cash tender is always present (`"0.00"` when none):
+Frozen at close so historical records preserve the closing information as it was counted (P9-15). Money is a 2-decimal string; every non-cash tender is always present (`"0.00"` when none):
 
 ```json
 {
@@ -95,10 +95,10 @@ A day in responses is `{ id, branch_id, business_date, opening_balance, opened_b
 |---|---|
 | `GET /cash-days/current?branchId=` | `{ business_date, today, earlier_open, last_closed }`: the server's Colombo date; today's day or null; the oldest earlier day still open `{ id, business_date }` or null; the most recent closed day `{ business_date, counted_balance }` or null (P9-7, P9-8). 404 "Branch not found". |
 | `POST /cash-days/open` `{ branch_id, opening_balance, client_request_id }` | 201 the day; 200 the recorded one on a resend. |
-| `GET /cash-days/:id/summary` | `{ cash_day_id, business_date, closed, opening_balance, cash_sales, cash_refunds, cash_voids_earlier, expected_balance, summary }`: live for an open day (the close dialog's preview), the snapshot for a closed one. |
+| `GET /cash-days/:id/summary` | `{ cash_day_id, business_date, closed, opening_balance, cash_sales, cash_refunds, cash_voids_earlier, expected_balance, summary }`: live for an open day (the close dialog's preview), the saved snapshot for a closed one. |
 | `POST /cash-days/:id/close` `{ counted_balance, difference_reason?, expected_seen, client_request_id }` | 200 the closed day, also on a resend. |
 | `GET /cash-days?branchId=&page=&limit=` | `{ data, meta }`: the branch's days **open ones included** (`closed_at` and `closed_by` null), newest `business_date` first, each with opener and closer `{ id, full_name }` (P9-16). 404 "Branch not found". |
-| `GET /cash-days/:id` | One day (reprint). |
+| `GET /cash-days/:id` | One day with its saved closing details. |
 
 ### Open
 
@@ -122,15 +122,16 @@ A clash on `UQ_cash_days_open_client_request_id` (the same id sent at once) is a
 3. **C3** as for open, for this day and user.
 4. **C2** wrong branch (403).
 5. The transaction (P9-10):
-   1. `FOR UPDATE` on the day's row, **selected by id with no `closed_at` filter**; open or closed is checked in code on the row returned.
-   2. C3 again (a resend that waited on the lock).
-   3. **C7** already closed: 409 `DAY_ALREADY_CLOSED` with `cash_day_id`, `closed_at`.
-   4. The summary, **run after the lock is held**, in the same transaction.
+   1. Resolve the branch, then lock its DRAFT sales created or modified since this cash day opened that have at least one sale line or payment, ordered by sale id (`FOR UPDATE OF s`). If any exist, refuse with 409 `OPEN_SALES` and `sale_count`; the cashier must complete or discard them first. Empty auto-created drafts and abandoned drafts from earlier days do not block close. These sale locks precede the day lock to match the sale-to-cash-day lock order.
+   2. `FOR UPDATE` on the day's row, **selected by id with no `closed_at` filter**; open or closed is checked in code on the row returned.
+   3. C3 again (a resend that waited on the lock).
+   4. **C7** already closed: 409 `DAY_ALREADY_CLOSED` with `cash_day_id`, `closed_at`.
+   5. The summary, **run after the lock is held**, in the same transaction.
    5. **C8** `expected_seen` ≠ the expected just worked out: 409 `EXPECTED_CHANGED` with `summary` (the fresh figures, as `GET /:id/summary`). Before C9: the expected decides the difference.
    6. difference = counted − expected, stored exactly. **C9** ([the rounding rule](#the-rounding-rule)): under 1.00 either way (0 included), any reason sent is ignored and `difference_reason` stored null (never a 400, never a CHECK violation); from 1.00, fewer than 3 characters after trimming is 400 `REASON_REQUIRED` with `difference`.
    7. The snapshot (`closed_at = now()`) and the **`DAY_CLOSE`** audit row (expected, counted, difference, reason).
 
-A closed day is never edited and never reopened. Every 4xx body is `{ message, code, … }`.
+A closed day is never edited and never reopened. Every 4xx body is `{ message, code, … }`. `OPEN_SALES` checks drafts created or modified since the active cash day opened, so unfinished carts on other terminals block closing while abandoned drafts from earlier days do not.
 
 ## Enforcement (backend 0b)
 

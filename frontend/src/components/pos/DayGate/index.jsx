@@ -30,7 +30,8 @@ import { cashDayErrorView } from "../../../utils/cashDayErrors";
  *
  * READS GET /cash-days/current on mount, when the branch changes (the
  * slice starts that branch from a clean state), when the tab becomes
- * visible again and on Try again.
+ * visible again and on Try again; and when a dialog refused DAY_NOT_OPEN
+ * / DAY_CLOSED closes (cashDaySlice recheckCashDay, P9-9).
  *
  * STATES (cashDaySlice current.status):
  * - idle / loading, no answer yet: a spinner
@@ -54,8 +55,10 @@ import { cashDayErrorView } from "../../../utils/cashDayErrors";
 
 const TILL_PATH = "/pos";
 
+// data-day-gate-screen: the gate shows instead of the page
+// (utils/posFocus.js focusAfterDayRecheck looks for it).
 const Centred = ({ children }) => (
-  <div className="h-full overflow-y-auto">
+  <div className="h-full overflow-y-auto" data-day-gate-screen="">
     <div className="min-h-full flex items-center justify-center p-4">{children}</div>
   </div>
 );

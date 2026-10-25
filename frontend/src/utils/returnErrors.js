@@ -1,5 +1,6 @@
 import { formatLKR, toCents } from "./money";
 import { SET_YOUR_PIN_MESSAGE } from "./voidErrors";
+import { DAY_ACTION, DAY_REFUSAL, dayRefusalOf, dayRefusalText } from "./dayRefusal";
 
 /**
  * Return errors (planning doc P7-15, P7-24, returns.md R1–R12)
@@ -31,7 +32,9 @@ import { SET_YOUR_PIN_MESSAGE } from "./voidErrors";
  *   (phone_taken_back); sale_line_ids (override_required); refund_due,
  *   refund_due_cents (refund_too_high); method, original_payment_id
  *   (refund_method); payment_id, refundable, refundable_cents
- *   (refund_exceeds_payment)
+ *   (refund_exceeds_payment); business_date (day_not_open, day_closed:
+ *   P9-9, checked before the PIN, so no attempt was spent and nothing was
+ *   recorded under the request id; utils/dayRefusal.js)
  */
 
 export const RETURN_ERROR = {
@@ -51,6 +54,8 @@ export const RETURN_ERROR = {
   WRONG_PIN: "wrong_pin", // 403 WRONG_PIN
   PIN_LOCKED: "pin_locked", // 423 PIN_LOCKED
   APPROVER_REFUSED: "approver_refused", // 403 APPROVER_*
+  DAY_NOT_OPEN: "day_not_open", // 409 DAY_NOT_OPEN (C10)
+  DAY_CLOSED: "day_closed", // 409 DAY_CLOSED (C11)
   SERVER: "server", // 5xx: outcome unknown until re-read
   NETWORK: "network", // no response
   TIMEOUT: "timeout", // RETURN_TIMEOUT_MS passed
@@ -149,6 +154,15 @@ export const classifyReturnError = (error) => {
   if (status >= 500) return { ...known, kind: RETURN_ERROR.SERVER, reconcile: true };
   if (status === 404) return { ...known, kind: RETURN_ERROR.NOT_FOUND, blocks: true };
 
+  const day = dayRefusalOf(response);
+  if (day) {
+    return {
+      ...known,
+      kind: day.code === DAY_REFUSAL.CLOSED ? RETURN_ERROR.DAY_CLOSED : RETURN_ERROR.DAY_NOT_OPEN,
+      blocks: true,
+      business_date: day.business_date,
+    };
+  }
   if (typeof code === "string" && BY_CODE[code]) {
     return { ...known, ...BY_CODE[code](data) };
   }
@@ -187,6 +201,8 @@ const LOCKED_SUFFIX = " Another manager can approve, or an admin can clear the P
  *   blocks: boolean,             // Return stays disabled until closed
  *   refresh: boolean,            // re-read the sale
  *   reconcile: boolean,          // re-read and look for this request's return
+ *   dayRefused?: true,           // today isn't open: only Close; the gate
+ *                                // re-reads when the dialog closes
  * }}
  */
 export const returnErrorView = (error, { approverIsSelf = false, lineName = () => null } = {}) => {
@@ -262,6 +278,19 @@ export const returnErrorView = (error, { approverIsSelf = false, lineName = () =
       return { ...view, message: "This return can't be sent. Close it and start the return again." };
     case RETURN_ERROR.FORBIDDEN:
       return { ...view, message: "You can't make returns on this sale." };
+    case RETURN_ERROR.DAY_NOT_OPEN:
+    case RETURN_ERROR.DAY_CLOSED:
+      return {
+        ...view,
+        message: dayRefusalText(
+          {
+            code: error.kind === RETURN_ERROR.DAY_CLOSED ? DAY_REFUSAL.CLOSED : DAY_REFUSAL.NOT_OPEN,
+            business_date: error.business_date ?? null,
+          },
+          DAY_ACTION.RETURN,
+        ).message,
+        dayRefused: true,
+      };
     case RETURN_ERROR.NETWORK:
     case RETURN_ERROR.TIMEOUT:
     case RETURN_ERROR.SERVER:

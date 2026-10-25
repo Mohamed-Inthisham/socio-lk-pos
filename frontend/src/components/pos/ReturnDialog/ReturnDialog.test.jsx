@@ -1,10 +1,21 @@
+import { useState } from "react";
 import { vi } from "vitest";
 import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { Provider } from "react-redux";
 import { MemoryRouter } from "react-router-dom";
 import ReturnDialog from ".";
-import { authState, createTestStore } from "../../../test/renderWithProviders";
+import { authState, cashDayState, createTestStore } from "../../../test/renderWithProviders";
+import {
+  BRANCH_ID,
+  closedCashDayEntity,
+  currentCashDayResponse,
+  dayClosedError,
+  dayNotOpenError,
+  openCashDayEntity,
+} from "../../../test/cashDayEntities";
+import { GATE } from "../../../store/slices/cashDaySlice";
+import * as cashDaysService from "../../../services/cashDaysService";
 import { cashierUser } from "../../../test/fixtures";
 import { paymentEntity, saleEntity, saleLineEntity } from "../../../test/saleEntities";
 import {
@@ -37,6 +48,7 @@ vi.mock("../../../services/approvalsService");
 vi.mock("../../../services/salesService");
 vi.mock("../../../services/stockService");
 vi.mock("../../../utils/printReceipt");
+vi.mock("../../../services/cashDaysService");
 
 // 10:30 on Fri 23 Oct 2026 in Colombo; saleEntity was completed on the 21st.
 const NOW = new Date("2026-10-23T05:00:00.000Z");
@@ -733,6 +745,117 @@ describe("ReturnDialog: sending (P7-9, P7-15)", () => {
     await fillFixtureReturn(user);
     await user.click(returnButton());
     expect(await within(total()).findByText(`Only ${lkr("2500.00")} can still go back to that payment.`)).toBeInTheDocument();
+  });
+});
+
+describe("ReturnDialog: today isn't open (P9-9, C10, C11)", () => {
+  let idSpy;
+  beforeEach(() => {
+    idSpy = vi.spyOn(requestId, "newClientRequestId").mockReturnValue(CLIENT_REQUEST_ID);
+  });
+  afterEach(() => idSpy.mockRestore());
+
+  // The gate's last answer: today open. The host closes the dialog for
+  // real, so afterLeave runs.
+  const renderOpenDay = () => {
+    const afterLeave = vi.fn();
+    const store = createTestStore({
+      auth: authState(cashierUser),
+      cashDay: cashDayState({
+        branchId: BRANCH_ID,
+        current: { status: GATE.OPEN, businessDate: "2026-10-20", today: openCashDayEntity() },
+      }),
+    });
+    const Host = () => {
+      const [open, setOpen] = useState(true);
+      return (
+        <ReturnDialog open={open} onClose={() => setOpen(false)} sale={saleEntity()} afterLeave={afterLeave} />
+      );
+    };
+    render(
+      <Provider store={store}>
+        <MemoryRouter>
+          <Host />
+        </MemoryRouter>
+      </Provider>,
+    );
+    return { store, afterLeave };
+  };
+
+  const send = async (user) => {
+    await toRefund(user);
+    await refundToCard(user);
+    await fillApproval(user);
+    await user.click(returnButton());
+  };
+
+  it("DAY_CLOSED: the date, nothing changed, no PIN attempt; PIN cleared; only Close, focused; not re-read yet", async () => {
+    const user = userEvent.setup();
+    salesService.createReturn.mockRejectedValue(dayClosedError());
+    renderOpenDay();
+    await send(user);
+
+    expect(await within(dialog()).findByRole("alert")).toHaveTextContent(
+      "Tue 20 Oct 2026 is closed: no returns until tomorrow's opening. Nothing was changed and no PIN attempt was used.",
+    );
+    expect(dialog()).not.toHaveTextContent("2026-10-20");
+    expect(within(dialog()).getByLabelText("Approval PIN")).toHaveValue("");
+    const close = within(dialog()).getByRole("button", { name: "Close" });
+    await waitFor(() => expect(close).toHaveFocus());
+    expect(within(dialog()).queryByRole("button", { name: /^(Return items|Try again)$/ })).not.toBeInTheDocument();
+    expect(within(dialog()).queryByRole("button", { name: "Back" })).not.toBeInTheDocument();
+    // Nothing recorded: no sale re-read, nothing resent, the gate not read yet.
+    expect(salesService.getSale).not.toHaveBeenCalled();
+    expect(salesService.createReturn).toHaveBeenCalledTimes(1);
+    expect(cashDaysService.getCurrentCashDay).not.toHaveBeenCalled();
+  });
+
+  it("DAY_NOT_OPEN: open the day, then make the return", async () => {
+    const user = userEvent.setup();
+    salesService.createReturn.mockRejectedValue(dayNotOpenError());
+    renderOpenDay();
+    await send(user);
+
+    expect(await within(dialog()).findByRole("alert")).toHaveTextContent(
+      "Tue 20 Oct 2026 hasn't been opened yet. Nothing was changed and no PIN attempt was used. Enter the opening balance, then make the return.",
+    );
+    await waitFor(() => expect(within(dialog()).getByRole("button", { name: "Close" })).toHaveFocus());
+  });
+
+  it("Close re-reads the gate and hands the re-read to afterLeave; nothing is resent", async () => {
+    const user = userEvent.setup();
+    salesService.createReturn.mockRejectedValue(dayClosedError());
+    cashDaysService.getCurrentCashDay.mockResolvedValue(currentCashDayResponse({ today: closedCashDayEntity() }));
+    const { store, afterLeave } = renderOpenDay();
+    await send(user);
+
+    await user.click(await within(dialog()).findByRole("button", { name: "Close" }));
+
+    await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
+    expect(cashDaysService.getCurrentCashDay).toHaveBeenCalledWith(BRANCH_ID);
+    await waitFor(() => expect(store.getState().cashDay.current.status).toBe(GATE.CLOSED));
+    await waitFor(() => expect(afterLeave).toHaveBeenCalledTimes(1));
+    // No gate screen here (no <main>): the page picks the focus.
+    await expect(afterLeave.mock.calls[0][0].dayRecheck).resolves.toBe(false);
+    expect(salesService.createReturn).toHaveBeenCalledTimes(1);
+  });
+
+  it("a lost answer, then Try again meets DAY_CLOSED: the same request id once, then only Close", async () => {
+    const user = userEvent.setup();
+    salesService.createReturn.mockRejectedValueOnce(returnNetworkError()).mockRejectedValueOnce(dayClosedError());
+    salesService.getSale.mockResolvedValue(saleEntity());
+    renderOpenDay();
+    await send(user);
+    await within(dialog()).findByText("The return wasn't recorded. Enter the PIN again and press Try again.");
+    await user.type(within(dialog()).getByLabelText("Approval PIN"), PIN);
+    await user.click(returnButton());
+
+    expect(await within(dialog()).findByRole("alert")).toHaveTextContent("Tue 20 Oct 2026 is closed: no returns");
+    await waitFor(() => expect(within(dialog()).getByRole("button", { name: "Close" })).toHaveFocus());
+    const [first, second] = salesService.createReturn.mock.calls;
+    expect(second[1].client_request_id).toBe(CLIENT_REQUEST_ID);
+    expect(second[1]).toEqual(first[1]);
+    expect(salesService.createReturn).toHaveBeenCalledTimes(2);
   });
 });
 

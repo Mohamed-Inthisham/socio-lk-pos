@@ -1,4 +1,5 @@
 import { COMPLETE_ERROR, classifyCompleteError } from "./completeErrors";
+import { dayClosedError, dayNotOpenError } from "../test/cashDayEntities";
 
 const httpError = (status, data) =>
   Object.assign(new Error(`Request failed with status code ${status}`), {
@@ -6,6 +7,24 @@ const httpError = (status, data) =>
   });
 
 describe("classifyCompleteError", () => {
+  it("C10: 409 DAY_NOT_OPEN → day_not_open with business_date, no reconcile (nothing was written)", () => {
+    expect(classifyCompleteError(dayNotOpenError())).toEqual({
+      kind: COMPLETE_ERROR.DAY_NOT_OPEN,
+      message: "Today (2026-10-20) hasn't been opened. Enter the opening balance first.",
+      status: 409,
+      reconcile: false,
+      business_date: "2026-10-20",
+    });
+  });
+
+  it("C11: 409 DAY_CLOSED → day_closed with business_date, no reconcile", () => {
+    expect(classifyCompleteError(dayClosedError())).toMatchObject({
+      kind: COMPLETE_ERROR.DAY_CLOSED,
+      status: 409,
+      reconcile: false,
+      business_date: "2026-10-20",
+    });
+  });
   it("E1: 404 → not_found, no reconcile", () => {
     expect(classifyCompleteError(httpError(404, { message: "Sale not found" }))).toEqual({
       kind: COMPLETE_ERROR.NOT_FOUND,

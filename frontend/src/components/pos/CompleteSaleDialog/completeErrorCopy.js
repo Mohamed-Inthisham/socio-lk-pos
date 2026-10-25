@@ -1,16 +1,20 @@
 import { COMPLETE_ERROR } from "../../../utils/completeErrors";
+import { DAY_ACTION, DAY_REFUSAL, dayRefusalText } from "../../../utils/dayRefusal";
 
 /**
  * What the CompleteSaleDialog tells the cashier about a failed complete
  * (planning doc P5-8), from the classified error (utils/completeErrors.js).
  *
- * Returns { title, body, fix, reload, nic }:
+ * Returns { title, body, fix, reload, nic } (and dayRefused: true for a day refusal):
  * - fix: "cart" | "payments" | null — the sale has to change before it can
  *   complete: Complete is blocked and the dialog offers "Fix the cart" /
  *   "Fix the payments", which closes it (the row stays highlighted).
  *   null = trying again may work, so Complete stays available.
  * - reload: the terminal's copy of the sale is out of date — re-read it.
  * - nic: show the NIC form instead of a message (E8).
+ * - dayRefused: today isn't open (P9-9, utils/dayRefusal.js). Nothing was
+ *   saved and the cart is kept; only Close is offered, and the gate
+ *   re-reads once the dialog closes.
  */
 
 const SAFE_RETRY = "Nothing was saved. Try again.";
@@ -26,6 +30,17 @@ export const describeCompleteError = (err) => {
   });
 
   switch (err.kind) {
+    case COMPLETE_ERROR.DAY_NOT_OPEN:
+    case COMPLETE_ERROR.DAY_CLOSED: {
+      const { title, message } = dayRefusalText(
+        {
+          code: err.kind === COMPLETE_ERROR.DAY_CLOSED ? DAY_REFUSAL.CLOSED : DAY_REFUSAL.NOT_OPEN,
+          business_date: err.business_date ?? null,
+        },
+        DAY_ACTION.COMPLETE,
+      );
+      return describe(title, message, { dayRefused: true });
+    }
     case COMPLETE_ERROR.OUT_OF_STOCK: {
       const figures =
         err.requested != null && err.available != null

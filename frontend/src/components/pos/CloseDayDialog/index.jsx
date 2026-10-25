@@ -22,6 +22,7 @@ import { differenceCents, needsReason } from "../../../utils/cashDayMath";
 import { shortDayLabel } from "../../../utils/cashDayLabels";
 import { formatColomboTime } from "../../../utils/colomboTime";
 import { toCents } from "../../../utils/money";
+import { focusTerminalMain } from "../../../utils/posFocus";
 
 /**
  * CloseDayDialog Component
@@ -40,7 +41,9 @@ import { toCents } from "../../../utils/money";
  *   blind count, P9-24); Counted and Difference follow the typing, the
  *   difference in the till's words (describeDifferenceForDisplay). The
  *   reason box shows from 1.00 either way (the rounding rule). The open
- *   sale's items are warned about (P9-12). Esc cancels; nothing is sent.
+ *   sale's items are warned about and block closing until the sale is
+ *   completed or discarded (P9-12). The backend also blocks drafts from
+ *   another terminal. Esc cancels; nothing is sent.
  * - Confirm: the count and reason read-only, then "No more sales today
  *   after closing. This can't be undone." Focus on Back, so a stray Enter
  *   never closes the day; Esc goes back.
@@ -62,19 +65,6 @@ import { toCents } from "../../../utils/money";
 
 const FORM_ID = "close-day-form";
 const EMPTY = { counted_balance: "", difference_reason: "" };
-
-const focusAfterClose = (target) => {
-  const main = document.querySelector("main");
-  if (!main) return;
-  if (target === "amount") {
-    main.querySelector('input[name="opening_balance"]')?.focus();
-    return;
-  }
-  const heading = main.querySelector("h1");
-  if (!heading) return;
-  if (!heading.hasAttribute("tabindex")) heading.setAttribute("tabindex", "-1");
-  heading.focus();
-};
 
 const Alert = ({ children }) => (
   <div
@@ -180,7 +170,7 @@ const CloseDayDialog = () => {
     focusTarget.current = null;
     dispatch(endCloseDay());
     setLeaving(false);
-    if (target) setTimeout(() => focusAfterClose(target), 0);
+    if (target) setTimeout(() => focusTerminalMain(target), 0);
   };
   const onClose = () => {
     if (submitting || unconfirmed) return;
@@ -189,7 +179,10 @@ const CloseDayDialog = () => {
     else leave();
   };
 
-  const toConfirm = handleSubmit(() => setStage("confirm"));
+  const toConfirm = handleSubmit(() => {
+    if (items > 0) return;
+    setStage("confirm");
+  });
   const send = () => {
     if (unconfirmed) {
       dispatch(closeDay());
@@ -249,21 +242,21 @@ const CloseDayDialog = () => {
         {view && view.field !== "reason" && <Alert>{view.message}</Alert>}
         {items > 0 && shown === "count" && (
           <div
-            role="note"
+            role="alert"
             data-testid="cart-warning"
-            className="mb-4 bg-amber-50 dark:bg-amber-950/40 border border-amber-200 dark:border-amber-900 rounded-lg p-3 flex items-start gap-2 text-xs text-amber-800 dark:text-amber-200"
+            className="mb-4 bg-red-50 dark:bg-red-950/40 border border-red-200 dark:border-red-900 rounded-lg p-3 flex items-start gap-2 text-xs text-red-800 dark:text-red-200"
           >
-            <AlertTriangle size={16} aria-hidden="true" className="shrink-0 mt-0.5" />
+            <AlertCircle size={16} aria-hidden="true" className="shrink-0 mt-0.5" />
             <p>
-              The open sale has {items} {items === 1 ? "item" : "items"}. It can&apos;t be completed until
-              tomorrow&apos;s opening.
+              There is an unfinished sale with {items} {items === 1 ? "item" : "items"}. Complete or discard it
+              before closing the day.
             </p>
           </div>
         )}
         <form
           id={FORM_ID}
           onSubmit={toConfirm}
-          // Close day… sits in the dialog footer, outside this form: browsers
+          // Close day sits in the dialog footer, outside this form: browsers
           // differ on Enter submitting through form=…, so Enter in the
           // counted field is handled here (the textarea keeps its newline).
           onKeyDown={(e) => {
@@ -313,7 +306,13 @@ const CloseDayDialog = () => {
       footer = (
         <>
           <Button variant="secondary" label="Cancel" onClick={leave} />
-          <Button type="submit" form={FORM_ID} variant="accent" label="Close day…" />
+          <Button
+            type="submit"
+            form={FORM_ID}
+            variant="accent"
+            label="Close day"
+            disabled={items > 0 || submitting}
+          />
         </>
       );
     } else if (unconfirmed) {

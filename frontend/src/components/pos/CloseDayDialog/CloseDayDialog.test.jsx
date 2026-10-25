@@ -84,7 +84,7 @@ const countAndClose = async (user, count, reason) => {
   await user.type(counted(), count);
   if (reason) await user.type(reasonBox(), reason);
   // Enter in the reason box is a newline, so go on with the button.
-  await user.click(screen.getByRole("button", { name: "Close day…" }));
+  await user.click(screen.getByRole("button", { name: "Close day" }));
   await user.click(await screen.findByRole("button", { name: "Close day" }));
 };
 
@@ -148,16 +148,19 @@ describe("CloseDayDialog: count (P9-11)", () => {
     expect(screen.queryByTestId("close-day-final")).not.toBeInTheDocument();
   });
 
-  it("warns about the open sale's items, counting quantities", async () => {
+  it("warns and disables closing for the open sale, counting quantities", async () => {
     await renderDialog({ lines: [{ id: "l1", quantity: 2 }, { id: "l2", quantity: 1 }] });
     expect(screen.getByTestId("cart-warning")).toHaveTextContent(
-      "The open sale has 3 items. It can't be completed until tomorrow's opening.",
+      "There is an unfinished sale with 3 items. Complete or discard it before closing the day.",
     );
+    expect(screen.getByRole("button", { name: "Close day" })).toBeDisabled();
   });
 
   it("says 1 item for one", async () => {
     await renderDialog({ lines: [{ id: "l1", quantity: 1 }] });
-    expect(screen.getByTestId("cart-warning")).toHaveTextContent("The open sale has 1 item.");
+    expect(screen.getByTestId("cart-warning")).toHaveTextContent(
+      "There is an unfinished sale with 1 item. Complete or discard it before closing the day.",
+    );
   });
 
   it("has no warning with an empty cart", async () => {
@@ -201,7 +204,7 @@ describe("CloseDayDialog: confirm and send", () => {
     await renderDialog();
     await user.type(counted(), "15400");
     await user.type(reasonBox(), "Coins short");
-    await user.click(screen.getByRole("button", { name: "Close day…" }));
+    await user.click(screen.getByRole("button", { name: "Close day" }));
 
     expect(screen.getByTestId("close-day-final")).toHaveTextContent(
       "No more sales today after closing. This can't be undone.",
@@ -301,7 +304,7 @@ describe("CloseDayDialog: server answers", () => {
     expect(cashDaysService.closeCashDay).toHaveBeenCalledTimes(1);
 
     cashDaysService.closeCashDay.mockResolvedValueOnce(closedCashDayEntity());
-    await user.click(screen.getByRole("button", { name: "Close day…" }));
+    await user.click(screen.getByRole("button", { name: "Close day" }));
     await user.click(await screen.findByRole("button", { name: "Close day" }));
 
     await waitFor(() => expect(cashDaysService.closeCashDay).toHaveBeenCalledTimes(2));

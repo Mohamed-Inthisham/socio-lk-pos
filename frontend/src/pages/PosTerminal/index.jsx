@@ -440,14 +440,23 @@ const PosTerminal = () => {
         }}
         // Deferred: Headless UI restores focus to the opener after afterLeave.
         // Print once the dialog has gone, then hand focus back (P5-12).
-        afterLeave={() =>
+        // After a day refusal (P9-9) the gate's re-read focuses its own
+        // screen if it replaced the till; if the till is still here (today
+        // open after all), the scan bar.
+        afterLeave={({ dayRecheck } = {}) => {
+          if (dayRecheck) {
+            dayRecheck.then((gateFocused) => {
+              if (!gateFocused) setTimeout(returnFocus, 0);
+            });
+            return;
+          }
           setTimeout(() => {
             const completedSale = receiptToPrint.current;
             receiptToPrint.current = null;
             if (completedSale) printReceipt(completedSale).catch(() => {}).finally(returnFocus);
             else returnFocus();
-          }, 0)
-        }
+          }, 0);
+        }}
       />
     </div>
   );

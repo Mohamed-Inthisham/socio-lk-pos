@@ -1,7 +1,7 @@
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useForm, useWatch } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
-import { useSelector } from "react-redux";
+import { useDispatch, useSelector } from "react-redux";
 import { Link } from "react-router-dom";
 import { AlertCircle, Loader2 } from "lucide-react";
 import Dialog from "../../common/Dialog";
@@ -11,6 +11,8 @@ import ManagerApprovalFields from "../ManagerApprovalFields";
 import { methodLabel } from "../PaymentDialog/methods";
 import { OTHER, VOID_REASONS, buildVoidPayload, voidFormDefaults, voidSchema } from "../../../schemas/voidSchema";
 import { getSale, voidSale } from "../../../services/salesService";
+import { recheckCashDay } from "../../../store/slices/cashDaySlice";
+import { whenDayRechecked } from "../../../utils/posFocus";
 import { formatLKR } from "../../../utils/money";
 import { classifyVoidError, voidErrorView } from "../../../utils/voidErrors";
 import { voidSummary } from "../../../utils/voidSummary";
@@ -41,6 +43,12 @@ import { voidSummary } from "../../../utils/voidSummary";
  * /sales/:id); VOIDED counts as done, COMPLETED says nothing was voided,
  * and if the re-read fails too, "Check again" re-reads only.
  *
+ * TODAY NOT OPEN (409 DAY_NOT_OPEN / DAY_CLOSED, P9-9): checked before the
+ * PIN, so nothing changed and no attempt was spent. The reason shows as
+ * the alert and the footer is only Close, focused; never resent. Closing
+ * re-reads the day gate (recheckCashDay): on a closed day the page stays
+ * without Void and Return items; a day not opened shows the opening.
+ *
  * THE PIN is cleared after every attempt and when the dialog closes; it
  * lives only in this form (never Redux, storage or logs), and the axios
  * error is never kept (it carries the request body).
@@ -49,7 +57,10 @@ import { voidSummary } from "../../../utils/voidSummary";
  * - open, onClose
  * - sale: the COMPLETED sale (hydrated)
  * - onVoided: (voidedSale) => void
- * - afterLeave: forwarded to Dialog (the page hands focus on)
+ * - afterLeave: ({ dayRecheck }) => void, once the dialog has gone (the
+ *   page hands focus on); dayRecheck, after a day refusal, is the gate's
+ *   re-read (utils/posFocus.js whenDayRechecked: true when the gate took
+ *   the focus), else null
  */
 
 const FORM_ID = "void-sale-form";
@@ -62,13 +73,22 @@ const Section = ({ title, children }) => (
 );
 
 const VoidSaleDialog = ({ open, onClose, sale, onVoided, afterLeave }) => {
+  const dispatch = useDispatch();
   const sessionUser = useSelector((state) => state.auth.user);
   const [phase, setPhase] = useState("form"); // form | voiding | checking | unknown
   const [alert, setAlert] = useState(null); // { message, laterSale, lead, tail }
   const [blocked, setBlocked] = useState(false);
+  const [dayRefused, setDayRefused] = useState(false);
   const [approvers, setApprovers] = useState({ status: "loading", count: 0 });
   const sending = useRef(false);
   const reasonGroup = useRef(null);
+  const closeRef = useRef(null);
+  const dayRecheck = useRef(null);
+
+  // A day refusal leaves only Close: it takes the focus.
+  useEffect(() => {
+    if (dayRefused) closeRef.current?.focus();
+  }, [dayRefused]);
 
   const {
     register,
@@ -99,8 +119,18 @@ const VoidSaleDialog = ({ open, onClose, sale, onVoided, afterLeave }) => {
 
   const close = () => {
     if (busy) return;
+    // P9-9: the cashier has read why; now the gate re-reads and moves on.
+    if (dayRefused && !dayRecheck.current) dayRecheck.current = whenDayRechecked(dispatch(recheckCashDay()));
     clearAll();
     onClose();
+  };
+
+  // dayRefused is reset only here, so the footer stays Close while it fades.
+  const onAfterLeave = () => {
+    const recheck = dayRecheck.current;
+    dayRecheck.current = null;
+    setDayRefused(false);
+    afterLeave?.({ dayRecheck: recheck });
   };
 
   const finishVoided = (voided) => {
@@ -150,6 +180,7 @@ const VoidSaleDialog = ({ open, onClose, sale, onVoided, afterLeave }) => {
       } else {
         setPhase("form");
         if (view.blocksVoid) setBlocked(true);
+        if (view.dayRefused) setDayRefused(true);
         if (view.field === "approver") setError("approver_id", { type: "server", message: view.message }, { shouldFocus: true });
         else if (view.field !== "pin") setAlert({ message: view.message, laterSale: view.laterSale, lead: view.lead, tail: view.tail });
       }
@@ -179,27 +210,31 @@ const VoidSaleDialog = ({ open, onClose, sale, onVoided, afterLeave }) => {
     <Dialog
       open={open}
       onClose={close}
-      afterLeave={afterLeave}
+      afterLeave={onAfterLeave}
       title={`Void ${sale.sale_number}`}
       description={`Total ${formatLKR(sale.total)}. A void can't be undone.`}
       size="lg"
       dismissible={!busy}
       footer={
-        <>
-          <Button type="button" variant="secondary" label="Cancel" onClick={close} disabled={busy} />
-          {phase === "unknown" ? (
-            <Button type="button" variant="accent" label="Check again" onClick={reconcile} />
-          ) : (
-            <Button
-              type="button"
-              variant="danger"
-              label={phase === "checking" ? "Checking…" : "Void sale"}
-              loading={busy}
-              disabled={!canVoid}
-              onClick={submit}
-            />
-          )}
-        </>
+        dayRefused ? (
+          <Button ref={closeRef} type="button" variant="accent" label="Close" onClick={close} />
+        ) : (
+          <>
+            <Button type="button" variant="secondary" label="Cancel" onClick={close} disabled={busy} />
+            {phase === "unknown" ? (
+              <Button type="button" variant="accent" label="Check again" onClick={reconcile} />
+            ) : (
+              <Button
+                type="button"
+                variant="danger"
+                label={phase === "checking" ? "Checking…" : "Void sale"}
+                loading={busy}
+                disabled={!canVoid}
+                onClick={submit}
+              />
+            )}
+          </>
+        )
       }
     >
       <form

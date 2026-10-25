@@ -1,3 +1,5 @@
+import { DAY_REFUSAL, dayRefusalOf } from "./dayRefusal";
+
 /**
  * Complete-sale errors (planning doc P5-8)
  *
@@ -20,7 +22,9 @@
  *   existing_unit (unit_sold); imei, payment_id, existing_unit
  *   (trade_in_imei_in_stock; existing_unit is null when the live-IMEI
  *   index caught it); product_name (trade_in_product_inactive, when
- *   named); sale_status (not_draft); amount_paid, total (unpaid)
+ *   named); sale_status (not_draft); amount_paid, total (unpaid);
+ *   business_date (day_not_open, day_closed: P9-9, read by `code`,
+ *   utils/dayRefusal.js)
  */
 
 export const COMPLETE_ERROR = {
@@ -34,6 +38,8 @@ export const COMPLETE_ERROR = {
   NIC_REQUIRED: "nic_required", // E8
   TRADE_IN_PRODUCT_INACTIVE: "trade_in_product_inactive", // E9
   TRADE_IN_IMEI_IN_STOCK: "trade_in_imei_in_stock", // E10, E11
+  DAY_NOT_OPEN: "day_not_open", // 409 DAY_NOT_OPEN (C10)
+  DAY_CLOSED: "day_closed", // 409 DAY_CLOSED (C11)
   SERVER: "server", // E12 (5xx)
   NETWORK: "network", // no response
   TIMEOUT: "timeout", // COMPLETE_TIMEOUT_MS passed
@@ -89,6 +95,15 @@ export const classifyCompleteError = (error) => {
   }
 
   if (status === 409) {
+    // By code, before any message match: nothing was written (P9-9).
+    const day = dayRefusalOf(response);
+    if (day) {
+      return {
+        ...base,
+        kind: day.code === DAY_REFUSAL.CLOSED ? COMPLETE_ERROR.DAY_CLOSED : COMPLETE_ERROR.DAY_NOT_OPEN,
+        business_date: day.business_date,
+      };
+    }
     let match = OUT_OF_STOCK_RE.exec(message);
     if (match || data?.product_id) {
       return {

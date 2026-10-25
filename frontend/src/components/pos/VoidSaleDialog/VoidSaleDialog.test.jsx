@@ -4,7 +4,17 @@ import userEvent from "@testing-library/user-event";
 import { Route, Routes, useLocation } from "react-router-dom";
 import SaleDetail from "../../../pages/SaleDetail";
 import RecentSales from "../../../pages/RecentSales";
-import { authState, branchesState, renderWithProviders } from "../../../test/renderWithProviders";
+import { authState, branchesState, cashDayState, renderWithProviders } from "../../../test/renderWithProviders";
+import {
+  BRANCH_ID,
+  closedCashDayEntity,
+  currentCashDayResponse,
+  dayClosedError,
+  dayNotOpenError,
+  openCashDayEntity,
+} from "../../../test/cashDayEntities";
+import { GATE } from "../../../store/slices/cashDaySlice";
+import * as cashDaysService from "../../../services/cashDaysService";
 import { mainShop } from "../../../test/fixtures";
 import { cashierSessionUser, managerSessionUser } from "../../../test/authEntities";
 import { paymentEntity, saleEntity, saleLineEntity, voidedSaleEntity } from "../../../test/saleEntities";
@@ -26,6 +36,7 @@ import * as approvalsService from "../../../services/approvalsService";
 
 vi.mock("../../../services/salesService");
 vi.mock("../../../services/approvalsService");
+vi.mock("../../../services/cashDaysService");
 
 const PIN = "482915";
 
@@ -527,6 +538,89 @@ describe("VoidSaleDialog: errors in the dialog (P6-11, P6-19, P6-22)", () => {
     await voidWith(user, integrityConflictError());
 
     expect(await inDialog().findByRole("alert")).toHaveTextContent("Couldn't void. Nothing was changed.");
+  });
+});
+
+describe("VoidSaleDialog: today isn't open (P9-9, C10, C11)", () => {
+  // The sale detail with the gate's last answer: today open.
+  const renderOpenDay = () =>
+    renderWithProviders(
+      <Routes>
+        <Route path="/pos/sales/:id" element={<SaleDetail />} />
+      </Routes>,
+      {
+        route: "/pos/sales/sale-7",
+        preloadedState: {
+          auth: authState(managerSessionUser()),
+          branches: branchesState([mainShop]),
+          cashDay: cashDayState({
+            branchId: BRANCH_ID,
+            current: { status: GATE.OPEN, businessDate: "2026-10-20", today: openCashDayEntity() },
+          }),
+        },
+      },
+    );
+
+  const refuse = async (user, error) => {
+    salesService.voidSale.mockRejectedValueOnce(error);
+    await fillVoid(user);
+    await user.click(voidButton());
+  };
+
+  it("DAY_CLOSED: the date, nothing changed, no PIN attempt; PIN cleared; only Close, focused; never resent or re-read yet", async () => {
+    const user = userEvent.setup();
+    const { store } = renderOpenDay();
+    await openVoid(user);
+
+    await refuse(user, dayClosedError());
+
+    const alert = await inDialog().findByRole("alert");
+    expect(alert).toHaveTextContent(
+      "Tue 20 Oct 2026 is closed: no voids until tomorrow's opening. Nothing was changed and no PIN attempt was used.",
+    );
+    expect(dialog()).not.toHaveTextContent("2026-10-20");
+    expect(pin()).toHaveValue("");
+    await waitFor(() => expect(inDialog().getByRole("button", { name: "Close" })).toHaveFocus());
+    expect(inDialog().queryByRole("button", { name: "Void sale" })).not.toBeInTheDocument();
+    expect(inDialog().queryByRole("button", { name: "Cancel" })).not.toBeInTheDocument();
+    expect(cashDaysService.getCurrentCashDay).not.toHaveBeenCalled();
+    expect(salesService.voidSale).toHaveBeenCalledTimes(1);
+    // No re-read of the sale either: nothing changed.
+    expect(salesService.getSale).toHaveBeenCalledTimes(1);
+    expectNoPin(store);
+  });
+
+  it("Close re-reads the gate: the page stays without Void and Return items, and focus goes to Reprint", async () => {
+    const user = userEvent.setup();
+    cashDaysService.getCurrentCashDay.mockResolvedValue(currentCashDayResponse({ today: closedCashDayEntity() }));
+    renderOpenDay();
+    await openVoid(user);
+    await refuse(user, dayClosedError());
+
+    await user.click(await inDialog().findByRole("button", { name: "Close" }));
+
+    await waitFor(() => expect(dialog()).not.toBeInTheDocument());
+    expect(cashDaysService.getCurrentCashDay).toHaveBeenCalledWith(BRANCH_ID);
+    expect(await screen.findByTestId("day-closed-note")).toHaveTextContent(
+      "Today is closed: no voids or returns until tomorrow's opening.",
+    );
+    expect(screen.queryByRole("button", { name: "Void sale" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Return items" })).not.toBeInTheDocument();
+    await waitFor(() => expect(screen.getByRole("button", { name: "Reprint receipt" })).toHaveFocus());
+    expect(salesService.voidSale).toHaveBeenCalledTimes(1);
+  });
+
+  it("DAY_NOT_OPEN: open the day, then void; only Close", async () => {
+    const user = userEvent.setup();
+    renderOpenDay();
+    await openVoid(user);
+
+    await refuse(user, dayNotOpenError());
+
+    expect(await inDialog().findByRole("alert")).toHaveTextContent(
+      "Tue 20 Oct 2026 hasn't been opened yet. Nothing was changed and no PIN attempt was used. Enter the opening balance, then void the sale.",
+    );
+    await waitFor(() => expect(inDialog().getByRole("button", { name: "Close" })).toHaveFocus());
   });
 });
 

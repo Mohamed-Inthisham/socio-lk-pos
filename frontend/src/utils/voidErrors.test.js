@@ -16,6 +16,7 @@ import {
   voidWrongBranchError,
   wrongPinError,
 } from "../test/voidEntities";
+import { dayClosedError, dayNotOpenError } from "../test/cashDayEntities";
 
 describe("voidErrorView: what the dialog shows (P6-11, P6-19, P6-20, P6-22)", () => {
   const view = (error, context) => voidErrorView(classifyVoidError(error), context);
@@ -88,6 +89,28 @@ describe("voidErrorView: what the dialog shows (P6-11, P6-19, P6-20, P6-22)", ()
     });
   });
 
+  it("DAY_CLOSED: the date built here (never the ISO message), Void blocked, never reconciled", () => {
+    const v = view(dayClosedError());
+    expect(v).toMatchObject({
+      field: null,
+      message:
+        "Tue 20 Oct 2026 is closed: no voids until tomorrow's opening. Nothing was changed and no PIN attempt was used.",
+      blocksVoid: true,
+      reconcile: false,
+      dayRefused: true,
+    });
+    expect(v.message).not.toContain("2026-10-20");
+  });
+
+  it("DAY_NOT_OPEN: open the day, then void", () => {
+    expect(view(dayNotOpenError())).toMatchObject({
+      message:
+        "Tue 20 Oct 2026 hasn't been opened yet. Nothing was changed and no PIN attempt was used. Enter the opening balance, then void the sale.",
+      blocksVoid: true,
+      dayRefused: true,
+    });
+  });
+
   it("not found, integrity, validation", () => {
     expect(view(saleNotFoundError())).toMatchObject({ message: "This sale no longer exists.", blocksVoid: true });
     expect(view(integrityConflictError())).toMatchObject({ message: "Couldn't void. Nothing was changed.", reconcile: false });
@@ -154,6 +177,27 @@ describe("classifyVoidError: server errors", () => {
       status: 409,
       reconcile: false,
       field: null,
+    });
+  });
+});
+
+describe("classifyVoidError: today isn't open (P9-9, C10, C11)", () => {
+  it("409 DAY_CLOSED is day_closed by its code, not INTEGRITY, and doesn't reconcile", () => {
+    expect(classifyVoidError(dayClosedError())).toEqual({
+      kind: VOID_ERROR.DAY_CLOSED,
+      message: "Today (2026-10-20) is closed. No sales, voids or returns until tomorrow's opening.",
+      status: 409,
+      reconcile: false,
+      field: null,
+      business_date: "2026-10-20",
+    });
+  });
+
+  it("409 DAY_NOT_OPEN is day_not_open with the date", () => {
+    expect(classifyVoidError(dayNotOpenError())).toMatchObject({
+      kind: VOID_ERROR.DAY_NOT_OPEN,
+      reconcile: false,
+      business_date: "2026-10-20",
     });
   });
 });

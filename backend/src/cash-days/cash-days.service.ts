@@ -498,11 +498,10 @@ export class CashDaysService {
   }
 
   /**
-   * The close's transaction (P9-10): FOR UPDATE on the day's row, selected
-   * by id with no closed_at filter (open or closed is checked here, on the
-   * row returned); C3 again (a resend that waited on the lock); C7; the
-   * summary, run after the lock is held; C8; the difference and C9; the
-   * snapshot; the DAY_CLOSE audit row.
+   * The close's transaction: non-empty DRAFT sale rows are locked first
+   * and block close (P9-12), then FOR UPDATE on the day's row, selected by
+   * id with no closed_at filter; C3 again, C7; the summary after the lock;
+   * C8; the difference and C9; the snapshot; the DAY_CLOSE audit row.
    */
   private async applyClose(
     tx: EntityManager,
@@ -511,6 +510,49 @@ export class CashDaysService {
     caller: CashDayCaller,
     ip?: string | null,
   ): Promise<void> {
+    const dayRef = await tx.findOne(CashDay, {
+      where: { id: dayId },
+      select: { id: true, branch_id: true, opened_at: true },
+    });
+    if (!dayRef) {
+      throw new NotFoundException('Cash day not found');
+    }
+
+    // A close request that already succeeded stays idempotent, even if a
+    // later empty or active draft exists on the branch.
+    const recordedBeforeDraftCheck = await this.findRecordedClose(
+      tx,
+      dayId,
+      dto.client_request_id,
+      caller,
+    );
+    if (recordedBeforeDraftCheck) return;
+
+    // Lock this day's non-empty drafts before the cash-day row, matching
+    // the sale -> cash-day lock order used by completeSale. Old abandoned
+    // drafts from earlier days must not prevent today's close.
+    const openSales: { id: string }[] = await tx.query(
+      `SELECT s.id
+         FROM sales s
+        WHERE s.branch_id = $1
+          AND s.status = 'DRAFT'
+          AND s.updated_at >= $2
+          AND (
+            EXISTS (SELECT 1 FROM sale_lines sl WHERE sl.sale_id = s.id)
+            OR EXISTS (SELECT 1 FROM payments p WHERE p.sale_id = s.id)
+          )
+        ORDER BY s.id
+        FOR UPDATE OF s`,
+      [dayRef.branch_id, dayRef.opened_at],
+    );
+    if (openSales.length > 0) {
+      throw new ConflictException({
+        message: 'Complete or discard all unfinished sales before closing the day.',
+        code: 'OPEN_SALES',
+        sale_count: openSales.length,
+      });
+    }
+
     const day = await tx
       .createQueryBuilder(CashDay, 'day')
       .setLock('pessimistic_write')
