@@ -45,6 +45,7 @@ const renderDetail = (route = "/pos/sales/sale-7") =>
   );
 
 const heading = () => screen.findByRole("heading", { name: "INV-20261021-0007" });
+const where = () => screen.getByTestId("where").textContent;
 const reprintButton = () => screen.getByRole("button", { name: /Reprint receipt/ });
 const receiptText = () => document.getElementById("receipt-root")?.textContent ?? "";
 
@@ -63,6 +64,30 @@ afterEach(() => {
 });
 
 describe("SaleDetail: loading", () => {
+  it("returns to the app-shell Sales history route when opened directly", async () => {
+    const user = userEvent.setup();
+    salesService.getSale.mockResolvedValue(saleEntity());
+    renderWithProviders(
+      <>
+        <Where />
+        <Routes>
+          <Route path="/sales" element={<p>sales list</p>} />
+          <Route path="/sales/:id" element={<SaleDetail salesPath="/sales" />} />
+        </Routes>
+      </>,
+      {
+        route: "/sales/sale-7",
+        preloadedState: { auth: authState(cashierUser), branches: branchesState([mainShop]) },
+      },
+    );
+
+    await heading();
+    await user.keyboard("{Escape}");
+
+    expect(where()).toBe("/sales");
+    expect(screen.getByText("sales list")).toBeInTheDocument();
+  });
+
   it("loads the sale by its id and shows the full detail", async () => {
     salesService.getSale.mockResolvedValue(saleEntity());
     renderDetail();

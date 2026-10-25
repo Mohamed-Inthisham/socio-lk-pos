@@ -77,7 +77,7 @@ const Card = ({ className = "", children }) => (
   </div>
 );
 
-const SaleDetail = () => {
+const SaleDetail = ({ salesPath = "/pos/sales", requireOpenDay = false }) => {
   const { id } = useParams();
   const navigate = useNavigate();
   const location = useLocation();
@@ -100,16 +100,18 @@ const SaleDetail = () => {
   const role = useSelector((state) => state.auth.user?.role);
   // P9-14: once today is closed the sale stays readable and reprintable,
   // but Void and Return items (and V / R) are gone until tomorrow's opening.
-  const dayClosed = useSelector(selectCashDayGate) === GATE.CLOSED;
+  const dayStatus = useSelector(selectCashDayGate);
+  const dayClosed = dayStatus === GATE.CLOSED;
+  const dayUnavailable = requireOpenDay ? dayStatus !== GATE.OPEN : dayClosed;
   // A sale with a return can't be voided (P7-11): no Void button, V does nothing.
   const hasReturns = (sale?.returns?.length ?? 0) > 0;
   const canVoid =
-    hasPermission(role, PERMISSIONS.VOID_SALE) && sale?.status === "COMPLETED" && !hasReturns && !dayClosed;
+    hasPermission(role, PERMISSIONS.VOID_SALE) && sale?.status === "COMPLETED" && !hasReturns && !dayUnavailable;
   const [slipPrinting, setSlipPrinting] = useState(null); // the return whose slip is reprinting
   const [slipErrors, setSlipErrors] = useState({});
   const leftToReturn = sale?.lines?.reduce((sum, line) => sum + returnableQuantity(line), 0) ?? 0;
   const canReturn =
-    hasPermission(role, PERMISSIONS.REFUND_SALE) && sale?.status === "COMPLETED" && leftToReturn > 0 && !dayClosed;
+    hasPermission(role, PERMISSIONS.REFUND_SALE) && sale?.status === "COMPLETED" && leftToReturn > 0 && !dayUnavailable;
 
   useEffect(() => {
     let live = true;
@@ -134,7 +136,7 @@ const SaleDetail = () => {
       navigate(from.path);
       return;
     }
-    navigate(`/pos/sales${from?.search ?? ""}`, {
+    navigate(`${salesPath}${from?.search ?? ""}`, {
       state: from ? { restore: { pages: from.pages, activeId: from.activeId } } : undefined,
     });
   };
@@ -298,12 +300,14 @@ const SaleDetail = () => {
                 onClick={reprint}
                 fullWidth
               />
-              {dayClosed && sale.status !== "VOIDED" && (
+              {dayUnavailable && sale.status !== "VOIDED" && (
                 <p className="text-xs text-slate-500 dark:text-slate-400" data-testid="day-closed-note">
-                  Today is closed: no voids or returns until tomorrow&apos;s opening.
+                  {dayClosed
+                    ? "Today is closed: no voids or returns until tomorrow's opening."
+                    : "Open today's cash day before voiding or returning a sale."}
                 </p>
               )}
-              {sale.status !== "VOIDED" && !dayClosed && (
+              {sale.status !== "VOIDED" && !dayUnavailable && (
                 <Button
                   ref={returnRef}
                   variant="secondary"
@@ -315,12 +319,12 @@ const SaleDetail = () => {
                   fullWidth
                 />
               )}
-              {sale.status !== "VOIDED" && hasReturns && !dayClosed && (
+              {sale.status !== "VOIDED" && hasReturns && !dayUnavailable && (
                 <p className="text-xs text-slate-500 dark:text-slate-400" data-testid="no-void-note">
                   Sales with returns can&apos;t be voided.
                 </p>
               )}
-              {sale.status !== "VOIDED" && !hasReturns && !dayClosed && (
+              {sale.status !== "VOIDED" && !hasReturns && !dayUnavailable && (
                 <Button
                   variant="danger"
                   icon={Ban}
@@ -348,6 +352,7 @@ const SaleDetail = () => {
           sale={sale}
           onVoided={onVoided}
           afterLeave={afterVoidLeave}
+          salesPath={salesPath}
         />
         <ReturnDialog
           open={returnOpen}
@@ -356,6 +361,7 @@ const SaleDetail = () => {
           onReturned={onReturned}
           onSaleChanged={showSale}
           afterLeave={afterReturnLeave}
+          salesPath={salesPath}
         />
       </>
     );

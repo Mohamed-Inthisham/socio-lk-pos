@@ -5,6 +5,8 @@ import {
   Package,
   Tag,
   FolderTree,
+  ReceiptText,
+  CalendarDays,
   ChevronsLeft,
   ChevronsRight,
   ChevronDown,
@@ -67,6 +69,22 @@ const NAV_ITEMS = [
     to: "/pos",
     label: "POS terminal",
     icon: ScanBarcode,
+  },
+  {
+    label: "Sales",
+    icon: ReceiptText,
+    children: [
+      {
+        to: "/sales",
+        label: "Sales history",
+        icon: ReceiptText,
+      },
+      {
+        to: "/cash-days",
+        label: "Cash days",
+        icon: CalendarDays,
+      },
+    ],
   },
   {
     label: "Products",

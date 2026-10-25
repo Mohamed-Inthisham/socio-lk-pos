@@ -70,7 +70,7 @@ const validDay = (raw, today) => {
 /** Exactly one status badge per row: Completed, Part returned, Returned or Voided (P7-18). */
 const StatusBadge = ({ row }) => <SaleStatusBadge state={saleListStatus(row)} />;
 
-const RecentSales = () => {
+const RecentSales = ({ salesPath = "/pos/sales", exitPath = "/pos", exitLabel = "Terminal" }) => {
   const navigate = useNavigate();
   const location = useLocation();
   const [searchParams, setSearchParams] = useSearchParams();
@@ -217,7 +217,7 @@ const RecentSales = () => {
   const openSale = (id) => {
     if (!id) return;
     setActiveId(id);
-    navigate(`/pos/sales/${id}`, {
+    navigate(`${salesPath}/${id}`, {
       state: {
         from: {
           search: location.search,
@@ -248,7 +248,7 @@ const RecentSales = () => {
       openSale(activeId);
     },
     { enableOnFormTags: true },
-    [activeId, rows, location.search],
+    [activeId, location.search, rows, salesPath],
   );
   useHotkeys(
     "/",
@@ -275,10 +275,10 @@ const RecentSales = () => {
         clearSearch();
         return;
       }
-      navigate("/pos");
+      navigate(exitPath);
     },
     { enableOnFormTags: true },
-    [input],
+    [exitPath, input],
   );
 
   const pendingShort = input.trim().length > 0 && input.trim().length < MIN_QUERY;
@@ -401,9 +401,9 @@ const RecentSales = () => {
             size="sm"
             variant="ghost"
             icon={ArrowLeft}
-            label="Terminal"
-            title="Back to the terminal (Esc)"
-            onClick={() => navigate("/pos")}
+            label={exitLabel}
+            title={`Back to ${exitLabel.toLowerCase()} (Esc)`}
+            onClick={() => navigate(exitPath)}
           />
           <DayStepper
             day={day}
