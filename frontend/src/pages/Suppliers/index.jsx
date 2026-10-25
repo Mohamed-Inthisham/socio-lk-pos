@@ -141,12 +141,12 @@ function SupplierProfileDialog({ supplier, onClose }) {
           <span className={`rounded-full px-2.5 py-1 text-xs font-medium ${supplier.is_active ? "bg-emerald-50 text-emerald-700 dark:bg-emerald-950/50 dark:text-emerald-300" : "bg-slate-100 text-slate-600 dark:bg-slate-800 dark:text-slate-300"}`}>{supplier.is_active ? "Active" : "Inactive"}</span>
         </div>
         <dl className="grid gap-3 sm:grid-cols-2">
-          {details.map(([label, value]) => <div key={label} className="rounded-lg bg-slate-50 p-3 dark:bg-slate-800/70">
+          {details.map(([label, value]) => <div key={label} className="rounded-lg border border-slate-200 bg-slate-50 p-3 dark:border-slate-700 dark:bg-slate-800">
             <dt className="text-xs font-medium uppercase tracking-wide text-slate-500 dark:text-slate-400">{label}</dt>
             <dd className="mt-1 break-words text-sm text-slate-900 dark:text-slate-100">{value || "—"}</dd>
           </div>)}
         </dl>
-        <div className="rounded-lg bg-slate-50 p-3 dark:bg-slate-800/70">
+        <div className="rounded-lg border border-slate-200 bg-slate-50 p-3 dark:border-slate-700 dark:bg-slate-800">
           <p className="text-xs font-medium uppercase tracking-wide text-slate-500 dark:text-slate-400">Notes</p>
           <p className="mt-1 whitespace-pre-wrap text-sm text-slate-900 dark:text-slate-100">{supplier.notes || "—"}</p>
         </div>
