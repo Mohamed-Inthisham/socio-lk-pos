@@ -81,8 +81,7 @@ export default function Customers() {
           <h2 className="font-semibold">All customers <span className="ml-1 text-sm font-normal text-slate-500">({result.total})</span></h2>
           <div className="flex flex-col gap-3 sm:flex-row sm:items-center">
             <div className="relative w-full sm:w-72">
-              <Search size={16} aria-hidden="true" className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
-              <InputField aria-label="Search customers" name="customer-search" placeholder="Search name, phone, NIC or email" value={search} onChange={(event) => { setSearch(event.target.value); setPage(1); }} className="pl-9" />
+              <InputField aria-label="Search customers" name="customer-search" type="search" icon={Search} placeholder="Search name, phone, NIC or email" value={search} onChange={(event) => { setSearch(event.target.value); setPage(1); }} />
             </div>
             {can(PERMISSIONS.CREATE_CUSTOMER) && <Button variant="accent" icon={Plus} label="Add customer" onClick={openCreate} className="shrink-0 self-start sm:self-auto" />}
           </div>
