@@ -115,6 +115,19 @@ export class AddSaleLineDto {
   imei_snapshot?: string;
 
   @ApiPropertyOptional({
+    example: '87e56576754',
+    description:
+      'Per-unit identifier for an IMEI- or serial-number-tracked product. ' +
+      'Use this field for new clients; imei_snapshot remains accepted for compatibility.',
+    maxLength: 100,
+  })
+  @Transform(trimStringField)
+  @IsOptional()
+  @IsString()
+  @MaxLength(100)
+  identifier_snapshot?: string;
+
+  @ApiPropertyOptional({
     enum: WarrantyPeriod,
     example: WarrantyPeriod.MONTH_12,
     description:

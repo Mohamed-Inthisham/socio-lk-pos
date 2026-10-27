@@ -15,6 +15,11 @@ export const getStockPurchase = async (id) => {
   return response.data;
 };
 
+export const getProductPurchaseIdentifiers = async (productId) => {
+  const response = await api.get(`/stock-purchases/products/${productId}/identifiers`);
+  return response.data;
+};
+
 export const createStockPurchase = async (payload) => {
   const response = await api.post('/stock-purchases', payload);
   return response.data;

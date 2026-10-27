@@ -198,11 +198,19 @@ export class SaleLine {
 
   @Column({
     type: 'varchar',
-    length: 50,
+    length: 100,
     nullable: true,
     name: 'imei_snapshot',
   })
   imei_snapshot!: string | null;
+
+  @Column({
+    type: 'varchar',
+    length: 20,
+    nullable: true,
+    name: 'identifier_type_snapshot',
+  })
+  identifier_type_snapshot!: string | null;
 
   /**
    * The warranty this line is sold with (Phase 6.4 P5-18): the product's

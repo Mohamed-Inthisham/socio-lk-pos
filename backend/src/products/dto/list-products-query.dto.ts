@@ -26,6 +26,7 @@ import { ProductType } from '../enums/product-type.enum';
  *   same way every other list DTO rejects out-of-range input.
  * - includeInactive: "true" | "false". Anything else is a 400 (matches
  *   the ParseBoolPipe behaviour this endpoint had before the DTO).
+ * - inactiveOnly: return only deactivated products.
  * - brandId / categoryId / branchId: UUIDs.
  * - trackingMethod: QUANTITY | IMEI | SERIAL_NUMBER.
  */
@@ -50,7 +51,7 @@ export class ListProductsQueryDto extends PaginationQueryDto {
   search?: string;
 
   @ApiPropertyOptional({
-    description: 'Include deactivated products (admin UI toggle)',
+    description: 'Include deactivated products alongside active products',
     type: Boolean,
     example: false,
   })
@@ -62,6 +63,20 @@ export class ListProductsQueryDto extends PaginationQueryDto {
   @IsOptional()
   @IsBoolean()
   includeInactive?: boolean;
+
+  @ApiPropertyOptional({
+    description: 'Return only deactivated products',
+    type: Boolean,
+    example: false,
+  })
+  @Transform(({ value }): unknown => {
+    if (value === 'true') return true;
+    if (value === 'false') return false;
+    return value;
+  })
+  @IsOptional()
+  @IsBoolean()
+  inactiveOnly?: boolean;
 
   @ApiPropertyOptional({ description: 'Filter by brand', format: 'uuid' })
   @IsOptional()

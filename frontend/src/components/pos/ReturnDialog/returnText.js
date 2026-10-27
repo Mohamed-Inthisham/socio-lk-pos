@@ -34,8 +34,9 @@ export const itemLines = (ret, sale) =>
   ret.lines.map((l) => {
     const line = sale.lines.find((s) => s.id === l.sale_line_id);
     const name = line?.product_name_snapshot ?? "An item";
-    const imei = l.product_unit?.imei ? ` (IMEI ${l.product_unit.imei})` : "";
-    return `${l.quantity} × ${name}${imei}: ${DISPOSITION_TEXT[l.disposition] ?? l.disposition}`;
+    const identifierLabel = line?.identifier_type_snapshot === "SERIAL_NUMBER" ? "Serial number" : "IMEI";
+    const identifier = l.product_unit?.imei ? ` (${identifierLabel} ${l.product_unit.imei})` : "";
+    return `${l.quantity} × ${name}${identifier}: ${DISPOSITION_TEXT[l.disposition] ?? l.disposition}`;
   });
 
 /**

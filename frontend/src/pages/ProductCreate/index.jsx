@@ -17,6 +17,7 @@ import {
   BARCODE_TYPES,
   PHONE_STORAGE_OPTIONS,
   PHONE_RAM_OPTIONS,
+  TRACKING_METHOD_OPTIONS,
 } from "../../schemas/productSchema";
 import { createProduct } from "../../services/productsService";
 import {
@@ -247,6 +248,7 @@ const ProductCreate = ({ embedded = false, onCreated, onCancel }) => {
                     field.onChange(event);
                     const category = categories.find((item) => item.id === value);
                     setValue("show_phone_specs", category?.show_phone_specs ?? false, { shouldValidate: true });
+                    setValue("tracking_method", category?.show_phone_specs ? "IMEI" : "QUANTITY", { shouldValidate: true });
                     const selectedBrand = brands.find((brand) => brand.id === selectedBrandId);
                     if (selectedBrand?.category_id && selectedBrand.category_id !== value) {
                       setValue("brand_id", "", { shouldValidate: true });
@@ -327,8 +329,26 @@ const ProductCreate = ({ embedded = false, onCreated, onCancel }) => {
 
         <FormSection
           title="Identification"
-          description="Barcode is optional — leave blank to auto-generate (SLP-XXXXXX)."
+          description="Choose how each received unit is identified. Barcode is optional — leave blank to auto-generate (SLP-XXXXXX)."
         >
+          <div className="max-w-sm mb-4">
+            <Controller
+              name="tracking_method"
+              control={control}
+              render={({ field, fieldState }) => (
+                <Select
+                  label="Unit identification"
+                  required
+                  name={field.name}
+                  value={field.value}
+                  onChange={field.onChange}
+                  options={TRACKING_METHOD_OPTIONS}
+                  error={fieldState.error?.message}
+                  hint="This controls per-unit identifiers. Stock Purchase still records how many units arrive."
+                />
+              )}
+            />
+          </div>
           <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
             <div className="md:col-span-2">
               <InputField

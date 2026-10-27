@@ -54,7 +54,12 @@ export interface CreateReturnResult {
 
 /** A phone waiting for inspection, with the return that brought it back. */
 export interface InspectionRow {
-  product_unit: { id: string; imei: string; product_name: string };
+  product_unit: {
+    id: string;
+    imei: string;
+    product_name: string;
+    product: { tracking_method: string };
+  };
   return_id: string;
   return_number: string;
   sale_id: string;
@@ -224,6 +229,7 @@ export class SaleReturnsService {
       unit_id: string;
       imei: string;
       product_name: string;
+      tracking_method: string;
       return_id: string;
       return_number: string;
       sale_id: string;
@@ -233,6 +239,7 @@ export class SaleReturnsService {
       `SELECT * FROM (
          SELECT DISTINCT ON (u.id)
                 u.id AS unit_id, u.imei, p.name AS product_name,
+                p.tracking_method,
                 r.id AS return_id, r.return_number,
                 s.id AS sale_id, s.sale_number,
                 r.created_at AS returned_at
@@ -253,6 +260,7 @@ export class SaleReturnsService {
         id: row.unit_id,
         imei: row.imei,
         product_name: row.product_name,
+        product: { tracking_method: row.tracking_method },
       },
       return_id: row.return_id,
       return_number: row.return_number,

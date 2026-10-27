@@ -15,6 +15,8 @@ import usePermissions from "../../hooks/usePermissions";
 import { PERMISSIONS } from "../../constants/rolePermissions";
 import { getProduct } from "../../services/productsService";
 import { getStockByProduct } from "../../services/stockService";
+import { listAllProductUnits } from "../../services/productUnitsService";
+import { getProductPurchaseIdentifiers } from "../../services/stockPurchasesService";
 import { warrantyLabel } from "../../constants/warranty";
 import DeactivateProductDialog from "../../components/products/DeactivateProductDialog";
 import AdjustStockDialog from "../../components/products/AdjustStockDialog";
@@ -214,10 +216,12 @@ const GenericErrorState = ({ message, onBack, onRetry }) => (
 const ProductDetail = () => {
   const { id } = useParams();
   const navigate = useNavigate();
-  const { can } = usePermissions();
+  const { can, isAdmin, isManager } = usePermissions();
 
   const [product, setProduct] = useState(null);
   const [stock, setStock] = useState([]);
+  const [productUnits, setProductUnits] = useState([]);
+  const [identifierPurchases, setIdentifierPurchases] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
   // Dialog state — deactivate is boolean, adjust-stock uses the row itself
@@ -229,10 +233,18 @@ const ProductDetail = () => {
     setLoading(true);
     setError(null);
 
-    Promise.all([getProduct(id), getStockByProduct(id)])
-      .then(([productData, stockData]) => {
+    const requests = [getProduct(id), getStockByProduct(id)];
+    if (isAdmin || isManager) {
+      requests.push(listAllProductUnits({ productId: id }));
+      requests.push(getProductPurchaseIdentifiers(id));
+    }
+
+    Promise.all(requests)
+      .then(([productData, stockData, unitData = [], purchaseData = []]) => {
         setProduct(productData);
         setStock(stockData);
+        setProductUnits(unitData);
+        setIdentifierPurchases(purchaseData);
       })
       .catch((err) => {
         const status = err.response?.status;
@@ -274,6 +286,18 @@ const ProductDetail = () => {
   const canEdit = can(PERMISSIONS.EDIT_PRODUCT);
   const canDelete = can(PERMISSIONS.DELETE_PRODUCT);
   const canAdjustStock = can(PERMISSIONS.ADJUST_STOCK);
+  const canViewIdentifiers = isAdmin || isManager;
+  const trackingMethodLabel = {
+    IMEI: "IMEI",
+    SERIAL_NUMBER: "Serial number",
+    QUANTITY: "No per-unit identifier",
+  }[product?.tracking_method] || "No per-unit identifier";
+  const stockQuantity = stock.reduce(
+    (sum, row) => sum + (row.manage_stock ? Number(row.quantity) || 0 : 0),
+    0,
+  );
+  const identifiedInStock = productUnits.filter((unit) => unit.status === "IN_STOCK").length;
+  const soldUnits = productUnits.filter((unit) => unit.status === "SOLD").length;
 
   const wrap = (content) => (
     <div className="max-w-6xl mx-auto p-4 md:p-6">{content}</div>
@@ -305,6 +329,19 @@ const ProductDetail = () => {
       product.phone_ram ||
       product.phone_color,
     );
+  const knownUnitIdentifiers = new Set(productUnits.map((unit) => unit.imei));
+  const legacyIdentifiers = identifierPurchases.flatMap((purchaseItem) => {
+    const identifiers = product.tracking_method === "IMEI"
+      ? purchaseItem.imei_numbers || []
+      : purchaseItem.serial_numbers || [];
+    return identifiers
+      .filter((identifier) => !knownUnitIdentifiers.has(identifier))
+      .map((identifier, index) => ({
+        key: `${purchaseItem.purchase_item_id}-${index}`,
+        identifier,
+        branchName: purchaseItem.branch_name,
+      }));
+  });
 
   return wrap(
     <div className="space-y-4">
@@ -384,6 +421,7 @@ const ProductDetail = () => {
           <Field label="Category" value={product.category?.name} />
           <Field label="Barcode" value={product.barcode} mono />
           <Field label="Barcode type" value={product.barcode_type} />
+          <Field label="Unit identification" value={trackingMethodLabel} />
           {product.description && (
             <Field label="Description" value={product.description} />
           )}
@@ -456,6 +494,77 @@ const ProductDetail = () => {
           </div>
         )}
       </Section>
+
+      {canViewIdentifiers && product.tracking_method !== "QUANTITY" && (
+        <Section title="Unit identifiers and balances">
+          <div className="mb-4 grid grid-cols-2 gap-3 sm:grid-cols-3">
+            <div className="rounded-lg bg-slate-50 p-3 dark:bg-slate-800/60">
+              <p className="text-xs text-slate-500 dark:text-slate-400">In stock with identifier</p>
+              <p className="mt-1 text-lg font-semibold">{identifiedInStock}</p>
+            </div>
+            <div className="rounded-lg bg-slate-50 p-3 dark:bg-slate-800/60">
+              <p className="text-xs text-slate-500 dark:text-slate-400">Currently sold</p>
+              <p className="mt-1 text-lg font-semibold">{soldUnits}</p>
+            </div>
+            <div className="rounded-lg bg-slate-50 p-3 dark:bg-slate-800/60">
+              <p className="text-xs text-slate-500 dark:text-slate-400">Total stock balance</p>
+              <p className="mt-1 text-lg font-semibold">{stockQuantity}</p>
+            </div>
+          </div>
+          {productUnits.length === 0 && legacyIdentifiers.length === 0 ? (
+            <p className="py-4 text-center text-sm text-slate-500 dark:text-slate-400">
+              No individual identifiers have been recorded for received stock yet.
+            </p>
+          ) : (
+            <div className="overflow-x-auto rounded-lg border border-slate-200 dark:border-slate-700">
+              <table className="w-full text-left text-sm">
+                <thead className="bg-slate-50 text-xs uppercase text-slate-500 dark:bg-slate-800/60 dark:text-slate-400">
+                  <tr>
+                    <th className="px-3 py-2">{trackingMethodLabel}</th>
+                    <th className="px-3 py-2">Branch</th>
+                    <th className="px-3 py-2">Status</th>
+                    <th className="px-3 py-2">Sale</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {productUnits.map((unit) => {
+                    const sale = (unit.sale_lines || [])
+                      .map((line) => line.sale)
+                      .filter((item) => item?.status === "COMPLETED" || item?.status === "VOIDED")
+                      .sort((a, b) => new Date(b.completed_at) - new Date(a.completed_at))[0];
+                    return (
+                      <tr key={unit.id} className="border-t border-slate-200 dark:border-slate-700">
+                        <td className="px-3 py-2 font-mono">{unit.imei}</td>
+                        <td className="px-3 py-2">{unit.branch?.name || "—"}</td>
+                        <td className="px-3 py-2">{unit.status.replaceAll("_", " ")}</td>
+                        <td className="px-3 py-2">
+                          {sale ? (
+                            <button
+                              type="button"
+                              className="text-cyan-700 underline dark:text-cyan-300"
+                              onClick={() => navigate(`/pos/sales/${sale.id}`)}
+                            >
+                              {sale.sale_number}{sale.status === "VOIDED" ? " (voided)" : ""}
+                            </button>
+                          ) : "—"}
+                        </td>
+                      </tr>
+                    );
+                  })}
+                  {legacyIdentifiers.map((item) => (
+                    <tr key={item.key} className="border-t border-slate-200 dark:border-slate-700">
+                      <td className="px-3 py-2 font-mono">{item.identifier}</td>
+                      <td className="px-3 py-2">{item.branchName || "—"}</td>
+                      <td className="px-3 py-2">Unknown (received before unit tracking)</td>
+                      <td className="px-3 py-2">—</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </Section>
+      )}
 
       {!product.is_active && (
         <div className="bg-slate-100 dark:bg-slate-800/60 border border-slate-200 dark:border-slate-700 rounded-xl p-4 flex items-start gap-3">

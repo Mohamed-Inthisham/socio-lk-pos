@@ -17,6 +17,7 @@ import {
   BARCODE_TYPES,
   PHONE_STORAGE_OPTIONS,
   PHONE_RAM_OPTIONS,
+  TRACKING_METHOD_OPTIONS,
 } from "../../schemas/productSchema";
 import { getProduct, updateProduct } from "../../services/productsService";
 import {
@@ -505,9 +506,27 @@ const ProductEdit = () => {
 
         <FormSection
           title="Identification"
-          description="Barcode can be updated. SKU changes require explicit override."
+          description="Choose how each received unit is identified. Barcode can be updated. SKU changes require explicit override."
         >
           <div className="space-y-4">
+            <div className="max-w-sm">
+              <Controller
+                name="tracking_method"
+                control={control}
+                render={({ field, fieldState }) => (
+                  <Select
+                    label="Unit identification"
+                    required
+                    name={field.name}
+                    value={field.value}
+                    onChange={field.onChange}
+                    options={TRACKING_METHOD_OPTIONS}
+                    error={fieldState.error?.message}
+                    hint="Stock Purchase still records units received. Products with existing stock or sales may not be able to change this."
+                  />
+                )}
+              />
+            </div>
             <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
               <div className="md:col-span-2">
                 <InputField

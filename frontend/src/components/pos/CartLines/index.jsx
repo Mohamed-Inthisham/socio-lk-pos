@@ -277,7 +277,8 @@ const UnitPrice = ({ line }) => {
 
 const CartLineRow = ({ line, index, stockWarning, stockUnknown, issue, onReturnFocus, onDiscount }) => {
   const dispatch = useDispatch();
-  const serialized = !!line.imei_snapshot;
+  const serialized = !!line.identifier_type_snapshot || !!line.imei_snapshot;
+  const identifierLabel = line.identifier_type_snapshot === "SERIAL_NUMBER" ? "Serial number" : "IMEI";
   const locked = line.pending || line.busy;
   const discounted = !!discountedUnitPrice(line);
 
@@ -330,9 +331,13 @@ const CartLineRow = ({ line, index, stockWarning, stockUnknown, issue, onReturnF
           </p>
           {/* Second line: the IMEI or SKU, then the line's warranty (P5-18) */}
           <div className="mt-0.5 flex items-center gap-2 min-w-0">
-            {serialized ? (
+            {line.imei_snapshot ? (
               <p className="min-w-0 text-xs font-mono tabular-nums text-slate-500 dark:text-slate-400 truncate">
-                IMEI {line.imei_snapshot}
+                {identifierLabel} {line.imei_snapshot}
+              </p>
+            ) : serialized ? (
+              <p className="min-w-0 text-xs text-slate-500 dark:text-slate-400 truncate">
+                No serial number entered
               </p>
             ) : (
               line.product_sku_snapshot && (

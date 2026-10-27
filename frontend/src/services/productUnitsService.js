@@ -1,5 +1,21 @@
 import api from "./api";
 
+export const listProductUnits = async (params = {}) => {
+  const response = await api.get("/product-units", { params });
+  return response.data;
+};
+
+export const listAllProductUnits = async (filters = {}) => {
+  const firstPage = await listProductUnits({ ...filters, page: 1, limit: 200 });
+  if (firstPage.meta.totalPages <= 1) return firstPage.data;
+  const pages = await Promise.all(
+    Array.from({ length: firstPage.meta.totalPages - 1 }, (_, index) =>
+      listProductUnits({ ...filters, page: index + 2, limit: 200 }),
+    ),
+  );
+  return [firstPage, ...pages].flatMap((page) => page.data);
+};
+
 /**
  * Product Units Service
  *

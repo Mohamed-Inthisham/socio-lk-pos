@@ -21,6 +21,8 @@ import { SaleReturn } from './entities/sale-return.entity';
 import { ReturnDisposition } from './enums/return-disposition.enum';
 import { ProductUnit } from '../product-units/entities/product-unit.entity';
 import { Product } from '../products/entities/product.entity';
+import { TrackingMethod } from '../products/enums/tracking-method.enum';
+import { Stock } from '../stock/entities/stock.entity';
 import { ProductUnitStatus } from '../product-units/enums/product-unit-status.enum';
 import { ProductUnitsService } from '../product-units/product-units.service';
 import { LIVE_UNIT_STATUSES } from '../product-units/live-imei';
@@ -751,9 +753,22 @@ export class SalesService {
       //    insert step commits. Only the serialized-in-house branch
       //    overrides unit_price / cost_price / imei_snapshot from Product
       //    defaults; other modes fall through to the Product-based values.
-      const clientImei = dto.imei_snapshot ?? null;
+      if (
+        dto.identifier_snapshot &&
+        dto.imei_snapshot &&
+        dto.identifier_snapshot !== dto.imei_snapshot
+      ) {
+        throw new BadRequestException(
+          'identifier_snapshot and imei_snapshot cannot contain different values.',
+        );
+      }
+      const clientImei = dto.identifier_snapshot ?? dto.imei_snapshot ?? null;
       let productUnitId: string | null = null;
       let imeiSnapshot: string | null = clientImei;
+      const identifierTypeSnapshot =
+        product.tracking_method === TrackingMethod.QUANTITY
+          ? null
+          : product.tracking_method;
       let unitPrice: string | null = product.selling_price;
       // Products created before a stock receipt may not yet have a known
       // acquisition cost. Unit or GRN cost is attached during receiving.
@@ -770,23 +785,29 @@ export class SalesService {
           );
         }
 
-        if (product.is_serialized) {
-          // EXTERNAL + serialized: IMEI required as free text,
-          // quantity=1, IN_STOCK collision check per Q7.
-          if (clientImei === null) {
+        if (product.tracking_method !== TrackingMethod.QUANTITY) {
+          if (product.tracking_method === TrackingMethod.SERIAL_NUMBER && dto.quantity !== 1) {
             throw new BadRequestException(
-              `imei_snapshot is required for serialized product "${product.name}"`,
+              `quantity must be 1 for serial-number-tracked product "${product.name}"`,
             );
           }
-          if (dto.quantity !== 1) {
+          if (product.tracking_method === TrackingMethod.IMEI && clientImei === null) {
             throw new BadRequestException(
-              `quantity must be 1 for serialized product "${product.name}"`,
+              `IMEI is required for product "${product.name}"`,
             );
           }
-          await this.assertExternalSerializedImeiNotInStock(
-            manager,
-            clientImei,
-          );
+          if (clientImei !== null && dto.quantity !== 1) {
+            throw new BadRequestException(
+              `quantity must be 1 when an identifier is entered for "${product.name}"`,
+            );
+          }
+          if (clientImei !== null) {
+            await this.assertExternalSerializedImeiNotInStock(
+              manager,
+              clientImei,
+              product.tracking_method,
+            );
+          }
           // imeiSnapshot already set to clientImei above; leave product-
           // based prices in place (settlement with supplier in Phase 6.7
           // uses these to compute margin owed).
@@ -794,16 +815,16 @@ export class SalesService {
           // EXTERNAL + non-serialized: no IMEI allowed.
           this.assertNoImeiOnNonSerializedLine(clientImei, product.name);
         }
-      } else if (product.is_serialized) {
+      } else if (product.tracking_method === TrackingMethod.IMEI) {
         // IN_HOUSE_SERIALIZED — resolve PU, all four Q3 checks, price fallback.
         if (clientImei === null) {
           throw new BadRequestException(
-            `imei_snapshot is required for serialized product "${product.name}"`,
+            `IMEI is required for product "${product.name}"`,
           );
         }
         if (dto.quantity !== 1) {
           throw new BadRequestException(
-            `quantity must be 1 for serialized product "${product.name}"`,
+            `quantity must be 1 for IMEI-tracked product "${product.name}"`,
           );
         }
         const resolved = await this.resolveInHouseSerializedLine(
@@ -811,11 +832,31 @@ export class SalesService {
           sale.branch_id,
           product,
           clientImei,
+          TrackingMethod.IMEI,
         );
         productUnitId = resolved.productUnitId;
         imeiSnapshot = resolved.imeiSnapshot;
         unitPrice = resolved.unitPrice;
         costPrice = resolved.costPrice;
+      } else if (product.tracking_method === TrackingMethod.SERIAL_NUMBER) {
+        if (dto.quantity !== 1) {
+          throw new BadRequestException(
+            `quantity must be 1 for serial-number-tracked product "${product.name}"`,
+          );
+        }
+        if (clientImei !== null) {
+          const resolved = await this.resolveInHouseSerializedLine(
+            manager,
+            sale.branch_id,
+            product,
+            clientImei,
+            TrackingMethod.SERIAL_NUMBER,
+          );
+          productUnitId = resolved.productUnitId;
+          imeiSnapshot = resolved.imeiSnapshot;
+          unitPrice = resolved.unitPrice;
+          costPrice = resolved.costPrice;
+        }
       } else {
         // IN_HOUSE_NON_SERIALIZED — no IMEI allowed.
         this.assertNoImeiOnNonSerializedLine(clientImei, product.name);
@@ -872,6 +913,7 @@ export class SalesService {
         line_total: lineTotal,
         external_supplier_id: dto.external_supplier_id ?? null,
         imei_snapshot: imeiSnapshot,
+        identifier_type_snapshot: identifierTypeSnapshot,
         product_unit_id: productUnitId,
         // P5-18: the product's default unless the cashier chose one
         warranty: dto.warranty ?? product.default_warranty,
@@ -980,6 +1022,7 @@ export class SalesService {
             await this.assertExternalSerializedImeiNotInStock(
               manager,
               dto.imei_snapshot,
+              product.tracking_method,
             );
           }
           // Nulling imei_snapshot on external serialized is nonsensical
@@ -1533,6 +1576,40 @@ export class SalesService {
           .map((line) => line.product_unit_id)
           .filter((id): id is string => id !== null),
       });
+
+      const unlabelledDemand = new Map<string, number>();
+      for (const line of lines) {
+        if (line.external_supplier_id === null && line.product_unit_id === null) {
+          unlabelledDemand.set(
+            line.product_id,
+            (unlabelledDemand.get(line.product_id) ?? 0) + line.quantity,
+          );
+        }
+      }
+      if (unlabelledDemand.size) {
+        const products = await manager.find(Product, {
+          where: { id: In([...unlabelledDemand.keys()]) },
+        });
+        for (const product of products) {
+          if (product.tracking_method !== TrackingMethod.SERIAL_NUMBER) continue;
+          const stock = await manager.findOne(Stock, {
+            where: { product_id: product.id, branch_id: sale.branch_id },
+          });
+          const trackedCount = await manager.count(ProductUnit, {
+            where: {
+              product_id: product.id,
+              branch_id: sale.branch_id,
+              status: ProductUnitStatus.IN_STOCK,
+            },
+          });
+          const unidentifiedBalance = Number(stock?.quantity ?? 0) - trackedCount;
+          if ((unlabelledDemand.get(product.id) ?? 0) > unidentifiedBalance) {
+            throw new BadRequestException(
+              `Not enough units without a serial number for "${product.name}" at this branch.`,
+            );
+          }
+        }
+      }
 
       // 2e. Today's cash day at the sale's branch must be open (P9-9):
       //     FOR SHARE, step 4 of the global lock order (P9-10), then
@@ -2525,10 +2602,9 @@ export class SalesService {
         `Trade-in product ${productId} does not belong to branch ${branchId}`,
       );
     }
-    if (!product.is_serialized) {
+    if (product.tracking_method !== TrackingMethod.IMEI) {
       throw new BadRequestException(
-        `Trade-in product ${productId} is not a serialized SKU; ` +
-          `trade-ins require is_serialized = true`,
+        `Trade-in product ${productId} must use IMEI tracking.`,
       );
     }
 
@@ -2625,6 +2701,7 @@ export class SalesService {
   private async assertExternalSerializedImeiNotInStock(
     manager: EntityManager,
     imei: string,
+    identifierType: TrackingMethod = TrackingMethod.IMEI,
   ): Promise<void> {
     const conflicting = await manager
       .createQueryBuilder(ProductUnit, 'unit')
@@ -2635,9 +2712,11 @@ export class SalesService {
       .getOne();
 
     if (conflicting) {
+      const identifierLabel =
+        identifierType === TrackingMethod.IMEI ? 'IMEI' : 'Serial number';
       throw new ConflictException({
         message:
-          `IMEI '${imei}' is currently in your stock (status: ${conflicting.status}). ` +
+          `${identifierLabel} '${imei}' is currently in your stock (status: ${conflicting.status}). ` +
           `If you meant to sell your own inventory, remove external_supplier_id.`,
         existing_unit: {
           id: conflicting.id,
@@ -2686,7 +2765,8 @@ export class SalesService {
     manager: EntityManager,
     saleBranchId: string,
     product: Product,
-    imei: string,
+    identifier: string,
+    identifierType: TrackingMethod,
   ): Promise<{
     productUnitId: string;
     imeiSnapshot: string;
@@ -2695,22 +2775,24 @@ export class SalesService {
   }> {
     const unit =
       (await manager.findOne(ProductUnit, {
-        where: { imei, status: In([...LIVE_UNIT_STATUSES]) },
+        where: { imei: identifier, status: In([...LIVE_UNIT_STATUSES]) },
       })) ??
       (await manager.findOne(ProductUnit, {
-        where: { imei },
+        where: { imei: identifier },
         order: { created_at: 'DESC' },
       }));
 
+    const identifierLabel = identifierType === TrackingMethod.IMEI ? 'IMEI' : 'Serial number';
+
     // 1. Not found
     if (!unit) {
-      throw new BadRequestException(`IMEI '${imei}' is not in stock`);
+      throw new BadRequestException(`${identifierLabel} '${identifier}' is not in stock`);
     }
 
     // 2. Product mismatch — payload integrity
     if (unit.product_id !== product.id) {
       throw new BadRequestException(
-        `IMEI '${imei}' does not belong to product "${product.name}"`,
+        `${identifierLabel} '${identifier}' does not belong to product "${product.name}"`,
       );
     }
 
@@ -2718,14 +2800,14 @@ export class SalesService {
     //    authorization issue (the cashier IS at their own branch).
     if (unit.branch_id !== saleBranchId) {
       throw new BadRequestException(
-        `IMEI '${imei}' is not available at this branch`,
+        `${identifierLabel} '${identifier}' is not available at this branch`,
       );
     }
 
     // 4. Non-IN_STOCK — state conflict, structured payload
     if (unit.status !== ProductUnitStatus.IN_STOCK) {
       throw new ConflictException({
-        message: `IMEI '${imei}' is not available (status: ${unit.status})`,
+        message: `${identifierLabel} '${identifier}' is not available (status: ${unit.status})`,
         existing_unit: {
           id: unit.id,
           status: unit.status,
@@ -2739,7 +2821,7 @@ export class SalesService {
     const unitPrice = unit.selling_price ?? product.selling_price ?? null;
     if (unitPrice === null) {
       throw new BadRequestException(
-        `Cannot price IMEI '${imei}' — no selling price set on unit or product`,
+        `Cannot price ${identifierLabel.toLowerCase()} '${identifier}' without a selling price`,
       );
     }
 

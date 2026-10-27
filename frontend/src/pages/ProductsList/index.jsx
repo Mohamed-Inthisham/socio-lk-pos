@@ -32,7 +32,7 @@ import {
  * Lists all products with filters. Path B step 4.
  *
  * FILTERING STRATEGY:
- * - Server-side: brand, category, branch, includeInactive
+ * - Server-side: brand, category, branch, inactiveOnly
  *   → refetch from backend when any of these change
  * - Client-side: text search on name/model/SKU/barcode and stock status
  *   → filter the in-memory list without a refetch
@@ -76,7 +76,7 @@ const ProductsList = () => {
     brandId: "",
     categoryId: "",
     branchId: "",
-    includeInactive: false,
+    inactiveOnly: false,
   });
   const [searchTerm, setSearchTerm] = useState("");
 
@@ -358,10 +358,10 @@ const ProductsList = () => {
     runFetch(nextFilters);
   };
 
-  const handleInactiveToggle = () => {
+  const handleInactiveToggle = (event) => {
     const nextFilters = {
       ...filters,
-      includeInactive: !filters.includeInactive,
+      inactiveOnly: event.target.checked,
     };
     setFilters(nextFilters);
     runFetch(nextFilters);
@@ -470,11 +470,11 @@ const ProductsList = () => {
           <label className="flex items-center gap-2 text-sm text-slate-600 dark:text-slate-300 whitespace-nowrap px-1">
             <input
               type="checkbox"
-              checked={filters.includeInactive}
+              checked={filters.inactiveOnly}
               onChange={handleInactiveToggle}
               className="w-4 h-4 rounded border-slate-300 dark:border-slate-600 text-cyan-600 focus:ring-cyan-500 [color-scheme:light] dark:[color-scheme:dark]"
             />
-            Show inactive
+            Inactive products only
           </label>
         </div>
 
@@ -533,14 +533,16 @@ const ProductsList = () => {
       <Table
         columns={columns}
         data={visibleProducts}
-        loading={loading}
+        loading={loading && products.length === 0}
         onRowClick={handleRowClick}
         emptyMessage={
-          searchTerm
-            ? `No products match "${searchTerm}"`
-            : stockStatusFilter
-              ? "No products match these filters"
-              : "No products yet"
+          filters.inactiveOnly
+            ? "No inactive products found"
+            : searchTerm
+              ? `No products match "${searchTerm}"`
+              : stockStatusFilter
+                ? "No products match these filters"
+                : "No products yet"
         }
       />
     </div>
