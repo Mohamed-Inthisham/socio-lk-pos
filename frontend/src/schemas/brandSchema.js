@@ -41,6 +41,7 @@ export const brandSchema = z.object({
     .trim()
     .min(1, "Brand name is required")
     .max(NAME_MAX, `Name is too long (max ${NAME_MAX} chars)`),
+  category_id: z.string().uuid("Select a category"),
 });
 
 // ============================================
@@ -49,6 +50,7 @@ export const brandSchema = z.object({
 
 export const brandFormDefaults = {
   name: "",
+  category_id: "",
 };
 
 // ============================================
@@ -61,6 +63,7 @@ export const brandFormDefaults = {
  */
 export const mapBrandToFormValues = (brand) => ({
   name: brand?.name ?? "",
+  category_id: brand?.category_id ?? brand?.category?.id ?? "",
 });
 
 // ============================================
@@ -78,7 +81,7 @@ export const mapBrandToFormValues = (brand) => ({
 export const buildBrandPayload = (formData, dirtyFields = null) => {
   if (dirtyFields === null) {
     // Create: send everything the form manages
-    return { name: formData.name.trim() };
+    return { name: formData.name.trim(), category_id: formData.category_id };
   }
 
   // Edit: only include dirty fields
@@ -86,5 +89,6 @@ export const buildBrandPayload = (formData, dirtyFields = null) => {
   if (dirtyFields.name) {
     payload.name = formData.name.trim();
   }
+  if (dirtyFields.category_id) payload.category_id = formData.category_id;
   return payload;
 };

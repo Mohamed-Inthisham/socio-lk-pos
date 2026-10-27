@@ -76,6 +76,8 @@ const renderStatus = (row) => {
   );
 };
 
+const renderCategory = (row) => row.category?.name || "Unassigned";
+
 // ============================================
 // MAIN COMPONENT
 // ============================================
@@ -218,6 +220,11 @@ const ManageBrands = () => {
       header: "Brand",
       render: renderName,
       primary: true,
+    },
+    {
+      key: "category",
+      header: "Category",
+      render: renderCategory,
     },
     {
       key: "status",

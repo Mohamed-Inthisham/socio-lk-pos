@@ -35,6 +35,8 @@ export class CategoriesService {
     const category = this.categoriesRepository.create({
       name,
       parent_id,
+      show_phone_specs: dto.show_phone_specs,
+      default_tracking_method: dto.default_tracking_method,
       sort_order: dto.sort_order,
       is_active: dto.is_active,
     });
@@ -112,6 +114,10 @@ export class CategoriesService {
       await this.assertNameNotTakenAmongSiblings(newName, newParentId, id);
     }
 
+    if (dto.show_phone_specs !== undefined)
+      category.show_phone_specs = dto.show_phone_specs;
+    if (dto.default_tracking_method !== undefined)
+      category.default_tracking_method = dto.default_tracking_method;
     category.name = newName;
     category.parent_id = newParentId;
     if (dto.sort_order !== undefined) category.sort_order = dto.sort_order;

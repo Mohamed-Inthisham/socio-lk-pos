@@ -46,6 +46,9 @@ const currencyFormatter = new Intl.NumberFormat("en-LK", {
 });
 
 const formatPrice = (priceStr) => {
+  if (priceStr === null || priceStr === undefined || priceStr === "") {
+    return "Not set";
+  }
   const n = Number(priceStr);
   if (!Number.isFinite(n)) return priceStr;
   return currencyFormatter.format(n);
@@ -272,9 +275,9 @@ const ProductDetail = () => {
   const canDelete = can(PERMISSIONS.DELETE_PRODUCT);
   const canAdjustStock = can(PERMISSIONS.ADJUST_STOCK);
 
-   const wrap = (content) => (
-     <div className="max-w-6xl mx-auto p-4 md:p-6">{content}</div>
-   );
+  const wrap = (content) => (
+    <div className="max-w-6xl mx-auto p-4 md:p-6">{content}</div>
+  );
 
   if (loading) return wrap(<LoadingSkeleton />);
 
@@ -294,7 +297,14 @@ const ProductDetail = () => {
 
   if (!product) return wrap(<NotFoundState onBack={handleBack} />);
 
-  const isPhone = product.product_type === "PHONE";
+  const isPhone =
+    product.category?.show_phone_specs ||
+    Boolean(
+      product.phone_condition ||
+      product.phone_storage ||
+      product.phone_ram ||
+      product.phone_color,
+    );
 
   return wrap(
     <div className="space-y-4">
@@ -316,7 +326,7 @@ const ProductDetail = () => {
             <Badge tone="slate">
               <span className="font-mono">{product.sku}</span>
             </Badge>
-            <Badge tone="cyan">{product.product_type}</Badge>
+            <Badge tone="cyan">{product.category?.name}</Badge>
             {product.is_active ? (
               <Badge tone="green">Active</Badge>
             ) : (
@@ -364,15 +374,16 @@ const ProductDetail = () => {
 
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
         <Section title="Product information">
+          <Field
+            label="Model"
+            value={
+              product.model === undefined ? product.phone_model : product.model
+            }
+          />
           <Field label="Brand" value={product.brand?.name} />
           <Field label="Category" value={product.category?.name} />
-          <Field label="Branch" value={product.branch?.name} />
           <Field label="Barcode" value={product.barcode} mono />
           <Field label="Barcode type" value={product.barcode_type} />
-          <Field
-            label="Serialized"
-            value={product.is_serialized ? "Yes (IMEI captured at sale)" : "No"}
-          />
           {product.description && (
             <Field label="Description" value={product.description} />
           )}
@@ -383,24 +394,22 @@ const ProductDetail = () => {
         <div className="space-y-4">
           <Section title="Pricing & warranty">
             <Field
-              label="Buying price"
-              value={formatPrice(product.buying_price)}
-              mono
-            />
-            <Field
               label="Selling price"
               value={formatPrice(product.selling_price)}
               mono
             />
             <Field
               label="Default warranty"
-              value={product.default_warranty ? warrantyLabel(product.default_warranty) : null}
+              value={
+                product.default_warranty
+                  ? warrantyLabel(product.default_warranty)
+                  : null
+              }
             />
           </Section>
 
           {isPhone && (
             <Section title="Phone specifications">
-              <Field label="Model" value={product.phone_model} />
               <Field label="Storage" value={product.phone_storage} />
               <Field label="RAM" value={product.phone_ram} />
               <Field label="Color" value={product.phone_color} />
@@ -483,6 +492,6 @@ const ProductDetail = () => {
       />
     </div>,
   );
-};;;
+};
 
 export default ProductDetail;

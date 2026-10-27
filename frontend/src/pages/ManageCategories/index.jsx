@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { useDispatch, useSelector } from "react-redux";
+import { useDispatch } from "react-redux";
 import {
   Plus,
   FolderTree,
@@ -15,10 +15,7 @@ import Table from "../../components/common/Table";
 import usePermissions from "../../hooks/usePermissions";
 import { PERMISSIONS } from "../../constants/rolePermissions";
 import { listCategories } from "../../services/categoriesService";
-import {
-  fetchCategories,
-  selectAllCategories,
-} from "../../store/slices/categoriesSlice";
+import { fetchCategories } from "../../store/slices/categoriesSlice";
 import CategoryFormDialog from "../../components/categories/CategoryFormDialog";
 import DeactivateCategoryDialog from "../../components/categories/DeactivateCategoryDialog";
 
@@ -26,12 +23,10 @@ import DeactivateCategoryDialog from "../../components/categories/DeactivateCate
  * ManageCategories Page
  *
  * Admin-manageable, all-authenticated-users-viewable page for the
- * category catalog. Same shape as ManageBrands with two category-specific
- * additions: a Parent column in the table, and a parent lookup that
- * resolves parent_id → parent name for display.
+ * category catalog.
  *
  * SCOPE (R1):
- * - Flat table (top-level + sub-categories mixed, not nested/indented)
+ * - Flat category list
  * - Search by name (client-side, small list)
  * - Per-row Edit + Deactivate/Reactivate for admins
  * - No filters — the list will be small in R1
@@ -42,20 +37,7 @@ import DeactivateCategoryDialog from "../../components/categories/DeactivateCate
  * with includeInactive=true so admin can see and reactivate deactivated
  * categories. After every mutation:
  * 1. runFetch() — refreshes the local table
- * 2. dispatch(fetchCategories()) — refreshes the Redux slice so the
- *    product filter dropdowns and the CategoryFormDialog's parent
- *    picker see the change immediately.
- *
- * The categories slice is ALSO read directly here to build the parent
- * name lookup — the local table state gives us the rows to render, but
- * the slice is the canonical source for name-by-id resolution. In R1
- * they'll usually be in sync since we refetch both after mutation.
- *
- * PARENT COLUMN:
- * Shows parent category name for sub-categories, "—" for top-level.
- * Falls back to "—" gracefully if the parent lookup misses (e.g. slice
- * hasn't loaded yet or parent was deleted — shouldn't happen with the
- * two-level rule + no cascade, but defense in depth).
+ * 2. dispatch(fetchCategories()) — refreshes product category dropdowns.
  */
 
 // ============================================
@@ -105,11 +87,6 @@ const ManageCategories = () => {
   const [formTarget, setFormTarget] = useState(null);
   const [deactivateTarget, setDeactivateTarget] = useState(null);
 
-  // Redux slice — used ONLY for the parent name lookup. Local table state
-  // is what drives rendering. Reading from the slice for names means we
-  // get the same source of truth as the CategoryFormDialog's parent picker.
-  const sliceCategories = useSelector(selectAllCategories);
-
   // Fetch runner — same pattern as ManageBrands and ProductsList.
   const runFetch = () => {
     const requestId = ++fetchRequestIdRef.current;
@@ -138,20 +115,9 @@ const ManageCategories = () => {
   useEffect(() => {
     // eslint-disable-next-line react-hooks/set-state-in-effect
     runFetch();
-    // Also warm the Redux slice so the parent name lookup below has data
-    // even before the first mutation refetch.
     dispatch(fetchCategories());
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
-
-  // Parent name lookup — id → name from the slice. Recomputed only when
-  // the slice data changes. Falls back to a Map so lookup is O(1) on the
-  // hot render path.
-  const parentNameById = useMemo(() => {
-    const map = new Map();
-    sliceCategories.forEach((c) => map.set(c.id, c.name));
-    return map;
-  }, [sliceCategories]);
 
   // Client-side filter — trimmed, case-insensitive match on name
   const visibleCategories = useMemo(() => {
@@ -192,8 +158,7 @@ const ManageCategories = () => {
     handleCloseForm();
     handleCloseDeactivate();
     runFetch();
-    // Refresh the slice so product filters, product forms, and this page's
-    // parent name lookup all see the change without a full page reload.
+    // Refresh the slice so product forms see the change immediately.
     dispatch(fetchCategories());
   };
 
@@ -202,22 +167,6 @@ const ManageCategories = () => {
   // ============================================
 
   const canManage = can(PERMISSIONS.MANAGE_CATEGORIES);
-
-  const renderParent = (row) => {
-    if (row.parent_id === null || row.parent_id === undefined) {
-      return <span className="text-slate-400 dark:text-slate-500">—</span>;
-    }
-    const parentName = parentNameById.get(row.parent_id);
-    if (!parentName) {
-      // Shouldn't happen in practice — the two-level rule plus no-cascade
-      // means every parent_id resolves. But if the slice is stale, show
-      // "—" rather than a raw UUID.
-      return <span className="text-slate-400 dark:text-slate-500">—</span>;
-    }
-    return (
-      <span className="text-slate-700 dark:text-slate-200">{parentName}</span>
-    );
-  };
 
   const renderActions = (row) => {
     if (!canManage) return null;
@@ -257,12 +206,6 @@ const ManageCategories = () => {
       header: "Category",
       render: renderName,
       primary: true,
-    },
-    {
-      key: "parent",
-      header: "Parent",
-      render: renderParent,
-      secondary: true,
     },
     {
       key: "status",

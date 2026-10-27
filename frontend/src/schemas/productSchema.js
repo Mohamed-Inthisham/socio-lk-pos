@@ -14,20 +14,16 @@ import { DEFAULT_WARRANTY, WARRANTY_CODES } from "../constants/warranty";
  * that they parse to a valid non-negative number with at most 2
  * decimal places, and send strings to the backend.
  *
- * CONDITIONAL PHONE FIELDS:
- * When product_type === "PHONE", we require phone_condition. Other
- * phone fields (model, storage, color, ram) are optional even for
- * phones — they're nice-to-have specs. When product_type !== "PHONE",
- * all phone fields are ignored on submit (see stripPhoneFields helper).
+ * Category settings control optional phone specifications. Model is shared
+ * by all products. Individual identifiers are captured during future GRN.
  */
 
 // ============================================
 // ENUMS
 // ============================================
 
-export const PRODUCT_TYPES = ["PHONE", "ACCESSORY", "WATCH", "SPEAKER", "CABLE", "BACKCOVER", "CHARGER", "HEADSET", "BATTERY", "OTHER"];
 export const PHONE_CONDITIONS = ["NEW", "USED"];
-export const BARCODE_TYPES = ["CODE_128", "EAN_13", "UPC_A", "CODE_39"];
+export const BARCODE_TYPES = ["CODE_128", "EAN_13"];
 // Phone specs — common values only. Schema still accepts any string on these
 // fields (phone_storage, phone_ram) since manufacturers occasionally use
 // non-standard values. The dropdown just gives fast entry for the 95% case.
@@ -84,9 +80,8 @@ const productBaseSchema = z.object({
     .string()
     .min(1, "Product name is required")
     .max(200, "Name is too long (max 200 chars)"),
-  product_type: z.enum(PRODUCT_TYPES, {
-    errorMap: () => ({ message: "Select a product type" }),
-  }),
+  model: z.string().trim().max(100).optional().or(z.literal("")),
+  show_phone_specs: z.boolean().default(false),
   description: z
     .string()
     .max(2000, "Description is too long")
@@ -96,7 +91,6 @@ const productBaseSchema = z.object({
   // Classification
   brand_id: uuidString,
   category_id: uuidString,
-  branch_id: uuidString,
 
   // Identification
   barcode: z
@@ -107,20 +101,15 @@ const productBaseSchema = z.object({
   barcode_type: z.enum(BARCODE_TYPES).optional(),
 
   // Pricing
-  buying_price: priceString,
-  selling_price: priceString,
+  selling_price: priceString.optional().or(z.literal("")),
 
   // Warranty (P5-18): the period a sale line starts with
   default_warranty: z.enum(WARRANTY_CODES, {
     errorMap: () => ({ message: "Select a warranty" }),
   }),
 
-  // Serialization
-  is_serialized: z.boolean().default(false),
-
   // Phone-specific (validated conditionally in sharedProductRefinements)
   phone_condition: z.enum(PHONE_CONDITIONS).optional().or(z.literal("")),
-  phone_model: z.string().max(100).optional().or(z.literal("")),
   phone_storage: z.string().max(50).optional().or(z.literal("")),
   phone_color: z.string().max(50).optional().or(z.literal("")),
   phone_ram: z.string().max(50).optional().or(z.literal("")),
@@ -133,24 +122,8 @@ const productBaseSchema = z.object({
  * both schemas without duplication.
  */
 const sharedProductRefinements = (data, ctx) => {
-  // Rule 1: selling price should be >= buying price (prevents obvious
-  // data entry mistakes; equal values allowed).
-  const buying = Number(data.buying_price);
-  const selling = Number(data.selling_price);
-  if (
-    Number.isFinite(buying) &&
-    Number.isFinite(selling) &&
-    selling < buying
-  ) {
-    ctx.addIssue({
-      code: z.ZodIssueCode.custom,
-      message: "Selling price is less than buying price",
-      path: ["selling_price"],
-    });
-  }
-
-  // Rule 2: phone_condition required when product_type === "PHONE"
-  if (data.product_type === "PHONE" && !data.phone_condition) {
+  // Condition is required when category specifications are enabled.
+  if (data.show_phone_specs && !data.phone_condition) {
     ctx.addIssue({
       code: z.ZodIssueCode.custom,
       message: "Condition is required for phones",
@@ -198,7 +171,6 @@ export const productEditSchema = productBaseSchema
   })
   .superRefine(sharedProductRefinements);
 
-
 // ============================================
 // PAYLOAD BUILDER
 // ============================================
@@ -216,7 +188,8 @@ export const buildCreatePayload = (data) => {
   const optionalFields = [
     "description",
     "barcode",
-    "phone_model",
+    "model",
+    "selling_price",
     "phone_storage",
     "phone_color",
     "phone_ram",
@@ -226,14 +199,15 @@ export const buildCreatePayload = (data) => {
     if (payload[f] === "" || payload[f] == null) delete payload[f];
   });
 
-  // If not a phone, strip all phone fields
-  if (payload.product_type !== "PHONE") {
+  // Category settings control phone specifications, never the shared model.
+  if (!payload.show_phone_specs) {
     delete payload.phone_condition;
-    delete payload.phone_model;
     delete payload.phone_storage;
     delete payload.phone_color;
     delete payload.phone_ram;
   }
+
+  delete payload.show_phone_specs;
 
   // Default barcode_type only if barcode is present
   if (payload.barcode && !payload.barcode_type) {
@@ -252,27 +226,23 @@ export const buildCreatePayload = (data) => {
 /**
  * Convert a backend product response into RHF form values.
  *
- * Two shape mismatches to handle:
- * - Backend returns nested { brand, category, branch } objects; form uses
- *   flat brand_id / category_id / branch_id.
+ * Backend returns nested { brand, category } objects; form uses flat IDs.
  * - Backend returns null for unset optionals; form inputs need "" so the
  *   controlled components stay controlled.
  */
 export const mapProductToFormValues = (product) => ({
   name: product.name ?? "",
-  product_type: product.product_type ?? "",
+  model:
+    (product.model === undefined ? product.phone_model : product.model) ?? "",
+  show_phone_specs: product.category?.show_phone_specs ?? false,
   description: product.description ?? "",
   brand_id: product.brand?.id ?? "",
   category_id: product.category?.id ?? "",
-  branch_id: product.branch?.id ?? "",
   barcode: product.barcode ?? "",
   barcode_type: product.barcode_type ?? "CODE_128",
-  buying_price: product.buying_price ?? "",
   selling_price: product.selling_price ?? "",
   default_warranty: product.default_warranty ?? DEFAULT_WARRANTY,
-  is_serialized: product.is_serialized ?? false,
   phone_condition: product.phone_condition ?? "",
-  phone_model: product.phone_model ?? "",
   phone_storage: product.phone_storage ?? "",
   phone_color: product.phone_color ?? "",
   phone_ram: product.phone_ram ?? "",
@@ -305,7 +275,7 @@ export const buildUpdatePayload = (formData, dirtyFields) => {
 
   // Only include fields RHF flagged as dirty
   Object.keys(dirtyFields).forEach((key) => {
-    if (dirtyFields[key]) {
+    if (dirtyFields[key] && key !== "show_phone_specs") {
       payload[key] = formData[key];
     }
   });
@@ -313,7 +283,8 @@ export const buildUpdatePayload = (formData, dirtyFields) => {
   // Nullable string fields: "" means "clear it"
   const nullableStringFields = [
     "description",
-    "phone_model",
+    "model",
+    "selling_price",
     "phone_storage",
     "phone_color",
     "phone_ram",
@@ -332,19 +303,16 @@ export const buildUpdatePayload = (formData, dirtyFields) => {
 
 export const productFormDefaults = {
   name: "",
-  product_type: "",
+  model: "",
+  show_phone_specs: false,
   description: "",
   brand_id: "",
   category_id: "",
-  branch_id: "",
   barcode: "",
   barcode_type: "CODE_128",
-  buying_price: "",
   selling_price: "",
   default_warranty: DEFAULT_WARRANTY,
-  is_serialized: false,
   phone_condition: "",
-  phone_model: "",
   phone_storage: "",
   phone_color: "",
   phone_ram: "",

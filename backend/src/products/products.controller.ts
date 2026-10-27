@@ -42,7 +42,7 @@ export class ProductsController {
       'DESC (newest first, stable across pages). Filters, combined with ' +
       'AND: search (case-insensitive substring match on name; trimmed, ' +
       'empty ignored, 2–100 chars), includeInactive, brandId, categoryId, ' +
-      'branchId, productType. Pagination: page (default 1), limit ' +
+      'branchId, trackingMethod. Pagination: page (default 1), limit ' +
       '(default 50, max 200). Every product includes nested brand, ' +
       'category, and branch objects for one-shot rendering.',
   })
@@ -99,13 +99,13 @@ export class ProductsController {
     description:
       'Admin-only. SKU is always auto-generated (SKU-XXXXXX). Barcode ' +
       'is auto-generated (SLP-XXXXXX) if omitted, or accepted if provided. ' +
-      'Referenced brand, category, and branch must all be active.',
+      'Brand and category must be active. Branch stock is added separately.',
   })
   @ApiResponse({ status: 201, description: 'Product created' })
   @ApiResponse({
     status: 400,
     description:
-      'Validation failed, or brand/category/branch is missing or inactive',
+      'Validation failed, or brand/category is missing or inactive',
   })
   @ApiResponse({ status: 401, description: 'Not authenticated' })
   @ApiResponse({ status: 403, description: 'Not an admin' })

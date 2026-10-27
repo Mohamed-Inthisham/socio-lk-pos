@@ -1,5 +1,7 @@
+import { TrackingMethod } from '../../products/enums/tracking-method.enum';
 import {
   Entity,
+  Check,
   PrimaryGeneratedColumn,
   Column,
   CreateDateColumn,
@@ -10,6 +12,10 @@ import {
 } from 'typeorm';
 
 @Entity('categories')
+@Check(
+  'CHK_categories_tracking_method',
+  `default_tracking_method IN ('QUANTITY', 'IMEI', 'SERIAL_NUMBER')`,
+)
 export class Category {
   @PrimaryGeneratedColumn('uuid')
   id!: string;
@@ -29,6 +35,12 @@ export class Category {
 
   @Column({ type: 'boolean', default: true, name: 'is_active' })
   is_active!: boolean;
+
+  @Column({ type: 'boolean', default: false })
+  show_phone_specs!: boolean;
+
+  @Column({ type: 'varchar', length: 20, default: TrackingMethod.QUANTITY })
+  default_tracking_method!: TrackingMethod;
 
   @CreateDateColumn({ type: 'timestamptz', name: 'created_at' })
   created_at!: Date;

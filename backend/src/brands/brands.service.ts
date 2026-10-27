@@ -2,18 +2,21 @@ import {
   Injectable,
   NotFoundException,
   ConflictException,
+  BadRequestException,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import { Brand } from './entities/brand.entity';
 import { CreateBrandDto } from './dto/create-brand.dto';
 import { UpdateBrandDto } from './dto/update-brand.dto';
+import { CategoriesService } from '../categories/categories.service';
 
 @Injectable()
 export class BrandsService {
   constructor(
     @InjectRepository(Brand)
     private readonly brandsRepository: Repository<Brand>,
+    private readonly categoriesService: CategoriesService,
   ) {}
 
   /**
@@ -25,8 +28,11 @@ export class BrandsService {
     const name = dto.name.trim();
     await this.assertNameNotTaken(name);
 
+    if (dto.category_id) await this.assertCategoryActive(dto.category_id);
+
     const brand = this.brandsRepository.create({
       name,
+      category_id: dto.category_id ?? null,
       is_active: dto.is_active,
     });
     return this.brandsRepository.save(brand);
@@ -40,6 +46,7 @@ export class BrandsService {
   async findAll(includeInactive = false): Promise<Brand[]> {
     return this.brandsRepository.find({
       where: includeInactive ? {} : { is_active: true },
+      relations: ['category'],
       order: { name: 'ASC' },
     });
   }
@@ -49,7 +56,10 @@ export class BrandsService {
    * Returns inactive brands too — the admin editor needs to load them.
    */
   async findOne(id: string): Promise<Brand> {
-    const brand = await this.brandsRepository.findOne({ where: { id } });
+    const brand = await this.brandsRepository.findOne({
+      where: { id },
+      relations: ['category'],
+    });
     if (!brand) {
       throw new NotFoundException('Brand not found');
     }
@@ -61,6 +71,18 @@ export class BrandsService {
    */
   async update(id: string, dto: UpdateBrandDto): Promise<Brand> {
     const brand = await this.findOne(id);
+
+    if (dto.category_id !== undefined && dto.category_id !== brand.category_id) {
+      if (dto.category_id !== null) await this.assertCategoryActive(dto.category_id);
+      const rows: { hasMismatch: boolean }[] = await this.brandsRepository.manager.query(
+        `SELECT EXISTS (SELECT 1 FROM products WHERE brand_id = $1 AND category_id IS DISTINCT FROM $2::uuid) AS "hasMismatch"`,
+        [id, dto.category_id],
+      );
+      if (rows[0]?.hasMismatch) {
+        throw new BadRequestException('This brand is already used by products in another category.');
+      }
+      brand.category_id = dto.category_id;
+    }
 
     if (dto.name !== undefined) {
       const newName = dto.name.trim();
@@ -108,5 +130,11 @@ export class BrandsService {
     if (existing) {
       throw new ConflictException(`Brand "${name}" already exists`);
     }
+  }
+
+  private async assertCategoryActive(categoryId: string): Promise<void> {
+    const category = await this.categoriesService.findOne(categoryId).catch(() => null);
+    if (!category) throw new BadRequestException(`Category ${categoryId} not found`);
+    if (!category.is_active) throw new BadRequestException(`Category "${category.name}" is not active`);
   }
 }

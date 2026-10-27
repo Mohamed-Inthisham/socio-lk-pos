@@ -3,6 +3,7 @@ import { getRepositoryToken } from '@nestjs/typeorm';
 import { NotFoundException, ConflictException } from '@nestjs/common';
 import { BrandsService } from './brands.service';
 import { Brand } from './entities/brand.entity';
+import { CategoriesService } from '../categories/categories.service';
 
 describe('BrandsService', () => {
   let service: BrandsService;
@@ -19,6 +20,7 @@ describe('BrandsService', () => {
     findOne: jest.fn(),
     createQueryBuilder: jest.fn(() => mockQueryBuilder),
   };
+  const mockCategoriesService = { findOne: jest.fn() };
 
   beforeEach(async () => {
     jest.clearAllMocks();
@@ -30,6 +32,7 @@ describe('BrandsService', () => {
       providers: [
         BrandsService,
         { provide: getRepositoryToken(Brand), useValue: mockRepo },
+        { provide: CategoriesService, useValue: mockCategoriesService },
       ],
     }).compile();
 
@@ -77,6 +80,7 @@ describe('BrandsService', () => {
 
       expect(mockRepo.find).toHaveBeenCalledWith({
         where: { is_active: true },
+        relations: ['category'],
         order: { name: 'ASC' },
       });
       expect(result).toBe(brands);
@@ -93,6 +97,7 @@ describe('BrandsService', () => {
 
       expect(mockRepo.find).toHaveBeenCalledWith({
         where: {},
+        relations: ['category'],
         order: { name: 'ASC' },
       });
       expect(result).toBe(brands);

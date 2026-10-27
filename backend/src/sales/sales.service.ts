@@ -741,7 +741,7 @@ export class SalesService {
           `Product "${product.name}" is not active`,
         );
       }
-      if (product.branch_id !== sale.branch_id) {
+      if (product.branch_id && product.branch_id !== sale.branch_id) {
         throw new BadRequestException(
           `Product "${product.name}" belongs to a different branch than this sale`,
         );
@@ -754,8 +754,10 @@ export class SalesService {
       const clientImei = dto.imei_snapshot ?? null;
       let productUnitId: string | null = null;
       let imeiSnapshot: string | null = clientImei;
-      let unitPrice: string = product.selling_price;
-      let costPrice: string = product.buying_price;
+      let unitPrice: string | null = product.selling_price;
+      // Products created before a stock receipt may not yet have a known
+      // acquisition cost. Unit or GRN cost is attached during receiving.
+      let costPrice: string = product.buying_price ?? '0.00';
 
       if (dto.external_supplier_id) {
         // EXTERNAL branch — resolve supplier (existing behavior)
@@ -817,6 +819,12 @@ export class SalesService {
       } else {
         // IN_HOUSE_NON_SERIALIZED — no IMEI allowed.
         this.assertNoImeiOnNonSerializedLine(clientImei, product.name);
+      }
+
+      if (unitPrice === null) {
+        throw new BadRequestException(
+          `No selling price is set for product "${product.name}".`,
+        );
       }
 
       // 4. Assign line_number as max + 1 within this sale. The sale row
@@ -2512,7 +2520,7 @@ export class SalesService {
         `Trade-in product ${productId} not found or inactive`,
       );
     }
-    if (product.branch_id !== branchId) {
+    if (product.branch_id && product.branch_id !== branchId) {
       throw new BadRequestException(
         `Trade-in product ${productId} does not belong to branch ${branchId}`,
       );

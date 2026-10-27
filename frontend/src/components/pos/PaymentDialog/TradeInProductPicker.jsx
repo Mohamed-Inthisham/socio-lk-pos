@@ -14,7 +14,7 @@ import {
  * Combobox for the trade-in's catalogue product (planning doc P4-3).
  *
  * SEARCH: 2+ chars, debounced 250 ms,
- * GET /products?search=&branchId=&productType=PHONE&limit=20. The server
+ * GET /products?search=&branchId=&trackingMethod=IMEI&limit=20. The server
  * can't filter on is_serialized, so the client keeps serialized, active
  * products only, with USED SKUs (phone_condition === "USED") first and
  * a "Used" badge. No match: "No used-phone product for this model. Ask
@@ -48,7 +48,16 @@ const UsedBadge = () => (
   </span>
 );
 
-const TradeInProductPicker = ({ branchId, product, onPick, onAdvance, error, disabled, name, ref }) => {
+const TradeInProductPicker = ({
+  branchId,
+  product,
+  onPick,
+  onAdvance,
+  error,
+  disabled,
+  name,
+  ref,
+}) => {
   const id = useId();
   const listId = `${id}-list`;
   const errorId = `${id}-error`;
@@ -79,7 +88,7 @@ const TradeInProductPicker = ({ branchId, product, onPick, onAdvance, error, dis
         const page = await listProducts({
           search: query,
           branchId,
-          productType: "PHONE",
+          trackingMethod: "IMEI",
           limit: TRADE_IN_PRODUCT_LIMIT,
         });
         if (seq !== requestSeq.current) return;
@@ -90,7 +99,9 @@ const TradeInProductPicker = ({ branchId, product, onPick, onAdvance, error, dis
         if (seq !== requestSeq.current) return;
         setResults([]);
         setResultsQuery(null);
-        setSearchError(err?.response?.data?.message || err?.message || "Search failed");
+        setSearchError(
+          err?.response?.data?.message || err?.message || "Search failed",
+        );
       }
     }, DEBOUNCE_MS);
     return () => clearTimeout(timer);
@@ -135,7 +146,8 @@ const TradeInProductPicker = ({ branchId, product, onPick, onAdvance, error, dis
     }
   };
 
-  const activeId = showList && options[active] ? `${id}-opt-${active}` : undefined;
+  const activeId =
+    showList && options[active] ? `${id}-opt-${active}` : undefined;
 
   let status = null;
   if (searchError) status = null;
@@ -159,7 +171,11 @@ const TradeInProductPicker = ({ branchId, product, onPick, onAdvance, error, dis
             ${disabled ? "opacity-60 cursor-not-allowed" : ""}
           `}
         >
-          <Smartphone size={16} aria-hidden="true" className="text-slate-400 dark:text-slate-500" />
+          <Smartphone
+            size={16}
+            aria-hidden="true"
+            className="text-slate-400 dark:text-slate-500"
+          />
           <input
             ref={ref}
             id={id}
@@ -196,13 +212,22 @@ const TradeInProductPicker = ({ branchId, product, onPick, onAdvance, error, dis
         {showList && (status || searchError || options.length > 0) && (
           <div className="absolute z-10 left-0 right-0 mt-1 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 shadow-lg overflow-hidden">
             {searchError && (
-              <p role="alert" className="flex items-start gap-2 px-4 py-2.5 text-sm text-red-600 dark:text-red-400">
-                <AlertCircle size={16} aria-hidden="true" className="flex-shrink-0 mt-0.5" />
+              <p
+                role="alert"
+                className="flex items-start gap-2 px-4 py-2.5 text-sm text-red-600 dark:text-red-400"
+              >
+                <AlertCircle
+                  size={16}
+                  aria-hidden="true"
+                  className="flex-shrink-0 mt-0.5"
+                />
                 {searchError}
               </p>
             )}
             {status && (
-              <p className="px-4 py-2.5 text-sm text-slate-500 dark:text-slate-400">{status}</p>
+              <p className="px-4 py-2.5 text-sm text-slate-500 dark:text-slate-400">
+                {status}
+              </p>
             )}
             {options.length > 0 && (
               <ul
@@ -234,7 +259,10 @@ const TradeInProductPicker = ({ branchId, product, onPick, onAdvance, error, dis
         )}
       </div>
       {error && (
-        <p id={errorId} className="text-xs text-red-500 dark:text-red-400 mt-0.5">
+        <p
+          id={errorId}
+          className="text-xs text-red-500 dark:text-red-400 mt-0.5"
+        >
           {error}
         </p>
       )}

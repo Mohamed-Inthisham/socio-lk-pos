@@ -1,4 +1,4 @@
-import { IsString, MaxLength, MinLength, IsBoolean } from 'class-validator';
+import { IsString, MaxLength, MinLength, IsBoolean, IsOptional, IsUUID } from 'class-validator';
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 import { IsOptionalNotNull } from '../../common/validators/is-optional-not-null.decorator';
 
@@ -13,6 +13,14 @@ export class CreateBrandDto {
   @MinLength(1)
   @MaxLength(100)
   name!: string;
+
+  @ApiPropertyOptional({
+    description: 'Category this brand belongs to. New product forms use it to show relevant brands.',
+    format: 'uuid',
+  })
+  @IsOptional()
+  @IsUUID()
+  category_id?: string | null;
 
   @ApiPropertyOptional({
     example: true,

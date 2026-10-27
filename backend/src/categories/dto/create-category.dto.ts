@@ -1,5 +1,7 @@
+import { TrackingMethod } from '../../products/enums/tracking-method.enum';
 import {
   IsString,
+  IsEnum,
   MaxLength,
   MinLength,
   IsOptional,
@@ -53,4 +55,20 @@ export class CreateCategoryDto {
   @IsOptionalNotNull()
   @IsBoolean()
   is_active?: boolean;
+  @ApiPropertyOptional({
+    description: 'Show phone specifications when adding or editing products.',
+    default: false,
+  })
+  @IsOptionalNotNull()
+  @IsBoolean()
+  show_phone_specs?: boolean;
+
+  @ApiPropertyOptional({
+    enum: TrackingMethod,
+    description:
+      'Default for new products; existing products keep their tracking method.',
+  })
+  @IsOptionalNotNull()
+  @IsEnum(TrackingMethod)
+  default_tracking_method?: TrackingMethod;
 }

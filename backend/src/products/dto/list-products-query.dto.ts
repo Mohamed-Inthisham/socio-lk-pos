@@ -1,3 +1,4 @@
+import { TrackingMethod } from '../enums/tracking-method.enum';
 import { ApiPropertyOptional } from '@nestjs/swagger';
 import { Transform } from 'class-transformer';
 import {
@@ -26,7 +27,7 @@ import { ProductType } from '../enums/product-type.enum';
  * - includeInactive: "true" | "false". Anything else is a 400 (matches
  *   the ParseBoolPipe behaviour this endpoint had before the DTO).
  * - brandId / categoryId / branchId: UUIDs.
- * - productType: PHONE | ACCESSORY | WATCH | SPEAKER.
+ * - trackingMethod: QUANTITY | IMEI | SERIAL_NUMBER.
  */
 export class ListProductsQueryDto extends PaginationQueryDto {
   @ApiPropertyOptional({
@@ -81,7 +82,16 @@ export class ListProductsQueryDto extends PaginationQueryDto {
   branchId?: string;
 
   @ApiPropertyOptional({
-    description: 'Filter by product type',
+    enum: TrackingMethod,
+    description: 'Filter by tracking method',
+  })
+  @IsOptional()
+  @IsEnum(TrackingMethod)
+  trackingMethod?: TrackingMethod;
+
+  @ApiPropertyOptional({
+    deprecated: true,
+    description: 'Filter by legacy product type',
     enum: ProductType,
   })
   @IsOptional()
