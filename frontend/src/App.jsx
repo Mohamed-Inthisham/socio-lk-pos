@@ -24,6 +24,9 @@ import SalesOverview from "./pages/SalesOverview";
 import Customers from "./pages/Customers";
 import CustomerDetail from "./pages/CustomerDetail";
 import Suppliers from "./pages/Suppliers";
+import StockPurchases from "./pages/StockPurchases";
+import StockPurchaseCreate from "./pages/StockPurchaseCreate";
+import StockPurchaseDetail from "./pages/StockPurchaseDetail";
 import { restoreSession } from "./store/slices/authSlice";
 import { fetchBranches } from "./store/slices/branchesSlice";
 
@@ -142,6 +145,30 @@ function App() {
         <Route path="/customers" element={<Customers />} />
         <Route path="/customers/:id" element={<CustomerDetail />} />
         <Route path="/suppliers" element={<Suppliers />} />
+        <Route
+          path="/stock-purchases"
+          element={
+            <RoleProtectedRoute allowedRoles={["admin", "manager"]}>
+              <StockPurchases />
+            </RoleProtectedRoute>
+          }
+        />
+        <Route
+          path="/stock-purchases/new"
+          element={
+            <RoleProtectedRoute allowedRoles={["admin", "manager"]}>
+              <StockPurchaseCreate />
+            </RoleProtectedRoute>
+          }
+        />
+        <Route
+          path="/stock-purchases/:id"
+          element={
+            <RoleProtectedRoute allowedRoles={["admin", "manager"]}>
+              <StockPurchaseDetail />
+            </RoleProtectedRoute>
+          }
+        />
         <Route element={<SalesArea />}>
           <Route
             path="/sales"

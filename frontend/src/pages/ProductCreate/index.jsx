@@ -7,6 +7,7 @@ import { ArrowLeft, Package, AlertCircle } from "lucide-react";
 import Button from "../../components/common/Button";
 import InputField from "../../components/common/InputField";
 import Select from "../../components/common/Select";
+import Dialog from "../../components/common/Dialog";
 import { WARRANTY_PERIODS } from "../../constants/warranty";
 import {
   productCreateSchema,
@@ -77,7 +78,7 @@ const FormSection = ({ title, description, children, className = "" }) => (
 // MAIN COMPONENT
 // ============================================
 
-const ProductCreate = () => {
+const ProductCreate = ({ embedded = false, onCreated, onCancel }) => {
   const dispatch = useDispatch();
   const navigate = useNavigate();
 
@@ -159,7 +160,11 @@ const ProductCreate = () => {
     try {
       const payload = buildCreatePayload(data);
       const created = await createProduct(payload);
-      navigate(`/products/${created.id}`);
+      if (onCreated) {
+        onCreated(created);
+      } else {
+        navigate(`/products/${created.id}`);
+      }
     } catch (err) {
       setApiError(
         err.response?.data?.message ||
@@ -170,9 +175,15 @@ const ProductCreate = () => {
     }
   };
 
-  const handleCancel = () => navigate("/products");
+  const handleCancel = () => {
+    if (onCancel) {
+      onCancel();
+    } else {
+      navigate("/products");
+    }
+  };
 
-  return (
+  const page = (
     <div className="max-w-4xl mx-auto p-4 md:p-6">
       <button
         type="button"
@@ -180,7 +191,7 @@ const ProductCreate = () => {
         className="inline-flex items-center gap-1.5 text-sm text-slate-500 dark:text-slate-400 hover:text-slate-800 dark:hover:text-slate-200 transition-colors mb-4"
       >
         <ArrowLeft size={14} />
-        Back to products
+        {onCancel ? "Back to stock purchase" : "Back to products"}
       </button>
 
       <div className="flex items-center gap-3 mb-6">
@@ -194,7 +205,7 @@ const ProductCreate = () => {
           <p className="text-sm text-slate-500 dark:text-slate-400">
             Register a model once. SKU and a product barcode are generated when
             needed. Stock and individual identifiers are added later through
-            GRN.
+            stock purchase.
           </p>
         </div>
       </div>
@@ -305,7 +316,7 @@ const ProductCreate = () => {
               <InputField
                 type="text"
                 label="Selling price"
-                placeholder="Enter now or add during GRN"
+                placeholder="Enter now or add during stock purchase"
                 inputMode="decimal"
                 error={errors.selling_price?.message}
                 {...register("selling_price")}
@@ -450,6 +461,12 @@ const ProductCreate = () => {
       </form>
     </div>
   );
+
+  return embedded ? (
+    <Dialog open onClose={handleCancel} size="xl" dismissible={!isSubmitting}>
+      <div className="max-h-[78vh] overflow-y-auto">{page}</div>
+    </Dialog>
+  ) : page;
 };
 
 export default ProductCreate;

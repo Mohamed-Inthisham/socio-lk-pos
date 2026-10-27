@@ -176,6 +176,28 @@ export class StockService {
   }
 
   /**
+   * Add received units to a branch stock balance inside the caller's
+   * transaction. Creates a row for a new catalog product and uses an atomic
+   * upsert so concurrent receipts cannot lose quantity increments.
+   */
+  async receivePurchase(
+    manager: EntityManager,
+    productId: string,
+    branchId: string,
+    quantity: number,
+  ): Promise<void> {
+    await manager.query(
+      `INSERT INTO "stock" ("product_id", "branch_id", "quantity", "min_quantity", "manage_stock")
+       VALUES ($1, $2, $3, 0, true)
+       ON CONFLICT ("product_id", "branch_id") DO UPDATE
+       SET "quantity" = "stock"."quantity" + EXCLUDED."quantity",
+           "manage_stock" = true,
+           "updated_at" = now()`,
+      [productId, branchId, quantity],
+    );
+  }
+
+  /**
    * Decrement stock for a sold line as part of a larger transaction
    * (typically SalesService.completeSale). Enlists in the caller's
    * EntityManager so that if the outer transaction rolls back — for

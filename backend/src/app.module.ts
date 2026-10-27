@@ -26,6 +26,7 @@ import { ProductUnitsModule } from './product-units/product-units.module';
 import { PhonePurchasesModule } from './phone-purchases/phone-purchases.module';
 import { ApprovalsModule } from './approvals/approvals.module';
 import { CashDaysModule } from './cash-days/cash-days.module';
+import { StockPurchasesModule } from './stock-purchases/stock-purchases.module';
 
 @Module({
   imports: [
@@ -68,6 +69,7 @@ import { CashDaysModule } from './cash-days/cash-days.module';
     PhonePurchasesModule,
     ApprovalsModule,
     CashDaysModule,
+    StockPurchasesModule,
   ],
   controllers: [AppController],
   providers: [
