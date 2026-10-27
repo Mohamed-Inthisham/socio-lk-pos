@@ -31,7 +31,7 @@ import {
  * Lists all products with filters. Path B step 4.
  *
  * FILTERING STRATEGY:
- * - Server-side: brand, category, branch, product_type, includeInactive
+ * - Server-side: brand, category, branch, includeInactive
  *   → refetch from backend when any of these change
  * - Client-side: text search on name/SKU/barcode
  *   → filter the in-memory list without a refetch
@@ -54,6 +54,9 @@ const currencyFormatter = new Intl.NumberFormat("en-LK", {
 });
 
 const formatPrice = (priceStr) => {
+  if (priceStr === null || priceStr === undefined || priceStr === "") {
+    return "Not set";
+  }
   const n = Number(priceStr);
   if (!Number.isFinite(n)) return priceStr;
   return currencyFormatter.format(n);
@@ -61,14 +64,6 @@ const formatPrice = (priceStr) => {
 
 // GET /products caps limit at 200 (shared PaginationQueryDto).
 const MAX_PAGE_SIZE = 200;
-
-const PRODUCT_TYPES = [
-  { value: "", label: "All types" },
-  { value: "PHONE", label: "Phone" },
-  { value: "ACCESSORY", label: "Accessory" },
-  { value: "WATCH", label: "Watch" },
-  { value: "SPEAKER", label: "Speaker" },
-];
 
 const ProductsList = () => {
   const dispatch = useDispatch();
@@ -80,7 +75,6 @@ const ProductsList = () => {
     brandId: "",
     categoryId: "",
     branchId: "",
-    productType: "",
     includeInactive: false,
   });
   const [searchTerm, setSearchTerm] = useState("");
@@ -168,6 +162,7 @@ const ProductsList = () => {
 
   const renderProduct = (row) => {
     const specParts = [
+      row.model,
       row.phone_storage,
       row.phone_color,
       row.phone_ram,
@@ -295,126 +290,119 @@ const ProductsList = () => {
     ...categories.map((c) => ({ value: c.id, label: c.name })),
   ];
 
-    return (
+  return (
     <div className="max-w-7xl mx-auto p-4 md:p-6">
-        {/* Page header */}
-        <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 mb-6">
-          <div className="flex items-center gap-3">
-            <div className="w-10 h-10 rounded-lg bg-cyan-100 dark:bg-cyan-900/40 flex items-center justify-center">
-              <Package size={20} className="text-cyan-600 dark:text-cyan-400" />
-            </div>
-            <div>
-              <h1 className="text-2xl font-bold text-slate-900 dark:text-slate-100">
-                Products
-              </h1>
-              <p className="text-sm text-slate-500 dark:text-slate-400">
-                {loading
-                  ? "Loading..."
-                  : `${visibleProducts.length} of ${products.length} shown` +
-                    (total > products.length
-                      ? ` (first ${products.length} of ${total} products)`
-                      : "")}
-              </p>
-            </div>
+      {/* Page header */}
+      <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 mb-6">
+        <div className="flex items-center gap-3">
+          <div className="w-10 h-10 rounded-lg bg-cyan-100 dark:bg-cyan-900/40 flex items-center justify-center">
+            <Package size={20} className="text-cyan-600 dark:text-cyan-400" />
           </div>
-
-          {canCreate && (
-            <Button
-              variant="accent"
-              icon={Plus}
-              onClick={handleNewProduct}
-              label="New product"
-            />
-          )}
-        </div>
-
-        {/* Filters bar */}
-        <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-xl p-4 mb-4 space-y-3">
-          {/* Search + inactive toggle */}
-          <div className="flex flex-col sm:flex-row gap-3">
-            <div className="flex-1">
-              <InputField
-                type="text"
-                name="search"
-                placeholder="Search by name, SKU, or barcode"
-                value={searchTerm}
-                onChange={(e) => setSearchTerm(e.target.value)}
-                icon={Search}
-              />
-            </div>
-            <label className="flex items-center gap-2 text-sm text-slate-600 dark:text-slate-300 whitespace-nowrap px-1">
-              <input
-                type="checkbox"
-                checked={filters.includeInactive}
-                onChange={handleInactiveToggle}
-                className="w-4 h-4 rounded border-slate-300 dark:border-slate-600 text-cyan-600 focus:ring-cyan-500 [color-scheme:light] dark:[color-scheme:dark]"
-              />
-              Show inactive
-            </label>
-          </div>
-
-          {/* Structural filters */}
-          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
-            <Select
-              name="brand"
-              value={filters.brandId}
-              onChange={handleFilterChange("brandId")}
-              options={brandOptions}
-              placeholder="All brands"
-            />
-            <Select
-              name="category"
-              value={filters.categoryId}
-              onChange={handleFilterChange("categoryId")}
-              options={categoryOptions}
-              placeholder="All categories"
-            />
-            <Select
-              name="branch"
-              value={filters.branchId}
-              onChange={handleFilterChange("branchId")}
-              options={branchOptions}
-              placeholder="All branches"
-            />
-            <Select
-              name="productType"
-              value={filters.productType}
-              onChange={handleFilterChange("productType")}
-              options={PRODUCT_TYPES}
-              placeholder="All types"
-            />
+          <div>
+            <h1 className="text-2xl font-bold text-slate-900 dark:text-slate-100">
+              Products
+            </h1>
+            <p className="text-sm text-slate-500 dark:text-slate-400">
+              {loading
+                ? "Loading..."
+                : `${visibleProducts.length} of ${products.length} shown` +
+                  (total > products.length
+                    ? ` (first ${products.length} of ${total} products)`
+                    : "")}
+            </p>
           </div>
         </div>
 
-        {/* Error banner */}
-        {error && (
-          <div className="bg-red-50 dark:bg-red-950/40 border border-red-200 dark:border-red-900 rounded-xl p-4 mb-4 flex items-start gap-3">
-            <AlertCircle
-              size={18}
-              className="text-red-600 dark:text-red-400 flex-shrink-0 mt-0.5"
-            />
-            <div>
-              <p className="text-sm font-medium text-red-800 dark:text-red-200">
-                Couldn't load products
-              </p>
-              <p className="text-xs text-red-700 dark:text-red-300 mt-0.5">
-                {error}
-              </p>
-            </div>
-          </div>
+        {canCreate && (
+          <Button
+            variant="accent"
+            icon={Plus}
+            onClick={handleNewProduct}
+            label="New product"
+          />
         )}
-
-        {/* Table */}
-        <Table
-          columns={columns}
-          data={visibleProducts}
-          loading={loading}
-          onRowClick={handleRowClick}
-          emptyMessage={
-            searchTerm ? `No products match "${searchTerm}"` : "No products yet"
-          }
-        />
       </div>
+
+      {/* Filters bar */}
+      <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-xl p-4 mb-4 space-y-3">
+        {/* Search + inactive toggle */}
+        <div className="flex flex-col sm:flex-row gap-3">
+          <div className="flex-1">
+            <InputField
+              type="text"
+              name="search"
+              placeholder="Search by name, SKU, or barcode"
+              value={searchTerm}
+              onChange={(e) => setSearchTerm(e.target.value)}
+              icon={Search}
+            />
+          </div>
+          <label className="flex items-center gap-2 text-sm text-slate-600 dark:text-slate-300 whitespace-nowrap px-1">
+            <input
+              type="checkbox"
+              checked={filters.includeInactive}
+              onChange={handleInactiveToggle}
+              className="w-4 h-4 rounded border-slate-300 dark:border-slate-600 text-cyan-600 focus:ring-cyan-500 [color-scheme:light] dark:[color-scheme:dark]"
+            />
+            Show inactive
+          </label>
+        </div>
+
+        {/* Structural filters */}
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
+          <Select
+            name="brand"
+            value={filters.brandId}
+            onChange={handleFilterChange("brandId")}
+            options={brandOptions}
+            placeholder="All brands"
+          />
+          <Select
+            name="category"
+            value={filters.categoryId}
+            onChange={handleFilterChange("categoryId")}
+            options={categoryOptions}
+            placeholder="All categories"
+          />
+          <Select
+            name="branch"
+            value={filters.branchId}
+            onChange={handleFilterChange("branchId")}
+            options={branchOptions}
+            placeholder="All branches"
+          />
+        </div>
+      </div>
+
+      {/* Error banner */}
+      {error && (
+        <div className="bg-red-50 dark:bg-red-950/40 border border-red-200 dark:border-red-900 rounded-xl p-4 mb-4 flex items-start gap-3">
+          <AlertCircle
+            size={18}
+            className="text-red-600 dark:text-red-400 flex-shrink-0 mt-0.5"
+          />
+          <div>
+            <p className="text-sm font-medium text-red-800 dark:text-red-200">
+              Couldn't load products
+            </p>
+            <p className="text-xs text-red-700 dark:text-red-300 mt-0.5">
+              {error}
+            </p>
+          </div>
+        </div>
+      )}
+
+      {/* Table */}
+      <Table
+        columns={columns}
+        data={visibleProducts}
+        loading={loading}
+        onRowClick={handleRowClick}
+        emptyMessage={
+          searchTerm ? `No products match "${searchTerm}"` : "No products yet"
+        }
+      />
+    </div>
   );
 };
 

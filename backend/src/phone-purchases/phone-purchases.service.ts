@@ -433,7 +433,7 @@ export class PhonePurchasesService {
       // when a trade-in's product was deactivated (Phase 6.4 P5-2).
       throw new BadRequestException(`Product "${product.name}" is inactive`);
     }
-    if (product.branch_id !== branchId) {
+    if (product.branch_id && product.branch_id !== branchId) {
       throw new BadRequestException(
         `Product ${productId} does not belong to branch ${branchId}`,
       );
@@ -442,6 +442,11 @@ export class PhonePurchasesService {
       throw new BadRequestException(
         `Product ${productId} is not a serialized SKU; ` +
           `phone intake requires is_serialized = true`,
+      );
+    }
+    if (product.tracking_method && product.tracking_method !== 'IMEI') {
+      throw new BadRequestException(
+        'Phone intake requires an IMEI-tracked product.',
       );
     }
   }

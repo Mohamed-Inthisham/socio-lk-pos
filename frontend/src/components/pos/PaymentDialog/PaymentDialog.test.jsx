@@ -643,7 +643,7 @@ describe("PaymentDialog — Trade-in", () => {
     expect(productsService.listProducts).toHaveBeenLastCalledWith({
       search: "iphone 12",
       branchId: "branch-main",
-      productType: "PHONE",
+      trackingMethod: "IMEI",
       limit: 20,
     });
     // Non-serialized and inactive products are left out

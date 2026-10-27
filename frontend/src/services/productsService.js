@@ -22,7 +22,7 @@ import api from "./api";
  * @param {string}  [filters.brandId]         - Filter by brand UUID
  * @param {string}  [filters.categoryId]      - Filter by category UUID
  * @param {string}  [filters.branchId]        - Filter by branch UUID
- * @param {string}  [filters.productType]     - PHONE | ACCESSORY | WATCH | SPEAKER
+ * @param {string}  [filters.trackingMethod]  - QUANTITY | IMEI | SERIAL_NUMBER
  * @param {number}  [filters.page]            - 1-based page (default 1)
  * @param {number}  [filters.limit]           - Page size (default 50, max 200)
  * @returns {Promise<{data: Array, meta: Object}>} Products with nested

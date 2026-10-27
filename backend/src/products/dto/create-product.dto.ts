@@ -1,3 +1,4 @@
+import { TrackingMethod } from '../enums/tracking-method.enum';
 import {
   IsString,
   MaxLength,
@@ -16,17 +17,38 @@ import { WarrantyPeriod } from '../enums/warranty-period.enum';
 import { IsOptionalNotNull } from '../../common/validators/is-optional-not-null.decorator';
 
 export class CreateProductDto {
-  @ApiProperty({
+  @ApiPropertyOptional({
+    deprecated: true,
     enum: ProductType,
     example: ProductType.PHONE,
-    description: 'Broad product category. Determines type-specific fields.',
+    description: 'Legacy classification. Use category_id.',
   })
+  @IsOptional()
   @IsEnum(ProductType, {
     message: `product_type must be one of: ${Object.values(ProductType).join(', ')}`,
   })
-  product_type!: ProductType;
+  product_type?: ProductType;
 
-  @ApiProperty({
+  @ApiPropertyOptional({
+    enum: TrackingMethod,
+    description:
+      'Tracking used when stock is received. Defaults to the category setting. No individual identifier is entered on a product.',
+  })
+  @IsOptionalNotNull()
+  @IsEnum(TrackingMethod)
+  tracking_method?: TrackingMethod;
+
+  @ApiPropertyOptional({
+    maxLength: 100,
+    description:
+      'Model name or number for any product. Individual IMEI and serial numbers are entered during stock receiving (GRN).',
+  })
+  @IsOptional()
+  @IsString()
+  @MaxLength(100)
+  model?: string;
+
+  @ApiPropertyOptional({
     example: 'iPhone 15 Pro Max',
     description: 'Product display name',
     minLength: 1,
@@ -75,13 +97,14 @@ export class CreateProductDto {
   @IsUUID()
   category_id!: string;
 
-  @ApiProperty({
+  @ApiPropertyOptional({
     example: 'c5f4e0f2-3456-789a-bcde-f23456789012',
-    description: 'Branch UUID (must be an active branch)',
+    description: 'Legacy branch association. New catalog products are global; stock is assigned to a branch when received.',
     format: 'uuid',
   })
+  @IsOptionalNotNull()
   @IsUUID()
-  branch_id!: string;
+  branch_id?: string;
 
   @ApiPropertyOptional({
     example: 'Latest flagship iPhone with titanium build',
@@ -91,29 +114,31 @@ export class CreateProductDto {
   @IsString()
   description?: string;
 
-  @ApiProperty({
+  @ApiPropertyOptional({
     example: '180000.00',
-    description: 'Buying price (LKR). Two decimal places. Non-negative.',
+    description: 'Legacy product cost. New purchase costs are recorded during stock receiving.',
   })
+  @IsOptional()
   @IsNumberString(
     { no_symbols: false },
     {
       message: 'buying_price must be a numeric string (e.g. "180000.00")',
     },
   )
-  buying_price!: string;
+  buying_price?: string;
 
-  @ApiProperty({
+  @ApiPropertyOptional({
     example: '199900.00',
-    description: 'Selling price (LKR). Two decimal places. Non-negative.',
+    description: 'Optional current selling price (LKR). Can be set later.',
   })
+  @IsOptionalNotNull()
   @IsNumberString(
     { no_symbols: false },
     {
       message: 'selling_price must be a numeric string (e.g. "199900.00")',
     },
   )
-  selling_price!: string;
+  selling_price?: string;
 
   // Omitted is fine (NO_WARRANTY on create); null is rejected — NO_WARRANTY
   // is the explicit "no warranty".
@@ -133,9 +158,10 @@ export class CreateProductDto {
   default_warranty?: WarrantyPeriod;
 
   @ApiPropertyOptional({
+    deprecated: true,
     example: true,
     description:
-      'If true, the cashier must enter an IMEI/serial per unit at sale time. ' +
+      'Legacy compatibility flag. Prefer tracking_method. If true, the cashier must enter an IMEI/serial per unit at sale time. ' +
       'Typical for phones. Defaults to false.',
   })
   @IsOptionalNotNull()
@@ -151,19 +177,20 @@ export class CreateProductDto {
   is_active?: boolean;
 
   // ---- Phone-specific fields ----
-  // All optional. UI enforces which of these are meaningful when
-  // product_type = 'PHONE'; the API does not block missing values.
+  // Optional specifications enabled through category settings.
 
   @ApiPropertyOptional({
     enum: PhoneCondition,
     example: PhoneCondition.NEW,
-    description: 'New or used. Meaningful only when product_type = PHONE.',
+    description:
+      'New or used. Available for categories with phone specifications enabled.',
   })
   @IsOptional()
   @IsEnum(PhoneCondition)
   phone_condition?: PhoneCondition;
 
   @ApiPropertyOptional({
+    deprecated: true,
     example: 'A2848',
     description: 'Manufacturer model number. Meaningful for phones.',
     maxLength: 100,

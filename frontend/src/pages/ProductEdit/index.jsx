@@ -20,11 +20,6 @@ import {
 } from "../../schemas/productSchema";
 import { getProduct, updateProduct } from "../../services/productsService";
 import {
-  fetchBranches,
-  selectActiveBranches,
-  selectBranchesInitialized,
-} from "../../store/slices/branchesSlice";
-import {
   fetchBrands,
   selectActiveBrands,
   selectBrandsInitialized,
@@ -42,10 +37,8 @@ import {
  *
  * DIFFERENCES FROM PRODUCTCREATE:
  * - Loads existing product on mount, pre-fills form via RHF reset()
- * - product_type and branch_id are READ-ONLY (rendered as plain fields).
- *   Changing them post-creation has too many downstream implications
- *   (stock rows keyed to product_id + branch_id, category constraints
- *   tied to type). If wrong at creation, deactivate + re-create.
+ * - Catalog products are branch-neutral. Branch stock belongs to receiving
+ *   and stock movements.
  * - SKU field appears in Identification section, gated behind an
  *   "Override SKU" toggle. Rare + dangerous change; extra click enforces
  *   intent so admins don't accidentally break physical labels.
@@ -197,21 +190,19 @@ const ProductEdit = () => {
   const [overrideSku, setOverrideSku] = useState(false);
 
   // Reference data for the editable selects (brand, category)
-  const branches = useSelector(selectActiveBranches);
-  const branchesInitialized = useSelector(selectBranchesInitialized);
   const brands = useSelector(selectActiveBrands);
   const brandsInitialized = useSelector(selectBrandsInitialized);
   const categories = useSelector(selectActiveCategories);
   const categoriesInitialized = useSelector(selectCategoriesInitialized);
 
   useEffect(() => {
-    if (!branchesInitialized) dispatch(fetchBranches());
     if (!brandsInitialized) dispatch(fetchBrands());
     if (!categoriesInitialized) dispatch(fetchCategories());
-  }, [dispatch, branchesInitialized, brandsInitialized, categoriesInitialized]);
+  }, [dispatch, brandsInitialized, categoriesInitialized]);
 
   const {
     register,
+    setValue,
     handleSubmit,
     watch,
     control,
@@ -252,16 +243,18 @@ const ProductEdit = () => {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [id]);
 
-  const productType = watch("product_type");
-  const isPhone = productType === "PHONE";
+  const isPhone = watch("show_phone_specs");
+  const selectedCategoryId = watch("category_id");
 
   // Dropdown options (memoized against the reference-data arrays)
   const brandOptions = useMemo(
     () => [
       { value: "", label: "Select a brand" },
-      ...brands.map((b) => ({ value: b.id, label: b.name })),
+      ...brands
+        .filter((brand) => brand.category_id === selectedCategoryId)
+        .map((b) => ({ value: b.id, label: b.name })),
     ],
-    [brands],
+    [brands, selectedCategoryId],
   );
   const categoryOptions = useMemo(
     () => [
@@ -295,14 +288,6 @@ const ProductEdit = () => {
     ],
     [],
   );
-
-  // Branch name lookup for the read-only field. Falls back to the
-  // branch object on the loaded product if the branches list hasn't
-  // fetched yet, so we always have something to show.
-  const branchName =
-    branches.find((b) => b.id === product?.branch?.id)?.name ||
-    product?.branch?.name ||
-    "—";
 
   const onSubmit = async (data) => {
     setApiError(null);
@@ -417,7 +402,7 @@ const ProductEdit = () => {
       <form onSubmit={handleSubmit(onSubmit)} className="space-y-4" noValidate>
         <FormSection
           title="Basics"
-          description="Name and product type. Type is fixed at creation."
+          description="Product name and model for this catalog entry."
         >
           <div className="space-y-4">
             <InputField
@@ -428,10 +413,11 @@ const ProductEdit = () => {
               {...register("name")}
             />
 
-            <ReadOnlyField
-              label="Product type"
-              value={product.product_type}
-              hint="Product type cannot be changed after creation. Deactivate and re-create if this is wrong."
+            <InputField
+              label="Model"
+              placeholder="e.g. 12 Pro or A115Hk Zolo 20W Type C"
+              error={errors.model?.message}
+              {...register("model")}
             />
 
             <InputField
@@ -447,9 +433,39 @@ const ProductEdit = () => {
 
         <FormSection
           title="Classification"
-          description="Brand and category can be reassigned. Branch is fixed at creation."
+          description="Choose a category first, then a brand assigned to it."
         >
-          <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+            <Controller
+              name="category_id"
+              control={control}
+              render={({ field, fieldState }) => (
+                <Select
+                  label="Category"
+                  required
+                  name={field.name}
+                  value={field.value}
+                  onChange={(event) => {
+                    const value = event.target.value;
+                    field.onChange(event);
+                    const category = categories.find(
+                      (item) => item.id === value,
+                    );
+                    setValue(
+                      "show_phone_specs",
+                      category?.show_phone_specs ?? false,
+                      { shouldValidate: true },
+                    );
+                    const selectedBrand = brands.find((brand) => brand.id === watch("brand_id"));
+                    if (selectedBrand?.category_id && selectedBrand.category_id !== value) {
+                      setValue("brand_id", "", { shouldValidate: true });
+                    }
+                  }}
+                  options={categoryOptions}
+                  error={fieldState.error?.message}
+                />
+              )}
+            />
             <Controller
               name="brand_id"
               control={control}
@@ -462,28 +478,9 @@ const ProductEdit = () => {
                   onChange={field.onChange}
                   options={brandOptions}
                   error={fieldState.error?.message}
+                  disabled={!watch("category_id")}
                 />
               )}
-            />
-            <Controller
-              name="category_id"
-              control={control}
-              render={({ field, fieldState }) => (
-                <Select
-                  label="Category"
-                  required
-                  name={field.name}
-                  value={field.value}
-                  onChange={field.onChange}
-                  options={categoryOptions}
-                  error={fieldState.error?.message}
-                />
-              )}
-            />
-            <ReadOnlyField
-              label="Branch"
-              value={branchName}
-              hint="Branch cannot be changed. Use a stock transfer instead."
             />
           </div>
         </FormSection>
@@ -492,25 +489,17 @@ const ProductEdit = () => {
           title="Pricing"
           description="Prices in LKR. Use up to 2 decimal places."
         >
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-            <InputField
-              type="text"
-              label="Buying price"
-              required
-              placeholder="e.g. 180000.00"
-              inputMode="decimal"
-              error={errors.buying_price?.message}
-              {...register("buying_price")}
-            />
-            <InputField
-              type="text"
-              label="Selling price"
-              required
-              placeholder="e.g. 199900.00"
-              inputMode="decimal"
-              error={errors.selling_price?.message}
-              {...register("selling_price")}
-            />
+          <div className="grid grid-cols-1 gap-4">
+            <div className="max-w-sm">
+              <InputField
+                type="text"
+                label="Selling price"
+                placeholder="Enter now or add during GRN"
+                inputMode="decimal"
+                error={errors.selling_price?.message}
+                {...register("selling_price")}
+              />
+            </div>
           </div>
         </FormSection>
 
@@ -605,26 +594,6 @@ const ProductEdit = () => {
           </div>
         </FormSection>
 
-        <FormSection
-          title="Serialization"
-          description="For phones sold with individual IMEI tracking. Cashiers will be prompted to scan IMEI at sale time."
-        >
-          <label className="flex items-start gap-3 cursor-pointer">
-            <input
-              type="checkbox"
-              {...register("is_serialized")}
-              className="w-4 h-4 mt-0.5 rounded border-slate-300 dark:border-slate-600 text-cyan-600 focus:ring-cyan-500 [color-scheme:light] dark:[color-scheme:dark]"
-            />
-            <span className="text-sm text-slate-700 dark:text-slate-200">
-              This product is sold with a unique serial number (IMEI)
-              <span className="block text-xs text-slate-500 dark:text-slate-400 mt-0.5">
-                Enable for phones and other serialized devices. Cashiers will
-                see an IMEI input at checkout.
-              </span>
-            </span>
-          </label>
-        </FormSection>
-
         {isPhone && (
           <FormSection
             title="Phone specifications"
@@ -648,12 +617,6 @@ const ProductEdit = () => {
               />
 
               <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                <InputField
-                  label="Model"
-                  placeholder="e.g. A2848"
-                  error={errors.phone_model?.message}
-                  {...register("phone_model")}
-                />
                 <Controller
                   name="phone_storage"
                   control={control}

@@ -30,8 +30,15 @@ export const isUsedProduct = (product) => product?.phone_condition === "USED";
  * group).
  */
 export const tradeInCandidates = (products) => {
-  const eligible = products.filter((p) => p.is_serialized && p.is_active !== false);
-  return [...eligible.filter(isUsedProduct), ...eligible.filter((p) => !isUsedProduct(p))];
+  const eligible = products.filter(
+    (p) =>
+      (p.tracking_method ? p.tracking_method === "IMEI" : p.is_serialized) &&
+      p.is_active !== false,
+  );
+  return [
+    ...eligible.filter(isUsedProduct),
+    ...eligible.filter((p) => !isUsedProduct(p)),
+  ];
 };
 
 /** P4-7: a trade-in 409 by `existing_unit.status`, or null for any other error. */

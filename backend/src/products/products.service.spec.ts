@@ -1,5 +1,5 @@
 import { Test, TestingModule } from '@nestjs/testing';
-import { ILike } from 'typeorm';
+import { ILike, IsNull } from 'typeorm';
 import { getRepositoryToken } from '@nestjs/typeorm';
 import {
   NotFoundException,
@@ -266,13 +266,22 @@ describe('ProductsService', () => {
 
       expect(mockRepo.findAndCount).toHaveBeenCalledWith(
         expect.objectContaining({
-          where: {
-            is_active: true,
-            brand_id: 'brand-1',
-            category_id: 'cat-1',
-            branch_id: 'branch-1',
-            product_type: 'PHONE',
-          },
+          where: expect.arrayContaining([
+            {
+              is_active: true,
+              brand_id: 'brand-1',
+              category_id: 'cat-1',
+              branch_id: 'branch-1',
+              product_type: 'PHONE',
+            },
+            {
+              is_active: true,
+              brand_id: 'brand-1',
+              category_id: 'cat-1',
+              branch_id: IsNull(),
+              product_type: 'PHONE',
+            },
+          ]),
         }),
       );
     });
@@ -292,11 +301,18 @@ describe('ProductsService', () => {
 
       expect(mockRepo.findAndCount).toHaveBeenCalledWith(
         expect.objectContaining({
-          where: {
-            is_active: true,
-            branch_id: 'branch-1',
-            name: ILike('%galaxy%'),
-          },
+          where: expect.arrayContaining([
+            {
+              is_active: true,
+              branch_id: 'branch-1',
+              name: ILike('%galaxy%'),
+            },
+            {
+              is_active: true,
+              branch_id: IsNull(),
+              name: ILike('%galaxy%'),
+            },
+          ]),
         }),
       );
     });

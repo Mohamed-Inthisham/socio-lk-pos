@@ -6,16 +6,9 @@ import { z } from "zod";
  * Client-side validation for category create/edit dialog. Mirrors the
  * backend DTO shape — same field names (snake_case), same types.
  *
- * TWO-LEVEL HIERARCHY:
- * Categories can be top-level (parent_id=null) or sub-categories
- * (parent_id points to a top-level category). Nesting deeper than two
- * levels is a 400 from the backend — the parent picker in the form
- * only shows top-level categories, so this is prevented client-side too.
- *
- * CASE-INSENSITIVE UNIQUENESS WITHIN A LEVEL:
- * Backend enforces uniqueness case-insensitively within the SAME parent.
- * "Cases" can exist under both "Phone Accessories" and "Watch Accessories".
- * Duplicate at the same level returns 409 Conflict — surfaced as a
+ * CASE-INSENSITIVE UNIQUENESS:
+ * Backend enforces category name uniqueness case-insensitively.
+ * Duplicate names return 409 Conflict — surfaced as a
  * field-level error on `name` in the dialog.
  *
  * SORT_ORDER:
@@ -32,11 +25,6 @@ import { z } from "zod";
 // backend changes this, the 400 validation response will surface.
 const NAME_MAX = 100;
 
-// Sentinel value used by the parent select to represent "no parent"
-// (top-level). Kept as an empty string so it plays nicely with HTML
-// selects, then translated to null in buildCategoryPayload.
-export const NO_PARENT = "";
-
 // ============================================
 // CATEGORY SCHEMA (shared create + edit)
 // ============================================
@@ -45,19 +33,14 @@ export const NO_PARENT = "";
  * One schema for both create and edit. Category has no create-only or
  * edit-only fields — the only difference is which endpoint receives it.
  *
- * parent_id: empty string = top-level. UUID = sub-category.
- * Validated as EITHER an empty string OR a valid UUID.
  */
 export const categorySchema = z.object({
+  show_phone_specs: z.boolean().default(false),
   name: z
     .string()
     .trim()
     .min(1, "Category name is required")
     .max(NAME_MAX, `Name is too long (max ${NAME_MAX} chars)`),
-  parent_id: z.union([
-    z.literal(NO_PARENT),
-    z.string().uuid("Please select a valid parent"),
-  ]),
 });
 
 // ============================================
@@ -65,8 +48,8 @@ export const categorySchema = z.object({
 // ============================================
 
 export const categoryFormDefaults = {
+  show_phone_specs: false,
   name: "",
-  parent_id: NO_PARENT,
 };
 
 // ============================================
@@ -76,12 +59,10 @@ export const categoryFormDefaults = {
 /**
  * Convert a backend category response into RHF form values.
  *
- * parent_id: backend returns null for top-level; form uses "" so the
- * controlled select stays controlled.
  */
 export const mapCategoryToFormValues = (category) => ({
+  show_phone_specs: category?.show_phone_specs ?? false,
   name: category?.name ?? "",
-  parent_id: category?.parent_id ?? NO_PARENT,
 });
 
 // ============================================
@@ -93,20 +74,15 @@ export const mapCategoryToFormValues = (category) => ({
  * - dirtyFields=null → create (send everything, hardcode sort_order=0)
  * - dirtyFields=object → edit (send only changed fields)
  *
- * parent_id translation:
- * - "" (NO_PARENT) → null (top-level)
- * - UUID string → passes through
  */
 export const buildCategoryPayload = (formData, dirtyFields = null) => {
-  // Helper — translates the form's empty-string sentinel to null for API
-  const parentIdForApi = (v) => (v === NO_PARENT ? null : v);
-
   if (dirtyFields === null) {
     // Create: send everything the form manages, plus sort_order default
     return {
       name: formData.name.trim(),
-      parent_id: parentIdForApi(formData.parent_id),
+      parent_id: null,
       sort_order: 0,
+      show_phone_specs: formData.show_phone_specs,
     };
   }
 
@@ -115,8 +91,8 @@ export const buildCategoryPayload = (formData, dirtyFields = null) => {
   if (dirtyFields.name) {
     payload.name = formData.name.trim();
   }
-  if (dirtyFields.parent_id) {
-    payload.parent_id = parentIdForApi(formData.parent_id);
+  for (const key of ["show_phone_specs"]) {
+    if (dirtyFields[key]) payload[key] = formData[key];
   }
   return payload;
 };

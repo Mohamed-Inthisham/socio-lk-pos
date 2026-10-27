@@ -1,3 +1,4 @@
+import { TrackingMethod } from './enums/tracking-method.enum';
 import {
   Injectable,
   NotFoundException,
@@ -5,7 +6,7 @@ import {
   BadRequestException,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { ILike, Not, Repository } from 'typeorm';
+import { ILike, IsNull, Not, Repository } from 'typeorm';
 import { Product } from './entities/product.entity';
 import { CreateProductDto } from './dto/create-product.dto';
 import { UpdateProductDto } from './dto/update-product.dto';
@@ -44,7 +45,7 @@ export class ProductsService {
 
   /**
    * Create a new product. Enforces:
-   *  - brand, category, branch exist AND are active
+   *  - brand and category exist AND are active; branch is legacy/optional
    *  - if barcode provided, it must be unique
    *  - SKU is always auto-generated
    *  - if barcode omitted, auto-generate an SLP-XXXXXX barcode
@@ -60,24 +61,46 @@ export class ProductsService {
       await this.assertBarcodeAvailable(dto.barcode);
     }
 
+    const category = await this.categoriesService.findOne(dto.category_id);
+    const tracking =
+      dto.tracking_method ??
+      (dto.is_serialized !== undefined
+        ? dto.is_serialized
+          ? TrackingMethod.IMEI
+          : TrackingMethod.QUANTITY
+        : (category.show_phone_specs
+          ? TrackingMethod.IMEI
+          : TrackingMethod.QUANTITY));
+    if (
+      dto.tracking_method !== undefined &&
+      dto.is_serialized !== undefined &&
+      dto.is_serialized !== (tracking !== TrackingMethod.QUANTITY)
+    ) {
+      throw new BadRequestException(
+        'is_serialized conflicts with tracking_method',
+      );
+    }
+
     const sku = await this.countersService.next(CounterType.SKU);
     const barcode =
       dto.barcode ?? (await this.countersService.next(CounterType.BARCODE));
 
     const product = this.productsRepository.create({
-      product_type: dto.product_type,
+      product_type: dto.product_type ?? null,
+      model: dto.model ?? dto.phone_model ?? null,
+      tracking_method: tracking,
       name: dto.name,
       sku,
       barcode,
       barcode_type: dto.barcode_type,
       brand_id: dto.brand_id,
       category_id: dto.category_id,
-      branch_id: dto.branch_id,
+      branch_id: dto.branch_id ?? null,
       description: dto.description ?? null,
-      buying_price: dto.buying_price,
-      selling_price: dto.selling_price,
+      buying_price: dto.buying_price ?? null,
+      selling_price: dto.selling_price ?? null,
       default_warranty: dto.default_warranty,
-      is_serialized: dto.is_serialized,
+      is_serialized: tracking !== TrackingMethod.QUANTITY,
       is_active: dto.is_active,
       phone_condition: dto.phone_condition ?? null,
       phone_model: dto.phone_model ?? null,
@@ -89,7 +112,9 @@ export class ProductsService {
     const saved = await this.productsRepository.save(product);
     // Auto-create a Stock row for the new product at its branch.
     // See Stock.createForNewProduct — idempotent, quantity starts at 0.
-    await this.stockService.createForNewProduct(saved.id, saved.branch_id);
+    if (saved.branch_id) {
+      await this.stockService.createForNewProduct(saved.id, saved.branch_id);
+    }
     // Re-fetch with relations for a consistent nested response shape
     return this.findOne(saved.id);
   }
@@ -111,6 +136,7 @@ export class ProductsService {
     if (query.brandId) where.brand_id = query.brandId;
     if (query.categoryId) where.category_id = query.categoryId;
     if (query.branchId) where.branch_id = query.branchId;
+    if (query.trackingMethod) where.tracking_method = query.trackingMethod;
     if (query.productType) where.product_type = query.productType;
     if (query.search) {
       // Escape LIKE wildcards so "50%" or "a_b" match literally.
@@ -119,7 +145,9 @@ export class ProductsService {
     }
 
     const [data, total] = await this.productsRepository.findAndCount({
-      where,
+      where: query.branchId
+        ? [where, { ...where, branch_id: IsNull() }]
+        : where,
       relations: [...PRODUCT_RELATIONS],
       // id tiebreaker keeps page boundaries stable when created_at ties
       order: { created_at: 'DESC', id: 'DESC' },
@@ -191,8 +219,46 @@ export class ProductsService {
       await this.assertBarcodeAvailable(dto.barcode, id);
     }
 
+    const tracking =
+      dto.tracking_method ??
+      (dto.is_serialized !== undefined
+        ? dto.is_serialized
+          ? product.tracking_method !== TrackingMethod.QUANTITY
+            ? product.tracking_method
+            : TrackingMethod.IMEI
+          : TrackingMethod.QUANTITY
+        : product.tracking_method);
+    if (
+      dto.tracking_method !== undefined &&
+      dto.is_serialized !== undefined &&
+      dto.is_serialized !== (tracking !== TrackingMethod.QUANTITY)
+    ) {
+      throw new BadRequestException(
+        'is_serialized conflicts with tracking_method',
+      );
+    }
+    if (tracking !== product.tracking_method) {
+      // Tracking cannot reinterpret existing inventory or historical sales.
+      const rows: { used: boolean }[] =
+        await this.productsRepository.manager.query(
+          `SELECT (EXISTS (SELECT 1 FROM product_units WHERE product_id = $1)
+          OR EXISTS (SELECT 1 FROM sale_lines WHERE product_id = $1)
+          OR EXISTS (SELECT 1 FROM stock WHERE product_id = $1 AND quantity <> 0)) AS used`,
+          [id],
+        );
+      if (rows[0]?.used)
+        throw new BadRequestException(
+          'Tracking cannot change after stock or sales have been recorded.',
+        );
+    }
+
     // Apply the update. Undefined fields are skipped, null clears the value.
     Object.assign(product, {
+      tracking_method: tracking,
+      is_serialized: tracking !== TrackingMethod.QUANTITY,
+      ...(dto.model !== undefined && { model: dto.model ?? null }),
+      ...(dto.model === undefined &&
+        dto.phone_model !== undefined && { model: dto.phone_model ?? null }),
       ...(dto.product_type !== undefined && { product_type: dto.product_type }),
       ...(dto.name !== undefined && { name: dto.name }),
       ...(dto.sku !== undefined && { sku: dto.sku }),
@@ -210,9 +276,6 @@ export class ProductsService {
       }),
       ...(dto.default_warranty !== undefined && {
         default_warranty: dto.default_warranty,
-      }),
-      ...(dto.is_serialized !== undefined && {
-        is_serialized: dto.is_serialized,
       }),
       ...(dto.is_active !== undefined && { is_active: dto.is_active }),
       ...(dto.phone_condition !== undefined && {
@@ -270,17 +333,21 @@ export class ProductsService {
   private async assertReferencedEntitiesActive(
     brandId: string,
     categoryId: string,
-    branchId: string,
+    branchId: string | null | undefined,
   ): Promise<void> {
     const [brand, category, branch] = await Promise.all([
       this.brandsService.findOne(brandId).catch(() => null),
       this.categoriesService.findOne(categoryId).catch(() => null),
-      this.branchesService.findOne(branchId).catch(() => null),
+      branchId
+        ? this.branchesService.findOne(branchId).catch(() => null)
+        : Promise.resolve(null),
     ]);
 
     if (!brand) throw new BadRequestException(`Brand ${brandId} not found`);
     if (!brand.is_active)
       throw new BadRequestException(`Brand "${brand.name}" is not active`);
+    if (brand.category_id && brand.category_id !== categoryId)
+      throw new BadRequestException(`Brand "${brand.name}" belongs to a different category`);
 
     if (!category)
       throw new BadRequestException(`Category ${categoryId} not found`);
@@ -289,8 +356,9 @@ export class ProductsService {
         `Category "${category.name}" is not active`,
       );
 
-    if (!branch) throw new BadRequestException(`Branch ${branchId} not found`);
-    if (!branch.is_active)
+    if (branchId && !branch)
+      throw new BadRequestException(`Branch ${branchId} not found`);
+    if (branchId && branch && !branch.is_active)
       throw new BadRequestException(`Branch "${branch.name}" is not active`);
   }
 

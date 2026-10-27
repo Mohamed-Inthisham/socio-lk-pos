@@ -7,11 +7,10 @@ import {
   productFormDefaults,
 } from "./productSchema";
 
-// A valid create form (an accessory, so no phone fields are required).
+// A valid create form with the default quantity tracking method.
 const form = (overrides = {}) => ({
   ...productFormDefaults,
   name: "USB-C Cable 1m",
-  product_type: "ACCESSORY",
   brand_id: "11111111-1111-4111-8111-111111111111",
   category_id: "22222222-2222-4222-8222-222222222222",
   branch_id: "33333333-3333-4333-8333-333333333333",
@@ -45,7 +44,7 @@ describe("productSchema — default warranty (P5-18)", () => {
   it("sends the default warranty on create, for phones and accessories alike", () => {
     expect(buildCreatePayload(form({ default_warranty: "WEEK_2" })).default_warranty).toBe("WEEK_2");
     expect(
-      buildCreatePayload(form({ product_type: "PHONE", phone_condition: "USED", default_warranty: "MONTH_3" }))
+      buildCreatePayload(form({ show_phone_specs: true, phone_condition: "USED", default_warranty: "MONTH_3" }))
         .default_warranty,
     ).toBe("MONTH_3");
   });
@@ -92,10 +91,10 @@ describe("productSchema — null only on nullable fields (the API rejects null e
   });
 
   it("sends null to clear the nullable text fields", () => {
-    const payload = buildUpdatePayload(editForm({ description: "", phone_model: "" }), {
+    const payload = buildUpdatePayload(editForm({ description: "", model: "" }), {
       description: true,
-      phone_model: true,
+      model: true,
     });
-    expect(payload).toEqual({ description: null, phone_model: null });
+    expect(payload).toEqual({ description: null, model: null });
   });
 });

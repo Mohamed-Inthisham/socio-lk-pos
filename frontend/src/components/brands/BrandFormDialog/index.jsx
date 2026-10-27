@@ -1,10 +1,17 @@
 import { useEffect, useState } from "react";
-import { useForm } from "react-hook-form";
+import { useForm, Controller } from "react-hook-form";
+import { useDispatch, useSelector } from "react-redux";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { AlertCircle } from "lucide-react";
 import Dialog from "../../common/Dialog";
 import Button from "../../common/Button";
 import InputField from "../../common/InputField";
+import Select from "../../common/Select";
+import {
+  fetchCategories,
+  selectActiveCategories,
+  selectCategoriesInitialized,
+} from "../../../store/slices/categoriesSlice";
 import {
   brandSchema,
   brandFormDefaults,
@@ -53,11 +60,19 @@ const BrandFormDialog = ({
   brand = null,
 }) => {
   const isEdit = mode === "edit";
+  const dispatch = useDispatch();
   const [apiError, setApiError] = useState(null);
+  const categories = useSelector(selectActiveCategories);
+  const categoriesInitialized = useSelector(selectCategoriesInitialized);
+
+  useEffect(() => {
+    if (!categoriesInitialized) dispatch(fetchCategories());
+  }, [dispatch, categoriesInitialized]);
 
   const {
     register,
     handleSubmit,
+    control,
     reset,
     setError,
     formState: { errors, isSubmitting, isDirty, dirtyFields },
@@ -117,6 +132,11 @@ const BrandFormDialog = ({
         return;
       }
 
+      if (status === 400 && /category/i.test(message)) {
+        setError("category_id", { type: "server", message });
+        return;
+      }
+
       // Everything else: banner at the top of the dialog body.
       setApiError(message);
     }
@@ -133,8 +153,8 @@ const BrandFormDialog = ({
       title={isEdit ? "Edit brand" : "Create brand"}
       description={
         isEdit
-          ? "Rename this brand. Products keep their attribution."
-          : "Add a new brand. Names must be unique."
+          ? "Rename this brand or change its category when no products conflict."
+          : "Add a brand under the category where it is used."
       }
       size="sm"
       dismissible={!isSubmitting}
@@ -177,9 +197,30 @@ const BrandFormDialog = ({
           autoFocus
           {...register("name")}
         />
+        <Controller
+          name="category_id"
+          control={control}
+          render={({ field, fieldState }) => (
+            <Select
+              label="Category"
+              required
+              name={field.name}
+              value={field.value}
+              onChange={field.onChange}
+              options={[
+                { value: "", label: "Select a category" },
+                ...categories.map((category) => ({
+                  value: category.id,
+                  label: category.name,
+                })),
+              ]}
+              error={fieldState.error?.message}
+            />
+          )}
+        />
       </form>
     </Dialog>
   );
-};;
+};
 
 export default BrandFormDialog;

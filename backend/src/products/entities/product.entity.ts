@@ -10,6 +10,7 @@ import {
   ManyToOne,
   JoinColumn,
 } from 'typeorm';
+import { TrackingMethod } from '../enums/tracking-method.enum';
 import { ProductType } from '../enums/product-type.enum';
 import { BarcodeType } from '../enums/barcode-type.enum';
 import { PhoneCondition } from '../enums/phone-condition.enum';
@@ -20,6 +21,14 @@ import { Branch } from '../../branches/entities/branch.entity';
 
 @Entity('products')
 @Check(
+  'CHK_products_tracking_method',
+  `tracking_method IN ('QUANTITY', 'IMEI', 'SERIAL_NUMBER')`,
+)
+@Check(
+  'CHK_products_tracking_serialized',
+  `is_serialized = (tracking_method <> 'QUANTITY')`,
+)
+@Check(
   'CHK_products_type',
   `product_type IN ('PHONE', 'ACCESSORY', 'WATCH', 'SPEAKER')`,
 )
@@ -28,8 +37,8 @@ import { Branch } from '../../branches/entities/branch.entity';
   'CHK_products_phone_condition',
   `phone_condition IS NULL OR phone_condition IN ('NEW', 'USED')`,
 )
-@Check('CHK_products_buying_price_nonneg', `buying_price >= 0`)
-@Check('CHK_products_selling_price_nonneg', `selling_price >= 0`)
+@Check('CHK_products_buying_price_nonneg', `buying_price IS NULL OR buying_price >= 0`)
+@Check('CHK_products_selling_price_nonneg', `selling_price IS NULL OR selling_price >= 0`)
 @Check(
   'CHK_products_default_warranty',
   `default_warranty IN ('NO_WARRANTY', 'CHECKING', 'WEEK_1', 'WEEK_2', 'MONTH_1', 'MONTH_2', 'MONTH_3', 'MONTH_6', 'MONTH_12', 'MONTH_18', 'MONTH_24')`,
@@ -38,8 +47,15 @@ export class Product {
   @PrimaryGeneratedColumn('uuid')
   id!: string;
 
-  @Column({ type: 'varchar', length: 20, name: 'product_type' })
-  product_type!: ProductType;
+  @Column({ type: 'varchar', length: 20, name: 'product_type', nullable: true })
+  /** @deprecated Historical classification; new products use category. */
+  product_type!: ProductType | null;
+
+  @Column({ type: 'varchar', length: 100, nullable: true })
+  model!: string | null;
+
+  @Column({ type: 'varchar', length: 20, default: TrackingMethod.QUANTITY })
+  tracking_method!: TrackingMethod;
 
   @Column({ type: 'varchar', length: 200 })
   name!: string;
@@ -74,21 +90,21 @@ export class Product {
   @JoinColumn({ name: 'category_id' })
   category!: Category;
 
-  @Column({ type: 'uuid', name: 'branch_id' })
-  branch_id!: string;
+  @Column({ type: 'uuid', name: 'branch_id', nullable: true })
+  branch_id!: string | null;
 
-  @ManyToOne(() => Branch, { nullable: false, onDelete: 'RESTRICT' })
+  @ManyToOne(() => Branch, { nullable: true, onDelete: 'RESTRICT' })
   @JoinColumn({ name: 'branch_id' })
-  branch!: Branch;
+  branch!: Branch | null;
 
   @Column({ type: 'text', nullable: true })
   description!: string | null;
 
-  @Column({ type: 'decimal', precision: 10, scale: 2, name: 'buying_price' })
-  buying_price!: string;
+  @Column({ type: 'decimal', precision: 10, scale: 2, name: 'buying_price', nullable: true })
+  buying_price!: string | null;
 
-  @Column({ type: 'decimal', precision: 10, scale: 2, name: 'selling_price' })
-  selling_price!: string;
+  @Column({ type: 'decimal', precision: 10, scale: 2, name: 'selling_price', nullable: true })
+  selling_price!: string | null;
 
   /**
    * The warranty a sale line of this product starts with (P5-18); the
@@ -110,10 +126,7 @@ export class Product {
   is_active!: boolean;
 
   // ---- Phone-specific fields ----
-  // Nullable — only meaningful when product_type = 'PHONE'.
-  // Enforced at UI level, not blocked at API level (lax) so admin can
-  // create phones fast and fill in details later.
-
+  // Optional specifications enabled by category settings.
   @Column({
     type: 'varchar',
     length: 10,
