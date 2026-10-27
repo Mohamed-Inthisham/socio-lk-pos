@@ -336,11 +336,15 @@ const saleMutation = (fallback, run, stockProductId) => async (arg, { dispatch, 
  */
 export const addLine = createAsyncThunk(
   "posTerminal/addLine",
-  saleMutation("Couldn't add the item", (saleId, { product, quantity = 1, imei }) =>
+  saleMutation("Couldn't add the item", (saleId, { product, quantity = 1, imei, identifier }) =>
     addSaleLine(saleId, {
       product_id: product.id,
       quantity,
-      ...(imei ? { imei_snapshot: imei } : {}),
+      ...((identifier ?? imei)
+        ? product.tracking_method === "SERIAL_NUMBER"
+          ? { identifier_snapshot: identifier ?? imei }
+          : { imei_snapshot: identifier ?? imei }
+        : {}),
     }),
     ({ product }) => product.id,
   ),

@@ -8,6 +8,7 @@ import { InjectDataSource, InjectRepository } from '@nestjs/typeorm';
 import { DataSource, EntityManager, Repository } from 'typeorm';
 import { ProductUnitStatus } from './enums/product-unit-status.enum';
 import { ProductUnit } from './entities/product-unit.entity';
+import { TrackingMethod } from '../products/enums/tracking-method.enum';
 import { ListProductUnitsQueryDto } from './dto/list-product-units-query.dto';
 import { isLiveImeiConflict } from './live-imei';
 import {
@@ -33,6 +34,8 @@ const PRODUCT_UNIT_RELATIONS = [
   'branch',
   'phone_purchase',
   'phone_purchase.customer',
+  'sale_lines',
+  'sale_lines.sale',
 ] as const;
 
 /**
@@ -54,11 +57,11 @@ export type VoidBlockReason =
 type LaterSale = { id: string; sale_number: string };
 
 /** 409 NOT_IN_INSPECTION unless the unit is waiting for a check (P7-7). */
-const assertInInspection = (unit: ProductUnit): void => {
+const assertInInspection = (unit: ProductUnit, identifierLabel = 'IMEI'): void => {
   if (unit.status !== ProductUnitStatus.INSPECTION) {
     throw new ConflictException({
       message:
-        `This phone (IMEI ${unit.imei}) is not waiting for inspection ` +
+        `This item (${identifierLabel} ${unit.imei}) is not waiting for inspection ` +
         `(status: ${unit.status}).`,
       code: 'NOT_IN_INSPECTION',
       status: unit.status,
@@ -94,7 +97,9 @@ export class ProductUnitsService {
       .leftJoinAndSelect('unit.product', 'product')
       .leftJoinAndSelect('unit.branch', 'branch')
       .leftJoinAndSelect('unit.phone_purchase', 'phone_purchase')
-      .leftJoinAndSelect('phone_purchase.customer', 'customer');
+      .leftJoinAndSelect('phone_purchase.customer', 'customer')
+      .leftJoinAndSelect('unit.sale_lines', 'sale_line')
+      .leftJoinAndSelect('sale_line.sale', 'sale');
 
     if (query.productId) {
       qb.andWhere('unit.product_id = :productId', {
@@ -164,13 +169,17 @@ export class ProductUnitsService {
     if (!unit) {
       throw new NotFoundException('Product unit not found');
     }
+    const identifierLabel =
+      unit.product?.tracking_method === TrackingMethod.SERIAL_NUMBER
+        ? 'Serial number'
+        : 'IMEI';
     if (user.role !== UserRole.ADMIN && user.branch_id !== unit.branch_id) {
       throw new ForbiddenException({
         message: 'You can only pass inspection for phones at your own branch.',
         code: 'INSPECTION_WRONG_BRANCH',
       });
     }
-    assertInInspection(unit);
+    assertInInspection(unit, identifierLabel);
 
     await this.dataSource.transaction(async (manager) => {
       await lockInventoryRows(manager, {
@@ -180,7 +189,7 @@ export class ProductUnitsService {
       const locked = await manager.findOneOrFail(ProductUnit, {
         where: { id },
       });
-      assertInInspection(locked);
+      assertInInspection(locked, identifierLabel);
 
       await manager.query(
         `UPDATE product_units
@@ -201,7 +210,7 @@ export class ProductUnitsService {
         entityType: 'ProductUnit',
         entityId: id,
         description:
-          `Inspection passed: IMEI ${unit.imei}` +
+          `Inspection passed: ${identifierLabel} ${unit.imei}` +
           (unit.product ? ` (${unit.product.name})` : '') +
           ` back in stock`,
         changes: {
@@ -272,7 +281,7 @@ export class ProductUnitsService {
     if (unit.status !== ProductUnitStatus.IN_STOCK) {
       throw new ConflictException({
         message:
-          `Cannot sell IMEI '${unit.imei}': status is ${unit.status}, ` +
+          `Cannot sell unit identifier '${unit.imei}': status is ${unit.status}, ` +
           `expected IN_STOCK. Another sale may have completed with this ` +
           `unit while yours was being drafted.`,
         existing_unit: {

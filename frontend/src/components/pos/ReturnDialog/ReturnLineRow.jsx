@@ -145,7 +145,7 @@ const ReturnLineRow = forwardRef(function ReturnLineRow(
           {name}
         </p>
         {line.imei_snapshot && (
-          <p className="text-xs text-slate-500 dark:text-slate-400">IMEI {line.imei_snapshot}</p>
+          <p className="text-xs text-slate-500 dark:text-slate-400">{line.identifier_type_snapshot === "SERIAL_NUMBER" ? "Serial number" : "IMEI"} {line.imei_snapshot}</p>
         )}
         <p data-part="price" className="text-xs text-slate-500 dark:text-slate-400 whitespace-nowrap">
           {line.quantity} × {formatAmount(line.unit_price)} · {formatLKR(line.line_total)}

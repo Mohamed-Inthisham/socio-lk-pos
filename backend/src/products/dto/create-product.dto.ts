@@ -161,8 +161,8 @@ export class CreateProductDto {
     deprecated: true,
     example: true,
     description:
-      'Legacy compatibility flag. Prefer tracking_method. If true, the cashier must enter an IMEI/serial per unit at sale time. ' +
-      'Typical for phones. Defaults to false.',
+      'Legacy compatibility flag. Prefer tracking_method. True means IMEI tracking; false means no IMEI prompt at the till. ' +
+      'Defaults to false.',
   })
   @IsOptionalNotNull()
   @IsBoolean()

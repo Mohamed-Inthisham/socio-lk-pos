@@ -45,17 +45,19 @@ export class ProductUnit {
   @JoinColumn({ name: 'branch_id' })
   branch?: Branch;
 
-  // One row per acquisition (buy-back): IMEI is unique only among units
+  // One row per acquired unit: its identifier is unique among units
   // the shop holds (IN_STOCK, WRITTEN_OFF, INSPECTION). SOLD and RETURNED
-  // rows are history and may repeat an IMEI. Mirrors
-  // uq_product_units_imei_live and LIVE_UNIT_STATUSES; the plain index
-  // serves lookups across all statuses.
+  // rows are history and may repeat an identifier after reacquisition.
+  // Mirrors uq_product_units_imei_live and LIVE_UNIT_STATUSES; the plain
+  // index serves lookups across all statuses.
   @Index('uq_product_units_imei_live', {
     unique: true,
     where: `"status" IN ('IN_STOCK', 'WRITTEN_OFF', 'INSPECTION')`,
   })
   @Index('idx_product_units_imei')
-  @Column({ type: 'varchar', length: 50 })
+  // Legacy column name. Stores the product's chosen per-unit identifier:
+  // IMEI for IMEI-tracked products, serial number for serial-tracked ones.
+  @Column({ type: 'varchar', length: 100 })
   imei!: string;
 
   @Column({

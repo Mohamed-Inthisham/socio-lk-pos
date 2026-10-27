@@ -51,6 +51,18 @@ export class StockPurchasesController {
     return this.service.supplierBalances(user);
   }
 
+  @Get('products/:productId/identifiers')
+  @Roles(UserRole.ADMIN, UserRole.MANAGER)
+  @ApiOperation({ summary: 'List received IMEIs and serial numbers for a product' })
+  @ApiParam({ name: 'productId', description: 'Product UUID', format: 'uuid' })
+  @ApiResponse({ status: 200, description: 'Purchase identifier records for the product.' })
+  async productIdentifiers(
+    @Param('productId', ParseUUIDPipe) productId: string,
+    @CurrentUser() user: AuthenticatedUser,
+  ) {
+    return this.service.findProductIdentifiers(productId, user);
+  }
+
   @Get(':id')
   @Roles(UserRole.ADMIN, UserRole.MANAGER)
   @ApiOperation({ summary: 'Get a stock purchase with all received items and identifiers' })
@@ -70,12 +82,12 @@ export class StockPurchasesController {
   @ApiOperation({
     summary: 'Record a stock purchase and receive it into a branch',
     description:
-      'Atomically records supplier cost, updates branch stock, creates IMEI units for serialized products, and optionally records an initial supplier payment. Cheques remain pending until cleared.',
+      'Atomically records supplier cost, updates branch stock, creates one unit record per supplied IMEI or serial number, and optionally records an initial supplier payment. Cheques remain pending until cleared.',
   })
   @ApiResponse({ status: 201, description: 'Stock purchase recorded and stock received.' })
   @ApiResponse({ status: 400, description: 'Invalid or inactive supplier, branch, product, quantity, or identifier count.' })
   @ApiResponse({ status: 403, description: 'Manager attempted to receive stock at another branch.' })
-  @ApiResponse({ status: 409, description: 'IMEI is already assigned to a live product unit.' })
+  @ApiResponse({ status: 409, description: 'An identifier is already assigned to a live product unit.' })
   async create(
     @Body() dto: CreateStockPurchaseDto,
     @CurrentUser() user: AuthenticatedUser,

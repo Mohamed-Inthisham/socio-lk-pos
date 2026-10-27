@@ -15,7 +15,8 @@ import { DEFAULT_WARRANTY, WARRANTY_CODES } from "../constants/warranty";
  * decimal places, and send strings to the backend.
  *
  * Category settings control optional phone specifications. Model is shared
- * by all products. Individual identifiers are captured during future GRN.
+ * by all products. The product's tracking method determines which identifiers
+ * Stock Purchase captures for each received line.
  */
 
 // ============================================
@@ -24,6 +25,12 @@ import { DEFAULT_WARRANTY, WARRANTY_CODES } from "../constants/warranty";
 
 export const PHONE_CONDITIONS = ["NEW", "USED"];
 export const BARCODE_TYPES = ["CODE_128", "EAN_13"];
+export const TRACKING_METHODS = ["IMEI", "SERIAL_NUMBER", "QUANTITY"];
+export const TRACKING_METHOD_OPTIONS = [
+  { value: "IMEI", label: "IMEI" },
+  { value: "SERIAL_NUMBER", label: "Serial number" },
+  { value: "QUANTITY", label: "No per-unit identifier" },
+];
 // Phone specs — common values only. Schema still accepts any string on these
 // fields (phone_storage, phone_ram) since manufacturers occasionally use
 // non-standard values. The dropdown just gives fast entry for the 95% case.
@@ -93,6 +100,7 @@ const productBaseSchema = z.object({
   category_id: uuidString,
 
   // Identification
+  tracking_method: z.enum(TRACKING_METHODS),
   barcode: z
     .string()
     .max(64, "Barcode is too long")
@@ -242,6 +250,7 @@ export const mapProductToFormValues = (product) => ({
   barcode_type: product.barcode_type ?? "CODE_128",
   selling_price: product.selling_price ?? "",
   default_warranty: product.default_warranty ?? DEFAULT_WARRANTY,
+  tracking_method: product.tracking_method ?? "QUANTITY",
   phone_condition: product.phone_condition ?? "",
   phone_storage: product.phone_storage ?? "",
   phone_color: product.phone_color ?? "",
@@ -312,6 +321,7 @@ export const productFormDefaults = {
   barcode_type: "CODE_128",
   selling_price: "",
   default_warranty: DEFAULT_WARRANTY,
+  tracking_method: "QUANTITY",
   phone_condition: "",
   phone_storage: "",
   phone_color: "",

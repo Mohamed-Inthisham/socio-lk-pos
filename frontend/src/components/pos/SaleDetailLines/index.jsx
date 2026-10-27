@@ -90,7 +90,9 @@ const SaleDetailLines = ({ lines, today }) => (
           </p>
           <p className="mt-0.5 text-xs text-slate-600 dark:text-slate-300 flex flex-wrap items-center gap-x-2">
             {line.imei_snapshot && (
-              <span className="font-mono tracking-tight">IMEI {line.imei_snapshot}</span>
+              <span className="font-mono tracking-tight">
+                {line.identifier_type_snapshot === "SERIAL_NUMBER" ? "Serial number" : "IMEI"} {line.imei_snapshot}
+              </span>
             )}
             <Warranty line={line} today={today} />
           </p>

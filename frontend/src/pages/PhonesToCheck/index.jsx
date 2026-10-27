@@ -50,6 +50,7 @@ const saleLink = (row) => ({
 });
 
 const waitingText = (days) => (days <= 0 ? "Returned today" : `${days} ${days === 1 ? "day" : "days"} waiting`);
+const identifierLabel = (unit) => unit.product?.tracking_method === "SERIAL_NUMBER" ? "Serial number" : "IMEI";
 
 const PhonesToCheck = () => {
   const navigate = useNavigate();
@@ -151,7 +152,7 @@ const PhonesToCheck = () => {
     setDialogError(null);
     try {
       await passInspection(row.product_unit.id);
-      passed(row, `IMEI ${row.product_unit.imei} is back in stock.`);
+      passed(row, `${identifierLabel(row.product_unit)} ${row.product_unit.imei} is back in stock.`);
     } catch (err) {
       const error = classifyInspectionError(err);
       if (error.retry) {
@@ -159,7 +160,7 @@ const PhonesToCheck = () => {
         try {
           const fresh = await listInspection(branchId);
           if (!fresh.some((r) => r.product_unit.id === row.product_unit.id)) {
-            passed(row, `IMEI ${row.product_unit.imei} is back in stock.`);
+            passed(row, `${identifierLabel(row.product_unit)} ${row.product_unit.imei} is back in stock.`);
             return;
           }
         } catch {
@@ -168,7 +169,7 @@ const PhonesToCheck = () => {
         }
         setDialogError({ message: error.message, retry: true });
       } else if (error.done) {
-        passed(row, `IMEI ${row.product_unit.imei}: ${error.message}`);
+        passed(row, `${identifierLabel(row.product_unit)} ${row.product_unit.imei}: ${error.message}`);
       } else {
         setDialogError({ message: error.message, retry: false });
         if (error.reread) reread();
@@ -244,7 +245,7 @@ const PhonesToCheck = () => {
       render: (r) => (
         <span className="flex flex-col min-w-0">
           <span className="font-semibold text-slate-900 dark:text-slate-100 wrap-break-word">{r.product_unit.product_name}</span>
-          <span className="font-mono text-xs tracking-tight text-slate-600 dark:text-slate-300">IMEI {r.product_unit.imei}</span>
+          <span className="font-mono text-xs tracking-tight text-slate-600 dark:text-slate-300">{identifierLabel(r.product_unit)} {r.product_unit.imei}</span>
         </span>
       ),
     },
@@ -377,7 +378,7 @@ const PhonesToCheck = () => {
             <p>
               <span className="font-semibold">{confirming.product_unit.product_name}</span>
               {" · "}
-              <span className="font-mono tracking-tight">IMEI {confirming.product_unit.imei}</span>
+              <span className="font-mono tracking-tight">{identifierLabel(confirming.product_unit)} {confirming.product_unit.imei}</span>
               {" "}goes back to stock and can be sold again.
             </p>
             <p className="text-slate-600 dark:text-slate-300">Only confirm once it&apos;s been checked and has no fault.</p>

@@ -132,7 +132,8 @@ export class ProductsService {
     const limit = query.limit ?? 50;
 
     const where: Record<string, unknown> = {};
-    if (!query.includeInactive) where.is_active = true;
+    if (query.inactiveOnly) where.is_active = false;
+    else if (!query.includeInactive) where.is_active = true;
     if (query.brandId) where.brand_id = query.brandId;
     if (query.categoryId) where.category_id = query.categoryId;
     if (query.branchId) where.branch_id = query.branchId;
@@ -223,9 +224,7 @@ export class ProductsService {
       dto.tracking_method ??
       (dto.is_serialized !== undefined
         ? dto.is_serialized
-          ? product.tracking_method !== TrackingMethod.QUANTITY
-            ? product.tracking_method
-            : TrackingMethod.IMEI
+          ? TrackingMethod.IMEI
           : TrackingMethod.QUANTITY
         : product.tracking_method);
     if (
@@ -243,6 +242,8 @@ export class ProductsService {
         await this.productsRepository.manager.query(
           `SELECT (EXISTS (SELECT 1 FROM product_units WHERE product_id = $1)
           OR EXISTS (SELECT 1 FROM sale_lines WHERE product_id = $1)
+          OR EXISTS (SELECT 1 FROM stock_purchase_items WHERE product_id = $1
+            AND (jsonb_array_length(imei_numbers) > 0 OR jsonb_array_length(serial_numbers) > 0))
           OR EXISTS (SELECT 1 FROM stock WHERE product_id = $1 AND quantity <> 0)) AS used`,
           [id],
         );

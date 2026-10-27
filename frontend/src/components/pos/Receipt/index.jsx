@@ -93,7 +93,7 @@ const Receipt = ({ sale, reprintedAt }) => {
       {lines.map((line) => (
         <div key={line.id} style={styles.line} data-testid="receipt-line">
           <div style={styles.bold}>{line.product_name_snapshot}</div>
-          {line.imei_snapshot && <div style={styles.indent}>IMEI {line.imei_snapshot}</div>}
+          {line.imei_snapshot && <div style={styles.indent}>{line.identifier_type_snapshot === "SERIAL_NUMBER" ? "Serial number" : "IMEI"} {line.imei_snapshot}</div>}
           <Row
             style={styles.indent}
             label={`${line.quantity} × ${receiptAmount(line.unit_price)}`}

@@ -37,12 +37,14 @@ const describeError = (err) => {
 };
 
 const ImeiPromptDialog = ({ product, onClose, onSubmit }) => {
-  const [imei, setImei] = useState("");
+  const [identifier, setIdentifier] = useState("");
   const [error, setError] = useState(null);
   const [submitting, setSubmitting] = useState(false);
+  const isSerialNumber = product?.tracking_method === "SERIAL_NUMBER";
+  const identifierLabel = isSerialNumber ? "Serial number" : "IMEI";
 
   const reset = () => {
-    setImei("");
+    setIdentifier("");
     setError(null);
   };
 
@@ -54,9 +56,9 @@ const ImeiPromptDialog = ({ product, onClose, onSubmit }) => {
 
   const handleSubmit = async (event) => {
     event.preventDefault();
-    const value = imei.trim();
-    if (!IMEI_PATTERN.test(value)) {
-      setError("Enter the IMEI: 8–50 letters or digits.");
+    const value = identifier.trim();
+    if (isSerialNumber ? !/^[A-Za-z0-9-]{1,100}$/.test(value) : !IMEI_PATTERN.test(value)) {
+      setError(isSerialNumber ? "Enter a valid serial number (up to 100 letters, digits, or hyphens)." : "Enter the IMEI: 8–50 letters or digits.");
       return;
     }
     setSubmitting(true);
@@ -76,7 +78,7 @@ const ImeiPromptDialog = ({ product, onClose, onSubmit }) => {
     <Dialog
       open={!!product}
       onClose={handleClose}
-      title="Scan the IMEI"
+      title={`Enter the ${identifierLabel}`}
       description={product?.name}
       size="sm"
       dismissible={!submitting}
@@ -84,23 +86,23 @@ const ImeiPromptDialog = ({ product, onClose, onSubmit }) => {
       <form onSubmit={handleSubmit} noValidate>
         <div className="flex items-center gap-3 mb-4 rounded-xl bg-slate-50 dark:bg-slate-800/60 px-3 py-2.5 text-sm text-slate-600 dark:text-slate-300">
           <Smartphone size={18} aria-hidden="true" className="flex-shrink-0 text-cyan-600 dark:text-cyan-400" />
-          Scan the IMEI sticker on the phone or its box, or type it.
+          Scan the {identifierLabel.toLowerCase()} sticker or type it.
         </div>
         <label
           htmlFor="imei-input"
           className="block text-sm font-medium text-slate-700 dark:text-slate-200 mb-1.5"
         >
-          IMEI
+          {identifierLabel}
         </label>
         <input
           id="imei-input"
           data-autofocus
-          value={imei}
+          value={identifier}
           onChange={(e) => {
-            setImei(e.target.value);
+            setIdentifier(e.target.value);
             if (error) setError(null);
           }}
-          inputMode="numeric"
+          inputMode={isSerialNumber ? "text" : "numeric"}
           autoComplete="off"
           spellCheck={false}
           aria-invalid={!!error}
@@ -113,6 +115,28 @@ const ImeiPromptDialog = ({ product, onClose, onSubmit }) => {
             focus:outline-none focus:ring-2 focus:ring-cyan-500 focus:border-cyan-500
           "
         />
+        {isSerialNumber && (
+          <button
+            type="button"
+            className="mt-3 text-sm text-cyan-700 underline dark:text-cyan-300"
+            onClick={async () => {
+              setSubmitting(true);
+              setError(null);
+              try {
+                await onSubmit(null);
+                reset();
+                onClose();
+              } catch (err) {
+                setError(describeError(err));
+              } finally {
+                setSubmitting(false);
+              }
+            }}
+            disabled={submitting}
+          >
+            This item has no serial number
+          </button>
+        )}
         {error && (
           <p id="imei-error" role="alert" className="mt-2 text-sm text-red-600 dark:text-red-400">
             {error}

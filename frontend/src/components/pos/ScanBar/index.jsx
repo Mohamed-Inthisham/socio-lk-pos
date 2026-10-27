@@ -291,7 +291,7 @@ const ScanBar = ({ branchId, disabled = false, inputRef }) => {
                 {product.is_serialized && (
                   <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-md text-[11px] font-medium bg-violet-50 text-violet-700 dark:bg-violet-900/40 dark:text-violet-300">
                     <Smartphone size={11} aria-hidden="true" />
-                    IMEI
+                    {product.tracking_method === "SERIAL_NUMBER" ? "Serial" : "IMEI"}
                   </span>
                 )}
                 <span className="text-sm font-semibold tabular-nums text-slate-700 dark:text-slate-200">
@@ -329,9 +329,9 @@ const ScanBar = ({ branchId, disabled = false, inputRef }) => {
           setImeiProduct(null);
           refocus();
         }}
-        onSubmit={async (imei) => {
+        onSubmit={async (identifier) => {
           try {
-            await dispatch(addLine({ product: imeiProduct, imei })).unwrap();
+            await dispatch(addLine({ product: imeiProduct, identifier })).unwrap();
           } catch (err) {
             // Shown inside the dialog — don't repeat it under the scan bar.
             dispatch(clearLineError());

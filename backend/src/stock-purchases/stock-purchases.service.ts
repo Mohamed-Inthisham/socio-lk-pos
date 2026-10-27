@@ -10,6 +10,7 @@ import { randomUUID } from 'crypto';
 import { DataSource, EntityManager, In, Repository } from 'typeorm';
 import { Branch } from '../branches/entities/branch.entity';
 import { Product } from '../products/entities/product.entity';
+import { TrackingMethod } from '../products/enums/tracking-method.enum';
 import { ProductUnit } from '../product-units/entities/product-unit.entity';
 import { ProductUnitStatus } from '../product-units/enums/product-unit-status.enum';
 import { LIVE_UNIT_STATUSES } from '../product-units/live-imei';
@@ -117,15 +118,26 @@ export class StockPurchasesService {
         }
         const imeis = item.imei_numbers ?? [];
         const serials = item.serial_numbers ?? [];
-        if (product.is_serialized) {
+        const trackingMethod =
+          product.tracking_method ??
+          (product.is_serialized
+            ? TrackingMethod.IMEI
+            : TrackingMethod.QUANTITY);
+        if (trackingMethod === TrackingMethod.IMEI) {
           if (serials.length || imeis.length !== item.quantity) {
             throw new BadRequestException(
               `${product.name} needs one IMEI for each of its ${item.quantity} units.`,
             );
           }
-        } else if (imeis.length || serials.length > item.quantity) {
+        } else if (trackingMethod === TrackingMethod.SERIAL_NUMBER) {
+          if (imeis.length || serials.length > item.quantity) {
+            throw new BadRequestException(
+              `Serial numbers for ${product.name} must not exceed the received quantity.`,
+            );
+          }
+        } else if (imeis.length || serials.length) {
           throw new BadRequestException(
-            `Identifiers for ${product.name} must not exceed the received quantity.`,
+            `${product.name} is set to receive stock without per-unit identifiers.`,
           );
         }
         if (item.unit_selling_price !== undefined) {
@@ -136,6 +148,7 @@ export class StockPurchasesService {
       }
 
       this.assertUniqueIdentifiers(dto);
+      await this.assertSerialsNotPreviouslyReceived(manager, dto);
       const allImeis = dto.items.flatMap((item) => item.imei_numbers ?? []);
       if (allImeis.length) {
         const existing = await manager.findOne(ProductUnit, {
@@ -246,6 +259,32 @@ export class StockPurchasesService {
               detail.constraint === 'uq_product_units_imei_live'
             ) {
               throw new ConflictException(`IMEI ${imei} is already in stock.`);
+            }
+            throw error;
+          }
+        }
+
+        for (const serialNumber of item.serial_numbers ?? []) {
+          const unit = manager.create(ProductUnit, {
+            product_id: product.id,
+            branch_id: dto.branch_id,
+            imei: serialNumber,
+            status: ProductUnitStatus.IN_STOCK,
+            buying_price: centsToAmount(unitBuyingCents),
+            selling_price: unitSellingPrice,
+            phone_purchase_id: null,
+          });
+          try {
+            await manager.save(unit);
+          } catch (error) {
+            const detail = error as { code?: string; constraint?: string };
+            if (
+              detail.code === '23505' &&
+              detail.constraint === 'uq_product_units_imei_live'
+            ) {
+              throw new ConflictException(
+                `Serial number ${serialNumber} is already in stock.`,
+              );
             }
             throw error;
           }
@@ -387,6 +426,38 @@ export class StockPurchasesService {
     });
   }
 
+  async findProductIdentifiers(
+    productId: string,
+    actor: { role: UserRole; branch_id: string | null },
+  ) {
+    const query = this.dataSource
+      .getRepository(StockPurchaseItem)
+      .createQueryBuilder('item')
+      .innerJoin('item.purchase', 'purchase')
+      .innerJoin('purchase.branch', 'branch')
+      .select('item.id', 'purchase_item_id')
+      .addSelect('item.quantity', 'quantity')
+      .addSelect('item.imei_numbers', 'imei_numbers')
+      .addSelect('item.serial_numbers', 'serial_numbers')
+      .addSelect('purchase.id', 'purchase_id')
+      .addSelect('purchase.purchase_number', 'purchase_number')
+      .addSelect('purchase.purchase_date', 'purchase_date')
+      .addSelect('branch.id', 'branch_id')
+      .addSelect('branch.name', 'branch_name')
+      .where('item.product_id = :productId', { productId });
+
+    if (actor.role !== UserRole.ADMIN) {
+      query.andWhere('purchase.branch_id = :branchId', {
+        branchId: actor.branch_id,
+      });
+    }
+
+    return query
+      .orderBy('purchase.purchase_date', 'DESC')
+      .addOrderBy('purchase.created_at', 'DESC')
+      .getRawMany();
+  }
+
   async supplierBalances(actor: {
     role: UserRole;
     branch_id: string | null;
@@ -449,6 +520,37 @@ export class StockPurchasesService {
     }
     if (new Set(serials).size !== serials.length) {
       throw new BadRequestException('A serial number can only appear once in a stock purchase.');
+    }
+  }
+
+  private async assertSerialsNotPreviouslyReceived(
+    manager: EntityManager,
+    dto: CreateStockPurchaseDto,
+  ): Promise<void> {
+    for (const item of dto.items) {
+      const serials = item.serial_numbers ?? [];
+      if (!serials.length) continue;
+
+      await manager.query(
+        `SELECT pg_advisory_xact_lock(hashtext('product-serial'), hashtext($1))`,
+        [item.product_id],
+      );
+
+      const [existing] = await manager.query(
+        `SELECT received.serial_number
+           FROM "stock_purchase_items" purchase_item
+           CROSS JOIN LATERAL jsonb_array_elements_text(purchase_item."serial_numbers")
+             AS received(serial_number)
+          WHERE purchase_item."product_id" = $1
+            AND received.serial_number = ANY($2::text[])
+          LIMIT 1`,
+        [item.product_id, serials],
+      );
+      if (existing) {
+        throw new ConflictException(
+          `Serial number ${existing.serial_number} was already received for this product.`,
+        );
+      }
     }
   }
 }

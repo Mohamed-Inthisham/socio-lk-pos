@@ -62,7 +62,7 @@ const SaleDetailReturns = ({ sale, onReprint, reprinting = null, errors = {}, di
             {ret.lines.map((l) => (
               <li key={l.sale_line_id}>
                 {l.quantity} × {nameOf(l.sale_line_id)}
-                {l.product_unit?.imei && <span className="font-mono tracking-tight"> (IMEI {l.product_unit.imei})</span>}
+                {l.product_unit?.imei && <span className="font-mono tracking-tight"> ({sale.lines.find((line) => line.id === l.sale_line_id)?.identifier_type_snapshot === "SERIAL_NUMBER" ? "Serial number" : "IMEI"} {l.product_unit.imei})</span>}
                 {" → "}
                 {WHERE[l.disposition] ?? l.disposition}
               </li>
