@@ -9,6 +9,7 @@ import Table from "../../components/common/Table";
 import usePermissions from "../../hooks/usePermissions";
 import { PERMISSIONS } from "../../constants/rolePermissions";
 import { listProducts } from "../../services/productsService";
+import { listStock } from "../../services/stockService";
 import {
   fetchBranches,
   selectActiveBranches,
@@ -33,7 +34,7 @@ import {
  * FILTERING STRATEGY:
  * - Server-side: brand, category, branch, includeInactive
  *   → refetch from backend when any of these change
- * - Client-side: text search on name/SKU/barcode
+ * - Client-side: text search on name/model/SKU/barcode and stock status
  *   → filter the in-memory list without a refetch
  *
  * Rationale: the backend supports the structural filters (see Swagger),
@@ -81,6 +82,8 @@ const ProductsList = () => {
 
   // Products list — local state, not Redux (view-specific data)
   const [products, setProducts] = useState([]);
+  const [stockRows, setStockRows] = useState([]);
+  const [stockStatusFilter, setStockStatusFilter] = useState("");
   const [total, setTotal] = useState(0);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
@@ -112,11 +115,15 @@ const ProductsList = () => {
 
     // One max-size page. No pager yet (see FOLLOWUPS) — the header says so
     // when the catalog is larger than this.
-    listProducts({ ...nextFilters, limit: MAX_PAGE_SIZE })
-      .then(({ data, meta }) => {
+    Promise.all([
+      listProducts({ ...nextFilters, limit: MAX_PAGE_SIZE }),
+      listStock(nextFilters.branchId ? { branchId: nextFilters.branchId } : {}),
+    ])
+      .then(([{ data, meta }, rows]) => {
         // Ignore if a newer request has been fired since
         if (requestId !== fetchRequestIdRef.current) return;
         setProducts(data);
+        setStockRows(rows);
         setTotal(meta.total);
       })
       .catch((err) => {
@@ -124,7 +131,7 @@ const ProductsList = () => {
         setError(
           err.response?.data?.message ||
             err.message ||
-            "Failed to load products",
+            "Failed to load products and stock",
         );
       })
       .finally(() => {
@@ -144,17 +151,56 @@ const ProductsList = () => {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  const stockByProduct = useMemo(() => {
+    const stock = {};
+    for (const row of stockRows) {
+      const entry = stock[row.product_id] ?? {
+        quantity: 0,
+        minQuantity: 0,
+        tracked: false,
+      };
+      if (row.manage_stock) {
+        entry.quantity += Number(row.quantity) || 0;
+        entry.minQuantity += Number(row.min_quantity) || 0;
+        entry.tracked = true;
+      }
+      entry.lowStock = entry.tracked && entry.quantity <= entry.minQuantity;
+      stock[row.product_id] = entry;
+    }
+    return stock;
+  }, [stockRows]);
+
+  const stockMetrics = useMemo(() => products.reduce((summary, product) => {
+    const stock = stockByProduct[product.id] ?? { quantity: 0, lowStock: false, tracked: true };
+    if (stock.tracked) {
+      summary.units += stock.quantity;
+      if (stock.quantity === 0) summary.outOfStock += 1;
+      else if (stock.lowStock) summary.lowStock += 1;
+    }
+    return summary;
+  }, { units: 0, lowStock: 0, outOfStock: 0 }), [products, stockByProduct]);
+
   // Client-side search — filters the already-fetched list in memory
   const visibleProducts = useMemo(() => {
     const q = searchTerm.trim().toLowerCase();
-    if (!q) return products;
-    return products.filter((p) => {
+    const searchResults = !q ? products : products.filter((p) => {
       const name = (p.name || "").toLowerCase();
+      const model = (p.model || "").toLowerCase();
       const sku = (p.sku || "").toLowerCase();
       const barcode = (p.barcode || "").toLowerCase();
-      return name.includes(q) || sku.includes(q) || barcode.includes(q);
+      return name.includes(q) || model.includes(q) || sku.includes(q) || barcode.includes(q);
     });
-  }, [products, searchTerm]);
+    if (!stockStatusFilter) return searchResults;
+    return searchResults.filter((product) => {
+      const stock = stockByProduct[product.id] ?? { quantity: 0, lowStock: false, tracked: true };
+      if (stockStatusFilter === "NOT_TRACKED") return !stock.tracked;
+      if (!stock.tracked) return false;
+      if (stockStatusFilter === "OUT_OF_STOCK") return stock.quantity === 0;
+      if (stockStatusFilter === "LOW_STOCK") return stock.quantity > 0 && stock.lowStock;
+      if (stockStatusFilter === "IN_STOCK") return stock.quantity > 0 && !stock.lowStock;
+      return true;
+    });
+  }, [products, searchTerm, stockStatusFilter, stockByProduct]);
 
   // ============================================
   // TABLE COLUMN CONFIG
@@ -189,13 +235,54 @@ const ProductsList = () => {
     </span>
   );
 
+  const renderCategory = (row) => row.category?.name || "—";
+
   const renderBrand = (row) => row.brand?.name || "—";
 
-  const renderPrice = (row) => (
-    <span className="font-medium tabular-nums text-slate-700 dark:text-slate-200">
+  const renderCost = (row) => (
+    <span className="tabular-nums text-slate-600 dark:text-slate-300">
+      {formatPrice(row.buying_price)}
+    </span>
+  );
+
+  const renderSellingPrice = (row) => (
+    <span className="font-medium tabular-nums text-slate-900 dark:text-slate-100">
       {formatPrice(row.selling_price)}
     </span>
   );
+
+  const stockFor = (productId) => stockByProduct[productId] ?? {
+    quantity: 0,
+    lowStock: false,
+    tracked: true,
+  };
+
+  const renderStock = (row) => {
+    const stock = stockFor(row.id);
+    const label = !stock.tracked
+      ? "Not tracked"
+      : stock.quantity === 0
+        ? "Out of stock"
+        : stock.lowStock
+          ? "Low stock"
+          : "In stock";
+    const tone = !stock.tracked
+      ? "text-slate-500 dark:text-slate-400"
+      : stock.quantity === 0
+        ? "text-red-700 dark:text-red-300"
+        : stock.lowStock
+          ? "text-amber-700 dark:text-amber-300"
+          : "text-emerald-700 dark:text-emerald-300";
+
+    return (
+      <div className="text-right">
+        <div className="font-semibold tabular-nums text-slate-900 dark:text-slate-100">
+          {stock.tracked ? stock.quantity : "—"}
+        </div>
+        <div className={`text-xs ${tone}`}>{label}</div>
+      </div>
+    );
+  };
 
   const renderStatus = (row) => {
     if (!row.is_active) {
@@ -226,15 +313,32 @@ const ProductsList = () => {
       mobileHidden: true,
     },
     {
+      key: "category",
+      header: "Category",
+      render: renderCategory,
+    },
+    {
       key: "brand",
       header: "Brand",
       render: renderBrand,
     },
     {
-      key: "price",
-      header: "Price",
+      key: "cost",
+      header: "Cost",
       align: "right",
-      render: renderPrice,
+      render: renderCost,
+    },
+    {
+      key: "sellingPrice",
+      header: "Selling",
+      align: "right",
+      render: renderSellingPrice,
+    },
+    {
+      key: "stock",
+      header: "Stocks",
+      align: "right",
+      render: renderStock,
     },
     {
       key: "status",
@@ -289,6 +393,13 @@ const ProductsList = () => {
     { value: "", label: "All categories" },
     ...categories.map((c) => ({ value: c.id, label: c.name })),
   ];
+  const stockStatusOptions = [
+    { value: "", label: "All stock statuses" },
+    { value: "IN_STOCK", label: "In stock" },
+    { value: "LOW_STOCK", label: "Low stock" },
+    { value: "OUT_OF_STOCK", label: "Out of stock" },
+    { value: "NOT_TRACKED", label: "Not tracked" },
+  ];
 
   return (
     <div className="max-w-7xl mx-auto p-4 md:p-6">
@@ -323,6 +434,25 @@ const ProductsList = () => {
         )}
       </div>
 
+      <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-3 mb-4">
+        <div className="rounded-xl border border-slate-200 bg-white p-4 dark:border-slate-800 dark:bg-slate-900">
+          <p className="text-xs font-medium text-slate-500 dark:text-slate-400">Total products</p>
+          <p className="mt-1 text-2xl font-semibold tabular-nums text-slate-900 dark:text-slate-100">{total}</p>
+        </div>
+        <div className="rounded-xl border border-slate-200 bg-white p-4 dark:border-slate-800 dark:bg-slate-900">
+          <p className="text-xs font-medium text-slate-500 dark:text-slate-400">Stock units</p>
+          <p className="mt-1 text-2xl font-semibold tabular-nums text-slate-900 dark:text-slate-100">{stockMetrics.units}</p>
+        </div>
+        <div className="rounded-xl border border-amber-200 bg-white p-4 dark:border-amber-900/70 dark:bg-slate-900">
+          <p className="text-xs font-medium text-amber-700 dark:text-amber-300">Low stock products</p>
+          <p className="mt-1 text-2xl font-semibold tabular-nums text-amber-800 dark:text-amber-200">{stockMetrics.lowStock}</p>
+        </div>
+        <div className="rounded-xl border border-red-200 bg-white p-4 dark:border-red-900/70 dark:bg-slate-900">
+          <p className="text-xs font-medium text-red-700 dark:text-red-300">Out of stock</p>
+          <p className="mt-1 text-2xl font-semibold tabular-nums text-red-800 dark:text-red-200">{stockMetrics.outOfStock}</p>
+        </div>
+      </div>
+
       {/* Filters bar */}
       <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-xl p-4 mb-4 space-y-3">
         {/* Search + inactive toggle */}
@@ -331,7 +461,7 @@ const ProductsList = () => {
             <InputField
               type="text"
               name="search"
-              placeholder="Search by name, SKU, or barcode"
+              placeholder="Search by name, model, SKU, or barcode"
               value={searchTerm}
               onChange={(e) => setSearchTerm(e.target.value)}
               icon={Search}
@@ -349,7 +479,7 @@ const ProductsList = () => {
         </div>
 
         {/* Structural filters */}
-        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
+        <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-3">
           <Select
             name="brand"
             value={filters.brandId}
@@ -371,7 +501,14 @@ const ProductsList = () => {
             options={branchOptions}
             placeholder="All branches"
           />
+          <Select
+            name="stockStatus"
+            value={stockStatusFilter}
+            onChange={(event) => setStockStatusFilter(event.target.value)}
+            options={stockStatusOptions}
+          />
         </div>
+        <p className="text-xs text-slate-500 dark:text-slate-400">Stock shows the selected branch quantity, or the combined quantity across branches. Open a product to see each branch and adjust stock.</p>
       </div>
 
       {/* Error banner */}
@@ -383,7 +520,7 @@ const ProductsList = () => {
           />
           <div>
             <p className="text-sm font-medium text-red-800 dark:text-red-200">
-              Couldn't load products
+              Couldn't load products or stock
             </p>
             <p className="text-xs text-red-700 dark:text-red-300 mt-0.5">
               {error}
@@ -399,7 +536,11 @@ const ProductsList = () => {
         loading={loading}
         onRowClick={handleRowClick}
         emptyMessage={
-          searchTerm ? `No products match "${searchTerm}"` : "No products yet"
+          searchTerm
+            ? `No products match "${searchTerm}"`
+            : stockStatusFilter
+              ? "No products match these filters"
+              : "No products yet"
         }
       />
     </div>
