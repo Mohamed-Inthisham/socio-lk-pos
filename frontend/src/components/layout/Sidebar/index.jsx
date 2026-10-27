@@ -13,9 +13,11 @@ import {
   ChevronsRight,
   ChevronDown,
   ScanBarcode,
+  ShoppingCart,
 } from "lucide-react";
 import Tooltip from "../../common/Tooltip";
 import useLayoutStore from "../../../store/zustand/layoutStore";
+import usePermissions from "../../../hooks/usePermissions";
 
 /**
  * Sidebar Component
@@ -84,6 +86,12 @@ const NAV_ITEMS = [
     icon: Truck,
   },
   {
+    to: "/stock-purchases",
+    label: "Stock purchases",
+    icon: ShoppingCart,
+    roles: ["admin", "manager"],
+  },
+  {
     label: "Sales",
     icon: ReceiptText,
     children: [
@@ -149,15 +157,19 @@ const Sidebar = ({ onNavigate }) => {
   const collapsed = useLayoutStore((s) => s.sidebarCollapsed);
   const toggleSidebar = useLayoutStore((s) => s.toggleSidebar);
   const { pathname } = useLocation();
+  const { role } = usePermissions();
 
   // When collapsed, flatten group children into top-level items so
   // each gets its own icon+tooltip. No fly-out submenu.
   const renderedItems = useMemo(() => {
-    if (!collapsed) return NAV_ITEMS;
-    return NAV_ITEMS.flatMap((item) =>
-      isGroup(item) ? item.children : [item],
-    );
-  }, [collapsed]);
+    const allowed = NAV_ITEMS.flatMap((item) => {
+      if (!isGroup(item)) return !item.roles || item.roles.includes(role) ? [item] : [];
+      const children = item.children.filter((child) => !child.roles || child.roles.includes(role));
+      return children.length ? [{ ...item, children }] : [];
+    });
+    if (!collapsed) return allowed;
+    return allowed.flatMap((item) => isGroup(item) ? item.children : [item]);
+  }, [collapsed, role]);
 
   return (
     <aside

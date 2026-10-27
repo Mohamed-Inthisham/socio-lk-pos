@@ -7,13 +7,15 @@ import InputField from "../../components/common/InputField";
 import Table from "../../components/common/Table";
 import usePermissions from "../../hooks/usePermissions";
 import { deactivateSupplier, listSuppliers, reactivateSupplier } from "../../services/suppliersService";
+import { listSupplierPurchaseBalances } from "../../services/stockPurchasesService";
+import { formatLKR } from "../../utils/money";
 import SupplierFormDialog from "./SupplierFormDialog";
 
 const PAGE_SIZE = 10;
 const panel = "rounded-xl border border-slate-200 bg-white dark:border-slate-800 dark:bg-slate-900";
 
 export default function Suppliers() {
-  const { isAdmin } = usePermissions();
+  const { isAdmin, isManager } = usePermissions();
   const [suppliers, setSuppliers] = useState([]);
   const [status, setStatus] = useState("loading");
   const [error, setError] = useState("");
@@ -24,16 +26,24 @@ export default function Suppliers() {
   const [formOpen, setFormOpen] = useState(false);
   const [viewing, setViewing] = useState(null);
   const [changingStatus, setChangingStatus] = useState(null);
+  const [supplierBalances, setSupplierBalances] = useState({});
 
   const load = useCallback(() => {
     let live = true;
     setStatus("loading");
     setError("");
-    listSuppliers({ includeInactive })
-      .then((rows) => { if (live) { setSuppliers(rows); setStatus("ready"); } })
+    Promise.all([
+      listSuppliers({ includeInactive }),
+      isAdmin || isManager ? listSupplierPurchaseBalances().catch(() => []) : Promise.resolve([]),
+    ])
+      .then(([rows, balanceRows]) => { if (live) {
+        setSuppliers(rows);
+        setSupplierBalances(Object.fromEntries(balanceRows.map((row) => [row.supplier_id, row])));
+        setStatus("ready");
+      } })
       .catch(() => { if (live) { setError("Couldn’t load suppliers. Try again."); setStatus("error"); } });
     return () => { live = false; };
-  }, [includeInactive]);
+  }, [includeInactive, isAdmin, isManager]);
 
   useEffect(() => load(), [load]);
 
@@ -52,6 +62,20 @@ export default function Suppliers() {
     { key: "contact_person", header: "Contact person", render: (row) => row.contact_person || <span className="text-slate-400">—</span> },
     { key: "phone", header: "Phone", render: (row) => row.phone || <span className="text-slate-400">—</span> },
     { key: "email", header: "Email", render: (row) => row.email || <span className="text-slate-400">—</span> },
+    ...((isAdmin || isManager) ? [{
+      key: "outstanding_balance",
+      header: isManager ? "Outstanding (branch)" : "Outstanding",
+      align: "right",
+      render: (row) => {
+        const balance = supplierBalances[row.id];
+        return (
+          <div className="text-right">
+            <span className="font-medium tabular-nums">{formatLKR(balance?.outstanding_amount || "0.00")}</span>
+            {Number(balance?.pending_cheque_amount || 0) > 0 && <p className="text-xs text-amber-700 dark:text-amber-300">{formatLKR(balance.pending_cheque_amount)} cheque pending</p>}
+          </div>
+        );
+      },
+    }] : []),
     { key: "status", header: "Status", render: (row) => <span className={`rounded-full px-2.5 py-1 text-xs font-medium ${row.is_active ? "bg-emerald-50 text-emerald-700 dark:bg-emerald-950/50 dark:text-emerald-300" : "bg-slate-100 text-slate-600 dark:bg-slate-800 dark:text-slate-300"}`}>{row.is_active ? "Active" : "Inactive"}</span> },
     { key: "actions", header: "Actions", align: "right", render: (row) => (
       <div className="flex justify-end gap-1" onClick={(event) => event.stopPropagation()}>
@@ -62,7 +86,7 @@ export default function Suppliers() {
         </>}
       </div>
     ) },
-  ], [isAdmin]);
+  ], [isAdmin, isManager, supplierBalances]);
 
   const openCreate = () => { setEditing(null); setFormOpen(true); };
   const submitStatusChange = async () => {

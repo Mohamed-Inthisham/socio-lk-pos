@@ -1,0 +1,454 @@
+import {
+  BadRequestException,
+  ConflictException,
+  ForbiddenException,
+  Injectable,
+  NotFoundException,
+} from '@nestjs/common';
+import { InjectDataSource, InjectRepository } from '@nestjs/typeorm';
+import { randomUUID } from 'crypto';
+import { DataSource, EntityManager, In, Repository } from 'typeorm';
+import { Branch } from '../branches/entities/branch.entity';
+import { Product } from '../products/entities/product.entity';
+import { ProductUnit } from '../product-units/entities/product-unit.entity';
+import { ProductUnitStatus } from '../product-units/enums/product-unit-status.enum';
+import { LIVE_UNIT_STATUSES } from '../product-units/live-imei';
+import { Supplier } from '../suppliers/entities/supplier.entity';
+import { StockService } from '../stock/stock.service';
+import { UserRole } from '../users/enums/user-role.enum';
+import { CreateStockPurchaseDto } from './dto/create-stock-purchase.dto';
+import { CreateStockPurchasePaymentDto } from './dto/create-stock-purchase-payment.dto';
+import { UpdateStockPurchasePaymentStatusDto } from './dto/update-stock-purchase-payment-status.dto';
+import { StockPurchaseItem } from './entities/stock-purchase-item.entity';
+import { StockPurchasePayment } from './entities/stock-purchase-payment.entity';
+import { StockPurchase } from './entities/stock-purchase.entity';
+import { StockPurchasePaymentMethod } from './enums/stock-purchase-payment-method.enum';
+import { StockPurchasePaymentStatus } from './enums/stock-purchase-payment-status.enum';
+
+const PURCHASE_RELATIONS = [
+  'supplier',
+  'branch',
+  'created_by',
+  'items',
+  'items.product',
+  'payments',
+  'payments.created_by',
+] as const;
+const MAX_QUANTITY = 1_000_000;
+const MAX_PURCHASE_TOTAL_CENTS = 99_999_999_999_999;
+
+const amountToCents = (value: string): number => {
+  if (!/^\d{1,8}(\.\d{1,2})?$/.test(value)) {
+    throw new BadRequestException('Prices must be non-negative amounts with up to 2 decimals.');
+  }
+  const [whole, fraction = ''] = value.split('.');
+  return Number(whole) * 100 + Number(fraction.padEnd(2, '0'));
+};
+
+const centsToAmount = (cents: number): string =>
+  `${Math.floor(cents / 100)}.${String(cents % 100).padStart(2, '0')}`;
+
+const paymentAmountToCents = (value: string): number => {
+  if (!/^\d{1,12}(\.\d{1,2})?$/.test(value)) {
+    throw new BadRequestException('Payment amounts must be non-negative with up to 2 decimals.');
+  }
+  const [whole, fraction = ''] = value.split('.');
+  return Number(whole) * 100 + Number(fraction.padEnd(2, '0'));
+};
+
+const currentColomboDate = (): string =>
+  new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'Asia/Colombo',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+  }).format(new Date());
+
+@Injectable()
+export class StockPurchasesService {
+  constructor(
+    @InjectRepository(StockPurchase)
+    private readonly purchasesRepository: Repository<StockPurchase>,
+    @InjectDataSource() private readonly dataSource: DataSource,
+    private readonly stockService: StockService,
+  ) {}
+
+  async create(
+    dto: CreateStockPurchaseDto,
+    actor: { id: string; role: UserRole; branch_id: string | null },
+  ): Promise<StockPurchase> {
+    const id = randomUUID();
+    const purchaseNumber = `SP-${id.slice(0, 8).toUpperCase()}`;
+    await this.dataSource.transaction(async (manager) => {
+      await this.assertBranchAccess(actor, dto.branch_id);
+      const supplier = await manager.findOne(Supplier, {
+        where: { id: dto.supplier_id },
+      });
+      if (!supplier || !supplier.is_active) {
+        throw new BadRequestException('Select an active supplier.');
+      }
+      const branch = await manager.findOne(Branch, {
+        where: { id: dto.branch_id },
+      });
+      if (!branch || !branch.is_active) {
+        throw new BadRequestException('Select an active branch.');
+      }
+
+      const productIds = dto.items.map((item) => item.product_id);
+      if (new Set(productIds).size !== productIds.length) {
+        throw new BadRequestException(
+          'Add each product once. Combine repeated products into one line.',
+        );
+      }
+
+      const products = new Map<string, Product>();
+      for (const item of dto.items) {
+        const product = await manager.findOne(Product, {
+          where: { id: item.product_id },
+          relations: ['category'],
+        });
+        if (!product || !product.is_active) {
+          throw new BadRequestException(
+            `Product ${item.product_id} was not found or is inactive.`,
+          );
+        }
+        if (item.quantity > MAX_QUANTITY) {
+          throw new BadRequestException('A purchase line quantity is too large.');
+        }
+        const imeis = item.imei_numbers ?? [];
+        const serials = item.serial_numbers ?? [];
+        if (product.is_serialized) {
+          if (serials.length || imeis.length !== item.quantity) {
+            throw new BadRequestException(
+              `${product.name} needs one IMEI for each of its ${item.quantity} units.`,
+            );
+          }
+        } else if (imeis.length || serials.length > item.quantity) {
+          throw new BadRequestException(
+            `Identifiers for ${product.name} must not exceed the received quantity.`,
+          );
+        }
+        if (item.unit_selling_price !== undefined) {
+          amountToCents(item.unit_selling_price);
+        }
+        amountToCents(item.unit_buying_price);
+        products.set(product.id, product);
+      }
+
+      this.assertUniqueIdentifiers(dto);
+      const allImeis = dto.items.flatMap((item) => item.imei_numbers ?? []);
+      if (allImeis.length) {
+        const existing = await manager.findOne(ProductUnit, {
+          where: { imei: In(allImeis), status: In([...LIVE_UNIT_STATUSES]) },
+        });
+        if (existing) {
+          throw new ConflictException({
+            message: `IMEI ${existing.imei} is already recorded on a live unit.`,
+            imei: existing.imei,
+            existing_unit: {
+              id: existing.id,
+              product_id: existing.product_id,
+              status: existing.status,
+            },
+          });
+        }
+      }
+
+      for (const item of dto.items) {
+        await manager.query(
+          `INSERT INTO "stock" ("product_id", "branch_id", "quantity", "min_quantity", "manage_stock")
+           VALUES ($1, $2, 0, 0, true)
+           ON CONFLICT ("product_id", "branch_id") DO NOTHING`,
+          [item.product_id, dto.branch_id],
+        );
+      }
+      await manager.query(
+        `SELECT "id" FROM "stock" WHERE ("product_id", "branch_id") IN (${dto.items
+          .map((_, index) => `($${index * 2 + 1}, $${index * 2 + 2})`)
+          .join(', ')}) FOR UPDATE`,
+        dto.items.flatMap((item) => [item.product_id, dto.branch_id]),
+      );
+
+      const purchase = manager.create(StockPurchase, {
+        id,
+        purchase_number: purchaseNumber,
+        supplier_id: dto.supplier_id,
+        branch_id: dto.branch_id,
+        created_by_id: actor.id,
+        purchase_date:
+          dto.purchase_date ??
+          new Intl.DateTimeFormat('en-CA', {
+            timeZone: 'Asia/Colombo',
+            year: 'numeric',
+            month: '2-digit',
+            day: '2-digit',
+          }).format(new Date()),
+        supplier_invoice_number: dto.supplier_invoice_number?.trim() || null,
+        total_amount: '0.00',
+        notes: dto.notes?.trim() || null,
+      });
+      const savedPurchase = await manager.save(purchase);
+      let totalCents = 0;
+
+      for (const item of dto.items) {
+        const product = products.get(item.product_id)!;
+        const unitBuyingCents = amountToCents(item.unit_buying_price);
+        const lineTotalCents = unitBuyingCents * item.quantity;
+        totalCents += lineTotalCents;
+        if (
+          !Number.isSafeInteger(lineTotalCents) ||
+          !Number.isSafeInteger(totalCents) ||
+          totalCents > MAX_PURCHASE_TOTAL_CENTS
+        ) {
+          throw new BadRequestException('The purchase total is too large.');
+        }
+        const unitSellingPrice = item.unit_selling_price ?? product.selling_price;
+        const line = manager.create(StockPurchaseItem, {
+          stock_purchase_id: savedPurchase.id,
+          product_id: product.id,
+          product_name_snapshot: product.name,
+          product_sku_snapshot: product.sku,
+          quantity: item.quantity,
+          unit_buying_price: centsToAmount(unitBuyingCents),
+          unit_selling_price:
+            item.unit_selling_price !== undefined
+              ? centsToAmount(amountToCents(item.unit_selling_price))
+              : null,
+          line_total: centsToAmount(lineTotalCents),
+          imei_numbers: item.imei_numbers ?? [],
+          serial_numbers: item.serial_numbers ?? [],
+        });
+        await manager.save(line);
+
+        await this.stockService.receivePurchase(
+          manager,
+          product.id,
+          dto.branch_id,
+          item.quantity,
+        );
+
+        for (const imei of item.imei_numbers ?? []) {
+          const unit = manager.create(ProductUnit, {
+            product_id: product.id,
+            branch_id: dto.branch_id,
+            imei,
+            status: ProductUnitStatus.IN_STOCK,
+            buying_price: centsToAmount(unitBuyingCents),
+            selling_price: unitSellingPrice,
+            phone_purchase_id: null,
+          });
+          try {
+            await manager.save(unit);
+          } catch (error) {
+            const detail = error as { code?: string; constraint?: string };
+            if (
+              detail.code === '23505' &&
+              detail.constraint === 'uq_product_units_imei_live'
+            ) {
+              throw new ConflictException(`IMEI ${imei} is already in stock.`);
+            }
+            throw error;
+          }
+        }
+
+        await manager.update(Product, product.id, {
+          buying_price: centsToAmount(unitBuyingCents),
+          ...(item.unit_selling_price !== undefined && {
+            selling_price: centsToAmount(amountToCents(item.unit_selling_price)),
+          }),
+        });
+      }
+
+      await manager.update(StockPurchase, savedPurchase.id, {
+        total_amount: centsToAmount(totalCents),
+      });
+      if (dto.initial_payment) {
+        await this.recordPayment(
+          manager,
+          savedPurchase.id,
+          dto.initial_payment,
+          actor.id,
+          totalCents,
+          0,
+        );
+      }
+    });
+    return this.findOne(id, actor);
+  }
+
+  async addPayment(
+    purchaseId: string,
+    dto: CreateStockPurchasePaymentDto,
+    actor: { id: string; role: UserRole; branch_id: string | null },
+  ): Promise<StockPurchase> {
+    await this.dataSource.transaction(async (manager) => {
+      const purchase = await manager.findOne(StockPurchase, {
+        where: { id: purchaseId },
+        lock: { mode: 'pessimistic_write' },
+      });
+      if (!purchase) throw new NotFoundException('Stock purchase not found.');
+      await this.assertBranchAccess(actor, purchase.branch_id);
+      const [{ reserved_amount: reservedAmount }] = await manager.query(
+        `SELECT COALESCE(SUM("amount"), 0)::text AS "reserved_amount"
+         FROM "stock_purchase_payments"
+         WHERE "stock_purchase_id" = $1 AND "status" <> $2`,
+        [purchaseId, StockPurchasePaymentStatus.BOUNCED],
+      );
+      const reservedCents = paymentAmountToCents(reservedAmount);
+      const totalCents = paymentAmountToCents(purchase.total_amount);
+      await this.recordPayment(
+        manager,
+        purchaseId,
+        dto,
+        actor.id,
+        totalCents,
+        reservedCents,
+      );
+    });
+    return this.findOne(purchaseId, actor);
+  }
+
+  async resolveCheque(
+    purchaseId: string,
+    paymentId: string,
+    dto: UpdateStockPurchasePaymentStatusDto,
+    actor: { id: string; role: UserRole; branch_id: string | null },
+  ): Promise<StockPurchase> {
+    await this.dataSource.transaction(async (manager) => {
+      const purchase = await manager.findOne(StockPurchase, {
+        where: { id: purchaseId },
+        lock: { mode: 'pessimistic_write' },
+      });
+      if (!purchase) throw new NotFoundException('Stock purchase not found.');
+      await this.assertBranchAccess(actor, purchase.branch_id);
+      const payment = await manager.findOne(StockPurchasePayment, {
+        where: { id: paymentId, stock_purchase_id: purchaseId },
+        lock: { mode: 'pessimistic_write' },
+      });
+      if (!payment) throw new NotFoundException('Supplier payment not found.');
+      if (
+        payment.method !== StockPurchasePaymentMethod.CHEQUE ||
+        payment.status !== StockPurchasePaymentStatus.PENDING
+      ) {
+        throw new BadRequestException('Only pending cheques can be cleared or marked bounced.');
+      }
+      await manager.update(StockPurchasePayment, payment.id, {
+        status: dto.status,
+      });
+    });
+    return this.findOne(purchaseId, actor);
+  }
+
+  private async recordPayment(
+    manager: EntityManager,
+    purchaseId: string,
+    dto: CreateStockPurchasePaymentDto,
+    actorId: string,
+    totalCents: number,
+    reservedCents: number,
+  ): Promise<void> {
+    const amountCents = paymentAmountToCents(dto.amount);
+    if (!amountCents) throw new BadRequestException('Payment amount must be greater than zero.');
+    if (!Number.isSafeInteger(amountCents) || reservedCents + amountCents > totalCents) {
+      throw new BadRequestException('Payments cannot exceed the stock purchase total.');
+    }
+    const isCheque = dto.method === StockPurchasePaymentMethod.CHEQUE;
+    const chequeValues = [dto.cheque_number, dto.cheque_date, dto.bank];
+    if (isCheque && chequeValues.some((value) => !value?.trim())) {
+      throw new BadRequestException('Cheque number, cheque date, and bank are required for cheque payments.');
+    }
+    if (!isCheque && chequeValues.some((value) => value !== undefined)) {
+      throw new BadRequestException('Cheque details can only be supplied for cheque payments.');
+    }
+    const payment = manager.create(StockPurchasePayment, {
+      stock_purchase_id: purchaseId,
+      amount: centsToAmount(amountCents),
+      method: dto.method,
+      status: isCheque
+        ? StockPurchasePaymentStatus.PENDING
+        : StockPurchasePaymentStatus.CLEARED,
+      payment_date: dto.payment_date || currentColomboDate(),
+      reference: dto.reference?.trim() || null,
+      cheque_number: isCheque ? dto.cheque_number!.trim() : null,
+      cheque_date: isCheque ? dto.cheque_date! : null,
+      bank: isCheque ? dto.bank!.trim() : null,
+      created_by_id: actorId,
+    });
+    await manager.save(payment);
+  }
+
+  async findAll(actor: { role: UserRole; branch_id: string | null }): Promise<StockPurchase[]> {
+    const where = actor.role === UserRole.ADMIN ? {} : { branch_id: actor.branch_id! };
+    return this.purchasesRepository.find({
+      where,
+      relations: [...PURCHASE_RELATIONS],
+      order: { purchase_date: 'DESC', created_at: 'DESC' },
+      take: 200,
+    });
+  }
+
+  async supplierBalances(actor: {
+    role: UserRole;
+    branch_id: string | null;
+  }): Promise<Array<{
+    supplier_id: string;
+    total_amount: string;
+    paid_amount: string;
+    pending_cheque_amount: string;
+    outstanding_amount: string;
+  }>> {
+    const branchCondition = actor.role === UserRole.ADMIN ? '' : 'WHERE sp."branch_id" = $1';
+    const parameters = actor.role === UserRole.ADMIN ? [] : [actor.branch_id];
+    return this.dataSource.manager.query(
+      `SELECT "supplier_id",
+              SUM("total_amount")::text AS "total_amount",
+              SUM("paid_amount")::text AS "paid_amount",
+              SUM("pending_cheque_amount")::text AS "pending_cheque_amount",
+              GREATEST(SUM("total_amount") - SUM("paid_amount"), 0)::text AS "outstanding_amount"
+       FROM (
+         SELECT sp."id", sp."supplier_id", sp."total_amount",
+                COALESCE(SUM(payment."amount") FILTER (WHERE payment."status" = $${parameters.length + 1}), 0)::numeric AS "paid_amount",
+                COALESCE(SUM(payment."amount") FILTER (WHERE payment."status" = $${parameters.length + 2}), 0)::numeric AS "pending_cheque_amount"
+         FROM "stock_purchases" sp
+         LEFT JOIN "stock_purchase_payments" payment ON payment."stock_purchase_id" = sp."id"
+         ${branchCondition}
+         GROUP BY sp."id"
+       ) purchase_totals
+       GROUP BY "supplier_id"`,
+      [...parameters, StockPurchasePaymentStatus.CLEARED, StockPurchasePaymentStatus.PENDING],
+    );
+  }
+
+  async findOne(
+    id: string,
+    actor: { role: UserRole; branch_id: string | null },
+  ): Promise<StockPurchase> {
+    const purchase = await this.purchasesRepository.findOne({
+      where: { id },
+      relations: [...PURCHASE_RELATIONS],
+    });
+    if (!purchase) throw new NotFoundException('Stock purchase not found.');
+    await this.assertBranchAccess(actor, purchase.branch_id);
+    return purchase;
+  }
+
+  private async assertBranchAccess(
+    actor: { role: UserRole; branch_id: string | null },
+    branchId: string,
+  ): Promise<void> {
+    if (actor.role !== UserRole.ADMIN && actor.branch_id !== branchId) {
+      throw new ForbiddenException('You can only record stock purchases for your branch.');
+    }
+  }
+
+  private assertUniqueIdentifiers(dto: CreateStockPurchaseDto): void {
+    const imeis = dto.items.flatMap((item) => item.imei_numbers ?? []);
+    const serials = dto.items.flatMap((item) => item.serial_numbers ?? []);
+    if (new Set(imeis).size !== imeis.length) {
+      throw new BadRequestException('An IMEI can only appear once in a stock purchase.');
+    }
+    if (new Set(serials).size !== serials.length) {
+      throw new BadRequestException('A serial number can only appear once in a stock purchase.');
+    }
+  }
+}
