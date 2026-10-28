@@ -126,12 +126,15 @@ export class AuthController {
   }
 
   @Public()
-  @Post('logout')
+  @Post(['refresh/logout', 'logout'])
   @HttpCode(HttpStatus.OK)
   @ApiOperation({
     summary: 'Log out and clear session cookies',
     description:
-      'Revokes the current refresh token (if present) and clears both access and refresh cookies.',
+      'Revokes the current refresh token (if present) and clears both cookies. ' +
+      'Browser clients must use /auth/refresh/logout to send the narrowly scoped ' +
+      'refresh cookie. /auth/logout remains a compatibility alias but browsers ' +
+      'do not send the refresh cookie to that path.',
   })
   @ApiResponse({ status: 200, description: 'Logged out' })
   async logout(@Req() req: Request, @Res({ passthrough: true }) res: Response) {
