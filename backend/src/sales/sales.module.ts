@@ -9,6 +9,7 @@ import { SaleRefund } from './entities/sale-refund.entity';
 import { Branch } from '../branches/entities/branch.entity';
 import { User } from '../users/entities/user.entity';
 import { SalesService } from './sales.service';
+import { SaleBranchGuard } from './guards/sale-branch.guard';
 import { SalesController } from './sales.controller';
 import { SaleReturnsService } from './sale-returns.service';
 import { SaleReturnsController } from './sale-returns.controller';
@@ -42,7 +43,7 @@ import { ApprovalsModule } from '../approvals/approvals.module';
     PhonePurchasesModule,
     ApprovalsModule,
   ],
-  providers: [SalesService, SaleReturnsService],
+  providers: [SalesService, SaleReturnsService, SaleBranchGuard],
   controllers: [SalesController, SaleReturnsController],
   exports: [SalesService],
 })

@@ -154,15 +154,6 @@ export class SaleReturnsService {
       throw new NotFoundException('Sale not found');
     }
 
-    const recorded = await this.findRecorded(
-      this.dataSource.manager,
-      saleId,
-      dto.client_request_id,
-      requestedBy,
-    );
-    if (recorded) return this.respond(false, saleId, recorded);
-
-    assertCompleted(sale);
     if (
       requestedBy.role !== UserRole.ADMIN &&
       requestedBy.branch_id !== sale.branch_id
@@ -172,6 +163,16 @@ export class SaleReturnsService {
         code: 'RETURN_WRONG_BRANCH',
       });
     }
+
+    const recorded = await this.findRecorded(
+      this.dataSource.manager,
+      saleId,
+      dto.client_request_id,
+      requestedBy,
+    );
+    if (recorded) return this.respond(false, saleId, recorded);
+
+    assertCompleted(sale);
     // Today's cash day must be open (P9-9), so a closed or unopened day
     // never spends a PIN attempt; applyReturn checks again under its lock.
     await assertDayOpen(this.dataSource.manager, sale.branch_id, {
