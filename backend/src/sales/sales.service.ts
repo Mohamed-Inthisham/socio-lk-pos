@@ -2076,11 +2076,6 @@ export class SalesService {
     if (!sale) {
       throw new NotFoundException('Sale not found');
     }
-    if (sale.status !== SaleStatus.COMPLETED) {
-      throw new BadRequestException(
-        `Cannot void a ${sale.status} sale. Only COMPLETED sales can be voided.`,
-      );
-    }
     if (
       requestedBy.role !== UserRole.ADMIN &&
       requestedBy.branch_id !== sale.branch_id
@@ -2089,6 +2084,11 @@ export class SalesService {
         message: 'You can only void sales at your own branch.',
         code: 'VOID_WRONG_BRANCH',
       });
+    }
+    if (sale.status !== SaleStatus.COMPLETED) {
+      throw new BadRequestException(
+        `Cannot void a ${sale.status} sale. Only COMPLETED sales can be voided.`,
+      );
     }
     if (
       (await this.saleReturnsRepository.count({ where: { sale_id: saleId } })) >

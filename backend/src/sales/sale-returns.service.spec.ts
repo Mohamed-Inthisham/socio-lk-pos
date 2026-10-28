@@ -1,7 +1,6 @@
 import { Test, TestingModule } from '@nestjs/testing';
 import { getDataSourceToken, getRepositoryToken } from '@nestjs/typeorm';
 import {
-  BadRequestException,
   ConflictException,
   ForbiddenException,
   HttpException,
@@ -334,17 +333,53 @@ describe('SaleReturnsService', () => {
       },
     );
 
-    it('R4 before R5: a voided sale at another branch is SALE_NOT_COMPLETED', async () => {
-      mockSalesRepo.findOne.mockResolvedValue(
-        sale({ status: SaleStatus.VOIDED, branch_id: 'branch-2' }),
-      );
+    it.each([UserRole.MANAGER, UserRole.CASHIER])(
+      'rejects cross-branch %s before disclosing state or changing financial/inventory records',
+      async (role) => {
+        for (const status of [
+          SaleStatus.DRAFT,
+          SaleStatus.COMPLETED,
+          SaleStatus.VOIDED,
+        ]) {
+          mockSalesRepo.findOne.mockResolvedValue(
+            sale({ status, branch_id: 'branch-2' }),
+          );
+          const { err, body } = await refusal(
+            service.createReturn('sale-1', dto(), { ...cashier, role }),
+          );
+          expect(err).toBeInstanceOf(ForbiddenException);
+          expect(body).toEqual({
+            message: 'You can only make returns on sales at your own branch.',
+            code: 'RETURN_WRONG_BRANCH',
+          });
+        }
+        expectNoPin();
+        expect(mockManager.findOne).not.toHaveBeenCalled();
+        expect(mockManager.save).not.toHaveBeenCalled();
+        expect(mockManager.query).not.toHaveBeenCalled();
+        expect(mockAuditRepo.save).not.toHaveBeenCalled();
+        for (const spy of Object.values(mockStockService))
+          expect(spy).not.toHaveBeenCalled();
+        for (const spy of Object.values(mockProductUnitsService))
+          expect(spy).not.toHaveBeenCalled();
+      },
+    );
 
-      const { err, body } = await refusal(
-        service.createReturn('sale-1', dto(), cashier),
+    it('rejects a recorded-return replay after the requester changes branch', async () => {
+      fixtures.recorded = {
+        id: 'ret-9',
+        sale_id: 'sale-1',
+        requested_by: cashier.id,
+      };
+      const { body } = await refusal(
+        service.createReturn('sale-1', dto(), {
+          ...cashier,
+          branch_id: 'branch-2',
+        }),
       );
-
-      expect(err).toBeInstanceOf(BadRequestException);
-      expect(body.code).toBe('SALE_NOT_COMPLETED');
+      expect(body.code).toBe('RETURN_WRONG_BRANCH');
+      expect(mockSalesService.findOne).not.toHaveBeenCalled();
+      expect(mockManager.findOne).not.toHaveBeenCalled();
       expectNoPin();
     });
 

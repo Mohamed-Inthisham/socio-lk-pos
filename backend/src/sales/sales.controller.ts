@@ -11,6 +11,7 @@ import {
   HttpCode,
   HttpStatus,
   Ip,
+  UseGuards,
 } from '@nestjs/common';
 import {
   ApiTags,
@@ -20,6 +21,7 @@ import {
   ApiParam,
 } from '@nestjs/swagger';
 import { SalesService } from './sales.service';
+import { SaleBranchGuard } from './guards/sale-branch.guard';
 import { CreateSaleDto } from './dto/create-sale.dto';
 import { UpdateSaleDto } from './dto/update-sale.dto';
 import { ListSalesQueryDto } from './dto/list-sales-query.dto';
@@ -133,6 +135,7 @@ export class SalesController {
   }
 
   @Patch(':id')
+  @UseGuards(SaleBranchGuard)
   @Roles(UserRole.ADMIN, UserRole.MANAGER, UserRole.CASHIER)
   @ApiOperation({
     summary: 'Update a DRAFT sale (sale-level fields only)',
@@ -158,6 +161,7 @@ export class SalesController {
   }
 
   @Delete(':id')
+  @UseGuards(SaleBranchGuard)
   @HttpCode(HttpStatus.NO_CONTENT)
   @Roles(UserRole.ADMIN, UserRole.MANAGER, UserRole.CASHIER)
   @ApiOperation({
@@ -186,6 +190,7 @@ export class SalesController {
   // after ringing up an item. DELETE returns 204 as usual.
 
   @Post(':saleId/lines')
+  @UseGuards(SaleBranchGuard)
   @Roles(UserRole.ADMIN, UserRole.MANAGER, UserRole.CASHIER)
   @ApiOperation({
     summary: 'Add a line to a DRAFT sale',
@@ -223,6 +228,7 @@ export class SalesController {
   }
 
   @Patch(':saleId/lines/:lineId')
+  @UseGuards(SaleBranchGuard)
   @Roles(UserRole.ADMIN, UserRole.MANAGER, UserRole.CASHIER)
   @ApiOperation({
     summary: 'Update a line on a DRAFT sale',
@@ -260,6 +266,7 @@ export class SalesController {
   }
 
   @Delete(':saleId/lines/:lineId')
+  @UseGuards(SaleBranchGuard)
   @HttpCode(HttpStatus.NO_CONTENT)
   @Roles(UserRole.ADMIN, UserRole.MANAGER, UserRole.CASHIER)
   @ApiOperation({
@@ -291,6 +298,7 @@ export class SalesController {
   // follow-up GET after recording a payment. DELETE returns 204.
 
   @Post(':saleId/payments')
+  @UseGuards(SaleBranchGuard)
   @Roles(UserRole.ADMIN, UserRole.MANAGER, UserRole.CASHIER)
   @ApiOperation({
     summary: 'Record a payment on a DRAFT sale',
@@ -343,6 +351,7 @@ export class SalesController {
   }
 
   @Patch(':saleId/payments/:paymentId')
+  @UseGuards(SaleBranchGuard)
   @Roles(UserRole.ADMIN, UserRole.MANAGER, UserRole.CASHIER)
   @ApiOperation({
     summary: 'Update a payment on a DRAFT sale',
@@ -383,6 +392,7 @@ export class SalesController {
   }
 
   @Delete(':saleId/payments/:paymentId')
+  @UseGuards(SaleBranchGuard)
   @HttpCode(HttpStatus.NO_CONTENT)
   @Roles(UserRole.ADMIN, UserRole.MANAGER, UserRole.CASHIER)
   @ApiOperation({
@@ -416,6 +426,7 @@ export class SalesController {
   // is noise, but this is a legal record and worth capturing.
 
   @Post(':id/complete')
+  @UseGuards(SaleBranchGuard)
   @HttpCode(HttpStatus.OK)
   @Roles(UserRole.ADMIN, UserRole.MANAGER, UserRole.CASHIER)
   @Auditable('Sale', AuditAction.COMPLETE)

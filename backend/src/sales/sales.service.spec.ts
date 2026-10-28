@@ -5721,22 +5721,58 @@ describe('SalesService', () => {
         expect(mockApprovalsService.verify).not.toHaveBeenCalled();
       });
 
-      it('403 VOID_WRONG_BRANCH before any PIN check when the session user is at another branch', async () => {
+      it.each([UserRole.MANAGER, UserRole.CASHIER])(
+        'rejects cross-branch %s before disclosing state or changing financial/inventory records',
+        async (role) => {
+          for (const status of [
+            SaleStatus.DRAFT,
+            SaleStatus.COMPLETED,
+            SaleStatus.VOIDED,
+          ]) {
+            mockSalesRepo.findOne.mockResolvedValue(
+              seedVoidableSale({ status }),
+            );
+            const err = await service
+              .voidWithApproval(
+                'sale-1',
+                { ...cashierAtBranch1, role, branch_id: 'branch-2' },
+                approvalDto,
+              )
+              .catch((e: unknown) => e);
+            expect(err).toBeInstanceOf(ForbiddenException);
+            expect((err as ForbiddenException).getResponse()).toEqual({
+              message: 'You can only void sales at your own branch.',
+              code: 'VOID_WRONG_BRANCH',
+            });
+          }
+          expect(mockApprovalsService.verify).not.toHaveBeenCalled();
+          expect(mockDataSource.transaction).not.toHaveBeenCalled();
+          expect(mockSaleReturnsRepo.count).not.toHaveBeenCalled();
+          expect(mockManager.query).not.toHaveBeenCalled();
+          expect(mockManager.save).not.toHaveBeenCalled();
+          expect(mockAuditRepo.save).not.toHaveBeenCalled();
+          for (const spy of Object.values(mockStockService))
+            expect(spy).not.toHaveBeenCalled();
+          for (const spy of Object.values(mockProductUnitsService))
+            expect(spy).not.toHaveBeenCalled();
+        },
+      );
+
+      it('allows a same-branch manager while still requiring approval', async () => {
         mockSalesRepo.findOne.mockResolvedValue(seedVoidableSale());
-
-        const err = await service
-          .voidWithApproval(
-            'sale-1',
-            { ...cashierAtBranch1, branch_id: 'branch-2' },
-            approvalDto,
-          )
-          .catch((e: unknown) => e);
-
-        expect(err).toBeInstanceOf(ForbiddenException);
-        expect((err as ForbiddenException).getResponse()).toMatchObject({
-          code: 'VOID_WRONG_BRANCH',
-        });
-        expect(mockApprovalsService.verify).not.toHaveBeenCalled();
+        mockApprovalsService.verify.mockResolvedValue(manager);
+        mockQueryBuilder.getOne.mockResolvedValueOnce(seedVoidableSale());
+        arrangeManagerFind([seedVoidableLine()]);
+        await service.voidWithApproval(
+          'sale-1',
+          {
+            ...cashierAtBranch1,
+            role: UserRole.MANAGER,
+          },
+          approvalDto,
+        );
+        expect(mockApprovalsService.verify).toHaveBeenCalledTimes(1);
+        expect(mockDataSource.transaction).toHaveBeenCalledTimes(1);
       });
 
       it('lets an admin session ask at any branch', async () => {
