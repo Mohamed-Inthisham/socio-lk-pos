@@ -40,10 +40,30 @@ Both cookies use the same base options:
 
 Every use of the refresh token:
 
-1. Verifies the JWT signature and expiry.
-2. Looks up the session by SHA-256 hash of the token.
-3. If the session was already revoked → **reuse detected**: revoke all sessions for that user and reject.
-4. Otherwise: mark the old session revoked, issue new access + refresh tokens, create a new session row.
+1. Verifies the JWT signature and expiry. A token that fails here is rejected ("Invalid refresh token") before the database is touched, so replaying a token whose JWT has expired never reaches reuse detection.
+2. Opens a database transaction and **claims** the session with one conditional update, by SHA-256 hash of the token: `UPDATE refresh_tokens SET revoked_at = now() WHERE token_hash = $1 AND revoked_at IS NULL AND expires_at > now() RETURNING user_id`. Expiry here is checked by the database clock.
+3. If no row was claimed, re-reads the row by hash in the same transaction and rejects, checking in this order:
+   - no row → "Refresh token not recognized";
+   - `revoked_at` set (whether or not it has also expired) → **reuse detected**: once the transaction has committed, revoke every unrevoked session of the JWT's user (`sub`), then reject;
+   - otherwise the row is unrevoked, so it can only have failed the expiry condition → "Refresh token expired".
+4. If the row was claimed: rejects if its `user_id` differs from the JWT's `sub` ("Refresh token not recognized") or the user is missing or inactive ("User no longer active"). These refusals commit, so the claimed token stays revoked. Otherwise issues new access + refresh tokens and inserts the replacement session row **in the same transaction**. The claim and the replacement commit together: if the insert fails, the transaction rolls back, the old token is left unrevoked, and a retry with it is not mistaken for reuse.
+
+### Concurrent refreshes and logout
+
+**On the server.** Concurrent claims of the same token wait on its row lock. The app doesn't set an isolation level, so PostgreSQL's default READ COMMITTED applies: when the lock is released, each waiting update re-checks its `WHERE` clause against the committed row. Exactly one request claims the token; the others find it revoked and are treated as reuse, which (under the strict policy above) also revokes the replacement the first request just committed. Logout's conditional update (`revoked_at IS NULL`) waits on the same row lock, so a refresh and a logout with the same token can't both take effect: if logout goes first, the refresh is treated as reuse; if the refresh goes first, the logout finds nothing to revoke.
+
+**In the browser.** Tabs share one cookie jar, so two tabs can send the same refresh token. The frontend runs every refresh (the 401 interceptor in `frontend/src/services/api.js`) and every logout (`logoutAPI` in `frontend/src/services/authService.js`) under one lock, `withAuthLock`:
+
+- Where the Web Locks API is available, the lock is `navigator.locks.request("socio-lk-pos-auth", …)`, exclusive across tabs of the same origin. A waiting tab sends its request only after the previous holder's response has been handled, so the browser attaches the cookie that response set. A tab that waited still makes its own refresh, rotating the token once more.
+- Logout waits for any refresh in flight and then sends the newest refresh cookie, so a refresh response can't arrive after logout has cleared the cookies.
+- Within one tab, concurrent 401s share a single refresh request.
+- Browsers expose Web Locks only in secure contexts (HTTPS or `localhost`). Elsewhere, for example a plain-HTTP LAN address, `withAuthLock` falls back to a queue inside each tab. That keeps refresh and logout ordered within a tab but does **not** coordinate tabs: two tabs refreshing at once send the same token, and the server's reuse detection revokes all of that user's sessions.
+
+**Limits.**
+
+- Nothing links a token to its replacement. A logout carrying an already-rotated token revokes nothing on the server, and the replacement stays valid; only the browser lock prevents that ordering.
+- A refresh request times out in the browser after 30 seconds, so a stalled one can't hold the lock and block logout indefinitely. The timeout only abandons the browser's request; it doesn't cancel the server's transaction, which may still commit the rotation. The failed refresh then logs the user out locally. If the browser never stored the new cookie, the replacement session row stays unrevoked until it expires.
+- Revoking sessions doesn't invalidate access tokens already issued; they remain valid until they expire.
 
 ### Why rotation
 
@@ -120,10 +140,11 @@ revoke an absent token. A non-browser client that explicitly supplies the refres
 cookie can still use this alias for revocation. Tests must use a path-aware jar
 for browser behavior rather than forcibly attaching every login cookie.
 
-This fix does not serialize refresh/logout requests or invalidate copied access
-JWTs before expiration. Refresh rotation and its existing policy of revoking all
-user sessions upon revoked-token replay are unchanged. The frontend also retains
-local logout on network failure; that alone does not confirm server revocation.
+Logout does not invalidate copied access JWTs before expiration. How logout is
+ordered against refreshes, in the browser and on the server, is described under
+"Concurrent refreshes and logout". Revoking all user sessions upon revoked-token
+replay is unchanged. The frontend also retains local logout on network failure;
+that alone does not confirm server revocation.
 
 ## Programmatic Use
 
