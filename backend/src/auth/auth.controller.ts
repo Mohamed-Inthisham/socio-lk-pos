@@ -62,7 +62,7 @@ export class AuthController {
 
     const { access_token, refresh_token } = await this.authService.login(
       user,
-      this.extractIp(req),
+      req.ip ?? null, // trusted proxies only (TRUST_PROXY)
       this.extractUserAgent(req),
     );
 
@@ -115,7 +115,7 @@ export class AuthController {
 
     const { access_token, refresh_token } = await this.authService.refresh(
       token,
-      this.extractIp(req),
+      req.ip ?? null, // trusted proxies only (TRUST_PROXY)
       this.extractUserAgent(req),
     );
 
@@ -194,12 +194,6 @@ export class AuthController {
       sameSite: 'strict',
       domain: this.config.get('COOKIE_DOMAIN'),
     };
-  }
-
-  private extractIp(req: Request): string | null {
-    const forwarded = req.headers['x-forwarded-for'];
-    if (typeof forwarded === 'string') return forwarded.split(',')[0].trim();
-    return req.ip ?? null;
   }
 
   private extractUserAgent(req: Request): string | null {

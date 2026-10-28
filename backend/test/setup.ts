@@ -2,19 +2,24 @@ import { INestApplication, ValidationPipe } from '@nestjs/common';
 import { Test } from '@nestjs/testing';
 import { DataSource } from 'typeorm';
 import cookieParser from 'cookie-parser';
+import { NestExpressApplication } from '@nestjs/platform-express';
 import { AppModule } from '../src/app.module';
+import { TypedConfigService } from '../src/config/typed-config.service';
+import { applyTrustProxy } from '../src/config/trust-proxy';
 
 /**
  * Boots the full NestJS app for e2e tests, mirroring the essential middleware
- * from main.ts. Skips helmet, CORS, and Swagger — noise for in-process tests.
+ * from main.ts (including TRUST_PROXY). Skips helmet, CORS, and Swagger —
+ * noise for in-process tests.
  */
 export async function createTestApp(): Promise<INestApplication> {
   const moduleFixture = await Test.createTestingModule({
     imports: [AppModule],
   }).compile();
 
-  const app = moduleFixture.createNestApplication();
+  const app = moduleFixture.createNestApplication<NestExpressApplication>();
 
+  applyTrustProxy(app, app.get(TypedConfigService).get('TRUST_PROXY'));
   app.use(cookieParser());
   app.useGlobalPipes(
     new ValidationPipe({

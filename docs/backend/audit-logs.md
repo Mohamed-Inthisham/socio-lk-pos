@@ -99,4 +99,4 @@ Response:
 
 ## Deployment note
 
-`request.ip` currently reads directly from the socket. In production (behind AWS ALB/CloudFront), Express `trust proxy` must be enabled in `main.ts` so the real client IP is read from `X-Forwarded-For` instead of the load balancer's IP. This is deferred to the deployment phase.
+`ip_address` is `request.ip`, which follows `X-Forwarded-For` only through the proxies `TRUST_PROXY` trusts (see [auth.md](./auth.md), "Client IP and trusted proxies"). By default no proxy is trusted and it is the socket's peer address. Behind a load balancer or CDN, production must set `TRUST_PROXY` to match the real proxy chain, or every entry records the proxy's address; the deployment topology that decides the value isn't settled yet.

@@ -97,11 +97,26 @@ Every session row in `refresh_tokens` records:
 - `token_hash` — SHA-256 of the refresh JWT
 - `expires_at` — UTC expiry
 - `revoked_at` — nullable; set when the session ends
-- `ip_address` — captured from `X-Forwarded-For` (first value) or `req.ip`
+- `ip_address` — `req.ip`, so `X-Forwarded-For` counts only through trusted proxies (see "Client IP and trusted proxies" below)
 - `user_agent` — captured from request header, truncated to 500 chars
 - `created_at` — login time
 
 This metadata supports future features (session management UI, "log out other devices") and enriches audit logs.
+
+### Client IP and trusted proxies
+
+`req.ip` is the one client IP the backend uses: the throttler keys on it, the audit log records it, and refresh-token sessions store it. Express derives it from the `trust proxy` setting, applied from `TRUST_PROXY` by `applyTrustProxy` (`backend/src/config/trust-proxy.ts`) in `main.ts` and in the e2e test app:
+
+- **`false` (and unset, outside production):** no proxy is trusted. `req.ip` is the connected peer and a client-sent `X-Forwarded-For` is ignored.
+- **A hop count, `1`–`5`:** trust that many hops by position, whatever their addresses. With a header that has at least that many entries, `req.ip` is the entry that many places from the right; anything a client wrote before it is ignored. **Safe only if the count matches the real proxy chain exactly and the backend can't be reached around the proxies.** If `X-Forwarded-For` has fewer entries than the hop count (the count is too high, or a request bypassed a proxy), Express walks off the left end and returns the left-most entry, which the client wrote: for example a count of `2` and a client sending `X-Forwarded-For: 6.6.6.6` straight to the backend gives `req.ip` = `6.6.6.6`.
+- **An allowlist (preferred):** comma-separated IPs, CIDR ranges and Express's named ranges. `req.ip` is the right-most address in the chain that isn't on the list. CIDR prefixes must be at least `/8` for IPv4 and `/32` for IPv6, so broad ranges can't add up to every address (as `0.0.0.0/1,128.0.0.0/1` would); that still fits any VPC subnet or provider range. The named ranges are exempt from the minimum:
+  - `loopback`: `127.0.0.0/8`, `::1/128`
+  - `linklocal`: `169.254.0.0/16`, `fe80::/10`
+  - `uniquelocal`: `10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`, `fc00::/7`. This trusts every private address, so it is only safe if no untrusted client can reach the backend from a private address (for example another workload in the same VPC, a VPN, or the shop LAN in an on-premises setup). Prefer the proxies' own subnets.
+
+`true` (trust everything), `0`, hop counts above 5, prefixes shorter than the minimum (including `/0`), netmask notation and malformed entries fail startup.
+
+**Production must set `TRUST_PROXY` explicitly.** With `NODE_ENV=production` the backend refuses to start if it is unset; set `false` if clients reach the backend directly, otherwise the proxies' addresses (or the exact hop count). With `false` behind a load balancer or CDN, every client appears as the proxy's address and shares one throttle allowance. The production proxy chain isn't decided yet, so no value is prescribed here.
 
 ## Timing-Safe Login
 
@@ -170,6 +185,7 @@ The `AuthenticatedUser` shape is `{ id, email, full_name, role, branch_id, branc
 | `JWT_REFRESH_EXPIRES_IN` | Refresh token lifetime | `7d` |
 | `COOKIE_DOMAIN` | Cookie scope | `localhost` (dev), `api.socio.lk` (prod) |
 | `COOKIE_SECURE` | HTTPS-only flag: exactly `true` or `false` (default `false`); any other value fails startup. Required `true` when `NODE_ENV=production` | `false` (dev, test), `true` (prod) |
+| `TRUST_PROXY` | Proxies whose `X-Forwarded-For` sets `req.ip`: `false` (none), a hop count `1`–`5`, or an allowlist of IPs, CIDRs (at least `/8` IPv4, `/32` IPv6) and named ranges. Unset means `false`, except that production refuses to start without it. `true` fails startup. See "Client IP and trusted proxies" | unset or `false` (dev, test); production: explicit, depends on the proxy chain |
 
 ## Future Work
 

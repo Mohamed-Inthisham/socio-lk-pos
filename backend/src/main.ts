@@ -1,14 +1,19 @@
 import { NestFactory } from '@nestjs/core';
 import { ValidationPipe } from '@nestjs/common';
+import { NestExpressApplication } from '@nestjs/platform-express';
 import helmet from 'helmet';
 import { AppModule } from './app.module';
 import { TypedConfigService } from './config/typed-config.service';
+import { applyTrustProxy } from './config/trust-proxy';
 import cookieParser from 'cookie-parser';
 import { DocumentBuilder, SwaggerModule } from '@nestjs/swagger';
 
 async function bootstrap() {
-  const app = await NestFactory.create(AppModule);
+  const app = await NestFactory.create<NestExpressApplication>(AppModule);
   const config = app.get(TypedConfigService);
+
+  // Which proxies' X-Forwarded-For to believe for req.ip (TRUST_PROXY)
+  applyTrustProxy(app, config.get('TRUST_PROXY'));
 
   // Security headers
   app.use(helmet());

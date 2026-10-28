@@ -93,6 +93,24 @@ describe('Auth (e2e)', () => {
       expect(accessCookie).toMatch(/SameSite=Strict/i);
     });
 
+    it('stores the connection’s IP on the session, not a client-sent X-Forwarded-For', async () => {
+      // .env.test leaves TRUST_PROXY unset: no proxy is trusted.
+      const { user, password } = await seedUser();
+
+      await request(app.getHttpServer())
+        .post('/api/v1/auth/login')
+        .set('X-Forwarded-For', '203.0.113.7')
+        .send({ email: user.email, password })
+        .expect(200);
+
+      const sessions: { ip_address: string | null }[] = await dataSource.query(
+        `SELECT ip_address FROM refresh_tokens WHERE user_id = $1`,
+        [user.id],
+      );
+      expect(sessions).toHaveLength(1);
+      expect(sessions[0].ip_address).toMatch(/^(::ffff:)?127\.0\.0\.1$|^::1$/);
+    });
+
     it('rejects invalid password with 401', async () => {
       await seedUser();
 

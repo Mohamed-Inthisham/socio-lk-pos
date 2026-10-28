@@ -17,22 +17,24 @@ const env = (overrides: Record<string, string>) => ({
 
 describe('validateEnv: COOKIE_SECURE', () => {
   describe('in production', () => {
+    // TRUST_PROXY is required in production too; set it so only
+    // COOKIE_SECURE decides these cases.
+    const production = { NODE_ENV: 'production', TRUST_PROXY: 'false' };
+
     it('rejects COOKIE_SECURE=false', () => {
       expect(() =>
-        validateEnv(env({ NODE_ENV: 'production', COOKIE_SECURE: 'false' })),
+        validateEnv(env({ ...production, COOKIE_SECURE: 'false' })),
       ).toThrow(/COOKIE_SECURE: must be "true" when NODE_ENV=production/);
     });
 
     it('rejects COOKIE_SECURE unset', () => {
-      expect(() => validateEnv(env({ NODE_ENV: 'production' }))).toThrow(
+      expect(() => validateEnv(env(production))).toThrow(
         /COOKIE_SECURE: must be "true" when NODE_ENV=production/,
       );
     });
 
     it('accepts COOKIE_SECURE=true', () => {
-      const result = validateEnv(
-        env({ NODE_ENV: 'production', COOKIE_SECURE: 'true' }),
-      );
+      const result = validateEnv(env({ ...production, COOKIE_SECURE: 'true' }));
       expect(result.NODE_ENV).toBe('production');
       expect(result.COOKIE_SECURE).toBe(true);
     });
