@@ -33,7 +33,7 @@ Both cookies use the same base options:
 
 - `HttpOnly: true` — inaccessible to JavaScript
 - `SameSite: 'strict'` — never sent on cross-site requests
-- `Secure: <env>` — HTTPS-only in production (controlled by `COOKIE_SECURE`)
+- `Secure: <env>` — HTTPS-only (controlled by `COOKIE_SECURE`). Must be `true` in production: the backend refuses to start with `NODE_ENV=production` and `COOKIE_SECURE` unset or `false`. `false` is for local HTTP development and tests.
 - `Domain: <env>` — scoped to configured host (controlled by `COOKIE_DOMAIN`)
 
 ## Refresh Token Rotation
@@ -169,7 +169,7 @@ The `AuthenticatedUser` shape is `{ id, email, full_name, role, branch_id, branc
 | `JWT_REFRESH_SECRET` | Signs refresh tokens | 64-char random hex |
 | `JWT_REFRESH_EXPIRES_IN` | Refresh token lifetime | `7d` |
 | `COOKIE_DOMAIN` | Cookie scope | `localhost` (dev), `api.socio.lk` (prod) |
-| `COOKIE_SECURE` | HTTPS-only flag | `false` (dev), `true` (prod) |
+| `COOKIE_SECURE` | HTTPS-only flag: exactly `true` or `false` (default `false`); any other value fails startup. Required `true` when `NODE_ENV=production` | `false` (dev, test), `true` (prod) |
 
 ## Future Work
 

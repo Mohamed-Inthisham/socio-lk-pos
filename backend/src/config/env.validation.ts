@@ -24,8 +24,10 @@ export const envSchema = z.object({
 
   // Cookies
   COOKIE_DOMAIN: z.string().min(1).default('localhost'),
+  // Exactly "true" or "false": a typo must fail, not silently mean false.
+  // Must be "true" in production (enforced in validateEnv).
   COOKIE_SECURE: z
-    .string()
+    .enum(['true', 'false'], { message: 'must be "true" or "false"' })
     .default('false')
     .transform((v) => v === 'true'),
 });
