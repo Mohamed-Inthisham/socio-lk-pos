@@ -1,6 +1,11 @@
 import { vi } from "vitest";
 import api, { withAuthLock } from "./api";
-import { getCurrentUser, loginAPI, logoutAPI } from "./authService";
+import {
+  getCurrentUser,
+  LOGIN_RATE_LIMITED_MESSAGE,
+  loginAPI,
+  logoutAPI,
+} from "./authService";
 
 vi.mock("./api", () => ({
   default: { get: vi.fn(), post: vi.fn() },
@@ -45,6 +50,51 @@ describe("logoutAPI", () => {
     } finally {
       log.mockRestore();
     }
+  });
+});
+
+describe("loginAPI errors", () => {
+  const httpError = (status, data) =>
+    Object.assign(new Error(`Request failed with status code ${status}`), {
+      response: { status, data },
+    });
+
+  it("shows a friendly message for 429, whatever the server's text", async () => {
+    api.post.mockRejectedValueOnce(
+      httpError(429, { statusCode: 429, message: "ThrottlerException: Too Many Requests" }),
+    );
+
+    await expect(loginAPI({ email: "x", password: "y" })).rejects.toThrow(
+      LOGIN_RATE_LIMITED_MESSAGE,
+    );
+  });
+
+  it("keeps the server's message for 401", async () => {
+    api.post.mockRejectedValueOnce(
+      httpError(401, { statusCode: 401, message: "Invalid email or password" }),
+    );
+
+    await expect(loginAPI({ email: "x", password: "y" })).rejects.toThrow(
+      "Invalid email or password",
+    );
+  });
+
+  it("keeps the first validation message for 400", async () => {
+    api.post.mockRejectedValueOnce(
+      httpError(400, { message: ["Email must be a valid email address"] }),
+    );
+
+    await expect(loginAPI({ email: "x", password: "y" })).rejects.toThrow(
+      "Email must be a valid email address",
+    );
+  });
+
+  it("keeps the existing fallback when there is no response", async () => {
+    api.post.mockRejectedValueOnce(new Error("Network Error"));
+
+    await expect(loginAPI({ email: "x", password: "y" })).rejects.toThrow(
+      "Invalid email or password",
+    );
   });
 });
 

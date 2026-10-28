@@ -118,6 +118,23 @@ This metadata supports future features (session management UI, "log out other de
 
 **Production must set `TRUST_PROXY` explicitly.** With `NODE_ENV=production` the backend refuses to start if it is unset; set `false` if clients reach the backend directly, otherwise the proxies' addresses (or the exact hop count). With `false` behind a load balancer or CDN, every client appears as the proxy's address and shares one throttle allowance. The production proxy chain isn't decided yet, so no value is prescribed here.
 
+## Login rate limit
+
+`POST /api/v1/auth/login` has its own limit per client IP, on top of the global `short` (10 a second) and `long` (100 a minute) limits every route has. All three are set up in `backend/src/config/throttle.ts`; the `login` throttler applies only to the handler marked `@LoginThrottle()`.
+
+- **Limit:** `LOGIN_THROTTLE_LIMIT` requests per `LOGIN_THROTTLE_TTL_SECONDS` (defaults 20 per 900 s, the production values). A blocked IP waits out the same window.
+- **What counts:** every request that reaches the route — successful logins, wrong passwords and malformed bodies (guards run before validation and the password check). Refused requests never reach bcrypt.
+- **Key:** the route plus the trusted `req.ip` (see "Client IP and trusted proxies"). Other routes, including refresh and logout, are unaffected.
+- **Response:** `429` with `{ statusCode: 429, message: "Too many login attempts. Please wait a few minutes and try again." }` and a `Retry-After-login` header (seconds). Other routes keep the throttler's default 429 message. The frontend shows its own copy of that message for any 429 from login.
+
+Limits of this protection:
+
+- Counts are kept **in memory in each backend process**. With several instances behind a load balancer each keeps its own count, so the effective limit is the setting times the number of instances; a restart clears them.
+- It depends on a correct production `TRUST_PROXY`. With `false` behind a load balancer every client is the proxy's address, so all logins share one allowance and one client can block everyone's logins.
+- It is per IP, not per account: guessing spread across many addresses isn't slowed, and tills behind one shop IP share the allowance. Per-account protection is a separate follow-up.
+
+e2e runs raise `LOGIN_THROTTLE_LIMIT` in `backend/test/load-test-env.ts` (only if it isn't already set), because the specs log in far more often than the production limit allows; `test/login-throttle.e2e-spec.ts` sets a low limit to test the wiring.
+
 ## Timing-Safe Login
 
 `validateUser()` always calls `bcrypt.compare()` — even when the user doesn't exist — against a dummy hash. This prevents timing-based user enumeration.
@@ -186,6 +203,8 @@ The `AuthenticatedUser` shape is `{ id, email, full_name, role, branch_id, branc
 | `COOKIE_DOMAIN` | Cookie scope | `localhost` (dev), `api.socio.lk` (prod) |
 | `COOKIE_SECURE` | HTTPS-only flag: exactly `true` or `false` (default `false`); any other value fails startup. Required `true` when `NODE_ENV=production` | `false` (dev, test), `true` (prod) |
 | `TRUST_PROXY` | Proxies whose `X-Forwarded-For` sets `req.ip`: `false` (none), a hop count `1`–`5`, or an allowlist of IPs, CIDRs (at least `/8` IPv4, `/32` IPv6) and named ranges. Unset means `false`, except that production refuses to start without it. `true` fails startup. See "Client IP and trusted proxies" | unset or `false` (dev, test); production: explicit, depends on the proxy chain |
+| `LOGIN_THROTTLE_LIMIT` | `POST /auth/login` requests per client IP per window: whole number 1–1000 (default 20). See "Login rate limit" | unset (prod: 20); e2e: 1000 via `test/load-test-env.ts` |
+| `LOGIN_THROTTLE_TTL_SECONDS` | Login window and block length in seconds: whole number 1–86400 (default 900) | unset (900) |
 
 ## Future Work
 

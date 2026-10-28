@@ -22,6 +22,7 @@ import { CurrentUser } from './decorators/current-user.decorator';
 import { AuthenticatedUser } from './strategies/jwt.strategy';
 import { TypedConfigService } from '../config/typed-config.service';
 import { Public } from './decorators/public.decorator';
+import { LoginThrottle } from '../config/throttle';
 import { UsersService } from '../users/users.service';
 
 const ACCESS_TOKEN_COOKIE = 'access_token';
@@ -41,6 +42,7 @@ export class AuthController {
   ) {}
 
   @Public()
+  @LoginThrottle()
   @Post('login')
   @HttpCode(HttpStatus.OK)
   @ApiOperation({
@@ -50,6 +52,10 @@ export class AuthController {
   })
   @ApiResponse({ status: 200, description: 'Login successful — cookies set' })
   @ApiResponse({ status: 401, description: 'Invalid email or password' })
+  @ApiResponse({
+    status: 429,
+    description: 'Too many login attempts from this IP (LOGIN_THROTTLE_*)',
+  })
   async login(
     @Body() dto: LoginDto,
     @Req() req: Request,
