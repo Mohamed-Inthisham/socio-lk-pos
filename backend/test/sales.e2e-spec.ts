@@ -12,6 +12,7 @@ import { Branch } from '../src/branches/entities/branch.entity';
 import { Brand } from '../src/brands/entities/brand.entity';
 import { Category } from '../src/categories/entities/category.entity';
 import { Product } from '../src/products/entities/product.entity';
+import { TrackingMethod } from '../src/products/enums/tracking-method.enum';
 import { ProductType } from '../src/products/enums/product-type.enum';
 import { WarrantyPeriod } from '../src/products/enums/warranty-period.enum';
 import { DateTime } from 'luxon';
@@ -200,6 +201,10 @@ describe('Sales (e2e)', () => {
         selling_price: overrides.selling_price ?? '100000.00',
         is_active: overrides.is_active ?? true,
         is_serialized: overrides.is_serialized ?? false,
+        tracking_method:
+          (overrides.is_serialized ?? false)
+            ? TrackingMethod.IMEI
+            : TrackingMethod.QUANTITY,
         default_warranty:
           overrides.default_warranty ?? WarrantyPeriod.NO_WARRANTY,
       }),
@@ -3952,7 +3957,7 @@ describe('Sales (e2e)', () => {
         .send({ product_id: product.id, quantity: 1 })
         .expect(400);
 
-      expect(response.body.message).toMatch(/imei_snapshot is required/);
+      expect(response.body.message).toMatch(/IMEI is required for product/);
     });
 
     it('returns 400 when quantity != 1 on a serialized in-house line', async () => {

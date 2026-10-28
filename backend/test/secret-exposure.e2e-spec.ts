@@ -10,6 +10,7 @@ import { Branch } from '../src/branches/entities/branch.entity';
 import { Brand } from '../src/brands/entities/brand.entity';
 import { Category } from '../src/categories/entities/category.entity';
 import { Product } from '../src/products/entities/product.entity';
+import { TrackingMethod } from '../src/products/enums/tracking-method.enum';
 import { ProductType } from '../src/products/enums/product-type.enum';
 import { Stock } from '../src/stock/entities/stock.entity';
 import { Customer } from '../src/customers/entities/customer.entity';
@@ -148,6 +149,9 @@ describe('Secret exposure (e2e)', () => {
         selling_price: '100.00',
         is_active: true,
         is_serialized: isSerialized,
+        tracking_method: isSerialized
+          ? TrackingMethod.IMEI
+          : TrackingMethod.QUANTITY,
       }),
     );
     await dataSource.getRepository(Stock).save({

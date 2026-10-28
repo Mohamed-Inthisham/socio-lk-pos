@@ -126,8 +126,6 @@ describe('null on required fields (e2e)', () => {
   describe('products', () => {
     it.each([
       ['name', 'name must be a string'],
-      ['product_type', 'product_type must be one of'],
-      ['buying_price', 'buying_price must be a numeric string'],
       ['selling_price', 'selling_price must be a numeric string'],
       ['barcode', 'barcode must not be null'],
       ['barcode_type', 'barcode_type must not be null'],
@@ -172,6 +170,25 @@ describe('null on required fields (e2e)', () => {
       expect(row.description).toBeNull();
       expect(row.phone_condition).toBeNull();
     }, 15_000);
+
+    // Nullable since the catalog went global (MakeProductsCatalogGlobal,
+    // AddCategoryProductTracking): product_type is deprecated in favour of
+    // the category, and the cost is recorded at stock receiving. Both keep
+    // @IsOptional, so null clears them like description does.
+    it.each(['product_type', 'buying_price'] as const)(
+      'PATCH %s: null → 200, clears the nullable column',
+      async (field) => {
+        const res = await send('patch', `/products/${ids.product}`, {
+          [field]: null,
+        });
+        expect(res.status).toBe(200);
+        const row = await dataSource
+          .getRepository(Product)
+          .findOneByOrFail({ id: ids.product });
+        expect(row[field]).toBeNull();
+      },
+      15_000,
+    );
 
     it('POST with is_active: null → 400', async () => {
       const res = await send('post', '/products', {
