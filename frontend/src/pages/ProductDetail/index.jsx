@@ -329,18 +329,26 @@ const ProductDetail = () => {
       product.phone_ram ||
       product.phone_color,
     );
-  const knownUnitIdentifiers = new Set(productUnits.map((unit) => unit.imei));
+  const knownUnitIdentifiers = new Set(
+    productUnits.flatMap((unit) => [unit.imei, unit.imei_number, unit.serial_number].filter(Boolean)),
+  );
   const legacyIdentifiers = identifierPurchases.flatMap((purchaseItem) => {
-    const identifiers = product.tracking_method === "IMEI"
-      ? purchaseItem.imei_numbers || []
-      : purchaseItem.serial_numbers || [];
-    return identifiers
-      .filter((identifier) => !knownUnitIdentifiers.has(identifier))
-      .map((identifier, index) => ({
-        key: `${purchaseItem.purchase_item_id}-${index}`,
-        identifier,
+    const imeis = purchaseItem.imei_numbers || [];
+    const serials = purchaseItem.serial_numbers || [];
+    return [
+      ...imeis.filter((identifier) => !knownUnitIdentifiers.has(identifier)).map((identifier, index) => ({
+        key: `${purchaseItem.purchase_item_id}-imei-${index}`,
+        imei: identifier,
+        serial: "",
         branchName: purchaseItem.branch_name,
-      }));
+      })),
+      ...serials.filter((identifier) => !knownUnitIdentifiers.has(identifier)).map((identifier, index) => ({
+        key: `${purchaseItem.purchase_item_id}-serial-${index}`,
+        imei: "",
+        serial: identifier,
+        branchName: purchaseItem.branch_name,
+      })),
+    ];
   });
 
   return wrap(
@@ -520,7 +528,8 @@ const ProductDetail = () => {
               <table className="w-full text-left text-sm">
                 <thead className="bg-slate-50 text-xs uppercase text-slate-500 dark:bg-slate-800/60 dark:text-slate-400">
                   <tr>
-                    <th className="px-3 py-2">{trackingMethodLabel}</th>
+                    <th className="px-3 py-2">IMEI</th>
+                    <th className="px-3 py-2">Serial number</th>
                     <th className="px-3 py-2">Branch</th>
                     <th className="px-3 py-2">Status</th>
                     <th className="px-3 py-2">Sale</th>
@@ -534,7 +543,8 @@ const ProductDetail = () => {
                       .sort((a, b) => new Date(b.completed_at) - new Date(a.completed_at))[0];
                     return (
                       <tr key={unit.id} className="border-t border-slate-200 dark:border-slate-700">
-                        <td className="px-3 py-2 font-mono">{unit.imei}</td>
+                        <td className="px-3 py-2 font-mono">{unit.imei_number || (product.tracking_method === "IMEI" ? unit.imei : "—")}</td>
+                        <td className="px-3 py-2 font-mono">{unit.serial_number || (!unit.imei_number && product.tracking_method === "SERIAL_NUMBER" ? unit.imei : "—")}</td>
                         <td className="px-3 py-2">{unit.branch?.name || "—"}</td>
                         <td className="px-3 py-2">{unit.status.replaceAll("_", " ")}</td>
                         <td className="px-3 py-2">
@@ -553,7 +563,8 @@ const ProductDetail = () => {
                   })}
                   {legacyIdentifiers.map((item) => (
                     <tr key={item.key} className="border-t border-slate-200 dark:border-slate-700">
-                      <td className="px-3 py-2 font-mono">{item.identifier}</td>
+                      <td className="px-3 py-2 font-mono">{item.imei || "—"}</td>
+                      <td className="px-3 py-2 font-mono">{item.serial || "—"}</td>
                       <td className="px-3 py-2">{item.branchName || "—"}</td>
                       <td className="px-3 py-2">Unknown (received before unit tracking)</td>
                       <td className="px-3 py-2">—</td>

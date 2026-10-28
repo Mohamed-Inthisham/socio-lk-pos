@@ -9,6 +9,7 @@ import {
   clearLineError,
   clearScan,
   scanBarcode,
+  scanUnitIdentifier,
   searchProducts,
   selectLineError,
   selectScanError,
@@ -56,6 +57,8 @@ const MIN_SEARCH = 2;
 /** Scanner-shaped values skip the name search and go to by-barcode. */
 const isBarcodeLike = (value) =>
   /^\d{8,20}$/.test(value) || /^SLP-/i.test(value);
+const isUnitIdentifierLike = (value) =>
+  /^[A-Z0-9][A-Z0-9._/-]{0,99}$/i.test(value);
 
 const ScanBar = ({ branchId, disabled = false, inputRef }) => {
   const dispatch = useDispatch();
@@ -130,9 +133,39 @@ const ScanBar = ({ branchId, disabled = false, inputRef }) => {
     });
   };
 
-  const submitBarcode = (barcode) => {
+  const addScannedUnit = (unit) => {
+    resetInput();
+    dispatch(clearScan());
+    const addUnit = () =>
+      dispatch(addLine({ product: unit.product, identifier: unit.identifier }));
+    if (!saleCompleteShowing()) return addUnit();
+    return dispatch(startNextSale()).then((started) => {
+      if (started) return addUnit();
+      return undefined;
+    });
+  };
+
+  const submitScan = (barcode) => {
     resetInput();
     scanChain.current = scanChain.current.then(async () => {
+      if (isUnitIdentifierLike(barcode) && branchId) {
+        const unitResult = await dispatch(scanUnitIdentifier({ identifier: barcode, branchId }));
+        if (scanUnitIdentifier.fulfilled.match(unitResult) && unitResult.payload) {
+          await addScannedUnit(unitResult.payload);
+          return;
+        }
+        if (scanUnitIdentifier.rejected.match(unitResult)) return;
+      }
+      if (!isBarcodeLike(barcode)) {
+        if (resultsCurrent && results[active]) addProduct(results[active]);
+        else if (textMode) {
+          setValue(barcode);
+          setOpen(true);
+          dispatch(searchProducts({ query: barcode, branchId }));
+          setActive(0);
+        }
+        return;
+      }
       const result = await dispatch(scanBarcode({ barcode }));
       if (scanBarcode.fulfilled.match(result)) await addProduct(result.payload);
     });
@@ -156,8 +189,8 @@ const ScanBar = ({ branchId, disabled = false, inputRef }) => {
         return;
       }
       if (!query || disabled) return;
-      if (isBarcodeLike(query)) {
-        submitBarcode(query);
+      if (isBarcodeLike(query) || isUnitIdentifierLike(query)) {
+        submitScan(query);
       } else if (resultsCurrent && results[active]) {
         addProduct(results[active]);
       } else if (textMode) {

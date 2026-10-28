@@ -21,6 +21,24 @@ import { CreateStockPurchasePaymentDto } from './create-stock-purchase-payment.d
 // Purchase prices are also copied to Product's numeric(10,2) price fields.
 const moneyPattern = /^\d{1,8}(\.\d{1,2})?$/;
 
+export class StockPurchaseUnitIdentifierDto {
+  @ApiPropertyOptional({ maxLength: 100 })
+  @IsOptional()
+  @IsString()
+  @MinLength(8)
+  @MaxLength(100)
+  @Matches(/^[A-Za-z0-9-]+$/)
+  imei_number?: string;
+
+  @ApiPropertyOptional({ maxLength: 100 })
+  @IsOptional()
+  @IsString()
+  @MinLength(1)
+  @MaxLength(100)
+  @Matches(/^[A-Za-z0-9-]+$/)
+  serial_number?: string;
+}
+
 export class CreateStockPurchaseItemDto {
   @ApiProperty({ format: 'uuid' })
   @IsUUID()
@@ -69,6 +87,18 @@ export class CreateStockPurchaseItemDto {
     message: 'Serial numbers must contain letters, numbers, or hyphens',
   })
   serial_numbers?: string[];
+
+  @ApiPropertyOptional({
+    type: 'array',
+    description: 'Paired per-unit identifiers; each item may have an IMEI, serial number, or both.',
+    example: [{ imei_number: '356938035643810', serial_number: 'SN-87E56576754' }],
+  })
+  @IsOptional()
+  @IsArray()
+  @ArrayMaxSize(200)
+  @ValidateNested({ each: true })
+  @Type(() => StockPurchaseUnitIdentifierDto)
+  unit_identifiers?: StockPurchaseUnitIdentifierDto[];
 }
 
 export class CreateStockPurchaseDto {

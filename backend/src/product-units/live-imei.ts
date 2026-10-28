@@ -19,6 +19,11 @@ export const LIVE_UNIT_STATUSES: readonly ProductUnitStatus[] = [
 ];
 
 export const LIVE_IMEI_INDEX = 'uq_product_units_imei_live';
+export const LIVE_IDENTIFIER_INDEXES = [
+  LIVE_IMEI_INDEX,
+  'uq_product_units_imei_number_live',
+  'uq_product_units_serial_number_live',
+];
 
 /**
  * True only for a unique violation on uq_product_units_imei_live: two
@@ -27,4 +32,6 @@ export const LIVE_IMEI_INDEX = 'uq_product_units_imei_live';
  */
 export const isLiveImeiConflict = (err: unknown): boolean =>
   err instanceof QueryFailedError &&
-  (err.driverError as { constraint?: string }).constraint === LIVE_IMEI_INDEX;
+  LIVE_IDENTIFIER_INDEXES.includes(
+    (err.driverError as { constraint?: string }).constraint ?? '',
+  );

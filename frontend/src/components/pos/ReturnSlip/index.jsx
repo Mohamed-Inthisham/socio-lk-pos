@@ -104,9 +104,9 @@ const ReturnSlip = ({ sale, ret, copy, reprintedAt }) => {
       {ret.lines.map((line) => (
         <div key={line.sale_line_id} style={styles.line} data-testid="slip-line">
           <div style={styles.bold}>{lineOf(line.sale_line_id)?.product_name_snapshot ?? "Item"}</div>
-          {line.product_unit?.imei && (
+          {line.product_unit?.imei && lineOf(line.sale_line_id)?.imei_snapshot && (
             <div style={styles.indent}>
-              {lineOf(line.sale_line_id)?.identifier_type_snapshot === "SERIAL_NUMBER" ? "Serial number" : "IMEI"} {line.product_unit.imei}
+              {lineOf(line.sale_line_id)?.identifier_type_snapshot === "SERIAL_NUMBER" ? "Serial number" : "IMEI"} {lineOf(line.sale_line_id)?.imei_snapshot}
             </div>
           )}
           <Row style={styles.indent} label={quantityLabel(line)} value={receiptAmount(line.refund_share)} />

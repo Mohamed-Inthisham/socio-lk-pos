@@ -60,6 +60,22 @@ export class ProductUnit {
   @Column({ type: 'varchar', length: 100 })
   imei!: string;
 
+  @Index('uq_product_units_imei_number_live', {
+    unique: true,
+    where: `"imei_number" IS NOT NULL AND "status" IN ('IN_STOCK', 'WRITTEN_OFF', 'INSPECTION')`,
+  })
+  @Index('idx_product_units_imei_number')
+  @Column({ type: 'varchar', length: 100, nullable: true })
+  imei_number!: string | null;
+
+  @Index('uq_product_units_serial_number_live', {
+    unique: true,
+    where: `"serial_number" IS NOT NULL AND "status" IN ('IN_STOCK', 'WRITTEN_OFF', 'INSPECTION')`,
+  })
+  @Index('idx_product_units_serial_number')
+  @Column({ type: 'varchar', length: 100, nullable: true })
+  serial_number!: string | null;
+
   @Column({
     type: 'varchar',
     length: 20,

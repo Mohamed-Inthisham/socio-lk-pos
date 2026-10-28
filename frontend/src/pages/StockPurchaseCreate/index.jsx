@@ -17,10 +17,14 @@ import ProductCreate from "../ProductCreate";
 const panel = "rounded-xl border border-slate-200 bg-white p-5 dark:border-slate-800 dark:bg-slate-900";
 const moneyPattern = /^\d{1,8}(\.\d{1,2})?$/;
 const paymentMoneyPattern = /^\d{1,12}(\.\d{1,2})?$/;
-const parseIdentifiers = (value) => value.split(/[\n,;]/).map((part) => part.trim()).filter(Boolean);
+const parseIdentifierRows = (value) => {
+  const rows = value ? value.split(/\r?\n/).map((part) => part.trim()) : [];
+  while (rows.at(-1) === "") rows.pop();
+  return rows;
+};
 const trackingMethodFor = (product) => product?.tracking_method ?? (product?.is_serialized ? "IMEI" : "QUANTITY");
 const currentColomboDate = () => new Intl.DateTimeFormat("en-CA", { timeZone: "Asia/Colombo", year: "numeric", month: "2-digit", day: "2-digit" }).format(new Date());
-const newItem = () => ({ product_id: "", quantity: "1", unit_buying_price: "", unit_selling_price: "", identifiers: "" });
+const newItem = () => ({ product_id: "", quantity: "1", unit_buying_price: "", unit_selling_price: "", imeiIdentifiers: "", serialIdentifiers: "" });
 const paymentMethods = [
   { value: "CASH", label: "Cash" },
   { value: "CARD", label: "Card" },
@@ -52,7 +56,16 @@ export default function StockPurchaseCreate() {
   const [bank, setBank] = useState("");
   const [invoiceNumber, setInvoiceNumber] = useState(purchaseDraft?.invoiceNumber || "");
   const [notes, setNotes] = useState(purchaseDraft?.notes || "");
-  const [items, setItems] = useState(purchaseDraft?.items || [newItem()]);
+  const [items, setItems] = useState(() =>
+    purchaseDraft?.items?.length
+      ? purchaseDraft.items.map((item) => ({
+          ...newItem(),
+          ...item,
+          imeiIdentifiers: item.imeiIdentifiers ?? item.identifiers ?? "",
+          serialIdentifiers: item.serialIdentifiers ?? "",
+        }))
+      : [newItem()],
+  );
   const [createdProduct, setCreatedProduct] = useState(location.state?.createdProduct || null);
   const [supplierFormOpen, setSupplierFormOpen] = useState(false);
   const [productFormOpen, setProductFormOpen] = useState(false);
@@ -133,7 +146,7 @@ export default function StockPurchaseCreate() {
   const selectProduct = (index, productId) => {
     const product = products.find((candidate) => candidate.id === productId);
     setItems((current) => current.map((item, itemIndex) => itemIndex === index
-      ? { ...item, product_id: productId, unit_selling_price: product?.selling_price ?? "", identifiers: "" }
+      ? { ...item, product_id: productId, unit_selling_price: product?.selling_price ?? "", imeiIdentifiers: "", serialIdentifiers: "" }
       : item));
     setFieldError("");
   };
@@ -168,15 +181,19 @@ export default function StockPurchaseCreate() {
       if (!Number.isInteger(quantity) || quantity < 1 || quantity > 1000000) return `Enter a valid quantity for ${product.name}.`;
       if (!moneyPattern.test(item.unit_buying_price)) return `Enter a valid buying price for ${product.name}.`;
       if (item.unit_selling_price && !moneyPattern.test(item.unit_selling_price)) return `Enter a valid selling price for ${product.name}, or leave it blank.`;
-      const identifiers = parseIdentifiers(item.identifiers);
+      const imeiRows = parseIdentifierRows(item.imeiIdentifiers);
+      const serialRows = parseIdentifierRows(item.serialIdentifiers);
+      const imeis = imeiRows.filter(Boolean);
+      const serials = serialRows.filter(Boolean);
       const trackingMethod = trackingMethodFor(product);
-      if (trackingMethod === "IMEI" && identifiers.length !== quantity) return `Enter one IMEI for each of the ${quantity} ${product.name} units.`;
-      if (trackingMethod === "SERIAL_NUMBER" && identifiers.length > quantity) return `There are more serial numbers than ${product.name} units.`;
-      if (trackingMethod === "QUANTITY" && identifiers.length) return `${product.name} is set to have no per-unit identifiers.`;
-      if (identifiers.length > 200) return `Enter no more than 200 identifiers for ${product.name} in one purchase.`;
-      if (new Set(identifiers).size !== identifiers.length) return `Remove duplicate identifiers from ${product.name}.`;
-      if (trackingMethod === "IMEI" && identifiers.some((identifier) => !/^[A-Za-z0-9-]{8,50}$/.test(identifier))) return `Check the IMEI entries for ${product.name}.`;
-      if (trackingMethod === "SERIAL_NUMBER" && identifiers.some((identifier) => !/^[A-Za-z0-9-]{1,100}$/.test(identifier))) return `Check the serial number entries for ${product.name}.`;
+      if (trackingMethod === "IMEI" && imeis.length !== quantity) return `Enter one IMEI for each of the ${quantity} ${product.name} units.`;
+      if (Math.max(imeiRows.length, serialRows.length) > quantity) return `There are more identifiers than ${product.name} units.`;
+      if (trackingMethod === "QUANTITY" && (imeis.length || serials.length)) return `${product.name} is set to have no per-unit identifiers.`;
+      if (Math.max(imeis.length, serials.length) > 200) return `Enter no more than 200 identifiers for ${product.name} in one purchase.`;
+      const allIdentifiers = [...imeis, ...serials];
+      if (new Set(allIdentifiers).size !== allIdentifiers.length) return `Remove duplicate identifiers from ${product.name}.`;
+      if (imeis.some((identifier) => !/^[A-Za-z0-9-]{8,100}$/.test(identifier))) return `Check the IMEI entries for ${product.name}.`;
+      if (serials.some((identifier) => !/^[A-Za-z0-9-]{1,100}$/.test(identifier))) return `Check the serial number entries for ${product.name}.`;
     }
     return "";
   };
@@ -210,15 +227,21 @@ export default function StockPurchaseCreate() {
       }),
       items: items.map((item) => {
         const product = products.find((candidate) => candidate.id === item.product_id);
-        const identifiers = parseIdentifiers(item.identifiers);
-        const trackingMethod = trackingMethodFor(product);
+        const imeiRows = parseIdentifierRows(item.imeiIdentifiers);
+        const serialRows = parseIdentifierRows(item.serialIdentifiers);
+        const unitIdentifiers = Array.from(
+          { length: Math.max(imeiRows.length, serialRows.length) },
+          (_, index) => ({
+            ...(imeiRows[index] && { imei_number: imeiRows[index] }),
+            ...(serialRows[index] && { serial_number: serialRows[index] }),
+          }),
+        ).filter((pair) => pair.imei_number || pair.serial_number);
         return {
           product_id: item.product_id,
           quantity: Number(item.quantity),
           unit_buying_price: item.unit_buying_price,
           ...(item.unit_selling_price && { unit_selling_price: item.unit_selling_price }),
-          ...(trackingMethod === "IMEI" ? { imei_numbers: identifiers } :
-            trackingMethod === "SERIAL_NUMBER" ? { serial_numbers: identifiers } : {}),
+          ...(unitIdentifiers.length && { unit_identifiers: unitIdentifiers }),
         };
       }),
     };
@@ -301,7 +324,8 @@ export default function StockPurchaseCreate() {
 
             {items.map((item, index) => {
               const product = products.find((candidate) => candidate.id === item.product_id);
-              const identifiers = parseIdentifiers(item.identifiers);
+              const imeiCount = parseIdentifierRows(item.imeiIdentifiers).filter(Boolean).length;
+              const serialCount = parseIdentifierRows(item.serialIdentifiers).filter(Boolean).length;
               const trackingMethod = trackingMethodFor(product);
               return (
                 <article key={`line-${index}`} className="space-y-4 rounded-xl border border-slate-200 p-4 dark:border-slate-700">
@@ -316,16 +340,25 @@ export default function StockPurchaseCreate() {
                     <InputField label="Selling price" inputMode="decimal" placeholder="Optional" value={item.unit_selling_price} onChange={(event) => updateItem(index, "unit_selling_price", event.target.value)} />
                   </div>
                   {product && trackingMethod !== "QUANTITY" && (
-                    <div>
+                    <div className="grid gap-4 md:grid-cols-2">
                       <InputField
                         type="textarea"
-                        label={trackingMethod === "IMEI" ? `IMEI numbers (${identifiers.length}/${item.quantity || 0})` : `Serial numbers (${identifiers.length} optional)`}
+                        label={`IMEI numbers (${imeiCount}${trackingMethod === "IMEI" ? `/${item.quantity || 0}` : " optional"})`}
                         required={trackingMethod === "IMEI"}
-                        rows={Math.min(5, Math.max(2, identifiers.length + 1))}
-                        placeholder={trackingMethod === "IMEI" ? "One IMEI per unit, one per line" : "Optional: enter available serial numbers, one per line"}
-                        value={item.identifiers}
-                        onChange={(event) => updateItem(index, "identifiers", event.target.value)}
-                        hint={trackingMethod === "IMEI" ? "Enter exactly one IMEI for each received unit." : "Leave blank for units without a serial number; enter available serials one per line."}
+                        rows={Math.min(5, Math.max(2, imeiCount + 1))}
+                        placeholder="One IMEI per unit, one per line"
+                        value={item.imeiIdentifiers}
+                        onChange={(event) => updateItem(index, "imeiIdentifiers", event.target.value)}
+                        hint={trackingMethod === "IMEI" ? "Enter exactly one IMEI per received unit. Serial numbers below are paired by line." : "Optional. Enter an IMEI when the unit has one; pair it with its serial on the same line."}
+                      />
+                      <InputField
+                        type="textarea"
+                        label={`Serial numbers (${serialCount} optional)`}
+                        rows={Math.min(5, Math.max(2, serialCount + 1))}
+                        placeholder="Optional: one serial number per unit, one per line"
+                        value={item.serialIdentifiers}
+                        onChange={(event) => updateItem(index, "serialIdentifiers", event.target.value)}
+                        hint="Keep the same line order as the IMEI list. Leave a blank line when a unit has no serial number."
                       />
                     </div>
                   )}

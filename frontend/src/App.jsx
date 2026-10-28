@@ -7,6 +7,7 @@ import ProductsList from "./pages/ProductsList";
 import ProductDetail from "./pages/ProductDetail";
 import ProductCreate from "./pages/ProductCreate";
 import ProductEdit from "./pages/ProductEdit";
+import BarcodeLabels from "./pages/BarcodeLabels";
 import ManageBrands from "./pages/ManageBrands";
 import ManageCategories from "./pages/ManageCategories";
 import RoleProtectedRoute from "./components/auth/RoleProtectedRoute";
@@ -116,6 +117,14 @@ function App() {
       >
         <Route path="/dashboard" element={<DashboardDemo />} />
         <Route path="/products" element={<ProductsList />} />
+        <Route
+          path="/barcode-labels"
+          element={
+            <RoleProtectedRoute allowedRoles={["admin", "manager"]}>
+              <BarcodeLabels />
+            </RoleProtectedRoute>
+          }
+        />
 
         {/*
           IMPORTANT: /products/new MUST be defined before /products/:id.

@@ -765,7 +765,7 @@ export class SalesService {
       const clientImei = dto.identifier_snapshot ?? dto.imei_snapshot ?? null;
       let productUnitId: string | null = null;
       let imeiSnapshot: string | null = clientImei;
-      const identifierTypeSnapshot =
+      let identifierTypeSnapshot =
         product.tracking_method === TrackingMethod.QUANTITY
           ? null
           : product.tracking_method;
@@ -836,6 +836,7 @@ export class SalesService {
         );
         productUnitId = resolved.productUnitId;
         imeiSnapshot = resolved.imeiSnapshot;
+        identifierTypeSnapshot = resolved.identifierType;
         unitPrice = resolved.unitPrice;
         costPrice = resolved.costPrice;
       } else if (product.tracking_method === TrackingMethod.SERIAL_NUMBER) {
@@ -854,6 +855,7 @@ export class SalesService {
           );
           productUnitId = resolved.productUnitId;
           imeiSnapshot = resolved.imeiSnapshot;
+          identifierTypeSnapshot = resolved.identifierType;
           unitPrice = resolved.unitPrice;
           costPrice = resolved.costPrice;
         }
@@ -2705,7 +2707,10 @@ export class SalesService {
   ): Promise<void> {
     const conflicting = await manager
       .createQueryBuilder(ProductUnit, 'unit')
-      .where('unit.imei = :imei', { imei })
+      .where(
+        '(unit.imei = :imei OR unit.imei_number = :imei OR unit.serial_number = :imei)',
+        { imei },
+      )
       .andWhere('unit.status IN (:...statuses)', {
         statuses: [...LIVE_UNIT_STATUSES],
       })
@@ -2766,19 +2771,28 @@ export class SalesService {
     saleBranchId: string,
     product: Product,
     identifier: string,
-    identifierType: TrackingMethod,
+    identifierType: TrackingMethod.IMEI | TrackingMethod.SERIAL_NUMBER,
   ): Promise<{
     productUnitId: string;
     imeiSnapshot: string;
+    identifierType: TrackingMethod.IMEI | TrackingMethod.SERIAL_NUMBER;
     unitPrice: string;
     costPrice: string;
   }> {
+    const identifierWhere = [
+      { imei: identifier },
+      { imei_number: identifier },
+      { serial_number: identifier },
+    ];
     const unit =
       (await manager.findOne(ProductUnit, {
-        where: { imei: identifier, status: In([...LIVE_UNIT_STATUSES]) },
+        where: identifierWhere.map((where) => ({
+          ...where,
+          status: In([...LIVE_UNIT_STATUSES]),
+        })),
       })) ??
       (await manager.findOne(ProductUnit, {
-        where: { imei: identifier },
+        where: identifierWhere,
         order: { created_at: 'DESC' },
       }));
 
@@ -2827,7 +2841,13 @@ export class SalesService {
 
     return {
       productUnitId: unit.id,
-      imeiSnapshot: unit.imei, // PU is source of truth
+      imeiSnapshot: identifier,
+      identifierType:
+        unit.imei_number === identifier
+          ? TrackingMethod.IMEI
+          : unit.serial_number === identifier
+            ? TrackingMethod.SERIAL_NUMBER
+            : identifierType,
       unitPrice,
       costPrice: unit.buying_price,
     };

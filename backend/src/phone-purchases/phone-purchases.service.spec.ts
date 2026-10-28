@@ -444,14 +444,32 @@ describe('PhonePurchasesService', () => {
       await service.create(validCreateDto(), 'cashier-1');
 
       expect(mockManager.findOne).toHaveBeenCalledWith(ProductUnit, {
-        where: {
-          imei: '356938035643809',
-          status: In([
-            ProductUnitStatus.IN_STOCK,
-            ProductUnitStatus.WRITTEN_OFF,
-            ProductUnitStatus.INSPECTION,
-          ]),
-        },
+        where: [
+          {
+            imei: '356938035643809',
+            status: In([
+              ProductUnitStatus.IN_STOCK,
+              ProductUnitStatus.WRITTEN_OFF,
+              ProductUnitStatus.INSPECTION,
+            ]),
+          },
+          {
+            imei_number: '356938035643809',
+            status: In([
+              ProductUnitStatus.IN_STOCK,
+              ProductUnitStatus.WRITTEN_OFF,
+              ProductUnitStatus.INSPECTION,
+            ]),
+          },
+          {
+            serial_number: '356938035643809',
+            status: In([
+              ProductUnitStatus.IN_STOCK,
+              ProductUnitStatus.WRITTEN_OFF,
+              ProductUnitStatus.INSPECTION,
+            ]),
+          },
+        ],
       });
     });
 

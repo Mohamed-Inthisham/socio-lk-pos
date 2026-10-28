@@ -59,14 +59,17 @@ const SaleDetailReturns = ({ sale, onReprint, reprinting = null, errors = {}, di
           </div>
 
           <ul className="mt-1 text-xs text-slate-700 dark:text-slate-200" data-testid="detail-return-items">
-            {ret.lines.map((l) => (
-              <li key={l.sale_line_id}>
-                {l.quantity} × {nameOf(l.sale_line_id)}
-                {l.product_unit?.imei && <span className="font-mono tracking-tight"> ({sale.lines.find((line) => line.id === l.sale_line_id)?.identifier_type_snapshot === "SERIAL_NUMBER" ? "Serial number" : "IMEI"} {l.product_unit.imei})</span>}
-                {" → "}
-                {WHERE[l.disposition] ?? l.disposition}
-              </li>
-            ))}
+            {ret.lines.map((l) => {
+              const saleLine = sale.lines.find((line) => line.id === l.sale_line_id);
+              return (
+                <li key={l.sale_line_id}>
+                  {l.quantity} × {nameOf(l.sale_line_id)}
+                  {saleLine?.imei_snapshot && <span className="font-mono tracking-tight"> ({saleLine.identifier_type_snapshot === "SERIAL_NUMBER" ? "Serial number" : "IMEI"} {saleLine.imei_snapshot})</span>}
+                  {" → "}
+                  {WHERE[l.disposition] ?? l.disposition}
+                </li>
+              );
+            })}
           </ul>
 
           <p className="mt-1 text-xs text-slate-600 dark:text-slate-300" data-testid="detail-return-how">

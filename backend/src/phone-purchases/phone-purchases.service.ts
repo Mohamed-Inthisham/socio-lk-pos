@@ -128,6 +128,8 @@ export class PhonePurchasesService {
         product_id: dto.product_id,
         branch_id: dto.branch_id,
         imei: dto.imei,
+        imei_number: dto.imei,
+        serial_number: null,
         status: ProductUnitStatus.IN_STOCK,
         buying_price: dto.buying_price.toFixed(2),
         selling_price:
@@ -324,6 +326,8 @@ export class PhonePurchasesService {
       product_id: input.product_id,
       branch_id: input.branch_id,
       imei: input.imei,
+      imei_number: input.imei,
+      serial_number: null,
       status: ProductUnitStatus.IN_STOCK,
       buying_price: input.buying_price,
       selling_price: input.selling_price,
@@ -468,7 +472,11 @@ export class PhonePurchasesService {
     manager: EntityManager,
   ): Promise<void> {
     const existing = await manager.findOne(ProductUnit, {
-      where: { imei, status: In([...LIVE_UNIT_STATUSES]) },
+      where: [
+        { imei, status: In([...LIVE_UNIT_STATUSES]) },
+        { imei_number: imei, status: In([...LIVE_UNIT_STATUSES]) },
+        { serial_number: imei, status: In([...LIVE_UNIT_STATUSES]) },
+      ],
     });
     if (existing) {
       throw new ConflictException({

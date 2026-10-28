@@ -65,6 +65,28 @@ const currentColomboDate = (): string =>
     day: '2-digit',
   }).format(new Date());
 
+type UnitIdentifierPair = {
+  imei_number?: string;
+  serial_number?: string;
+};
+
+const unitIdentifierPairs = (item: CreateStockPurchaseDto['items'][number]): UnitIdentifierPair[] => {
+  if (item.unit_identifiers) {
+    return item.unit_identifiers
+      .map(({ imei_number, serial_number }) => ({
+        ...(imei_number?.trim() && { imei_number: imei_number.trim() }),
+        ...(serial_number?.trim() && { serial_number: serial_number.trim() }),
+      }))
+      .filter((pair) => pair.imei_number || pair.serial_number);
+  }
+  const imeis = item.imei_numbers ?? [];
+  const serials = item.serial_numbers ?? [];
+  return Array.from({ length: Math.max(imeis.length, serials.length) }, (_, index) => ({
+    ...(imeis[index] && { imei_number: imeis[index] }),
+    ...(serials[index] && { serial_number: serials[index] }),
+  }));
+};
+
 @Injectable()
 export class StockPurchasesService {
   constructor(
@@ -116,26 +138,26 @@ export class StockPurchasesService {
         if (item.quantity > MAX_QUANTITY) {
           throw new BadRequestException('A purchase line quantity is too large.');
         }
-        const imeis = item.imei_numbers ?? [];
-        const serials = item.serial_numbers ?? [];
+        const pairs = unitIdentifierPairs(item);
+        const imeis = pairs.flatMap((pair) => pair.imei_number ? [pair.imei_number] : []);
         const trackingMethod =
           product.tracking_method ??
           (product.is_serialized
             ? TrackingMethod.IMEI
             : TrackingMethod.QUANTITY);
         if (trackingMethod === TrackingMethod.IMEI) {
-          if (serials.length || imeis.length !== item.quantity) {
+          if (imeis.length !== item.quantity || pairs.some((pair) => !pair.imei_number)) {
             throw new BadRequestException(
               `${product.name} needs one IMEI for each of its ${item.quantity} units.`,
             );
           }
         } else if (trackingMethod === TrackingMethod.SERIAL_NUMBER) {
-          if (imeis.length || serials.length > item.quantity) {
+          if (pairs.length > item.quantity) {
             throw new BadRequestException(
-              `Serial numbers for ${product.name} must not exceed the received quantity.`,
+              `Identifiers for ${product.name} must not exceed the received quantity.`,
             );
           }
-        } else if (imeis.length || serials.length) {
+        } else if (pairs.length) {
           throw new BadRequestException(
             `${product.name} is set to receive stock without per-unit identifiers.`,
           );
@@ -149,15 +171,23 @@ export class StockPurchasesService {
 
       this.assertUniqueIdentifiers(dto);
       await this.assertSerialsNotPreviouslyReceived(manager, dto);
-      const allImeis = dto.items.flatMap((item) => item.imei_numbers ?? []);
-      if (allImeis.length) {
+      const allPairs = dto.items.flatMap((item) => unitIdentifierPairs(item));
+      const allImeis = allPairs.flatMap((pair) => pair.imei_number ? [pair.imei_number] : []);
+      const allSerials = allPairs.flatMap((pair) => pair.serial_number ? [pair.serial_number] : []);
+      const allCodes = [...new Set([...allImeis, ...allSerials])];
+      if (allCodes.length) {
         const existing = await manager.findOne(ProductUnit, {
-          where: { imei: In(allImeis), status: In([...LIVE_UNIT_STATUSES]) },
+          where: [
+            { imei: In(allCodes), status: In([...LIVE_UNIT_STATUSES]) },
+            { imei_number: In(allCodes), status: In([...LIVE_UNIT_STATUSES]) },
+            { serial_number: In(allCodes), status: In([...LIVE_UNIT_STATUSES]) },
+          ],
         });
         if (existing) {
           throw new ConflictException({
-            message: `IMEI ${existing.imei} is already recorded on a live unit.`,
-            imei: existing.imei,
+            message: 'An IMEI or serial number is already recorded on a live unit.',
+            imei: existing.imei_number,
+            serial_number: existing.serial_number,
             existing_unit: {
               id: existing.id,
               product_id: existing.product_id,
@@ -216,6 +246,7 @@ export class StockPurchasesService {
           throw new BadRequestException('The purchase total is too large.');
         }
         const unitSellingPrice = item.unit_selling_price ?? product.selling_price;
+        const unitPairs = unitIdentifierPairs(item);
         const line = manager.create(StockPurchaseItem, {
           stock_purchase_id: savedPurchase.id,
           product_id: product.id,
@@ -228,8 +259,8 @@ export class StockPurchasesService {
               ? centsToAmount(amountToCents(item.unit_selling_price))
               : null,
           line_total: centsToAmount(lineTotalCents),
-          imei_numbers: item.imei_numbers ?? [],
-          serial_numbers: item.serial_numbers ?? [],
+          imei_numbers: unitPairs.flatMap((pair) => pair.imei_number ? [pair.imei_number] : []),
+          serial_numbers: unitPairs.flatMap((pair) => pair.serial_number ? [pair.serial_number] : []),
         });
         await manager.save(line);
 
@@ -240,11 +271,15 @@ export class StockPurchasesService {
           item.quantity,
         );
 
-        for (const imei of item.imei_numbers ?? []) {
+        for (const pair of unitPairs) {
+          const legacyIdentifier = pair.imei_number ?? pair.serial_number;
+          if (!legacyIdentifier) continue;
           const unit = manager.create(ProductUnit, {
             product_id: product.id,
             branch_id: dto.branch_id,
-            imei,
+            imei: legacyIdentifier,
+            imei_number: pair.imei_number ?? null,
+            serial_number: pair.serial_number ?? null,
             status: ProductUnitStatus.IN_STOCK,
             buying_price: centsToAmount(unitBuyingCents),
             selling_price: unitSellingPrice,
@@ -256,34 +291,10 @@ export class StockPurchasesService {
             const detail = error as { code?: string; constraint?: string };
             if (
               detail.code === '23505' &&
-              detail.constraint === 'uq_product_units_imei_live'
-            ) {
-              throw new ConflictException(`IMEI ${imei} is already in stock.`);
-            }
-            throw error;
-          }
-        }
-
-        for (const serialNumber of item.serial_numbers ?? []) {
-          const unit = manager.create(ProductUnit, {
-            product_id: product.id,
-            branch_id: dto.branch_id,
-            imei: serialNumber,
-            status: ProductUnitStatus.IN_STOCK,
-            buying_price: centsToAmount(unitBuyingCents),
-            selling_price: unitSellingPrice,
-            phone_purchase_id: null,
-          });
-          try {
-            await manager.save(unit);
-          } catch (error) {
-            const detail = error as { code?: string; constraint?: string };
-            if (
-              detail.code === '23505' &&
-              detail.constraint === 'uq_product_units_imei_live'
+              ['uq_product_units_imei_live', 'uq_product_units_imei_number_live', 'uq_product_units_serial_number_live'].includes(detail.constraint ?? '')
             ) {
               throw new ConflictException(
-                `Serial number ${serialNumber} is already in stock.`,
+                `Identifier ${legacyIdentifier} is already in stock.`,
               );
             }
             throw error;
@@ -513,13 +524,17 @@ export class StockPurchasesService {
   }
 
   private assertUniqueIdentifiers(dto: CreateStockPurchaseDto): void {
-    const imeis = dto.items.flatMap((item) => item.imei_numbers ?? []);
-    const serials = dto.items.flatMap((item) => item.serial_numbers ?? []);
-    if (new Set(imeis).size !== imeis.length) {
-      throw new BadRequestException('An IMEI can only appear once in a stock purchase.');
-    }
-    if (new Set(serials).size !== serials.length) {
-      throw new BadRequestException('A serial number can only appear once in a stock purchase.');
+    const identifiers = dto.items.flatMap((item) =>
+      unitIdentifierPairs(item).flatMap((pair) =>
+        [pair.imei_number, pair.serial_number].filter(
+          (identifier): identifier is string => Boolean(identifier),
+        ),
+      ),
+    );
+    if (new Set(identifiers).size !== identifiers.length) {
+      throw new BadRequestException(
+        'An IMEI or serial number can only appear once in a stock purchase.',
+      );
     }
   }
 
@@ -528,7 +543,9 @@ export class StockPurchasesService {
     dto: CreateStockPurchaseDto,
   ): Promise<void> {
     for (const item of dto.items) {
-      const serials = item.serial_numbers ?? [];
+      const serials = unitIdentifierPairs(item).flatMap((pair) =>
+        pair.serial_number ? [pair.serial_number] : [],
+      );
       if (!serials.length) continue;
 
       await manager.query(
