@@ -2,7 +2,7 @@ import { INestApplication } from '@nestjs/common';
 import { Reflector } from '@nestjs/core';
 import { JwtService } from '@nestjs/jwt';
 import { Test } from '@nestjs/testing';
-import { getRepositoryToken } from '@nestjs/typeorm';
+import { getDataSourceToken, getRepositoryToken } from '@nestjs/typeorm';
 import * as bcrypt from 'bcrypt';
 import cookieParser from 'cookie-parser';
 import { Cookie, CookieAccessInfo, CookieJar } from 'cookiejar';
@@ -84,6 +84,64 @@ describe('Logout HTTP (no database)', () => {
       },
     ),
   };
+  // refresh()'s conditional claim, applied to the in-memory sessions.
+  const claimBuilder = () => {
+    let tokenHash = '';
+    const builder = {
+      update: () => builder,
+      set: () => builder,
+      andWhere: () => builder,
+      returning: () => builder,
+      where: (_: string, params: { tokenHash: string }) => {
+        tokenHash = params.tokenHash;
+        return builder;
+      },
+      execute: () => {
+        const session = sessions.get(tokenHash);
+        if (
+          !session ||
+          session.revoked_at !== null ||
+          session.expires_at <= new Date()
+        )
+          return Promise.resolve({ raw: [] });
+        session.revoked_at = new Date();
+        return Promise.resolve({ raw: [{ user_id: session.user_id }] });
+      },
+    };
+    return builder;
+  };
+  const manager = {
+    createQueryBuilder: claimBuilder,
+    findOne: (_: unknown, options: { where: { token_hash: string } }) =>
+      repository.findOne(options),
+    getRepository: () => repository,
+  };
+  // Transactions run one at a time, standing in for the row lock the real
+  // claim waits on; a throw puts the sessions back as they were.
+  let transactions = Promise.resolve();
+  const dataSource = {
+    transaction: jest.fn(
+      <T>(work: (m: typeof manager) => Promise<T>): Promise<T> => {
+        const run = transactions.then(async () => {
+          const before = [...sessions].map(
+            ([key, session]) => [key, { ...session }] as const,
+          );
+          try {
+            return await work(manager);
+          } catch (error) {
+            sessions.clear();
+            before.forEach(([key, session]) => sessions.set(key, session));
+            throw error;
+          }
+        });
+        transactions = run.then(
+          () => undefined,
+          () => undefined,
+        );
+        return run;
+      },
+    ),
+  };
 
   beforeAll(async () => {
     user.password_hash = await bcrypt.hash('test-password', 4);
@@ -100,6 +158,7 @@ describe('Logout HTTP (no database)', () => {
         AuthService,
         JwtService,
         { provide: getRepositoryToken(RefreshToken), useValue: repository },
+        { provide: getDataSourceToken(), useValue: dataSource },
         {
           provide: UsersService,
           useValue: {
@@ -338,6 +397,55 @@ describe('Logout HTTP (no database)', () => {
     expect(sessions.get(hash(token))!.revoked_at).toBeNull();
     receive(jar, response);
     expect(cookiesFor(jar, refreshPath)).toBe('');
+  });
+
+  it('lets one of two refreshes with the same cookie rotate; the other is reuse', async () => {
+    const { jar, token } = await login();
+    const other = await login();
+    const [a, b] = await Promise.all([
+      post(refreshPath, jar),
+      post(refreshPath, jar),
+    ]);
+    expect([a.status, b.status].sort()).toEqual([200, 401]);
+    const loser = a.status === 401 ? a : b;
+    expect((loser.body as { message: string }).message).toContain(
+      'reuse detected',
+    );
+    // One replacement minted, and strict reuse detection revoked it along
+    // with every other session of the user.
+    expect(sessions.size).toBe(3);
+    expect(sessions.get(hash(token))!.revoked_at).toBeInstanceOf(Date);
+    expect(sessions.get(hash(other.token))!.revoked_at).toBeInstanceOf(Date);
+    expect([...sessions.values()].every((s) => s.revoked_at !== null)).toBe(
+      true,
+    );
+  });
+
+  it('rolls the claim back when the replacement cannot be stored', async () => {
+    const { jar, token } = await login();
+    repository.save.mockRejectedValueOnce(new Error('Persistence unavailable'));
+    const failed = await post(refreshPath, jar).expect(500);
+    expect(failed.headers['set-cookie']).toBeUndefined();
+    expect(sessions.get(hash(token))!.revoked_at).toBeNull();
+    expect(sessions.size).toBe(1);
+    // The same cookie still works: no false reuse alarm on retry.
+    await post(refreshPath, jar).expect(200);
+    expect(sessions.size).toBe(2);
+  });
+
+  it('keeps an inactive user’s token revoked after refusing the refresh', async () => {
+    const { jar, token } = await login();
+    user.is_active = false;
+    try {
+      const response = await post(refreshPath, jar).expect(401);
+      expect((response.body as { message: string }).message).toBe(
+        'User no longer active',
+      );
+    } finally {
+      user.is_active = true;
+    }
+    expect(sessions.get(hash(token))!.revoked_at).toBeInstanceOf(Date);
+    expect(sessions.size).toBe(1);
   });
 
   it('awaits successful revocation before sending cookie-clearing headers', async () => {

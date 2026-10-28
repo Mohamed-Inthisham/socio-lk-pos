@@ -15,6 +15,34 @@ const api = axios.create({
 // Tracks an in-flight refresh so parallel 401s all await the same call
 let refreshPromise = null;
 
+// ============================================
+// AUTH LOCK (refresh + logout, across tabs)
+// ============================================
+
+// Every tab shares one refresh cookie, and the server treats a second use
+// of a rotated token as theft (all sessions revoked). So refresh and logout
+// run one at a time across tabs: a tab only sends once the previous
+// holder's response has updated the cookie jar, so it never sends a stale
+// token, and logout can't be overtaken by a refresh that restores cookies.
+const AUTH_LOCK = "socio-lk-pos-auth";
+
+// A stalled refresh must not hold the lock (and so block logout) forever.
+const REFRESH_TIMEOUT_MS = 30_000;
+
+// Fallback without Web Locks (insecure origins, old browsers): one queue
+// per tab. Tabs aren't coordinated then; the server's strict reuse
+// detection is the backstop.
+let localQueue = Promise.resolve();
+
+export const withAuthLock = (task) => {
+  if (globalThis.navigator?.locks?.request) {
+    return navigator.locks.request(AUTH_LOCK, task);
+  }
+  const run = localQueue.then(task);
+  localQueue = run.catch(() => {});
+  return run;
+};
+
 // Callback wired up from outside (see main.jsx) — called when refresh fails.
 // Kept as a variable to avoid api.js importing the Redux store (circular dep).
 let onAuthFailure = () => {};
@@ -45,7 +73,9 @@ api.interceptors.response.use(
     try {
       // Coalesce concurrent 401s onto a single refresh
       if (!refreshPromise) {
-        refreshPromise = api.post("/auth/refresh").finally(() => {
+        refreshPromise = withAuthLock(() =>
+          api.post("/auth/refresh", null, { timeout: REFRESH_TIMEOUT_MS }),
+        ).finally(() => {
           refreshPromise = null;
         });
       }
