@@ -1,6 +1,26 @@
 import { z } from 'zod';
 import { parseTrustProxy } from './trust-proxy';
 
+/**
+ * A whole number from 1 to `max`, written as plain digits ("20", not
+ * " 20", "20.0" or "1e2"); `fallback` when unset.
+ */
+const wholeNumber = (fallback: number, max: number) =>
+  z
+    .string()
+    .optional()
+    .transform((raw, ctx) => {
+      if (raw === undefined) return fallback;
+      if (!/^[1-9]\d*$/.test(raw) || Number(raw) > max) {
+        ctx.addIssue({
+          code: 'custom',
+          message: `must be a whole number from 1 to ${max}`,
+        });
+        return z.NEVER;
+      }
+      return Number(raw);
+    });
+
 export const envSchema = z.object({
   // Application
   NODE_ENV: z
@@ -45,6 +65,11 @@ export const envSchema = z.object({
       }
       return parsed.value;
     }),
+
+  // Login requests allowed per client IP per window, on POST /auth/login
+  // only (see throttle.ts). The defaults are the production values.
+  LOGIN_THROTTLE_LIMIT: wholeNumber(20, 1000),
+  LOGIN_THROTTLE_TTL_SECONDS: wholeNumber(900, 86_400),
 });
 
 export type Env = z.infer<typeof envSchema>;

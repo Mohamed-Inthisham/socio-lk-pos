@@ -50,6 +50,9 @@ const extractErrorMessage = (error, fallback) => {
 // AUTH API METHODS
 // ============================================
 
+export const LOGIN_RATE_LIMITED_MESSAGE =
+  "Too many login attempts. Please wait a few minutes and try again.";
+
 /**
  * Login with email and password.
  * Backend sets access_token + refresh_token httpOnly cookies.
@@ -62,9 +65,13 @@ export const loginAPI = async ({ email, password }) => {
       user: mapBackendUser(response.data.user),
     };
   } catch (error) {
-    throw new Error(extractErrorMessage(error, "Invalid email or password"), {
-      cause: error,
-    });
+    // 429: the backend's login limit per IP (LOGIN_THROTTLE_*). Fixed
+    // wording here so the form never shows a raw throttler message.
+    const message =
+      error?.response?.status === 429
+        ? LOGIN_RATE_LIMITED_MESSAGE
+        : extractErrorMessage(error, "Invalid email or password");
+    throw new Error(message, { cause: error });
   }
 };
 
