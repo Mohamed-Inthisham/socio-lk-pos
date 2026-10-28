@@ -11,6 +11,7 @@ import { Branch } from '../src/branches/entities/branch.entity';
 import { Brand } from '../src/brands/entities/brand.entity';
 import { Category } from '../src/categories/entities/category.entity';
 import { Product } from '../src/products/entities/product.entity';
+import { TrackingMethod } from '../src/products/enums/tracking-method.enum';
 import { ProductType } from '../src/products/enums/product-type.enum';
 import { WarrantyPeriod } from '../src/products/enums/warranty-period.enum';
 import { Stock } from '../src/stock/entities/stock.entity';
@@ -149,6 +150,10 @@ describe('Cash days (e2e)', () => {
         selling_price: price,
         is_active: true,
         is_serialized: opts.serialized ?? false,
+        tracking_method:
+          (opts.serialized ?? false)
+            ? TrackingMethod.IMEI
+            : TrackingMethod.QUANTITY,
         default_warranty: WarrantyPeriod.MONTH_12,
       }),
     );

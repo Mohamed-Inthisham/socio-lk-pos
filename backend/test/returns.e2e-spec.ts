@@ -12,6 +12,7 @@ import { Branch } from '../src/branches/entities/branch.entity';
 import { Brand } from '../src/brands/entities/brand.entity';
 import { Category } from '../src/categories/entities/category.entity';
 import { Product } from '../src/products/entities/product.entity';
+import { TrackingMethod } from '../src/products/enums/tracking-method.enum';
 import { ProductType } from '../src/products/enums/product-type.enum';
 import { WarrantyPeriod } from '../src/products/enums/warranty-period.enum';
 import { Stock } from '../src/stock/entities/stock.entity';
@@ -154,6 +155,10 @@ describe('Returns (e2e)', () => {
         selling_price: opts.price ?? '1000.00',
         is_active: true,
         is_serialized: opts.serialized ?? false,
+        tracking_method:
+          (opts.serialized ?? false)
+            ? TrackingMethod.IMEI
+            : TrackingMethod.QUANTITY,
         default_warranty: WarrantyPeriod.MONTH_12,
       }),
     );
@@ -175,10 +180,17 @@ describe('Returns (e2e)', () => {
 
   /** A phone in stock: its purchase, an IN_STOCK unit, stock +1. */
   async function seedPhone(product: Product): Promise<ProductUnit> {
+    // Seeded products are branch-scoped; the catalog column is nullable.
+    const branchId = product.branch_id;
+    if (branchId === null) {
+      throw new Error(
+        `Seeded phone needs a branch-scoped product: ${product.sku}`,
+      );
+    }
     const purchase = await dataSource.getRepository(PhonePurchase).save(
       dataSource.getRepository(PhonePurchase).create({
         customer_id: customer.id,
-        branch_id: product.branch_id,
+        branch_id: branchId,
         cashier_id: cashierA.id,
         total_amount: '100.00',
         notes: null,
@@ -187,7 +199,7 @@ describe('Returns (e2e)', () => {
     const unit = await dataSource.getRepository(ProductUnit).save(
       dataSource.getRepository(ProductUnit).create({
         product_id: product.id,
-        branch_id: product.branch_id,
+        branch_id: branchId,
         imei: nextImei(),
         status: ProductUnitStatus.IN_STOCK,
         buying_price: '100.00',
@@ -1056,6 +1068,7 @@ describe('Returns (e2e)', () => {
             id: unit.id,
             imei: unit.imei,
             product_name: model.name,
+            product: { tracking_method: TrackingMethod.IMEI },
           },
           return_id: res.body.return_id,
           return_number: res.body.sale.returns[0].return_number,

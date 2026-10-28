@@ -14,6 +14,7 @@ import { Branch } from '../src/branches/entities/branch.entity';
 import { Brand } from '../src/brands/entities/brand.entity';
 import { Category } from '../src/categories/entities/category.entity';
 import { Product } from '../src/products/entities/product.entity';
+import { TrackingMethod } from '../src/products/enums/tracking-method.enum';
 import { ProductType } from '../src/products/enums/product-type.enum';
 import { WarrantyPeriod } from '../src/products/enums/warranty-period.enum';
 import { Stock } from '../src/stock/entities/stock.entity';
@@ -130,6 +131,10 @@ describe('INSPECTION status (e2e)', () => {
         selling_price: '1000.00',
         is_active: true,
         is_serialized: opts.serialized ?? true,
+        tracking_method:
+          (opts.serialized ?? true)
+            ? TrackingMethod.IMEI
+            : TrackingMethod.QUANTITY,
         default_warranty: WarrantyPeriod.NO_WARRANTY,
       }),
     );
@@ -152,10 +157,17 @@ describe('INSPECTION status (e2e)', () => {
     imei: string,
     status: ProductUnitStatus,
   ): Promise<ProductUnit> {
+    // Seeded products are branch-scoped; the catalog column is nullable.
+    const branchId = product.branch_id;
+    if (branchId === null) {
+      throw new Error(
+        `Seeded phone needs a branch-scoped product: ${product.sku}`,
+      );
+    }
     const purchase = await dataSource.getRepository(PhonePurchase).save(
       dataSource.getRepository(PhonePurchase).create({
         customer_id: customer.id,
-        branch_id: product.branch_id,
+        branch_id: branchId,
         cashier_id: cashier.id,
         total_amount: '500.00',
         notes: null,
@@ -164,7 +176,7 @@ describe('INSPECTION status (e2e)', () => {
     return dataSource.getRepository(ProductUnit).save(
       dataSource.getRepository(ProductUnit).create({
         product_id: product.id,
-        branch_id: product.branch_id,
+        branch_id: branchId,
         imei,
         status,
         buying_price: '500.00',
@@ -478,7 +490,7 @@ describe('INSPECTION status (e2e)', () => {
 
       expect((res.body as { message: string }).message).toMatch(
         new RegExp(
-          `^Cannot sell IMEI '${IMEI}': status is INSPECTION, expected IN_STOCK`,
+          `^Cannot sell unit identifier '${IMEI}': status is INSPECTION, expected IN_STOCK`,
         ),
       );
       expect(await unitStatus(unit)).toBe(ProductUnitStatus.INSPECTION);

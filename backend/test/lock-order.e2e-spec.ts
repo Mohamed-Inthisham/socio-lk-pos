@@ -15,6 +15,7 @@ import { Branch } from '../src/branches/entities/branch.entity';
 import { Brand } from '../src/brands/entities/brand.entity';
 import { Category } from '../src/categories/entities/category.entity';
 import { Product } from '../src/products/entities/product.entity';
+import { TrackingMethod } from '../src/products/enums/tracking-method.enum';
 import { ProductType } from '../src/products/enums/product-type.enum';
 import { WarrantyPeriod } from '../src/products/enums/warranty-period.enum';
 import { Stock } from '../src/stock/entities/stock.entity';
@@ -136,6 +137,10 @@ describe('Lock order (e2e)', () => {
         selling_price: opts.price ?? '1000.00',
         is_active: true,
         is_serialized: opts.serialized ?? false,
+        tracking_method:
+          (opts.serialized ?? false)
+            ? TrackingMethod.IMEI
+            : TrackingMethod.QUANTITY,
         default_warranty: WarrantyPeriod.NO_WARRANTY,
       }),
     );
@@ -225,6 +230,11 @@ describe('Lock order (e2e)', () => {
     for (const l of lines) {
       const quantity = l.quantity ?? 1;
       const unitPrice = l.product.selling_price;
+      const costPrice = l.product.buying_price;
+      // Seeded products are priced; the catalog columns are nullable.
+      if (unitPrice === null || costPrice === null) {
+        throw new Error(`Seeded line needs a priced product: ${l.product.sku}`);
+      }
       await dataSource.getRepository(SaleLine).save(
         dataSource.getRepository(SaleLine).create({
           sale_id: sale.id,
@@ -233,7 +243,7 @@ describe('Lock order (e2e)', () => {
           product_sku_snapshot: l.product.sku,
           product_name_snapshot: l.product.name,
           unit_price: unitPrice,
-          cost_price_snapshot: l.product.buying_price,
+          cost_price_snapshot: costPrice,
           quantity,
           discount_type: null,
           discount_value: null,

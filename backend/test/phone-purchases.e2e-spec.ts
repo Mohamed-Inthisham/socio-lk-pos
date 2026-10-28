@@ -8,6 +8,7 @@ import { UserRole } from '../src/users/enums/user-role.enum';
 import { Branch } from '../src/branches/entities/branch.entity';
 import { Customer } from '../src/customers/entities/customer.entity';
 import { Product } from '../src/products/entities/product.entity';
+import { TrackingMethod } from '../src/products/enums/tracking-method.enum';
 import { ProductType } from '../src/products/enums/product-type.enum';
 import { Brand } from '../src/brands/entities/brand.entity';
 import { Category } from '../src/categories/entities/category.entity';
@@ -126,6 +127,12 @@ describe('Phone Purchases (e2e)', () => {
         is_active: true,
         is_serialized: true,
         ...overrides,
+        // After the overrides, so it follows an is_serialized override.
+        tracking_method:
+          overrides.tracking_method ??
+          ((overrides.is_serialized ?? true)
+            ? TrackingMethod.IMEI
+            : TrackingMethod.QUANTITY),
       }),
     );
     const stockRepo = dataSource.getRepository(Stock);
