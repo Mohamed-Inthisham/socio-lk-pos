@@ -10,6 +10,8 @@ import { User } from './entities/user.entity';
 import { UserRole } from './enums/user-role.enum';
 import { Branch } from '../branches/entities/branch.entity';
 import { TypedConfigService } from '../config/typed-config.service';
+import * as bcrypt from 'bcrypt';
+import { PASSWORD_TOO_LONG_MESSAGE } from '../common/bcrypt-input';
 
 jest.mock('bcrypt', () => ({
   hash: jest.fn().mockResolvedValue('hashed-password'),
@@ -232,6 +234,46 @@ describe('UsersService', () => {
           branch_id: 'branch-1',
         }),
       );
+    });
+
+    describe('password byte length (bcrypt reads only 72 bytes)', () => {
+      const SINHALA = 'ම'; // 1 UTF-16 unit, 3 bytes in UTF-8
+      const createAdmin = (password: string) =>
+        service.create({
+          email: 'admin@t.com',
+          password,
+          full_name: 'Admin',
+          role: UserRole.ADMIN,
+        });
+
+      it.each([
+        ['72 ASCII characters', 'a'.repeat(72)],
+        ['24 Sinhala letters (72 bytes)', SINHALA.repeat(24)],
+      ])('hashes %s whole, untruncated', async (_, password) => {
+        await createAdmin(password);
+        expect(bcrypt.hash).toHaveBeenCalledWith(password, 4);
+      });
+
+      it.each([
+        ['73 ASCII characters', 'a'.repeat(73)],
+        ['25 Sinhala letters (75 bytes)', SINHALA.repeat(25)],
+        ['71 ASCII + one 3-byte letter (74 bytes)', 'a'.repeat(71) + SINHALA],
+      ])('refuses %s before hashing', async (_, password) => {
+        const attempt = createAdmin(password);
+        await expect(attempt).rejects.toThrow(BadRequestException);
+        await expect(attempt).rejects.toThrow(PASSWORD_TOO_LONG_MESSAGE);
+        expect(bcrypt.hash).not.toHaveBeenCalled();
+        expect(mockUsersRepo.save).not.toHaveBeenCalled();
+      });
+
+      it('never puts the password in the error', async () => {
+        const password = `secret-${'x'.repeat(80)}`;
+        await expect(createAdmin(password)).rejects.toThrow(
+          expect.objectContaining({
+            message: expect.not.stringContaining('secret-') as string,
+          }) as Error,
+        );
+      });
     });
 
     it('creates a manager with an active branch', async () => {
