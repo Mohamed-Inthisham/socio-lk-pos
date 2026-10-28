@@ -103,6 +103,13 @@ Every session row in `refresh_tokens` records:
 
 This metadata supports future features (session management UI, "log out other devices") and enriches audit logs.
 
+### When a user's sessions are revoked
+
+`UsersService.deactivate()` and `UsersService.softDelete()` revoke all of the user's unrevoked refresh tokens **in the same transaction** as the user update: both happen or neither does. They use the same predicate as reuse detection (`{ user_id, revoked_at: IsNull() }`), so a token revoked earlier keeps its original `revoked_at`, and repeating either call succeeds and revokes nothing more (a repeated soft delete does reset `deleted_at`, as TypeORM's `softDelete` always has). Neither method has a route yet.
+
+- **Any future reactivation (or undelete) flow must revoke the user's refresh tokens again**, in the same transaction that sets `is_active = true` (or clears `deleted_at`).
+- A refresh that races with a deactivation can commit its replacement token just after the revocation ran. That token is unusable while the user is inactive or deleted — refresh and every authenticated request check the user — so only a reactivation could bring it back, which the rule above covers. The refresh path takes no user-row lock.
+
 ### Client IP and trusted proxies
 
 `req.ip` is the one client IP the backend uses: the throttler keys on it, the audit log records it, and refresh-token sessions store it. Express derives it from the `trust proxy` setting, applied from `TRUST_PROXY` by `applyTrustProxy` (`backend/src/config/trust-proxy.ts`) in `main.ts` and in the e2e test app:

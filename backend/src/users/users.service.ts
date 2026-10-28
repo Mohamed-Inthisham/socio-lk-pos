@@ -4,10 +4,11 @@ import {
   NotFoundException,
   BadRequestException,
 } from '@nestjs/common';
-import { InjectRepository } from '@nestjs/typeorm';
-import { Repository } from 'typeorm';
+import { InjectDataSource, InjectRepository } from '@nestjs/typeorm';
+import { DataSource, EntityManager, IsNull, Repository } from 'typeorm';
 import * as bcrypt from 'bcrypt';
 import { User } from './entities/user.entity';
+import { RefreshToken } from '../auth/entities/refresh-token.entity';
 import { UserRole } from './enums/user-role.enum';
 import { Branch } from '../branches/entities/branch.entity';
 import { CreateUserDto } from './dto/create-user.dto';
@@ -42,6 +43,28 @@ function toSafeUser(user: User): SafeUser {
   return safeUser;
 }
 
+/**
+ * Revoke every unrevoked refresh token of a user, inside the caller's
+ * transaction. The same predicate as AuthService's reuse revocation, so a
+ * token already revoked keeps its original revoked_at. Used when a user
+ * stops being able to log in (deactivate, softDelete); a future
+ * reactivation flow must call it too.
+ *
+ * A refresh racing with this can commit a replacement token after it ran;
+ * that token is unusable while the user is inactive or deleted (refresh and
+ * every request check the user), so only reactivation would revive it.
+ */
+async function revokeRefreshTokens(
+  manager: EntityManager,
+  userId: string,
+): Promise<void> {
+  await manager.update(
+    RefreshToken,
+    { user_id: userId, revoked_at: IsNull() },
+    { revoked_at: new Date() },
+  );
+}
+
 @Injectable()
 export class UsersService {
   private readonly bcryptRounds: number;
@@ -52,6 +75,7 @@ export class UsersService {
     @InjectRepository(Branch)
     private readonly branchesRepository: Repository<Branch>,
     config: TypedConfigService,
+    @InjectDataSource() private readonly dataSource: DataSource,
   ) {
     this.bcryptRounds = config.get('BCRYPT_ROUNDS');
   }
@@ -181,29 +205,40 @@ export class UsersService {
    *
    * Also clears their approval PIN, its count and lock (Phase 6.4 P6-15):
    * an inactive user never approves anything.
+   *
+   * Revokes the user's refresh tokens in the same transaction, so a later
+   * reactivation can't bring old sessions back; any reactivation flow must
+   * revoke them again too (see revokeRefreshTokens).
    */
   async deactivate(id: string): Promise<void> {
-    const result = await this.usersRepository.update(id, {
-      is_active: false,
-      approval_pin_hash: null,
-      approval_pin_set_at: null,
-      approval_pin_failed_attempts: 0,
-      approval_pin_locked_until: null,
+    await this.dataSource.transaction(async (manager) => {
+      const result = await manager.update(User, id, {
+        is_active: false,
+        approval_pin_hash: null,
+        approval_pin_set_at: null,
+        approval_pin_failed_attempts: 0,
+        approval_pin_locked_until: null,
+      });
+      if (result.affected === 0) {
+        throw new NotFoundException('User not found');
+      }
+      await revokeRefreshTokens(manager, id);
     });
-    if (result.affected === 0) {
-      throw new NotFoundException('User not found');
-    }
   }
 
   /**
    * Soft-delete — sets deleted_at. Subsequent queries exclude this user.
    * Use sparingly; prefer deactivate() for normal POS user lifecycle.
+   * Revokes the user's refresh tokens in the same transaction.
    */
   async softDelete(id: string): Promise<void> {
-    const result = await this.usersRepository.softDelete(id);
-    if (result.affected === 0) {
-      throw new NotFoundException('User not found');
-    }
+    await this.dataSource.transaction(async (manager) => {
+      const result = await manager.softDelete(User, id);
+      if (result.affected === 0) {
+        throw new NotFoundException('User not found');
+      }
+      await revokeRefreshTokens(manager, id);
+    });
   }
 
   // ---------------------------------------------------------------------------
