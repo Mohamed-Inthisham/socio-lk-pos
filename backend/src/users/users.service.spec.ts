@@ -1,5 +1,6 @@
 import { Test, TestingModule } from '@nestjs/testing';
-import { getRepositoryToken } from '@nestjs/typeorm';
+import { getDataSourceToken, getRepositoryToken } from '@nestjs/typeorm';
+import { IsNull } from 'typeorm';
 import {
   ConflictException,
   NotFoundException,
@@ -7,6 +8,7 @@ import {
 } from '@nestjs/common';
 import { UsersService } from './users.service';
 import { User } from './entities/user.entity';
+import { RefreshToken } from '../auth/entities/refresh-token.entity';
 import { UserRole } from './enums/user-role.enum';
 import { Branch } from '../branches/entities/branch.entity';
 import { TypedConfigService } from '../config/typed-config.service';
@@ -60,8 +62,31 @@ describe('UsersService', () => {
     is_active: false,
   };
 
+  // deactivate / softDelete run in a transaction: its manager's writes, and
+  // whether the last transaction committed or rolled back.
+  const mockManager = {
+    update: jest.fn(),
+    softDelete: jest.fn(),
+  };
+  let transactionOutcome: 'committed' | 'rolled back' | undefined;
+  const mockDataSource = {
+    transaction: jest.fn(
+      async (work: (manager: typeof mockManager) => Promise<unknown>) => {
+        try {
+          const result = await work(mockManager);
+          transactionOutcome = 'committed';
+          return result;
+        } catch (error) {
+          transactionOutcome = 'rolled back';
+          throw error;
+        }
+      },
+    ),
+  };
+
   beforeEach(async () => {
     jest.clearAllMocks();
+    transactionOutcome = undefined;
 
     const module: TestingModule = await Test.createTestingModule({
       providers: [
@@ -69,6 +94,7 @@ describe('UsersService', () => {
         { provide: getRepositoryToken(User), useValue: mockUsersRepo },
         { provide: getRepositoryToken(Branch), useValue: mockBranchesRepo },
         { provide: TypedConfigService, useValue: mockConfig },
+        { provide: getDataSourceToken(), useValue: mockDataSource },
       ],
     }).compile();
 
@@ -464,39 +490,108 @@ describe('UsersService', () => {
     });
   });
 
+  // The user's unrevoked refresh tokens, revoked in the same transaction.
+  const tokenRevocation = [
+    RefreshToken,
+    { user_id: 'u1', revoked_at: IsNull() },
+    { revoked_at: expect.any(Date) as Date },
+  ];
+  const isTokenRevocation = (entity: unknown) => entity === RefreshToken;
+
   describe('deactivate', () => {
-    it('flips is_active to false and clears the approval PIN, its count and lock (P6-15)', async () => {
-      mockUsersRepo.update.mockResolvedValue({ affected: 1 });
+    const userUpdateAffects = (affected: number) =>
+      mockManager.update.mockImplementation((entity: unknown) =>
+        Promise.resolve({ affected: isTokenRevocation(entity) ? 2 : affected }),
+      );
+
+    it('flips is_active to false, clears the approval PIN (P6-15) and revokes refresh tokens, in one transaction', async () => {
+      userUpdateAffects(1);
       await service.deactivate('u1');
-      expect(mockUsersRepo.update).toHaveBeenCalledWith('u1', {
+
+      expect(mockDataSource.transaction).toHaveBeenCalledTimes(1);
+      expect(mockManager.update).toHaveBeenNthCalledWith(1, User, 'u1', {
         is_active: false,
         approval_pin_hash: null,
         approval_pin_set_at: null,
         approval_pin_failed_attempts: 0,
         approval_pin_locked_until: null,
       });
+      expect(mockManager.update).toHaveBeenNthCalledWith(2, ...tokenRevocation);
+      expect(transactionOutcome).toBe('committed');
+      expect(mockUsersRepo.update).not.toHaveBeenCalled();
     });
 
-    it('throws NotFoundException when user does not exist', async () => {
-      mockUsersRepo.update.mockResolvedValue({ affected: 0 });
+    it('throws NotFoundException when user does not exist, revoking nothing', async () => {
+      userUpdateAffects(0);
       await expect(service.deactivate('missing')).rejects.toThrow(
         NotFoundException,
       );
+      expect(mockManager.update).toHaveBeenCalledTimes(1);
+      expect(transactionOutcome).toBe('rolled back');
+    });
+
+    it('rolls the deactivation back when revoking the tokens fails', async () => {
+      const failure = new Error('connection lost');
+      mockManager.update.mockImplementation((entity: unknown) =>
+        isTokenRevocation(entity)
+          ? Promise.reject(failure)
+          : Promise.resolve({ affected: 1 }),
+      );
+      await expect(service.deactivate('u1')).rejects.toBe(failure);
+      expect(transactionOutcome).toBe('rolled back');
+    });
+
+    it('can be repeated on an already inactive user, revoking again', async () => {
+      userUpdateAffects(1); // Postgres counts the matched row
+      await service.deactivate('u1');
+      await service.deactivate('u1');
+      const revocations = mockManager.update.mock.calls.filter(([entity]) =>
+        isTokenRevocation(entity),
+      );
+      expect(revocations).toEqual([tokenRevocation, tokenRevocation]);
+      expect(transactionOutcome).toBe('committed');
     });
   });
 
   describe('softDelete', () => {
-    it('soft-deletes the user', async () => {
-      mockUsersRepo.softDelete.mockResolvedValue({ affected: 1 });
-      await service.softDelete('u1');
-      expect(mockUsersRepo.softDelete).toHaveBeenCalledWith('u1');
+    beforeEach(() => {
+      mockManager.update.mockResolvedValue({ affected: 2 });
     });
 
-    it('throws NotFoundException when user does not exist', async () => {
-      mockUsersRepo.softDelete.mockResolvedValue({ affected: 0 });
+    it('soft-deletes the user and revokes refresh tokens, in one transaction', async () => {
+      mockManager.softDelete.mockResolvedValue({ affected: 1 });
+      await service.softDelete('u1');
+
+      expect(mockDataSource.transaction).toHaveBeenCalledTimes(1);
+      expect(mockManager.softDelete).toHaveBeenCalledWith(User, 'u1');
+      expect(mockManager.update).toHaveBeenCalledWith(...tokenRevocation);
+      expect(transactionOutcome).toBe('committed');
+      expect(mockUsersRepo.softDelete).not.toHaveBeenCalled();
+    });
+
+    it('throws NotFoundException when user does not exist, revoking nothing', async () => {
+      mockManager.softDelete.mockResolvedValue({ affected: 0 });
       await expect(service.softDelete('missing')).rejects.toThrow(
         NotFoundException,
       );
+      expect(mockManager.update).not.toHaveBeenCalled();
+      expect(transactionOutcome).toBe('rolled back');
+    });
+
+    it('rolls the soft delete back when revoking the tokens fails', async () => {
+      const failure = new Error('connection lost');
+      mockManager.softDelete.mockResolvedValue({ affected: 1 });
+      mockManager.update.mockRejectedValue(failure);
+      await expect(service.softDelete('u1')).rejects.toBe(failure);
+      expect(transactionOutcome).toBe('rolled back');
+    });
+
+    it('can be repeated, revoking again', async () => {
+      mockManager.softDelete.mockResolvedValue({ affected: 1 });
+      await service.softDelete('u1');
+      await service.softDelete('u1');
+      expect(mockManager.update).toHaveBeenCalledTimes(2);
+      expect(transactionOutcome).toBe('committed');
     });
   });
 });
