@@ -13,6 +13,7 @@ import { Branch } from '../branches/entities/branch.entity';
 import { CreateUserDto } from './dto/create-user.dto';
 import { UpdateUserDto } from './dto/update-user.dto';
 import { TypedConfigService } from '../config/typed-config.service';
+import { assertBcryptPasswordLength } from '../common/bcrypt-input';
 
 /** User fields never returned to a client. */
 type SecretUserField =
@@ -117,6 +118,9 @@ export class UsersService {
       dto.branch_id,
     );
 
+    // Also enforced by CreateUserDto; repeated here for callers that skip
+    // the HTTP ValidationPipe, since bcrypt would silently truncate.
+    assertBcryptPasswordLength(dto.password);
     const password_hash = await bcrypt.hash(dto.password, this.bcryptRounds);
 
     const user = this.usersRepository.create({

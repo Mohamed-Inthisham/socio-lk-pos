@@ -111,6 +111,25 @@ describe('Auth (e2e)', () => {
       expect(sessions[0].ip_address).toMatch(/^(::ffff:)?127\.0\.0\.1$|^::1$/);
     });
 
+    it('still logs in a user whose password is over 72 bytes (set before the byte limit)', async () => {
+      // 30 Sinhala letters: 30 characters, 90 bytes. New passwords can't be
+      // this long any more, but a hash made from one must keep working;
+      // login isn't byte-limited and bcrypt reads it as it did when hashing.
+      const longPassword = 'ම'.repeat(30);
+      const { user } = await seedUser({
+        password_hash: await bcrypt.hash(longPassword, 4),
+      });
+
+      await request(app.getHttpServer())
+        .post('/api/v1/auth/login')
+        .send({ email: user.email, password: longPassword })
+        .expect(200);
+      await request(app.getHttpServer())
+        .post('/api/v1/auth/login')
+        .send({ email: user.email, password: `x${longPassword}` })
+        .expect(401);
+    });
+
     it('rejects invalid password with 401', async () => {
       await seedUser();
 

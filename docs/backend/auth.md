@@ -141,6 +141,14 @@ e2e runs raise `LOGIN_THROTTLE_LIMIT` in `backend/test/load-test-env.ts` (only i
 
 **Both success cases return a generic error message:** "Invalid email or password." Never distinguish "no such user" from "wrong password" in responses.
 
+## Password length and bcrypt's 72-byte limit
+
+bcrypt (`bcrypt` 6) only uses the first **72 bytes** of a password and silently ignores the rest. Character counts don't measure that: `@MaxLength` counts UTF-16 units, and a Sinhala or Tamil letter is 3 bytes in UTF-8, an emoji 4.
+
+- **Setting a password is limited to 72 bytes.** `CreateUserDto.password` uses `@MaxUtf8Bytes(72)` (`backend/src/common/validators/`), and `UsersService.create` calls `assertBcryptPasswordLength` (`backend/src/common/bcrypt-input.ts`) right before `bcrypt.hash`, for callers that skip the HTTP validation pipe. A longer password is refused with 400 "Password cannot exceed 72 bytes …", never truncated; the message never includes the password. The 8-character minimum is unchanged, and an ASCII password is limited exactly as before (72 bytes = 72 characters). Any future password-setting path (change or reset) must apply the same check.
+- **Checking a password is not byte-limited.** `LoginDto.password` and `SetApprovalPinDto.current_password` keep their existing character limits. A password over 72 bytes may have been set before this limit (bcrypt hashed its first 72 bytes); `bcrypt.compare` reads it the same way, so such a user can still log in. No stored hash changes.
+- Approval PINs are always 6 ASCII digits, well inside the limit.
+
 ## Endpoint Reference
 
 | Method | Path | Guard | Body | Success | Failure |
