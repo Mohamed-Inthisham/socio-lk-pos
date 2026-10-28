@@ -275,6 +275,10 @@ describe('Logout HTTP (no database)', () => {
       const originals = (
         issued.headers['set-cookie'] as unknown as string[]
       ).map((value) => new Cookie(value));
+      // The issued cookies carry the configured Secure flag themselves, so
+      // the comparison below can't pass with both sides wrong.
+      expect(originals).toHaveLength(2);
+      for (const original of originals) expect(original.secure).toBe(secure);
       const removals = cleared.headers['set-cookie'] as unknown as string[];
       expect(removals).toHaveLength(2);
       for (const header of removals) {
@@ -295,6 +299,30 @@ describe('Logout HTTP (no database)', () => {
       }
       receive(jar, cleared);
       expect(cookiesFor(jar, refreshPath)).toBe('');
+    },
+  );
+
+  it.each([false, true])(
+    'issues login and refresh cookies with the configured security options (Secure=%s)',
+    async (secure) => {
+      secureCookies = secure;
+      const { jar, response: issued } = await login();
+      const refreshed = await post(refreshPath, jar).expect(200);
+      for (const response of [issued, refreshed]) {
+        const headers = response.headers['set-cookie'] as unknown as string[];
+        expect(headers).toHaveLength(2);
+        for (const header of headers) {
+          const cookie = new Cookie(header);
+          expect(cookie.value).not.toBe('');
+          expect(cookie.secure).toBe(secure);
+          expect(cookie.noscript).toBe(true);
+          expect(cookie.domain).toBe(host);
+          expect(cookie.path).toBe(
+            cookie.name === 'access_token' ? '/' : refreshPath,
+          );
+          expect(header).toMatch(/SameSite=Strict/i);
+        }
+      }
     },
   );
 
