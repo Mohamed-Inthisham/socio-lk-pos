@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { parseTrustProxy } from './trust-proxy';
 
 export const envSchema = z.object({
   // Application
@@ -30,6 +31,20 @@ export const envSchema = z.object({
     .enum(['true', 'false'], { message: 'must be "true" or "false"' })
     .default('false')
     .transform((v) => v === 'true'),
+
+  // Proxies whose X-Forwarded-For Express may believe (see trust-proxy.ts).
+  // Unset: none, so req.ip is the connected peer.
+  TRUST_PROXY: z
+    .string()
+    .optional()
+    .transform((raw, ctx) => {
+      const parsed = parseTrustProxy(raw);
+      if ('error' in parsed) {
+        ctx.addIssue({ code: 'custom', message: parsed.error });
+        return z.NEVER;
+      }
+      return parsed.value;
+    }),
 });
 
 export type Env = z.infer<typeof envSchema>;

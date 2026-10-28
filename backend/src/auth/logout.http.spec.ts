@@ -1,6 +1,7 @@
 import { INestApplication } from '@nestjs/common';
 import { Reflector } from '@nestjs/core';
 import { JwtService } from '@nestjs/jwt';
+import { NestExpressApplication } from '@nestjs/platform-express';
 import { Test } from '@nestjs/testing';
 import { getDataSourceToken, getRepositoryToken } from '@nestjs/typeorm';
 import * as bcrypt from 'bcrypt';
@@ -15,6 +16,7 @@ import { AuthService } from './auth.service';
 import { RefreshToken } from './entities/refresh-token.entity';
 import { JwtAuthGuard } from './guards/jwt-auth.guard';
 import { TypedConfigService } from '../config/typed-config.service';
+import { applyTrustProxy } from '../config/trust-proxy';
 import { UsersService } from '../users/users.service';
 import { UserRole } from '../users/enums/user-role.enum';
 
@@ -33,6 +35,7 @@ type Session = Pick<
 /** Real controller, auth service, JWTs and cookie routing; persistence stays in memory. */
 describe('Logout HTTP (no database)', () => {
   let app: INestApplication<Server>;
+  let express: NestExpressApplication;
   let jwt: JwtService;
   let secureCookies = false;
   const sessions = new Map<string, Session>();
@@ -177,7 +180,8 @@ describe('Logout HTTP (no database)', () => {
       ],
     }).compile();
     jwt = module.get(JwtService);
-    app = module.createNestApplication();
+    express = module.createNestApplication<NestExpressApplication>();
+    app = express;
     app.useLogger(false);
     app.use(cookieParser());
     app.useGlobalGuards(new JwtAuthGuard(new Reflector()));
@@ -191,6 +195,7 @@ describe('Logout HTTP (no database)', () => {
   beforeEach(() => {
     sessions.clear();
     secureCookies = false;
+    applyTrustProxy(express, false);
     jest.clearAllMocks();
   });
 
@@ -325,6 +330,49 @@ describe('Logout HTTP (no database)', () => {
       }
     },
   );
+
+  describe('session IP metadata', () => {
+    const LOOPBACK = /^(::ffff:)?127\.0\.0\.1$|^::1$/;
+    const recordedIps = () =>
+      repository.create.mock.calls.map(
+        ([input]) => (input as { ip_address?: string | null }).ip_address,
+      );
+    const loginFrom = (xff: string) =>
+      request(app.getHttpServer())
+        .post('/api/v1/auth/login')
+        .set('X-Forwarded-For', xff)
+        .send({ email: user.email, password: 'test-password' })
+        .expect(200);
+    const refreshFrom = (token: string, xff: string) =>
+      request(app.getHttpServer())
+        .post(refreshPath)
+        .set('Cookie', `refresh_token=${token}`)
+        .set('X-Forwarded-For', xff)
+        .expect(200);
+    const refreshTokenOf = (response: request.Response) => {
+      const jar = new CookieJar();
+      receive(jar, response);
+      return jar.getCookie(
+        'refresh_token',
+        new CookieAccessInfo(host, refreshPath),
+      )!.value;
+    };
+
+    it('records the connection’s address, not a client-sent X-Forwarded-For, with no proxy trusted', async () => {
+      const issued = await loginFrom('203.0.113.7');
+      await refreshFrom(refreshTokenOf(issued), '198.51.100.9');
+      const ips = recordedIps();
+      expect(ips).toHaveLength(2);
+      for (const ip of ips) expect(ip).toMatch(LOOPBACK);
+    });
+
+    it('records the address a trusted proxy appended, ignoring spoofed entries before it', async () => {
+      applyTrustProxy(express, 1);
+      const issued = await loginFrom('6.6.6.6, 203.0.113.7');
+      await refreshFrom(refreshTokenOf(issued), '6.6.6.6, 198.51.100.9');
+      expect(recordedIps()).toEqual(['203.0.113.7', '198.51.100.9']);
+    });
+  });
 
   it('rejects replay after logout, preserving existing global reuse detection', async () => {
     const { jar } = await login();
