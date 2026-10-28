@@ -1,4 +1,4 @@
-import api from "./api";
+import api, { withAuthLock } from "./api";
 
 /**
  * Authentication Service
@@ -70,10 +70,12 @@ export const loginAPI = async ({ email, password }) => {
 
 /**
  * Logout — revokes the refresh token server-side and clears cookies.
+ * Takes the auth lock, so it waits for any refresh in flight (any tab)
+ * and sends the newest refresh cookie; no refresh can land after it.
  */
 export const logoutAPI = async () => {
   try {
-    await api.post("/auth/refresh/logout");
+    await withAuthLock(() => api.post("/auth/refresh/logout"));
     return { success: true };
   } catch (error) {
     // Even if server call fails, treat logout as successful locally

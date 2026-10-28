@@ -1,5 +1,5 @@
 import { Test, TestingModule } from '@nestjs/testing';
-import { getRepositoryToken } from '@nestjs/typeorm';
+import { getDataSourceToken, getRepositoryToken } from '@nestjs/typeorm';
 import { JwtService } from '@nestjs/jwt';
 import { AuthService } from './auth.service';
 import { UsersService } from '../users/users.service';
@@ -44,9 +44,38 @@ describe('AuthService', () => {
     update: jest.fn(),
   };
 
+  // refresh()'s transaction: the conditional claim's query builder, the
+  // manager it runs on, and whether the last transaction committed.
+  const mockClaimBuilder = {
+    update: jest.fn().mockReturnThis(),
+    set: jest.fn().mockReturnThis(),
+    where: jest.fn().mockReturnThis(),
+    andWhere: jest.fn().mockReturnThis(),
+    returning: jest.fn().mockReturnThis(),
+    execute: jest.fn(),
+  };
+
+  const mockManager = {
+    createQueryBuilder: jest.fn(() => mockClaimBuilder),
+    findOne: jest.fn(),
+    getRepository: jest.fn(() => mockRefreshTokensRepo),
+  };
+
+  let committed = false;
+  const mockDataSource = {
+    transaction: jest.fn(
+      async (work: (manager: typeof mockManager) => Promise<unknown>) => {
+        const result = await work(mockManager);
+        committed = true;
+        return result;
+      },
+    ),
+  };
+
   beforeEach(async () => {
     // Reset mocks between tests so state doesn't leak
     jest.clearAllMocks();
+    committed = false;
 
     const module: TestingModule = await Test.createTestingModule({
       providers: [
@@ -58,6 +87,7 @@ describe('AuthService', () => {
           provide: getRepositoryToken(RefreshToken),
           useValue: mockRefreshTokensRepo,
         },
+        { provide: getDataSourceToken(), useValue: mockDataSource },
       ],
     }).compile();
 
@@ -228,6 +258,10 @@ describe('AuthService', () => {
 
     const validRefreshToken = 'valid-refresh-token-string';
 
+    // The conditional claim's result: the claimed row, or none.
+    const claimReturns = (rows: { user_id: string }[]) =>
+      mockClaimBuilder.execute.mockResolvedValue({ raw: rows });
+
     beforeEach(() => {
       // JWT verify returns a decoded payload with the user id
       mockJwtService.verifyAsync.mockResolvedValue({ sub: 'user-1' });
@@ -250,16 +284,8 @@ describe('AuthService', () => {
       mockUsersService.findByIdForAuth.mockResolvedValue(fakeUser);
     });
 
-    it('happy path: rotates tokens for a valid, unrevoked, unexpired session', async () => {
-      // Simulate a valid, active session found in DB
-      const session = {
-        id: 'session-1',
-        user_id: 'user-1',
-        token_hash: 'any-hash',
-        revoked_at: null,
-        expires_at: new Date(Date.now() + 60_000), // 1 min from now
-      };
-      mockRefreshTokensRepo.findOne.mockResolvedValue(session);
+    it('happy path: claims the token and mints its replacement in one transaction', async () => {
+      claimReturns([{ user_id: 'user-1' }]);
 
       const result = await service.refresh(
         validRefreshToken,
@@ -271,14 +297,31 @@ describe('AuthService', () => {
         access_token: 'new-access-token',
         refresh_token: 'new-refresh-token',
       });
+      expect(mockDataSource.transaction).toHaveBeenCalledTimes(1);
 
-      // Old session marked revoked
+      // Old token claimed only if still unrevoked and unexpired, by the DB clock
+      expect(mockClaimBuilder.update).toHaveBeenCalledWith(RefreshToken);
+      expect(mockClaimBuilder.where).toHaveBeenCalledWith(
+        'token_hash = :tokenHash',
+        { tokenHash: expect.stringMatching(/^[a-f0-9]{64}$/) },
+      );
+      expect(mockClaimBuilder.andWhere).toHaveBeenCalledWith(
+        'revoked_at IS NULL',
+      );
+      expect(mockClaimBuilder.andWhere).toHaveBeenCalledWith(
+        'expires_at > now()',
+      );
+
+      // Replacement stored through the transaction's repository
+      expect(mockManager.getRepository).toHaveBeenCalledWith(RefreshToken);
       expect(mockRefreshTokensRepo.save).toHaveBeenCalledWith(
         expect.objectContaining({
-          id: 'session-1',
-          revoked_at: expect.any(Date),
+          user_id: 'user-1',
+          ip_address: '127.0.0.1',
+          user_agent: 'ua',
         }),
       );
+      expect(mockRefreshTokensRepo.update).not.toHaveBeenCalled();
     });
 
     it('throws when the JWT signature is invalid', async () => {
@@ -287,25 +330,31 @@ describe('AuthService', () => {
       await expect(
         service.refresh('tampered-token', null, null),
       ).rejects.toThrow('Invalid refresh token');
+      expect(mockDataSource.transaction).not.toHaveBeenCalled();
     });
 
     it('throws when the token JWT is valid but not in the DB', async () => {
-      mockRefreshTokensRepo.findOne.mockResolvedValue(null);
+      claimReturns([]);
+      mockManager.findOne.mockResolvedValue(null);
 
       await expect(
         service.refresh(validRefreshToken, null, null),
       ).rejects.toThrow('Refresh token not recognized');
+      expect(mockRefreshTokensRepo.update).not.toHaveBeenCalled();
     });
 
-    it('revokes ALL sessions when a revoked token is presented (reuse detection)', async () => {
-      const revokedSession = {
-        id: 'session-1',
+    it('revokes ALL sessions, after the commit, when a revoked token is presented (reuse detection)', async () => {
+      claimReturns([]);
+      mockManager.findOne.mockResolvedValue({
         user_id: 'user-1',
-        token_hash: 'any-hash',
         revoked_at: new Date(), // already revoked
         expires_at: new Date(Date.now() + 60_000),
-      };
-      mockRefreshTokensRepo.findOne.mockResolvedValue(revokedSession);
+      });
+      let committedBeforeRevokeAll = false;
+      mockRefreshTokensRepo.update.mockImplementation(() => {
+        committedBeforeRevokeAll = committed;
+        return Promise.resolve({ affected: 2 });
+      });
 
       await expect(
         service.refresh(validRefreshToken, null, null),
@@ -316,32 +365,28 @@ describe('AuthService', () => {
         expect.objectContaining({ user_id: 'user-1' }),
         expect.objectContaining({ revoked_at: expect.any(Date) }),
       );
+      // ...once the transaction is over, so a replacement minted by a
+      // concurrent winner is visible and revoked too
+      expect(committedBeforeRevokeAll).toBe(true);
+      expect(mockRefreshTokensRepo.save).not.toHaveBeenCalled();
     });
 
     it('throws when the session has expired', async () => {
-      const expiredSession = {
-        id: 'session-1',
+      claimReturns([]);
+      mockManager.findOne.mockResolvedValue({
         user_id: 'user-1',
-        token_hash: 'any-hash',
         revoked_at: null,
         expires_at: new Date(Date.now() - 1000), // 1 sec ago
-      };
-      mockRefreshTokensRepo.findOne.mockResolvedValue(expiredSession);
+      });
 
       await expect(
         service.refresh(validRefreshToken, null, null),
       ).rejects.toThrow('expired');
+      expect(mockRefreshTokensRepo.update).not.toHaveBeenCalled();
     });
 
-    it('throws if the user is no longer active', async () => {
-      const session = {
-        id: 'session-1',
-        user_id: 'user-1',
-        token_hash: 'any-hash',
-        revoked_at: null,
-        expires_at: new Date(Date.now() + 60_000),
-      };
-      mockRefreshTokensRepo.findOne.mockResolvedValue(session);
+    it('throws if the user is no longer active, committing the claim', async () => {
+      claimReturns([{ user_id: 'user-1' }]);
       mockUsersService.findByIdForAuth.mockResolvedValueOnce({
         ...fakeUser,
         is_active: false,
@@ -350,6 +395,33 @@ describe('AuthService', () => {
       await expect(
         service.refresh(validRefreshToken, null, null),
       ).rejects.toThrow('no longer active');
+      // The transaction resolved (committed), so the old token stays revoked
+      expect(committed).toBe(true);
+      expect(mockRefreshTokensRepo.save).not.toHaveBeenCalled();
+      expect(mockRefreshTokensRepo.update).not.toHaveBeenCalled();
+    });
+
+    it('refuses a claimed row that belongs to a different user than the JWT', async () => {
+      claimReturns([{ user_id: 'someone-else' }]);
+
+      await expect(
+        service.refresh(validRefreshToken, null, null),
+      ).rejects.toThrow('Refresh token not recognized');
+      expect(mockUsersService.findByIdForAuth).not.toHaveBeenCalled();
+      expect(mockRefreshTokensRepo.save).not.toHaveBeenCalled();
+    });
+
+    it('rolls back when the replacement cannot be stored, without a reuse alarm', async () => {
+      claimReturns([{ user_id: 'user-1' }]);
+      const failure = new Error('connection lost');
+      mockRefreshTokensRepo.save.mockRejectedValueOnce(failure);
+
+      await expect(service.refresh(validRefreshToken, null, null)).rejects.toBe(
+        failure,
+      );
+      // The transaction rejected (rolled back) rather than committing
+      expect(committed).toBe(false);
+      expect(mockRefreshTokensRepo.update).not.toHaveBeenCalled();
     });
   });
 

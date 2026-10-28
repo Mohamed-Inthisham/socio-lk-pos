@@ -1,9 +1,10 @@
 import { vi } from "vitest";
-import api from "./api";
+import api, { withAuthLock } from "./api";
 import { getCurrentUser, loginAPI, logoutAPI } from "./authService";
 
 vi.mock("./api", () => ({
   default: { get: vi.fn(), post: vi.fn() },
+  withAuthLock: vi.fn((task) => task()),
 }));
 
 describe("logoutAPI", () => {
@@ -12,6 +13,27 @@ describe("logoutAPI", () => {
 
     await expect(logoutAPI()).resolves.toEqual({ success: true });
 
+    expect(api.post).toHaveBeenLastCalledWith("/auth/refresh/logout");
+  });
+
+  it("sends logout under the auth lock", async () => {
+    let locked = false;
+    withAuthLock.mockImplementationOnce(async (task) => {
+      locked = true;
+      try {
+        return await task();
+      } finally {
+        locked = false;
+      }
+    });
+    api.post.mockImplementationOnce(async () => {
+      expect(locked).toBe(true);
+      return { data: { success: true } };
+    });
+
+    await logoutAPI();
+
+    expect(withAuthLock).toHaveBeenCalledTimes(1);
     expect(api.post).toHaveBeenLastCalledWith("/auth/refresh/logout");
   });
 
