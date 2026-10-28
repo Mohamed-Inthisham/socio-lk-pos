@@ -13,6 +13,7 @@ import {
   ChevronsRight,
   ChevronDown,
   ScanBarcode,
+  Barcode,
   ShoppingCart,
 } from "lucide-react";
 import Tooltip from "../../common/Tooltip";
@@ -127,6 +128,12 @@ const NAV_ITEMS = [
         icon: FolderTree,
       },
     ],
+  },
+  {
+    to: "/barcode-labels",
+    label: "Barcode Labels",
+    icon: Barcode,
+    roles: ["admin", "manager"],
   },
 ];
 

@@ -61,7 +61,7 @@ const assertInInspection = (unit: ProductUnit, identifierLabel = 'IMEI'): void =
   if (unit.status !== ProductUnitStatus.INSPECTION) {
     throw new ConflictException({
       message:
-        `This item (${identifierLabel} ${unit.imei}) is not waiting for inspection ` +
+        `This ${identifierLabel === 'IMEI' ? 'phone' : 'item'} (${identifierLabel} ${unit.imei}) is not waiting for inspection ` +
         `(status: ${unit.status}).`,
       code: 'NOT_IN_INSPECTION',
       status: unit.status,
@@ -139,6 +139,53 @@ export class ProductUnitsService {
       throw new NotFoundException('Product unit not found');
     }
     return unit;
+  }
+
+  /** Resolve a scanned unit identifier to its product for POS checkout. */
+  async findSellableByIdentifier(identifier: string, branchId: string) {
+    const unit = await this.productUnitsRepository
+      .createQueryBuilder('unit')
+      .innerJoinAndSelect('unit.product', 'product')
+      .where(
+        '(unit.imei = :identifier OR unit.imei_number = :identifier OR unit.serial_number = :identifier)',
+        { identifier: identifier.trim() },
+      )
+      .andWhere('unit.branch_id = :branchId', { branchId })
+      .andWhere('product.is_active = :active', { active: true })
+      .orderBy(
+        `CASE WHEN unit.status = '${ProductUnitStatus.IN_STOCK}' THEN 0 ELSE 1 END`,
+        'ASC',
+      )
+      .addOrderBy('unit.created_at', 'DESC')
+      .getOne();
+
+    if (!unit) {
+      throw new NotFoundException(
+        'No available item matches that identifier at this branch',
+      );
+    }
+    if (unit.status !== ProductUnitStatus.IN_STOCK) {
+      throw new ConflictException({
+        message: `This item is not available to sell (status: ${unit.status}).`,
+        existing_unit: {
+          id: unit.id,
+          product_id: unit.product_id,
+          branch_id: unit.branch_id,
+          status: unit.status,
+        },
+      });
+    }
+    const identifierType = unit.imei_number === identifier.trim()
+      ? TrackingMethod.IMEI
+      : unit.serial_number === identifier.trim()
+        ? TrackingMethod.SERIAL_NUMBER
+        : unit.product?.tracking_method ?? TrackingMethod.IMEI;
+    return {
+      product: unit.product,
+      identifier: identifier.trim(),
+      identifierType,
+      unitId: unit.id,
+    };
   }
 
   /**

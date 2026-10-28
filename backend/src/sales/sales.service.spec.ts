@@ -33,6 +33,7 @@ import { ApprovalsService } from '../approvals/approvals.service';
 import { UserRole } from '../users/enums/user-role.enum';
 import { AuditAction } from '../audit-log/enums/audit-action.enum';
 import { WarrantyPeriod } from '../products/enums/warranty-period.enum';
+import { TrackingMethod } from '../products/enums/tracking-method.enum';
 import { lockInventoryRows } from '../stock/lock-inventory-rows';
 import { assertDayOpen } from '../cash-days/day-gate';
 
@@ -1125,6 +1126,7 @@ describe('SalesService', () => {
       branch_id: string;
       is_active: boolean;
       is_serialized: boolean;
+      tracking_method: TrackingMethod;
       default_warranty: WarrantyPeriod;
     }> = {},
   ) => ({
@@ -1135,6 +1137,9 @@ describe('SalesService', () => {
     buying_price: '220000.00',
     branch_id: 'branch-1',
     is_active: true,
+    tracking_method:
+      overrides.tracking_method ??
+      (overrides.is_serialized ? TrackingMethod.IMEI : TrackingMethod.QUANTITY),
     ...overrides,
   });
 
@@ -5956,6 +5961,57 @@ describe('SalesService', () => {
     );
   });
 
+  it('resolves a serial scan to the same unit as its IMEI', async () => {
+    mockQueryBuilder.getOne.mockResolvedValue(
+      seedDraftSale({ branch_id: 'branch-1' }),
+    );
+    mockQueryBuilder.getRawOne.mockResolvedValue({ max: '0' });
+    mockProductsService.findOne.mockResolvedValue(
+      seedProduct({
+        id: 'prod-1',
+        is_serialized: true,
+        tracking_method: TrackingMethod.IMEI,
+        branch_id: 'branch-1',
+      }),
+    );
+    mockManager.findOne.mockResolvedValue({
+      id: 'unit-with-both-identifiers',
+      imei: '354789102345678',
+      imei_number: '354789102345678',
+      serial_number: 'SN-MANGO-87',
+      status: ProductUnitStatus.IN_STOCK,
+      product_id: 'prod-1',
+      branch_id: 'branch-1',
+      selling_price: '260000.00',
+      buying_price: '210000.00',
+    });
+    mockManager.create.mockImplementation((_e, data) => data);
+    mockManager.save.mockImplementation((e) => Promise.resolve(e));
+
+    await service.addLine(
+      'sale-1',
+      { product_id: 'prod-1', quantity: 1, identifier_snapshot: 'SN-MANGO-87' },
+      'cashier-1',
+    );
+
+    expect(mockManager.findOne).toHaveBeenCalledWith(
+      ProductUnit,
+      expect.objectContaining({
+        where: expect.arrayContaining([
+          { serial_number: 'SN-MANGO-87', status: expect.anything() },
+        ]),
+      }),
+    );
+    expect(mockManager.create).toHaveBeenCalledWith(
+      SaleLine,
+      expect.objectContaining({
+        product_unit_id: 'unit-with-both-identifiers',
+        imei_snapshot: 'SN-MANGO-87',
+        identifier_type_snapshot: TrackingMethod.SERIAL_NUMBER,
+      }),
+    );
+  });
+
   it('falls back to Product.selling_price when PU.selling_price is null', async () => {
     mockQueryBuilder.getOne.mockResolvedValue(
       seedDraftSale({ branch_id: 'branch-1' }),
@@ -6240,14 +6296,32 @@ describe('SalesService', () => {
     );
 
     expect(mockManager.findOne).toHaveBeenCalledWith(ProductUnit, {
-      where: {
-        imei: '354789102345678',
-        status: In([
-          ProductUnitStatus.IN_STOCK,
-          ProductUnitStatus.WRITTEN_OFF,
-          ProductUnitStatus.INSPECTION,
-        ]),
-      },
+      where: [
+        {
+          imei: '354789102345678',
+          status: In([
+            ProductUnitStatus.IN_STOCK,
+            ProductUnitStatus.WRITTEN_OFF,
+            ProductUnitStatus.INSPECTION,
+          ]),
+        },
+        {
+          imei_number: '354789102345678',
+          status: In([
+            ProductUnitStatus.IN_STOCK,
+            ProductUnitStatus.WRITTEN_OFF,
+            ProductUnitStatus.INSPECTION,
+          ]),
+        },
+        {
+          serial_number: '354789102345678',
+          status: In([
+            ProductUnitStatus.IN_STOCK,
+            ProductUnitStatus.WRITTEN_OFF,
+            ProductUnitStatus.INSPECTION,
+          ]),
+        },
+      ],
     });
     // The live row was found, so the newest-row fallback never ran.
     expect(mockManager.findOne).not.toHaveBeenCalledWith(
@@ -6288,7 +6362,11 @@ describe('SalesService', () => {
       ),
     ).rejects.toBeInstanceOf(ConflictException);
     expect(mockManager.findOne).toHaveBeenNthCalledWith(2, ProductUnit, {
-      where: { imei: '354789102345678' },
+      where: [
+        { imei: '354789102345678' },
+        { imei_number: '354789102345678' },
+        { serial_number: '354789102345678' },
+      ],
       order: { created_at: 'DESC' },
     });
   });

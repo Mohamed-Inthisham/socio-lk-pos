@@ -506,7 +506,7 @@ const ProductEdit = () => {
 
         <FormSection
           title="Identification"
-          description="Choose how each received unit is identified. Barcode can be updated. SKU changes require explicit override."
+          description="Choose the primary unit identifier. Stock purchases can also record both an IMEI and serial number for each received unit. Barcode can be updated."
         >
           <div className="space-y-4">
             <div className="max-w-sm">
@@ -522,7 +522,7 @@ const ProductEdit = () => {
                     onChange={field.onChange}
                     options={TRACKING_METHOD_OPTIONS}
                     error={fieldState.error?.message}
-                    hint="Stock Purchase still records units received. Products with existing stock or sales may not be able to change this."
+                    hint="This sets the primary identifier. You can record the other identifier on stock purchases too. Products with existing stock or sales may not be able to change this."
                   />
                 )}
               />

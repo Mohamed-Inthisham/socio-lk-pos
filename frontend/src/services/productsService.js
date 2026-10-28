@@ -70,6 +70,15 @@ export const getProductByBarcode = async (barcode) => {
   return response.data;
 };
 
+/** Resolve an exact in-stock IMEI or serial number at the active POS branch. */
+export const getSellableUnitByIdentifier = async (identifier, branchId) => {
+  const response = await api.get(
+    `/product-units/sellable/by-identifier/${encodeURIComponent(identifier)}`,
+    { params: { branchId } },
+  );
+  return response.data;
+};
+
 /**
  * Create a new product (admin only).
  *

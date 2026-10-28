@@ -329,7 +329,7 @@ const ProductCreate = ({ embedded = false, onCreated, onCancel }) => {
 
         <FormSection
           title="Identification"
-          description="Choose how each received unit is identified. Barcode is optional — leave blank to auto-generate (SLP-XXXXXX)."
+          description="Choose the primary unit identifier. Stock purchases can also record both an IMEI and serial number for each received unit. Product barcode is optional."
         >
           <div className="max-w-sm mb-4">
             <Controller
@@ -344,7 +344,7 @@ const ProductCreate = ({ embedded = false, onCreated, onCancel }) => {
                   onChange={field.onChange}
                   options={TRACKING_METHOD_OPTIONS}
                   error={fieldState.error?.message}
-                  hint="This controls per-unit identifiers. Stock Purchase still records how many units arrive."
+                  hint="This sets the primary identifier type. You can record the other identifier on each stock purchase too."
                 />
               )}
             />

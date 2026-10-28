@@ -61,6 +61,25 @@ export class ProductUnitsController {
     return this.productUnitsService.findAll(query);
   }
 
+  @Get('sellable/by-identifier/:identifier')
+  @Roles(UserRole.ADMIN, UserRole.MANAGER, UserRole.CASHIER)
+  @ApiOperation({
+    summary: 'Resolve an in-stock IMEI or serial number for POS scanning',
+    description:
+      'Returns the product and exact identifier only when the matching unit ' +
+      'is in stock at the supplied branch.',
+  })
+  @ApiParam({ name: 'identifier', description: 'Exact IMEI or serial number' })
+  async findSellableByIdentifier(
+    @Param('identifier') identifier: string,
+    @Query('branchId', ParseUUIDPipe) branchId: string,
+  ) {
+    return this.productUnitsService.findSellableByIdentifier(
+      identifier,
+      branchId,
+    );
+  }
+
   @Get(':id')
   @Roles(UserRole.ADMIN, UserRole.MANAGER)
   @ApiOperation({

@@ -23,6 +23,7 @@ import {
 } from "../../services/customersService";
 import {
   getProductByBarcode,
+  getSellableUnitByIdentifier,
   listProducts,
 } from "../../services/productsService";
 import { listStock } from "../../services/stockService";
@@ -710,6 +711,21 @@ export const scanBarcode = createAsyncThunk(
   },
 );
 
+/** Resolve a scanned IMEI/serial to the exact in-stock unit at this branch. */
+export const scanUnitIdentifier = createAsyncThunk(
+  "posTerminal/scanUnitIdentifier",
+  async ({ identifier, branchId }, { rejectWithValue }) => {
+    // Keeps consumers with a mocked/older product service compatible.
+    if (typeof getSellableUnitByIdentifier !== "function") return null;
+    try {
+      return await getSellableUnitByIdentifier(identifier, branchId);
+    } catch (error) {
+      if (error?.response?.status === 404) return null;
+      return rejectWithValue(toError(error, "Unit identifier lookup failed"));
+    }
+  },
+);
+
 export const SEARCH_LIMIT = 20;
 
 /** arg: { query, branchId } → resolves with up to 20 products */
@@ -1201,6 +1217,17 @@ const posTerminalSlice = createSlice({
         state.scanState = "idle";
         state.scanError = action.payload || { message: "Barcode lookup failed" };
       })
+        .addCase(scanUnitIdentifier.pending, (state) => {
+          state.scanState = "loading";
+          state.scanError = null;
+        })
+        .addCase(scanUnitIdentifier.fulfilled, (state) => {
+          state.scanState = "idle";
+        })
+        .addCase(scanUnitIdentifier.rejected, (state, action) => {
+          state.scanState = "idle";
+          state.scanError = action.payload || { message: "Unit identifier lookup failed" };
+        })
       .addCase(searchProducts.pending, (state, action) => {
         state.scanState = "searching";
         state.scanError = null;
