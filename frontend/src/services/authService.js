@@ -73,7 +73,7 @@ export const loginAPI = async ({ email, password }) => {
  */
 export const logoutAPI = async () => {
   try {
-    await api.post("/auth/logout");
+    await api.post("/auth/refresh/logout");
     return { success: true };
   } catch (error) {
     // Even if server call fails, treat logout as successful locally

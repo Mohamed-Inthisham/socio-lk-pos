@@ -12,14 +12,14 @@ Two tokens per session:
 
 | Token | Lifetime | Cookie name | Cookie path | Purpose |
 |-------|----------|-------------|-------------|---------|
-| Access | 15 min | `access_token` | `/api/v1/` | Sent on every authenticated request |
-| Refresh | 7 days | `refresh_token` | `/api/v1/auth/refresh` | Used only to obtain new access tokens |
+| Access | 15 min | `access_token` | `/` | Sent on authenticated requests |
+| Refresh | 7 days | `refresh_token` | `/api/v1/auth/refresh` | Refresh and browser logout |
 
 ### Why two tokens
 
 - **Blast radius:** if an access token is stolen, the attacker has ≤15 minutes to abuse it before it expires.
 - **UX:** the refresh token lets users stay logged in for 7 days without re-entering credentials.
-- **Scoping:** the refresh cookie's narrow `Path` means it's only sent on refresh requests — every other request only exposes the short-lived access token.
+- **Scoping:** the refresh cookie's narrow `Path` sends it to `/api/v1/auth/refresh` and its child `/api/v1/auth/refresh/logout`, rather than other API endpoints.
 
 ### Why cookies (not response body / localStorage)
 
@@ -95,10 +95,35 @@ This metadata supports future features (session management UI, "log out other de
 |--------|------|-------|------|---------|---------|
 | POST | `/api/v1/auth/login` | none | `{email, password}` | 200 + user + cookies | 401 |
 | POST | `/api/v1/auth/refresh` | none (validates cookie) | none | 200 + new cookies | 401 |
-| POST | `/api/v1/auth/logout` | none | none | 200 + cleared cookies | 200 (idempotent) |
+| POST | `/api/v1/auth/refresh/logout` | none | none | 200 + cleared cookies | 200 (idempotent) |
+| POST | `/api/v1/auth/logout` | none | none | Compatibility alias; see below | 200 (idempotent) |
 | GET | `/api/v1/auth/me` | JwtAuthGuard | none | 200 + user | 401 |
 
 **Login and `/auth/me` return the same user shape.** Both respond with `{ id, email, full_name, role, branch_id, branch }`, where `branch_id` is `null` for admins and a UUID for managers/cashiers, and `branch` is the nested `Branch` object (or `null`). `login()` re-fetches the user with the branch relation loaded right after issuing tokens, specifically so its response matches `/auth/me` exactly rather than returning the pre-fetch, branch-less row.
+
+## Logout and Browser Cookie Paths
+
+Browser clients must call `POST /api/v1/auth/refresh/logout`. The existing refresh
+cookie path matches this endpoint, including cookies issued before this endpoint
+was added. No re-login or cookie-path migration is required.
+
+The handler awaits revocation of the matching stored refresh-token hash before
+clearing the access cookie at `/` and the refresh cookie at
+`/api/v1/auth/refresh`. Clearing uses the original domain, HttpOnly, Secure, and
+SameSite options. Logout is public and idempotent, including when the access
+token has expired or the refresh cookie is missing, unknown, malformed, already
+revoked, or expired. Logout does not mint tokens or revoke unrelated sessions.
+
+`POST /api/v1/auth/logout` remains available for compatibility. A browser does
+not send the narrow-path refresh cookie there: it clears cookies but cannot
+revoke an absent token. A non-browser client that explicitly supplies the refresh
+cookie can still use this alias for revocation. Tests must use a path-aware jar
+for browser behavior rather than forcibly attaching every login cookie.
+
+This fix does not serialize refresh/logout requests or invalidate copied access
+JWTs before expiration. Refresh rotation and its existing policy of revoking all
+user sessions upon revoked-token replay are unchanged. The frontend also retains
+local logout on network failure; that alone does not confirm server revocation.
 
 ## Programmatic Use
 

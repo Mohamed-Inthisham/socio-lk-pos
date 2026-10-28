@@ -4,12 +4,18 @@ import { authState, cashDayState, createTestStore } from "../../test/renderWithP
 import { managerSessionUser } from "../../test/authEntities";
 import { openCashDayEntity } from "../../test/cashDayEntities";
 import * as authService from "../../services/authService";
+import useActiveBranchStore from "../zustand/activeBranchStore";
+import useTerminalSessionStore from "../zustand/terminalSessionStore";
 
 vi.mock("../../services/authService");
 
 describe("authSlice logoutUser", () => {
-  it("clears the cash day, so the next user on the till starts from a fresh read (P9)", async () => {
-    authService.logoutAPI.mockResolvedValue(undefined);
+  it.each([false, true])("clears the session, cash day and persisted till pointers (API failure=%s)", async (fails) => {
+    if (fails) authService.logoutAPI.mockRejectedValueOnce(new Error("Network unavailable"));
+    else authService.logoutAPI.mockResolvedValueOnce({ success: true });
+    useActiveBranchStore.getState().setActiveBranch("branch-main");
+    useTerminalSessionStore.getState().setDraftSaleId("sale-private");
+    useTerminalSessionStore.getState().setLastCompletedSaleId("sale-completed");
     const store = createTestStore({
       auth: authState(managerSessionUser()),
       cashDay: cashDayState({
@@ -22,6 +28,9 @@ describe("authSlice logoutUser", () => {
     await store.dispatch(logoutUser());
 
     expect(store.getState().cashDay).toEqual(cashDayState());
+    expect(store.getState().auth).toMatchObject({ user: null, isAuthenticated: false });
+    expect(useActiveBranchStore.getState().activeBranchId).toBeNull();
+    expect(useTerminalSessionStore.getState()).toMatchObject({ draftSaleId: null, lastCompletedSaleId: null });
   });
 });
 

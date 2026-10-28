@@ -1,10 +1,30 @@
 import { vi } from "vitest";
 import api from "./api";
-import { getCurrentUser, loginAPI } from "./authService";
+import { getCurrentUser, loginAPI, logoutAPI } from "./authService";
 
 vi.mock("./api", () => ({
   default: { get: vi.fn(), post: vi.fn() },
 }));
+
+describe("logoutAPI", () => {
+  it("uses the browser-compatible refresh-cookie path", async () => {
+    api.post.mockResolvedValueOnce({ data: { success: true } });
+
+    await expect(logoutAPI()).resolves.toEqual({ success: true });
+
+    expect(api.post).toHaveBeenLastCalledWith("/auth/refresh/logout");
+  });
+
+  it("preserves local logout behavior when the request fails", async () => {
+    api.post.mockRejectedValueOnce(new Error("Network unavailable"));
+    const log = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      await expect(logoutAPI()).resolves.toEqual({ success: true });
+    } finally {
+      log.mockRestore();
+    }
+  });
+});
 
 const branch = { id: "branch-1", name: "Main Shop" };
 
