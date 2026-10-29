@@ -37,7 +37,7 @@ SaleNumberCounter (one row per branch, per day)
 
 - Every `Sale` belongs to exactly one `Branch` and one `User` (the cashier).
 - A `Sale` in `VOIDED` status also carries a second User reference (`voided_by`, the admin or manager who authorized the reversal).
-- `SaleLine` and `Payment` cascade-delete only when the parent `Sale` is DRAFT and is discarded via `DELETE /sales/:id`. After completion, lines and payments are immutable.
+- `SaleLine` and `Payment` cascade-delete only when the parent `Sale` is DRAFT and is discarded, via `DELETE /sales/:id` or by its branch's day close ([cash-days.md](./cash-days.md), #75); either way only a draft with no payment is discarded. After completion, lines and payments are immutable.
 - `SaleLine.external_supplier_id` is nullable — in-house lines have `NULL`; friendly-shop lines reference a `Supplier`.
 - `SaleNumberCounter` holds one row per `(branch_id, sale_date)` pair, row-locked when issuing the next invoice number.
 
@@ -56,7 +56,7 @@ Valid transitions:
 | From | To | Endpoint | Side effects |
 |------|----|--------|--------------|
 | _(nothing)_ | DRAFT | `POST /sales` | Creates empty cart |
-| DRAFT | _(deleted)_ | `DELETE /sales/:id` | Hard delete of sale + lines + payments |
+| DRAFT | _(deleted)_ | `DELETE /sales/:id` | Hard delete of an unpaid draft and its lines, on the sale row locked and re-checked DRAFT; a draft with a payment is refused (409 `DRAFT_HAS_PAYMENTS`). Writes a `DRAFT_DISCARDED` audit row in the same transaction (#75) |
 | DRAFT | COMPLETED | `POST /sales/:id/complete` | Decrements stock, issues invoice number, sets completed_at |
 | COMPLETED | VOIDED | `POST /sales/:id/void` | Re-increments stock, stamps payments reversed, sets voided_at/by/reason. Refused once the sale has a return (409 `SALE_HAS_RETURNS`) |
 
@@ -427,7 +427,7 @@ All endpoints are prefixed with `/api/v1` and require authentication via the `ac
 | GET | `/sales/:id` | any | Get one sale with nested branch, cashier, customer, voider (soft-deleted included), lines (each with `returned_quantity`), payments, and `returns[]` (Phase 6.4 P7; approver and requester as `{ id, full_name }` only) |
 | POST | `/sales` | any | Create a DRAFT sale (empty cart) |
 | PATCH | `/sales/:id` | any | Update DRAFT sale (notes, customer_id only) |
-| DELETE | `/sales/:id` | any | Discard a DRAFT sale (hard delete; cascade removes lines + payments) |
+| DELETE | `/sales/:id` | any | Discard an unpaid DRAFT sale (hard delete; its lines cascade). 400 if it isn't DRAFT, 409 `DRAFT_HAS_PAYMENTS` if it has any payment; audited as `DRAFT_DISCARDED` (#75) |
 
 ### Sales — line sub-resource
 

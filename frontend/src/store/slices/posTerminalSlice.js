@@ -1348,7 +1348,8 @@ export const selectStockWarnings = createSelector(
  * The products the sale needs more of than the branch has, once each:
  * [{ product_id, name, required, available }], in cart order. What the
  * "Not enough stock" alert lists (StockShortfallAlert) and what keeps Pay
- * and Complete blocked.
+ * blocked (selectCanPay). The CompleteSaleDialog reads it after its own
+ * stock re-check to block Complete.
  */
 export const selectStockShortfall = createSelector(
   [selectDraftSale, selectStockWarnings],
