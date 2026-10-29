@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useHotkeys } from "react-hotkeys-hook";
-import { useDispatch, useSelector } from "react-redux";
+import { useDispatch, useSelector, useStore } from "react-redux";
 import { AlertTriangle, FilePlus2, Printer } from "lucide-react";
 import Button from "../../components/common/Button";
 import CartLines from "../../components/pos/CartLines";
@@ -12,6 +12,7 @@ import PaymentDialog from "../../components/pos/PaymentDialog";
 import PaymentsList from "../../components/pos/PaymentsList";
 import SaleCompletePanel from "../../components/pos/SaleCompletePanel";
 import ScanBar from "../../components/pos/ScanBar";
+import StockShortfallAlert from "../../components/pos/StockShortfallAlert";
 import TotalsPanel from "../../components/pos/TotalsPanel";
 import useTerminalBranch from "../../hooks/useTerminalBranch";
 import { isTouchOnly } from "../../utils/device";
@@ -23,6 +24,7 @@ import useTerminalSessionStore from "../../store/zustand/terminalSessionStore";
 import {
   discardDraftSale,
   ensureDraftSale,
+  refreshCartStock,
   selectCanComplete,
   selectCanPay,
   selectCartLines,
@@ -31,6 +33,7 @@ import {
   selectPosStatus,
   selectAttachedCustomer,
   selectHasTradeInPayment,
+  selectStockShortfall,
 } from "../../store/slices/posTerminalSlice";
 import { CASH, TRADE_IN } from "../../schemas/paymentSchema";
 
@@ -51,7 +54,10 @@ import { CASH, TRADE_IN } from "../../schemas/paymentSchema";
  *   unless a dialog (New sale, Attach customer, IMEI prompt) is already
  *   open, or a trade-in payment holds the customer (P4-11).
  * - F4 opens the PaymentDialog under the same rule, and only when the
- *   Pay button is enabled (both read selectCanPay).
+ *   Pay button is enabled (both read selectCanPay). A product short of
+ *   stock disables both, and the "Not enough stock" alert at the top of
+ *   the cart column lists it; every way into the PaymentDialog re-reads
+ *   the cart's stock first (openPayment).
  * - F6 (P4-1, P4-2) opens it on Trade-in under the F4 rule. With no
  *   customer on the sale it starts the attach-then-return sequence
  *   instead. A page can intercept F6 (Chrome/Edge would otherwise move
@@ -108,6 +114,7 @@ const dialogOpen = () => inDialog() || !!document.querySelector('[role="dialog"]
 
 const PosTerminal = () => {
   const dispatch = useDispatch();
+  const store = useStore();
   const scanRef = useRef(null);
   const { branchId } = useTerminalBranch();
   const status = useSelector(selectPosStatus);
@@ -115,6 +122,7 @@ const PosTerminal = () => {
   const sale = useSelector(selectDraftSale);
   const lines = useSelector(selectCartLines);
   const canPay = useSelector(selectCanPay);
+  const shortfall = useSelector(selectStockShortfall);
   const canComplete = useSelector(selectCanComplete);
   const customer = useSelector(selectAttachedCustomer);
   const hasTradeIn = useSelector(selectHasTradeInPayment);
@@ -122,6 +130,11 @@ const PosTerminal = () => {
   const [attachOpen, setAttachOpen] = useState(false);
   const [paymentOpen, setPaymentOpen] = useState(false);
   const [paymentMethod, setPaymentMethod] = useState(CASH);
+  // The stock re-read before payment (openPayment): state for the Pay
+  // button's spinner, the ref so a second Pay / F4 / F6 can't start another.
+  const [payChecking, setPayChecking] = useState(false);
+  const payCheck = useRef(false);
+  const shortfallRef = useRef(null);
   const [completeOpen, setCompleteOpen] = useState(false);
   // Receipts (P5-12): the completed sale waiting for the confirm to close,
   // and "Reprint last receipt" (works after a reload: the id is persisted).
@@ -176,7 +189,38 @@ const PosTerminal = () => {
     { enableOnFormTags: true, preventDefault: true },
     [focusScan],
   );
-  const openPayment = (method) => {
+  // Every way into the PaymentDialog (Pay, F4, F6, the trade-in attach-
+  // then-return) comes through here. The cart's stock is read again first
+  // (one GET /stock?branchId=, refreshCartStock), one check at a time, and
+  // the dialog opens only if selectCanPay still holds: a shortage the read
+  // finds keeps Pay blocked and the alert shows it. A failed read leaves
+  // the stock as last known, so a known shortage still blocks; otherwise
+  // the payment goes ahead and the server's check at complete is the guard.
+  const openPayment = async (method) => {
+    const current = store.getState().posTerminal.draftSale;
+    if (payCheck.current || !current) return;
+    const shortBefore = selectStockShortfall(store.getState()).length > 0;
+    payCheck.current = true;
+    setPayChecking(true);
+    try {
+      const productIds = [...new Set((current.lines ?? []).map((line) => line.product_id))];
+      if (productIds.length) {
+        await dispatch(refreshCartStock({ branchId: current.branch_id, productIds }));
+      }
+    } finally {
+      payCheck.current = false;
+      setPayChecking(false);
+    }
+    const after = store.getState();
+    if (!selectCanPay(after)) {
+      // This read found the shortage: bring the alert into view once it has
+      // rendered (on a phone the cashier has scrolled down to Pay). "nearest"
+      // leaves an alert that is already visible, as on a desktop, alone.
+      if (!shortBefore && selectStockShortfall(after).length > 0) {
+        setTimeout(() => shortfallRef.current?.scrollIntoView?.({ block: "nearest" }), 0);
+      }
+      return;
+    }
     setPaymentMethod(method);
     setPaymentOpen(true);
   };
@@ -319,6 +363,13 @@ const PosTerminal = () => {
             </div>
           )}
 
+          {/* A known shortage blocks Pay (selectCanPay); this says which products. */}
+          {status === "ready" && shortfall.length > 0 && (
+            <div ref={shortfallRef}>
+              <StockShortfallAlert items={shortfall} className="text-sm" />
+            </div>
+          )}
+
           <ScanBar
             branchId={branchId}
             disabled={status !== "ready" && !completed}
@@ -400,6 +451,7 @@ const PosTerminal = () => {
             <TotalsPanel
               onPay={() => openPayment(CASH)}
               onComplete={() => setCompleteOpen(true)}
+              payChecking={payChecking}
             />
           </div>
         </aside>

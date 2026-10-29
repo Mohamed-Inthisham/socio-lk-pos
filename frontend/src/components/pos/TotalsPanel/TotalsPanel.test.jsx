@@ -1,9 +1,10 @@
 import { vi } from "vitest";
-import { screen } from "@testing-library/react";
+import { act, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import TotalsPanel from ".";
 import { posTerminalState, renderWithProviders } from "../../../test/renderWithProviders";
-import { cashPayment, draftSale, saleLine } from "../../../test/posFixtures";
+import { cableProduct, cashPayment, draftSale, saleLine } from "../../../test/posFixtures";
+import { refreshStock } from "../../../store/slices/posTerminalSlice";
 
 const renderTotals = (sale, overrides = {}, props = {}) =>
   renderWithProviders(<TotalsPanel {...props} />, {
@@ -158,5 +159,62 @@ describe("TotalsPanel", () => {
     expect(payButton()).toBeDisabled();
     expect(payButton()).toHaveTextContent("1,000.00");
     expect(screen.queryByTestId("totals-ready")).not.toBeInTheDocument();
+  });
+});
+
+describe("TotalsPanel: not enough stock", () => {
+  const tracked = (quantity) => ({ [cableProduct.id]: { quantity, manage_stock: true } });
+  // Two cables in the cart, nothing paid.
+  const twoCables = () => cartSale({ lines: [saleLine({ quantity: 2 })], subtotal: "3000.00", total: "3000.00" });
+
+  it("disables Pay and says why while a product is short of stock", () => {
+    renderTotals(twoCables(), { stockByProduct: tracked(1) });
+
+    expect(payButton()).toBeDisabled();
+    expect(screen.getByTestId("pay-blocked-reason")).toHaveTextContent("Not enough stock for this sale.");
+  });
+
+  it("enables Pay again, without the reason, once refreshed stock covers the sale", async () => {
+    const { store } = renderTotals(twoCables(), { stockByProduct: tracked(1) });
+    expect(payButton()).toBeDisabled();
+
+    act(() => {
+      store.dispatch(
+        refreshStock.fulfilled({ quantity: 5, manage_stock: true }, "req-1", {
+          productId: cableProduct.id,
+          branchId: "branch-main",
+        }),
+      );
+    });
+
+    expect(payButton()).toBeEnabled();
+    expect(screen.queryByTestId("pay-blocked-reason")).not.toBeInTheDocument();
+  });
+
+  it("a sale with enough stock pays as before: Pay enabled, no reason", async () => {
+    const onPay = vi.fn();
+    const user = userEvent.setup();
+    renderTotals(twoCables(), { stockByProduct: tracked(2) }, { onPay });
+
+    expect(screen.queryByTestId("pay-blocked-reason")).not.toBeInTheDocument();
+    await user.click(payButton());
+    expect(onPay).toHaveBeenCalledTimes(1);
+  });
+
+  it("other reasons for a disabled Pay give no stock reason", () => {
+    renderTotals(cartSale(), { pendingPayments: [pendingPayment] });
+
+    expect(payButton()).toBeDisabled();
+    expect(screen.queryByTestId("pay-blocked-reason")).not.toBeInTheDocument();
+  });
+
+  it("spins and can't be pressed while the stock is re-read before payment", async () => {
+    const onPay = vi.fn();
+    const user = userEvent.setup();
+    renderTotals(twoCables(), { stockByProduct: tracked(5) }, { onPay, payChecking: true });
+
+    expect(payButton()).toBeDisabled();
+    await user.click(payButton());
+    expect(onPay).not.toHaveBeenCalled();
   });
 });

@@ -11,6 +11,7 @@ import {
   selectIsCompleting,
   selectPaidTotal,
   selectReadyToComplete,
+  selectStockShortfall,
 } from "../../../store/slices/posTerminalSlice";
 
 /**
@@ -35,8 +36,11 @@ import {
  *
  * PAY (P3-6): "Pay LKR X" (X = balance due) opens the PaymentDialog via
  * `onPay`, as F4 does on the terminal. Both use selectCanPay: disabled
- * with an empty cart, nothing left to pay, or a mutation in flight — the
- * button keeps the last known balance and no spinner of its own.
+ * with an empty cart, nothing left to pay, a mutation in flight, or a
+ * product short of stock — the button keeps the last known balance. A
+ * shortage also says why under it ("Not enough stock for this sale."; the
+ * cart column lists the products). It spins while the terminal re-reads
+ * the cart's stock before opening the PaymentDialog (`payChecking`).
  *
  * COMPLETE (P5-3, revised from P3-7's Ready box): once the last
  * confirmed server sale is fully paid, Pay gives way to a "Paid in full ·
@@ -49,6 +53,7 @@ import {
  * PROPS:
  * - onPay: () => void — open the PaymentDialog
  * - onComplete: () => void — open the CompleteSaleDialog
+ * - payChecking: the stock re-read before payment is running
  */
 
 const ShortcutChip = ({ label }) => (
@@ -81,12 +86,13 @@ const Row = ({ label, value, testId, strong = false }) => (
   </div>
 );
 
-const TotalsPanel = ({ onPay, onComplete }) => {
+const TotalsPanel = ({ onPay, onComplete, payChecking = false }) => {
   const sale = useSelector(selectDraftSale);
   const syncing = useSelector(selectCartSyncing);
   const paid = useSelector(selectPaidTotal);
   const balance = useSelector(selectBalanceDue);
   const canPay = useSelector(selectCanPay);
+  const shortOfStock = useSelector(selectStockShortfall).length > 0;
   const canComplete = useSelector(selectCanComplete);
   const completing = useSelector(selectIsCompleting);
   // "completing" keeps the Complete button (spinning) instead of falling back to Pay
@@ -172,17 +178,25 @@ const TotalsPanel = ({ onPay, onComplete }) => {
             </Button>
           </div>
         ) : (
-          <Button
-            variant="accent"
-            fullWidth
-            className="h-12 text-base"
-            aria-keyshortcuts="F4"
-            disabled={!canPay}
-            onClick={onPay}
-          >
-            <span className="tabular-nums">Pay {formatLKR(balance)}</span>
-            <ShortcutChip label="F4" />
-          </Button>
+          <>
+            <Button
+              variant="accent"
+              fullWidth
+              className="h-12 text-base"
+              aria-keyshortcuts="F4"
+              disabled={!canPay}
+              loading={payChecking}
+              onClick={onPay}
+            >
+              <span className="tabular-nums">Pay {formatLKR(balance)}</span>
+              <ShortcutChip label="F4" />
+            </Button>
+            {shortOfStock && (
+              <p data-testid="pay-blocked-reason" className="mt-1.5 text-xs text-amber-700 dark:text-amber-300">
+                Not enough stock for this sale.
+              </p>
+            )}
+          </>
         )}
       </div>
     </section>

@@ -190,6 +190,31 @@ describe("CompleteSaleDialog", () => {
     expect(completeButton()).not.toHaveAttribute("aria-disabled", "true");
   });
 
+  it("lists every short product once, two lines of one product added together", async () => {
+    stockService.listStock.mockResolvedValueOnce([
+      stockRow(2),
+      { product_id: "p-glass", branch_id: "branch-main", quantity: 25, manage_stock: true },
+    ]);
+    renderDialog(
+      paidSale({
+        lines: [
+          saleLine({ quantity: 2 }),
+          saleLine({ id: "line-2", line_number: 2, quantity: 1 }),
+          saleLine({ id: "line-3", line_number: 3, product_id: "p-glass", product_name_snapshot: "TEST Tempered Glass", quantity: 26 }),
+        ],
+      }),
+    );
+
+    const alert = await within(dialog()).findByRole("alert");
+    expect(within(alert).getAllByRole("listitem").map((item) => item.textContent)).toEqual([
+      "USB-C Cable 1m: 3 needed, 2 in stock",
+      "TEST Tempered Glass: 26 needed, 25 in stock",
+    ]);
+    expect(alert).toHaveTextContent("Remove or reduce the item, or ask a manager to adjust stock.");
+    expect(within(alert).getByRole("button", { name: "Check again" })).toBeInTheDocument();
+    expect(completeButton()).toHaveAttribute("aria-disabled", "true");
+  });
+
   it("still lets the cashier complete when the stock lookup fails", async () => {
     const user = userEvent.setup();
     stockService.listStock.mockRejectedValue(new Error("Network Error"));

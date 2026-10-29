@@ -67,7 +67,10 @@ import { DEFAULT_WARRANTY } from "../../constants/warranty";
  * After each add / qty change (and for every product on a resumed draft)
  * refreshStock fetches the branch stock row, and selectStockWarnings
  * flags lines whose product needs more units than the branch has. It
- * warns only — it never blocks a line.
+ * never blocks a line, but a known shortage blocks payment:
+ * selectStockShortfall lists the short products, and selectCanPay (Pay,
+ * F4, F6) is false while it isn't empty. Unknown or untracked stock
+ * never counts as short.
  *
  * CUSTOMER (P2):
  * attachCustomer / detachCustomer PATCH /sales/:id { customer_id }. They
@@ -1315,19 +1318,20 @@ const selectStockByProduct = (state) => state.posTerminal.stockByProduct;
  * Lines whose product needs more units than the branch has in stock:
  * { [lineId]: { available, required } }. `required` sums every line of
  * that product. Untracked (manage_stock=false) or unknown stock never
- * warns.
+ * warns, and another shop's lines (external_supplier_id) neither count
+ * nor warn: completing a sale takes no stock for them.
  */
 export const selectStockWarnings = createSelector(
   [selectDraftSale, selectStockByProduct],
   (sale, stockByProduct) => {
-    const lines = sale?.lines ?? [];
+    const lines = (sale?.lines ?? []).filter((line) => !line.external_supplier_id);
     const required = {};
     for (const line of lines) {
       required[line.product_id] = (required[line.product_id] ?? 0) + line.quantity;
     }
     const warnings = {};
     for (const line of lines) {
-      const stock = stockByProduct[line.product_id];
+      const stock = stockByProduct?.[line.product_id];
       if (!stock || !stock.manage_stock) continue;
       if (stock.quantity < required[line.product_id]) {
         warnings[line.id] = {
@@ -1337,6 +1341,31 @@ export const selectStockWarnings = createSelector(
       }
     }
     return warnings;
+  },
+);
+
+/**
+ * The products the sale needs more of than the branch has, once each:
+ * [{ product_id, name, required, available }], in cart order. What the
+ * "Not enough stock" alert lists (StockShortfallAlert) and what keeps Pay
+ * and Complete blocked.
+ */
+export const selectStockShortfall = createSelector(
+  [selectDraftSale, selectStockWarnings],
+  (sale, warnings) => {
+    const byProduct = new Map();
+    for (const line of sale?.lines ?? []) {
+      const warning = warnings[line.id];
+      if (warning && !byProduct.has(line.product_id)) {
+        byProduct.set(line.product_id, {
+          product_id: line.product_id,
+          name: line.product_name_snapshot,
+          required: warning.required,
+          available: warning.available,
+        });
+      }
+    }
+    return [...byProduct.values()];
   },
 );
 
@@ -1399,15 +1428,16 @@ export const selectIsFullyPaid = (state) =>
   selectBalanceDueCents(state) === 0;
 
 /**
- * The Pay button and F4 share this: an open draft with lines, a balance
- * left, and no line / payment mutation in flight (the balance would be
- * stale or about to change).
+ * The Pay button, F4 and F6 share this: an open draft with lines, a
+ * balance left, no line / payment mutation in flight (the balance would
+ * be stale or about to change), and no product short of stock.
  */
 export const selectCanPay = (state) =>
   state.posTerminal.status === "ready" &&
   (state.posTerminal.draftSale?.lines?.length ?? 0) > 0 &&
   selectBalanceDueCents(state) > 0 &&
-  !selectCartSyncing(state);
+  !selectCartSyncing(state) &&
+  selectStockShortfall(state).length === 0;
 
 /**
  * Fully paid per the last confirmed server sale. Deliberately ignores
