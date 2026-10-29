@@ -169,7 +169,8 @@ export class SalesController {
     description:
       'Hard-deletes a DRAFT sale. Only DRAFT sales can be discarded — a ' +
       'DRAFT never became a real financial record, so no history is lost. ' +
-      'Completed sales must be VOIDED via POST /sales/:id/void, never deleted.',
+      'Completed sales must be VOIDED via POST /sales/:id/void, never deleted. ' +
+      'A draft with any payment is kept (409). Audited as DRAFT_DISCARDED.',
   })
   @ApiParam({ name: 'id', description: 'Sale UUID', format: 'uuid' })
   @ApiResponse({ status: 204, description: 'DRAFT sale discarded' })
@@ -179,8 +180,18 @@ export class SalesController {
   })
   @ApiResponse({ status: 401, description: 'Not authenticated' })
   @ApiResponse({ status: 404, description: 'Sale not found' })
-  async discardDraft(@Param('id', ParseUUIDPipe) id: string): Promise<void> {
-    await this.salesService.discardDraft(id);
+  @ApiResponse({
+    status: 409,
+    description:
+      'DRAFT_HAS_PAYMENTS: the draft has a payment row, so it is kept with ' +
+      'its payments.',
+  })
+  async discardDraft(
+    @Param('id', ParseUUIDPipe) id: string,
+    @CurrentUser() user: AuthenticatedUser,
+    @Ip() ip: string,
+  ): Promise<void> {
+    await this.salesService.discardDraft(id, user, ip);
   }
 
   // ---- Line sub-resource endpoints ----

@@ -24,6 +24,7 @@ import { Branch } from '../branches/entities/branch.entity';
 import { User } from '../users/entities/user.entity';
 import { UserRole } from '../users/enums/user-role.enum';
 import { PaymentMethod } from '../sales/enums/payment-method.enum';
+import { readDraftSnapshots } from '../sales/draft-snapshot';
 import { AuditAction } from '../audit-log/enums/audit-action.enum';
 import { writeAuditEntry } from '../audit-log/utils/write-audit-entry';
 import { fromCents, toCents } from '../common/utils/money';
@@ -111,6 +112,16 @@ const isClash = (err: unknown, key: string): boolean =>
 // the same value that stamps completed_at, voided_at and returns. Also
 // read by the day gate (day-gate.ts).
 export const TODAY_SQL = `SELECT to_char((now() AT TIME ZONE 'Asia/Colombo')::date, 'YYYY-MM-DD') AS today`;
+
+// The branch's draft sales ($1: the branch id). Close takes it exclusive
+// before it lists the drafts it discards; SalesService.create takes it
+// shared around its INSERT, so no draft is made between that list and the
+// close's commit. Held to the end of the transaction.
+const DRAFTS_LOCK_KEY = `hashtext('sale_drafts:' || $1::text)`;
+export const DRAFTS_LOCK_SQL = `SELECT pg_advisory_xact_lock(${DRAFTS_LOCK_KEY})`;
+export const DRAFTS_SHARED_LOCK_SQL = `SELECT pg_advisory_xact_lock_shared(${DRAFTS_LOCK_KEY})`;
+
+const DISCARD_REASON = 'AUTO_DISCARD_ON_DAY_CLOSE';
 
 // The day's bounds for $2 (a date), as timestamptz: Colombo midnights, the
 // same instants as "+05:30" bounds. Constant within a query, so the range
@@ -501,10 +512,13 @@ export class CashDaysService {
   }
 
   /**
-   * The close's transaction: non-empty DRAFT sale rows are locked first
-   * and block close (P9-12), then FOR UPDATE on the day's row, selected by
-   * id with no closed_at filter; C3 again, C7; the summary after the lock;
-   * C8; the difference and C9; the snapshot; the DAY_CLOSE audit row.
+   * The close's transaction: the branch's draft lock, then every DRAFT
+   * sale at the branch locked; a draft with any payment blocks close
+   * (OPEN_SALES). Then FOR UPDATE on the day's row, selected by id with no
+   * closed_at filter; C3 again, C7; the summary after the lock; C8; the
+   * difference and C9; the unpaid drafts discarded, one DRAFT_DISCARDED
+   * row each; the snapshot; the DAY_CLOSE audit row. Every rejection comes
+   * before the discard, and all of it commits or rolls back together.
    */
   private async applyClose(
     tx: EntityManager,
@@ -531,28 +545,43 @@ export class CashDaysService {
     );
     if (recordedBeforeDraftCheck) return;
 
-    // Lock this day's non-empty drafts before the cash-day row, matching
-    // the sale -> cash-day lock order used by completeSale. Old abandoned
-    // drafts from earlier days must not prevent today's close.
-    const openSales: { id: string }[] = await tx.query(
+    // Every draft at the branch, of any age and any cashier, is discarded
+    // with the close unless it has a payment. The draft lock first, so no
+    // draft is created after the list below; then the drafts locked in id
+    // order before the cash-day row, matching the sale -> cash-day lock
+    // order used by completeSale.
+    await tx.query(DRAFTS_LOCK_SQL, [dayRef.branch_id]);
+    const drafts: { id: string }[] = await tx.query(
       `SELECT s.id
          FROM sales s
         WHERE s.branch_id = $1
           AND s.status = 'DRAFT'
-          AND s.updated_at >= $2
-          AND (
-            EXISTS (SELECT 1 FROM sale_lines sl WHERE sl.sale_id = s.id)
-            OR EXISTS (SELECT 1 FROM payments p WHERE p.sale_id = s.id)
-          )
         ORDER BY s.id
         FOR UPDATE OF s`,
-      [dayRef.branch_id, dayRef.opened_at],
+      [dayRef.branch_id],
     );
-    if (openSales.length > 0) {
+    const draftIds = drafts.map((d) => d.id);
+
+    // Payments in their own statement: a FOR UPDATE that waited re-checks
+    // only the locked row, so a subquery there could miss a payment
+    // committed by the transaction it waited for. With the drafts locked,
+    // no payment can be added to them (addPayment locks the sale first).
+    const paid: { sale_id: string }[] = draftIds.length
+      ? await tx.query(
+          `SELECT DISTINCT p.sale_id
+             FROM payments p
+            WHERE p.sale_id = ANY($1::uuid[])`,
+          [draftIds],
+        )
+      : [];
+    if (paid.length > 0) {
       throw new ConflictException({
-        message: 'Complete or discard all unfinished sales before closing the day.',
+        message:
+          'An unfinished sale with a payment cannot be discarded ' +
+          'automatically. Please ask an administrator to resolve it before ' +
+          'closing the cash day.',
         code: 'OPEN_SALES',
-        sale_count: openSales.length,
+        sale_count: paid.length,
       });
     }
 
@@ -605,6 +634,14 @@ export class CashDaysService {
       });
     }
 
+    const discarded = await this.discardUnpaidDrafts(
+      tx,
+      draftIds,
+      day,
+      caller,
+      ip,
+    );
+
     await tx.query(
       `UPDATE cash_days
           SET cash_sales = $2, cash_refunds = $3, cash_voids_earlier = $4,
@@ -637,15 +674,84 @@ export class CashDaysService {
         `(${caller.id}): expected LKR ${live.expected_balance}, counted ` +
         `LKR ${fromCents(counted)}, ${describeDifference(difference)}` +
         (settled.reason ? `. Reason: ${settled.reason}` : '') +
+        (discarded ? `. Unpaid drafts discarded: ${discarded}` : '') +
         '.',
       changes: {
         expected_balance: { old: null, new: live.expected_balance },
         counted_balance: { old: null, new: fromCents(counted) },
         difference: { old: null, new: fromCents(difference) },
         difference_reason: { old: null, new: settled.reason },
+        drafts_discarded: { old: null, new: discarded },
       },
       ip,
     });
+  }
+
+  /**
+   * Discard the unpaid drafts close locked (`ids`), inside its transaction:
+   * a snapshot of each draft and its lines first (no cost prices), then
+   * one DELETE guarded again by DRAFT and no payment (lines and payments
+   * cascade), then a DRAFT_DISCARDED audit row per draft. Drafts never
+   * moved stock, units or cash, so nothing else changes. Returns how many
+   * were discarded.
+   */
+  private async discardUnpaidDrafts(
+    tx: EntityManager,
+    ids: string[],
+    day: CashDay,
+    caller: CashDayCaller,
+    ip?: string | null,
+  ): Promise<number> {
+    if (ids.length === 0) return 0;
+
+    const sales = await readDraftSnapshots(tx, ids);
+
+    // manager.query answers a DELETE with [rows, affected count].
+    const [, deleted]: [unknown[], number] = await tx.query(
+      `DELETE FROM sales s
+        WHERE s.id = ANY($1::uuid[])
+          AND s.status = 'DRAFT'
+          AND NOT EXISTS (SELECT 1 FROM payments p WHERE p.sale_id = s.id)`,
+      [ids],
+    );
+    if (deleted !== ids.length || sales.length !== ids.length) {
+      // The drafts are locked, so this means the data moved under us:
+      // throwing rolls the whole close back.
+      throw new Error(
+        `Day ${day.id} close: ${deleted} of ${ids.length} locked drafts ` +
+          `discarded (${sales.length} read). Nothing was changed.`,
+      );
+    }
+
+    for (const sale of sales) {
+      await writeAuditEntry(tx, {
+        actor: caller,
+        action: AuditAction.DRAFT_DISCARDED,
+        entityType: 'Sale',
+        entityId: sale.id,
+        description:
+          `Unpaid draft ${sale.id} (${sale.lines.length} ` +
+          `${sale.lines.length === 1 ? 'line' : 'lines'}, LKR ${sale.total}, ` +
+          `cashier ${sale.cashier_name ?? sale.cashier_id}) discarded when ` +
+          `day ${day.business_date} was closed by ${caller.full_name} ` +
+          `(${caller.id}).`,
+        changes: {
+          status: { old: 'DRAFT', new: 'DISCARDED' },
+          sale: { old: sale, new: null },
+          discard: {
+            old: null,
+            new: {
+              reason: DISCARD_REASON,
+              cash_day_id: day.id,
+              business_date: day.business_date,
+              closed_by: caller.id,
+            },
+          },
+        },
+        ip,
+      });
+    }
+    return deleted;
   }
 
   /**

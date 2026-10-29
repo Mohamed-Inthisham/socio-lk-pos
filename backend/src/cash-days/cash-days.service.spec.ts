@@ -8,7 +8,7 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import { QueryFailedError } from 'typeorm';
-import { CashDaysService } from './cash-days.service';
+import { CashDaysService, DRAFTS_LOCK_SQL } from './cash-days.service';
 import { CashDay } from './entities/cash-day.entity';
 import { OpenCashDayDto } from './dto/open-cash-day.dto';
 import { CloseCashDayDto } from './dto/close-cash-day.dto';
@@ -118,12 +118,80 @@ describe('CashDaysService', () => {
       ...overrides,
     });
 
+  // A sale row as the draft-cleanup queries see it, with its lines (as the
+  // snapshot SELECT returns them: no cost price) and its payments.
+  type SaleFixture = {
+    id: string;
+    branch_id: string;
+    status: 'DRAFT' | 'COMPLETED' | 'VOIDED';
+    cashier_id: string;
+    cashier_name: string | null;
+    customer_id: string | null;
+    subtotal: string;
+    discount_total: string;
+    tax_total: string;
+    total: string;
+    notes: string | null;
+    created_at: Date;
+    updated_at: Date;
+    lines: Record<string, unknown>[];
+    payments: string[];
+  };
+  const saleRow = (overrides: Partial<SaleFixture> = {}): SaleFixture => ({
+    id: 'draft-1',
+    branch_id: 'branch-1',
+    status: 'DRAFT',
+    cashier_id: 'cashier-1',
+    cashier_name: 'Till Cashier',
+    customer_id: null,
+    subtotal: '0.00',
+    discount_total: '0.00',
+    tax_total: '0.00',
+    total: '0.00',
+    notes: null,
+    created_at: new Date('2026-10-20T04:00:00Z'),
+    updated_at: new Date('2026-10-20T04:00:00Z'),
+    lines: [],
+    payments: [],
+    ...overrides,
+  });
+  const glassLine = {
+    line_number: 1,
+    product_id: 'product-glass',
+    product_sku_snapshot: 'SLP-0001',
+    product_name_snapshot: 'Tempered Glass',
+    quantity: 2,
+    unit_price: '990.00',
+    discount_type: null,
+    discount_value: null,
+    discount_amount: '0.00',
+    line_total: '1980.00',
+    product_unit_id: null,
+    imei_snapshot: null,
+    identifier_type_snapshot: null,
+  };
+  const phoneLine = {
+    ...glassLine,
+    line_number: 2,
+    product_id: 'product-phone',
+    product_sku_snapshot: 'SLP-0002',
+    product_name_snapshot: 'iPhone 13 128GB',
+    quantity: 1,
+    unit_price: '150000.00',
+    line_total: '150000.00',
+    product_unit_id: 'unit-1',
+    imei_snapshot: '356789012345678',
+    identifier_type_snapshot: 'IMEI',
+  };
+
   // What the manager mock answers, per test.
   let fixtures: {
     today: string;
     branches: string[];
     days: CashDay[];
-    openSales: { id: string }[];
+    saleRows: SaleFixture[];
+    // Make the close's UPDATE cash_days fail (rollback tests).
+    failCloseUpdate: boolean;
     sales: MethodTotalRow[];
     refunds: MethodTotalRow[];
     earlierVoids: MethodTotalRow[];
@@ -132,6 +200,10 @@ describe('CashDaysService', () => {
   // Every manager.query, in order, and whether it ran in the transaction.
   let queries: { sql: string; params: unknown[]; inTx: boolean }[];
   let inTx: boolean;
+  // Whether each audit row was saved inside the transaction, and the
+  // number of queries run before the cash-day row was locked.
+  let auditInTx: boolean[];
+  let dayLockAt: number;
 
   const matches = (day: CashDay, where: Record<string, unknown>) =>
     Object.entries(where).every(
@@ -179,7 +251,39 @@ describe('CashDaysService', () => {
           counted_balance: d.counted_balance,
         }));
     }
-    if (sql.includes('FOR UPDATE OF s')) return fixtures.openSales;
+    // The draft cleanup's statements (DRAFT and branch filtered here as the
+    // SQL does; the SQL text itself is asserted in the tests).
+    if (sql.includes('FOR UPDATE OF s')) {
+      return fixtures.saleRows
+        .filter((s) => s.branch_id === params[0] && s.status === 'DRAFT')
+        .sort((a, b) => a.id.localeCompare(b.id))
+        .map((s) => ({ id: s.id }));
+    }
+    const ids = (params[0] ?? []) as string[];
+    if (sql.includes('SELECT DISTINCT p.sale_id')) {
+      return fixtures.saleRows
+        .filter((s) => ids.includes(s.id) && s.payments.length > 0)
+        .map((s) => ({ sale_id: s.id }));
+    }
+    if (sql.includes('FROM sale_lines sl')) {
+      return fixtures.saleRows
+        .filter((s) => ids.includes(s.id))
+        .flatMap((s) => s.lines.map((line) => ({ sale_id: s.id, ...line })));
+    }
+    if (sql.includes('LEFT JOIN users u')) {
+      return fixtures.saleRows
+        .filter((s) => ids.includes(s.id))
+        .map(({ status: _s, lines: _l, payments: _p, ...row }) => row);
+    }
+    if (sql.includes('DELETE FROM sales')) {
+      const gone = fixtures.saleRows.filter(
+        (s) =>
+          ids.includes(s.id) && s.status === 'DRAFT' && s.payments.length === 0,
+      );
+      fixtures.saleRows = fixtures.saleRows.filter((s) => !gone.includes(s));
+      // The Postgres driver answers a DELETE with [rows, affected count].
+      return [[], gone.length];
+    }
     if (sql.includes('-- cash day: sales')) return fixtures.sales;
     if (sql.includes('-- cash day: refunds')) return fixtures.refunds;
     if (sql.includes('-- cash day: earlier voids'))
@@ -201,6 +305,7 @@ describe('CashDaysService', () => {
       return [{ id: 'day-new' }];
     }
     if (sql.includes('UPDATE cash_days')) {
+      if (fixtures.failCloseUpdate) throw new Error('UPDATE cash_days failed');
       const p = params as (string | null)[];
       const day = fixtures.days.find((d) => d.id === p[0])!;
       Object.assign(day, {
@@ -262,7 +367,8 @@ describe('CashDaysService', () => {
       today: '2026-10-20',
       branches: ['branch-1', 'branch-2'],
       days: [],
-      openSales: [],
+      saleRows: [],
+      failCloseUpdate: false,
       // P9-5: sale A paid 12,000.00 cash (B, voided the same day, is left
       // out by the SQL); the return refunds CARD 500.00 + CASH 1,500.00.
       sales: [{ method: PaymentMethod.CASH, total: '12000.00' }],
@@ -298,15 +404,23 @@ describe('CashDaysService', () => {
     );
     mockLock.setLock.mockReturnThis();
     mockLock.where.mockReturnThis();
-    mockLock.getOne.mockImplementation(() =>
-      Promise.resolve(
+    mockLock.getOne.mockImplementation(() => {
+      // Where the cash-day row lock falls among the queries.
+      dayLockAt = queries.length;
+      return Promise.resolve(
         fixtures.days.find(
           (d) => d.id === (whereCalls().at(-1)?.[1] as { id: string }).id,
         ) ?? null,
-      ),
-    );
+      );
+    });
     mockManager.createQueryBuilder.mockReturnValue(mockLock);
     mockManager.getRepository.mockReturnValue(mockAuditRepo);
+    auditInTx = [];
+    dayLockAt = -1;
+    mockAuditRepo.save.mockImplementation(() => {
+      auditInTx.push(inTx);
+      return Promise.resolve({});
+    });
     mockDataSource.transaction.mockImplementation(
       async (cb: (m: typeof mockManager) => unknown) => {
         inTx = true;
@@ -480,18 +594,24 @@ describe('CashDaysService', () => {
       fixtures.days.push(openDay());
     });
 
-    it('refuses close while this cash day has an unfinished sale', async () => {
-      fixtures.openSales = [{ id: 'draft-sale-1' }];
+    it('refuses close while a draft at the branch has a payment', async () => {
+      fixtures.saleRows = [
+        saleRow({ id: 'draft-paid', payments: ['payment-1'] }),
+      ];
 
-      const { body } = await refusal(
+      const { err, body } = await refusal(
         service.close('day-1', closeDto(), cashier),
       );
 
-      expect(body).toMatchObject({ code: 'OPEN_SALES', sale_count: 1 });
-      expect(queries.find((q) => q.sql.includes('FOR UPDATE OF s'))?.params).toEqual([
-        'branch-1',
-        openDay().opened_at,
-      ]);
+      expect(err).toBeInstanceOf(ConflictException);
+      expect(body).toEqual({
+        message:
+          'An unfinished sale with a payment cannot be discarded ' +
+          'automatically. Please ask an administrator to resolve it before ' +
+          'closing the cash day.',
+        code: 'OPEN_SALES',
+        sale_count: 1,
+      });
       expect(updates().some((q) => q.sql.includes('UPDATE cash_days'))).toBe(
         false,
       );
@@ -535,6 +655,7 @@ describe('CashDaysService', () => {
             counted_balance: { old: null, new: '15500.00' },
             difference: { old: null, new: '0.00' },
             difference_reason: { old: null, new: null },
+            drafts_discarded: { old: null, new: 0 },
           },
         }),
       ]);
@@ -698,6 +819,467 @@ describe('CashDaysService', () => {
         BANK_TRANSFER: '0.00',
         KOKO: '0.00',
         MINTPAY: '0.00',
+      });
+    });
+  });
+
+  describe('close: unpaid drafts discarded', () => {
+    type AuditRow = {
+      action: AuditAction;
+      entity_type: string;
+      entity_id: string;
+      user_id: string;
+      description: string;
+      changes: Record<string, { old: unknown; new: unknown }>;
+    };
+    const audits = () =>
+      (mockAuditRepo.save.mock.calls as unknown[][]).map(
+        (c) => c[0] as AuditRow,
+      );
+    const draftAudits = () =>
+      audits().filter((a) => a.action === AuditAction.DRAFT_DISCARDED);
+    const dayCloseAudit = () =>
+      audits().find((a) => a.action === AuditAction.DAY_CLOSE);
+    const at = (needle: string) =>
+      queries.findIndex((q) => q.sql.includes(needle));
+    const ran = (needle: string) => at(needle) !== -1;
+    const ids = () => fixtures.saleRows.map((s) => s.id).sort();
+
+    // The transaction as Postgres runs it: on a throw, every write made
+    // through it (drafts deleted, the day closed) is undone. The audit rows
+    // go the same way; each test checks they were written inside it.
+    const rollingBack = () => {
+      mockDataSource.transaction.mockImplementationOnce(
+        async (cb: (m: typeof mockManager) => unknown) => {
+          const saved = {
+            saleRows: structuredClone(fixtures.saleRows),
+            days: structuredClone(fixtures.days),
+          };
+          inTx = true;
+          try {
+            return await cb(mockManager);
+          } catch (err) {
+            fixtures.saleRows = saved.saleRows;
+            fixtures.days = saved.days;
+            throw err;
+          } finally {
+            inTx = false;
+          }
+        },
+      );
+    };
+
+    beforeEach(() => {
+      fixtures.days.push(openDay());
+    });
+
+    it('discards every unpaid draft at the branch: empty or with lines, any age, any cashier', async () => {
+      fixtures.saleRows = [
+        saleRow({ id: 'draft-a' }),
+        saleRow({
+          id: 'draft-b',
+          cashier_id: 'cashier-2',
+          cashier_name: 'Other',
+          lines: [glassLine],
+          subtotal: '1980.00',
+          total: '1980.00',
+          created_at: new Date('2026-10-15T09:00:00Z'),
+          updated_at: new Date('2026-10-15T09:05:00Z'),
+        }),
+        saleRow({
+          id: 'draft-c',
+          cashier_id: 'admin-1',
+          cashier_name: 'Shop Admin',
+          lines: [glassLine, phoneLine],
+          created_at: new Date('2026-09-01T09:00:00Z'),
+          updated_at: new Date('2026-09-01T09:00:00Z'),
+        }),
+        // Not this close's: another branch's draft, and finished sales.
+        saleRow({ id: 'draft-other-branch', branch_id: 'branch-2' }),
+        saleRow({ id: 'sale-completed', status: 'COMPLETED' }),
+        saleRow({ id: 'sale-voided', status: 'VOIDED' }),
+      ];
+
+      const day = await service.close('day-1', closeDto(), cashier);
+
+      expect(day.closed_at).not.toBeNull();
+      expect(ids()).toEqual([
+        'draft-other-branch',
+        'sale-completed',
+        'sale-voided',
+      ]);
+      expect(draftAudits().map((a) => a.entity_id)).toEqual([
+        'draft-a',
+        'draft-b',
+        'draft-c',
+      ]);
+      expect(dayCloseAudit()?.changes.drafts_discarded).toEqual({
+        old: null,
+        new: 3,
+      });
+
+      // Every draft at the closing branch: no age, line or cashier filter.
+      const lock = queries[at('FOR UPDATE OF s')];
+      expect(lock.params).toEqual(['branch-1']);
+      expect(lock.sql).toContain("s.status = 'DRAFT'");
+      expect(lock.sql).not.toMatch(/updated_at|opened_at|sale_lines|cashier/);
+      expect(lock.sql).toContain('ORDER BY s.id');
+      // The DELETE re-checks DRAFT and no payment, for exactly those ids.
+      const del = queries[at('DELETE FROM sales')];
+      expect(del.sql).toContain("s.status = 'DRAFT'");
+      expect(del.sql).toContain(
+        'NOT EXISTS (SELECT 1 FROM payments p WHERE p.sale_id = s.id)',
+      );
+      expect(del.params).toEqual([['draft-a', 'draft-b', 'draft-c']]);
+    });
+
+    it('keeps each draft in its DRAFT_DISCARDED row: sale, cashier, lines, totals, times, cash day, reason, closer; never a cost price', async () => {
+      fixtures.saleRows = [
+        saleRow({
+          id: 'draft-b',
+          cashier_id: 'cashier-2',
+          cashier_name: 'Other',
+          customer_id: 'customer-9',
+          notes: 'Hold for pickup',
+          lines: [glassLine, phoneLine],
+          subtotal: '151980.00',
+          total: '151980.00',
+          created_at: new Date('2026-10-15T09:00:00Z'),
+          updated_at: new Date('2026-10-15T09:05:00Z'),
+        }),
+      ];
+
+      await service.close('day-1', closeDto(), admin);
+
+      const [row] = draftAudits();
+      expect(row).toMatchObject({
+        action: AuditAction.DRAFT_DISCARDED,
+        entity_type: 'Sale',
+        entity_id: 'draft-b',
+        user_id: 'admin-1',
+      });
+      expect(row.description).toBe(
+        'Unpaid draft draft-b (2 lines, LKR 151980.00, cashier Other) ' +
+          'discarded when day 2026-10-20 was closed by Shop Admin (admin-1).',
+      );
+      expect(row.changes).toEqual({
+        status: { old: 'DRAFT', new: 'DISCARDED' },
+        sale: {
+          old: {
+            id: 'draft-b',
+            branch_id: 'branch-1',
+            cashier_id: 'cashier-2',
+            cashier_name: 'Other',
+            customer_id: 'customer-9',
+            subtotal: '151980.00',
+            discount_total: '0.00',
+            tax_total: '0.00',
+            total: '151980.00',
+            notes: 'Hold for pickup',
+            created_at: new Date('2026-10-15T09:00:00Z'),
+            updated_at: new Date('2026-10-15T09:05:00Z'),
+            lines: [glassLine, phoneLine],
+          },
+          new: null,
+        },
+        discard: {
+          old: null,
+          new: {
+            reason: 'AUTO_DISCARD_ON_DAY_CLOSE',
+            cash_day_id: 'day-1',
+            business_date: '2026-10-20',
+            closed_by: 'admin-1',
+          },
+        },
+      });
+      // No cost price is selected, so none can be kept.
+      expect(queries[at('FROM sale_lines sl')].sql).not.toMatch(/cost/);
+      expect(queries[at('LEFT JOIN users u')].sql).not.toMatch(/cost/);
+      expect(JSON.stringify(row)).not.toMatch(/cost/);
+    });
+
+    it('records the count on DAY_CLOSE, in its changes and description', async () => {
+      fixtures.saleRows = [
+        saleRow({ id: 'draft-a' }),
+        saleRow({ id: 'draft-b' }),
+      ];
+
+      await service.close('day-1', closeDto(), cashier);
+
+      const row = dayCloseAudit()!;
+      expect(row.changes.drafts_discarded).toEqual({ old: null, new: 2 });
+      expect(row.description).toContain('. Unpaid drafts discarded: 2.');
+      // The discard rows come before DAY_CLOSE, all in the transaction.
+      expect(audits().map((a) => a.action)).toEqual([
+        AuditAction.DRAFT_DISCARDED,
+        AuditAction.DRAFT_DISCARDED,
+        AuditAction.DAY_CLOSE,
+      ]);
+      expect(auditInTx).toEqual([true, true, true]);
+    });
+
+    it('with no drafts: no snapshot or DELETE, and drafts_discarded 0', async () => {
+      await service.close('day-1', closeDto(), cashier);
+
+      expect(ran('SELECT DISTINCT p.sale_id')).toBe(false);
+      expect(ran('LEFT JOIN users u')).toBe(false);
+      expect(ran('DELETE FROM sales')).toBe(false);
+      expect(dayCloseAudit()?.changes.drafts_discarded).toEqual({
+        old: null,
+        new: 0,
+      });
+      expect(dayCloseAudit()?.description).not.toContain('Unpaid drafts');
+    });
+
+    it('any payment protects its draft: the check has no method or amount filter (CASH, card, split, TRADE_IN, zero)', async () => {
+      // Payment rows of any kind are just rows here: the check asks only
+      // whether one exists.
+      fixtures.saleRows = [
+        saleRow({ id: 'draft-cash', payments: ['p-cash'] }),
+        saleRow({ id: 'draft-split', payments: ['p-card', 'p-cash-2'] }),
+        saleRow({ id: 'draft-trade-in', payments: ['p-trade-in'] }),
+        saleRow({ id: 'draft-zero', payments: ['p-zero'] }),
+      ];
+
+      const { body } = await refusal(
+        service.close('day-1', closeDto(), cashier),
+      );
+
+      expect(body).toMatchObject({ code: 'OPEN_SALES', sale_count: 4 });
+      // No payment detail in the refusal.
+      expect(Object.keys(body).sort()).toEqual([
+        'code',
+        'message',
+        'sale_count',
+      ]);
+      const check = queries[at('SELECT DISTINCT p.sale_id')];
+      expect(check.sql).toContain('FROM payments p');
+      expect(check.sql).toContain('p.sale_id = ANY($1::uuid[])');
+      expect(check.sql).not.toMatch(/payment_method|amount|status/);
+    });
+
+    it('a paid draft next to unpaid ones: nothing deleted, no DRAFT_DISCARDED, the day stays open', async () => {
+      fixtures.saleRows = [
+        saleRow({ id: 'draft-a' }),
+        saleRow({ id: 'draft-b', lines: [glassLine] }),
+        saleRow({
+          id: 'draft-old-paid',
+          cashier_id: 'cashier-2',
+          created_at: new Date('2026-10-01T09:00:00Z'),
+          payments: ['p-trade-in'],
+        }),
+      ];
+
+      const { body } = await refusal(
+        service.close('day-1', closeDto(), cashier),
+      );
+
+      expect(body).toMatchObject({ code: 'OPEN_SALES', sale_count: 1 });
+      expect(ids()).toEqual(['draft-a', 'draft-b', 'draft-old-paid']);
+      expect(ran('DELETE FROM sales')).toBe(false);
+      expect(ran('LEFT JOIN users u')).toBe(false);
+      expect(audits()).toEqual([]);
+      expect(fixtures.days[0].closed_at).toBeNull();
+      // Refused before the cash-day row was locked or the figures read.
+      expect(dayLockAt).toBe(-1);
+      expect(ran('-- cash day:')).toBe(false);
+    });
+
+    it('locks in order: draft lock, drafts by id, payments in their own statement, day row; discards after every check', async () => {
+      fixtures.saleRows = [
+        saleRow({ id: 'draft-b' }),
+        saleRow({ id: 'draft-a' }),
+      ];
+
+      await service.close('day-1', closeDto(), cashier);
+
+      // The branch's draft lock, exclusive, with the branch id.
+      const lock = queries[at('pg_advisory_xact_lock')];
+      expect(lock.sql).toBe(DRAFTS_LOCK_SQL);
+      expect(lock.sql).toContain(`hashtext('sale_drafts:' || $1::text)`);
+      expect(lock.sql).not.toContain('_shared');
+      expect(lock.params).toEqual(['branch-1']);
+
+      const lockAt = at('pg_advisory_xact_lock');
+      const draftsAt = at('FOR UPDATE OF s');
+      const paymentsAt = at('SELECT DISTINCT p.sale_id');
+      const summaryAt = at('-- cash day: counts');
+      const deleteAt = at('DELETE FROM sales');
+      const closeAt = at('UPDATE cash_days');
+      // The locking statement reads no payment: a FOR UPDATE that waited
+      // re-checks only its row, so payments are read after, fresh.
+      expect(queries[draftsAt].sql).not.toContain('payments');
+      expect(lockAt).toBeLessThan(draftsAt);
+      expect(draftsAt).toBeLessThan(paymentsAt);
+      expect(paymentsAt).toBeLessThan(dayLockAt);
+      expect(dayLockAt).toBeLessThan(summaryAt);
+      expect(summaryAt).toBeLessThan(deleteAt);
+      expect(deleteAt).toBeLessThan(closeAt);
+      expect(queries.slice(lockAt).every((q) => q.inTx)).toBe(true);
+      expect(queries[deleteAt].params).toEqual([['draft-a', 'draft-b']]);
+    });
+
+    it('a refusal after the locks (EXPECTED_CHANGED, REASON_REQUIRED, DAY_ALREADY_CLOSED) discards nothing', async () => {
+      const drafts = () => [saleRow({ id: 'draft-a', lines: [glassLine] })];
+
+      fixtures.saleRows = drafts();
+      const changed = await refusal(
+        service.close('day-1', closeDto({ expected_seen: 1 }), cashier),
+      );
+      expect(changed.body.code).toBe('EXPECTED_CHANGED');
+
+      const reason = await refusal(
+        service.close('day-1', closeDto({ counted_balance: 15000 }), cashier),
+      );
+      expect(reason.body.code).toBe('REASON_REQUIRED');
+
+      fixtures.days[0] = closedDay();
+      const closed = await refusal(service.close('day-1', closeDto(), cashier));
+      expect(closed.body.code).toBe('DAY_ALREADY_CLOSED');
+
+      expect(ids()).toEqual(['draft-a']);
+      expect(ran('DELETE FROM sales')).toBe(false);
+      expect(audits()).toEqual([]);
+    });
+
+    it('a failing DRAFT_DISCARDED write rolls back the discard and the close', async () => {
+      fixtures.saleRows = [
+        saleRow({ id: 'draft-a' }),
+        saleRow({ id: 'draft-b' }),
+      ];
+      rollingBack();
+      mockAuditRepo.save
+        .mockImplementationOnce(() => {
+          auditInTx.push(inTx);
+          return Promise.resolve({});
+        })
+        .mockImplementationOnce(() => {
+          auditInTx.push(inTx);
+          return Promise.reject(new Error('audit write failed'));
+        });
+
+      await expect(service.close('day-1', closeDto(), cashier)).rejects.toThrow(
+        'audit write failed',
+      );
+
+      // Everything was written through the transaction that failed.
+      expect(queries[at('DELETE FROM sales')].inTx).toBe(true);
+      expect(auditInTx).toEqual([true, true]);
+      expect(ran('UPDATE cash_days')).toBe(false);
+      expect(ids()).toEqual(['draft-a', 'draft-b']);
+      expect(fixtures.days[0].closed_at).toBeNull();
+    });
+
+    it('a failing cash-day UPDATE rolls back the discard and its DRAFT_DISCARDED rows', async () => {
+      fixtures.saleRows = [saleRow({ id: 'draft-a', lines: [glassLine] })];
+      fixtures.failCloseUpdate = true;
+      rollingBack();
+
+      await expect(service.close('day-1', closeDto(), cashier)).rejects.toThrow(
+        'UPDATE cash_days failed',
+      );
+
+      expect(queries[at('DELETE FROM sales')].inTx).toBe(true);
+      expect(draftAudits()).toHaveLength(1);
+      expect(auditInTx).toEqual([true]);
+      expect(dayCloseAudit()).toBeUndefined();
+      expect(ids()).toEqual(['draft-a']);
+      expect(fixtures.days[0].closed_at).toBeNull();
+    });
+
+    it('fewer rows deleted than drafts locked throws, writes no audit and rolls back', async () => {
+      fixtures.saleRows = [
+        saleRow({ id: 'draft-a' }),
+        saleRow({ id: 'draft-b' }),
+      ];
+      rollingBack();
+      // Can't happen with the drafts locked; if it ever did, the close
+      // must not go through on a partial discard.
+      const answer = mockManager.query.getMockImplementation()!;
+      mockManager.query.mockImplementation(
+        (sql: string, params?: unknown[]) => {
+          if (sql.includes('DELETE FROM sales')) {
+            queries.push({ sql, params: params ?? [], inTx });
+            return Promise.resolve([[], 1]);
+          }
+          return answer(sql, params);
+        },
+      );
+
+      await expect(service.close('day-1', closeDto(), cashier)).rejects.toThrow(
+        '1 of 2 locked drafts discarded',
+      );
+
+      expect(audits()).toEqual([]);
+      expect(ran('UPDATE cash_days')).toBe(false);
+      expect(ids()).toEqual(['draft-a', 'draft-b']);
+    });
+
+    it('a resend of a close that discarded drafts gets the closed day; nothing discarded or audited again', async () => {
+      fixtures.saleRows = [saleRow({ id: 'draft-a' })];
+      await service.close('day-1', closeDto(), cashier);
+      expect(draftAudits()).toHaveLength(1);
+      const auditCount = audits().length;
+      fixtures.saleRows = [saleRow({ id: 'draft-later' })];
+      queries = [];
+
+      const day = await service.close('day-1', closeDto(), cashier);
+
+      expect(day.closed_at).not.toBeNull();
+      expect(mockDataSource.transaction).toHaveBeenCalledTimes(1);
+      expect(audits()).toHaveLength(auditCount);
+      expect(ran('pg_advisory_xact_lock')).toBe(false);
+      expect(ids()).toEqual(['draft-later']);
+    });
+
+    it('a resend recorded by the time its transaction starts returns before any draft is locked', async () => {
+      fixtures.saleRows = [saleRow({ id: 'draft-a' })];
+      mockDataSource.transaction.mockImplementationOnce(
+        async (cb: (m: typeof mockManager) => unknown) => {
+          // The first request commits while this one waits to start.
+          fixtures.days[0] = closedDay({
+            close_client_request_id: 'close-crid-new',
+          });
+          inTx = true;
+          try {
+            return await cb(mockManager);
+          } finally {
+            inTx = false;
+          }
+        },
+      );
+
+      const day = await service.close('day-1', closeDto(), cashier);
+
+      expect(day.closed_at).not.toBeNull();
+      expect(ran('pg_advisory_xact_lock')).toBe(false);
+      expect(ran('DELETE FROM sales')).toBe(false);
+      expect(audits()).toEqual([]);
+      expect(ids()).toEqual(['draft-a']);
+    });
+
+    it('never touches stock, units, payments or lines directly, nor the figures', async () => {
+      fixtures.saleRows = [
+        saleRow({ id: 'draft-a', lines: [glassLine, phoneLine] }),
+      ];
+
+      const day = await service.close('day-1', closeDto(), cashier);
+
+      const writes = queries.filter((q) =>
+        /^\s*(INSERT|UPDATE|DELETE)/i.test(q.sql),
+      );
+      expect(
+        writes.map((q) => q.sql.trim().split(/\s+/).slice(0, 3).join(' ')),
+      ).toEqual(['DELETE FROM sales', 'UPDATE cash_days SET']);
+      expect(queries.some((q) => /\bstock\b|product_units/.test(q.sql))).toBe(
+        false,
+      );
+      // The figures are the same as a close with no drafts.
+      expect(day).toMatchObject({
+        cash_sales: '12000.00',
+        cash_refunds: '1500.00',
+        expected_balance: '15500.00',
+        difference: '0.00',
       });
     });
   });

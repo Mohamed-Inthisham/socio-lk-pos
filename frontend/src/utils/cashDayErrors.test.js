@@ -14,6 +14,7 @@ import {
   dayAlreadyOpenError,
   earlierDayNotClosedError,
   expectedChangedError,
+  openSalesError,
   reasonRequiredError,
 } from "../test/cashDayEntities";
 
@@ -75,6 +76,12 @@ describe("classifyCashDayError", () => {
         difference: "-1500.00",
         difference_cents: -150000,
       },
+    ],
+    [
+      "P9-12 open sales: retryable, not blocking, with the count",
+      () => openSalesError(2),
+      CLOSE,
+      { kind: CASH_DAY_ERROR.OPEN_SALES, status: 409, sale_count: 2 },
     ],
     ["401", cashDayUnauthenticatedError, CURRENT, { kind: CASH_DAY_ERROR.UNAUTHENTICATED, status: 401, blocks: true }],
     ["another 403", cashDayForbiddenError, LIST, { kind: CASH_DAY_ERROR.FORBIDDEN, status: 403, blocks: true }],
@@ -148,6 +155,18 @@ describe("classifyCashDayError", () => {
     expect(classifyCashDayError(unknown, OPEN).kind).toBe(CASH_DAY_ERROR.FORBIDDEN);
   });
 
+  it("OPEN_SALES is read by its code, whatever the message; a missing or invalid count is 1", () => {
+    const error = openSalesError(3);
+    error.response.data.message = "Something else entirely";
+    expect(classifyCashDayError(error, CLOSE)).toMatchObject({ kind: CASH_DAY_ERROR.OPEN_SALES, sale_count: 3 });
+
+    for (const count of [undefined, null, 0, -2, 1.5, "2"]) {
+      const odd = openSalesError();
+      odd.response.data.sale_count = count;
+      expect(classifyCashDayError(odd, CLOSE).sale_count).toBe(1);
+    }
+  });
+
   it("an unknown 409 is rejected, not guessed", () => {
     const error = cashDayRequestIdConflictError();
     error.response.data.code = "SOMETHING_NEW";
@@ -208,6 +227,18 @@ describe("cashDayErrorView", () => {
       `Short ${LKR}1,500.00: give a reason (at least 3 characters).`,
     ],
     ["C9 over", () => reasonRequiredError("50.50"), CLOSE, `Over ${LKR}50.50: give a reason (at least 3 characters).`],
+    [
+      "P9-12 one open sale",
+      () => openSalesError(1),
+      CLOSE,
+      "An unfinished sale has a payment recorded, so the day can't close. Complete the sale or remove its payment, then close again.",
+    ],
+    [
+      "P9-12 several open sales, with the count",
+      () => openSalesError(3),
+      CLOSE,
+      "3 unfinished sales have payments recorded, so the day can't close. Complete them or remove their payments, then close again.",
+    ],
     ["401", cashDayUnauthenticatedError, CURRENT, "Your session has ended. Log in again."],
     ["another 403", cashDayForbiddenError, CLOSE, "You can't do this here."],
   ])("%s", (_, makeError, op, message) => {
@@ -250,6 +281,7 @@ describe("cashDayErrorView", () => {
       [earlierDayNotClosedError, OPEN],
       [dayAlreadyClosedError, CLOSE],
       [() => dayAlreadyOpenError("2026-10-20T12:45:00.000Z"), OPEN],
+      [openSalesError, CLOSE],
     ]) {
       const error = classifyCashDayError(makeError(), op);
       expect(cashDayErrorView(error).message).not.toBe(error.message);

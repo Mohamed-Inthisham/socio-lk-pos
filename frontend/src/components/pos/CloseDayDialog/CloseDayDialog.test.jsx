@@ -21,6 +21,7 @@ import {
   dayAlreadyClosedError,
   expectedChangedError,
   openCashDayEntity,
+  openSalesError,
   reasonRequiredError,
 } from "../../../test/cashDayEntities";
 
@@ -44,6 +45,7 @@ const renderDialog = async ({
   current = todayOpen,
   dayId = "day-1020",
   lines = [],
+  payments = [],
   summaryReply,
   summaryFails = false,
 } = {}) => {
@@ -56,7 +58,7 @@ const renderDialog = async ({
       branches: branchesState([mainShop]),
       cashDay: cashDayState({ branchId: BRANCH_ID, current }),
       posTerminal: posTerminalState({
-        draftSale: { id: "sale-1", status: "DRAFT", branch_id: BRANCH_ID, lines, payments: [], total: "0.00" },
+        draftSale: { id: "sale-1", status: "DRAFT", branch_id: BRANCH_ID, lines, payments, total: "0.00" },
       }),
     },
   });
@@ -166,6 +168,29 @@ describe("CloseDayDialog: count (P9-11)", () => {
   it("has no warning with an empty cart", async () => {
     await renderDialog();
     expect(screen.queryByTestId("cart-warning")).not.toBeInTheDocument();
+  });
+
+  it("says unpaid unfinished sales are discarded with the close, on the count only, with no count of them", async () => {
+    const user = userEvent.setup();
+    await renderDialog();
+
+    expect(screen.getByTestId("close-day-cleanup-notice")).toHaveTextContent(
+      "Unfinished sales without a payment, on any till at this branch, are discarded when the day closes.",
+    );
+    expect(screen.getByTestId("close-day-cleanup-notice").textContent).not.toMatch(/\d/);
+
+    await user.type(counted(), "15500");
+    await user.click(screen.getByRole("button", { name: "Close day" }));
+    await screen.findByTestId("close-day-final");
+    expect(screen.queryByTestId("close-day-cleanup-notice")).not.toBeInTheDocument();
+  });
+
+  it("keeps the open-sale guard beside the notice: this till's items still block closing", async () => {
+    await renderDialog({ lines: [{ id: "l1", quantity: 1 }] });
+
+    expect(screen.getByTestId("cart-warning")).toBeInTheDocument();
+    expect(screen.getByTestId("close-day-cleanup-notice")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Close day" })).toBeDisabled();
   });
 
   it("Esc cancels without sending anything", async () => {
@@ -365,5 +390,103 @@ describe("CloseDayDialog: server answers", () => {
 
     expect(await screen.findByTestId("close-day-closed")).toBeInTheDocument();
     expect(bodies()[1]).toEqual(bodies()[0]);
+  });
+});
+
+describe("CloseDayDialog: OPEN_SALES, a sale with a payment (P9-12)", () => {
+  const ONE =
+    "An unfinished sale has a payment recorded, so the day can't close. Complete the sale or remove its payment, then close again.";
+  const earlierDay = {
+    current: {
+      status: "earlier_open",
+      businessDate: "2026-10-20",
+      today: null,
+      earlierOpen: { id: "day-1019", business_date: "2026-10-19" },
+    },
+    dayId: "day-1019",
+    summary: cashDaySummaryEntity({ cash_day_id: "day-1019", business_date: "2026-10-19" }),
+  };
+
+  it("says so and stays open on Confirm with the count kept: no closed panel, the day not closed", async () => {
+    const user = userEvent.setup();
+    cashDaysService.closeCashDay.mockRejectedValueOnce(openSalesError(1));
+    const { store } = await renderDialog();
+
+    await countAndClose(user, "15400", "Coins short at count");
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(ONE);
+    expect(dialog()).toBeInTheDocument();
+    expect(screen.queryByTestId("close-day-closed")).not.toBeInTheDocument();
+    // Not blocking: Back and Close day stay, not just Done.
+    expect(within(dialog()).getAllByRole("button").map((b) => b.textContent)).toEqual(["Back", "Close day"]);
+    expect(counted()).toHaveValue("15400");
+    expect(reasonBox()).toHaveValue("Coins short at count");
+    expect(store.getState().cashDay.close).toMatchObject({ status: "error", closedDay: null, unconfirmed: false });
+    expect(store.getState().cashDay.current.today.closed_at).toBeNull();
+  });
+
+  it("Close day sends again, with the same count and request id, once the sale is dealt with, and closes", async () => {
+    const user = userEvent.setup();
+    cashDaysService.closeCashDay.mockRejectedValueOnce(openSalesError(2));
+    await renderDialog();
+
+    await countAndClose(user, "15500");
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "2 unfinished sales have payments recorded, so the day can't close.",
+    );
+
+    cashDaysService.closeCashDay.mockResolvedValueOnce(closedCashDayEntity());
+    await user.click(screen.getByRole("button", { name: "Close day" }));
+
+    expect(await screen.findByTestId("close-day-closed")).toBeInTheDocument();
+    expect(cashDaysService.closeCashDay).toHaveBeenCalledTimes(2);
+    expect(bodies()[1]).toEqual(bodies()[0]);
+  });
+
+  it("leaves this till's cart and its payments exactly as they were", async () => {
+    const user = userEvent.setup();
+    cashDaysService.closeCashDay.mockRejectedValueOnce(openSalesError(1));
+    // An earlier day: the cart doesn't block that close, so it is there to check.
+    const { store } = await renderDialog({
+      ...earlierDay,
+      lines: [{ id: "l1", quantity: 1 }],
+      payments: [{ id: "p1", payment_method: "CASH", amount: "500.00" }],
+    });
+    const before = store.getState().posTerminal;
+
+    await countAndClose(user, "15500");
+    await screen.findByRole("alert");
+
+    // Untouched: the same state object, its lines and payments included.
+    expect(store.getState().posTerminal).toBe(before);
+    expect(store.getState().posTerminal.draftSale.payments).toEqual([
+      { id: "p1", payment_method: "CASH", amount: "500.00" },
+    ]);
+  });
+
+  it("sends once on a double click, before and after the refusal", async () => {
+    const user = userEvent.setup();
+    let refuse;
+    cashDaysService.closeCashDay.mockReturnValueOnce(
+      new Promise((_, reject) => {
+        refuse = reject;
+      }),
+    );
+    await renderDialog();
+    await user.type(counted(), "15500");
+    await user.click(screen.getByRole("button", { name: "Close day" }));
+
+    await user.dblClick(await screen.findByRole("button", { name: "Close day" }));
+    expect(cashDaysService.closeCashDay).toHaveBeenCalledTimes(1);
+
+    await act(async () => refuse(openSalesError(1)));
+    await screen.findByRole("alert");
+
+    const pending = deferred();
+    cashDaysService.closeCashDay.mockReturnValueOnce(pending.promise);
+    await user.dblClick(screen.getByRole("button", { name: "Close day" }));
+    expect(cashDaysService.closeCashDay).toHaveBeenCalledTimes(2);
+    await act(async () => pending.resolve(closedCashDayEntity()));
+    expect(await screen.findByTestId("close-day-closed")).toBeInTheDocument();
   });
 });

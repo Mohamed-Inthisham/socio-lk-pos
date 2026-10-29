@@ -55,7 +55,7 @@ export const CASH_DAY_ERROR = {
   ALREADY_CLOSED: "already_closed", // C7
   EXPECTED_CHANGED: "expected_changed", // C8
   REASON_REQUIRED: "reason_required", // C9
-  OPEN_SALES: "open_sales", // P9-12: finish or discard drafts before close
+  OPEN_SALES: "open_sales", // P9-12: a draft with a payment blocks close (unpaid ones are discarded)
   UNAUTHENTICATED: "unauthenticated", // 401: the session could not be refreshed
   SERVER: "server", // 5xx: outcome unknown until re-read
   NETWORK: "network", // no response
@@ -101,10 +101,12 @@ const BY_CODE = {
     closed_at: data.closed_at ?? null,
   }),
   EXPECTED_CHANGED: (data) => ({ kind: CASH_DAY_ERROR.EXPECTED_CHANGED, summary: data.summary ?? null }),
+  // Not blocking: once the paid sale is completed or its payment removed
+  // (often on another till), Close day sends again from the same dialog.
+  // A refused close isn't recorded, so its request id can be sent again.
   OPEN_SALES: (data) => ({
     kind: CASH_DAY_ERROR.OPEN_SALES,
-    blocks: true,
-    sale_count: data.sale_count ?? 1,
+    sale_count: Number.isInteger(data.sale_count) && data.sale_count > 0 ? data.sale_count : 1,
   }),
   REASON_REQUIRED: (data) => ({
     kind: CASH_DAY_ERROR.REASON_REQUIRED,
@@ -244,8 +246,8 @@ export const cashDayErrorView = (error) => {
       return {
         ...view,
         message: count === 1
-          ? "There is an unfinished sale. Complete or discard it before closing the day."
-          : `There are ${count} unfinished sales. Complete or discard them before closing the day.`,
+          ? "An unfinished sale has a payment recorded, so the day can't close. Complete the sale or remove its payment, then close again."
+          : `${count} unfinished sales have payments recorded, so the day can't close. Complete them or remove their payments, then close again.`,
       };
     }
     case CASH_DAY_ERROR.REASON_REQUIRED:

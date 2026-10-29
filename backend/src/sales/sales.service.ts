@@ -28,6 +28,8 @@ import { ProductUnitsService } from '../product-units/product-units.service';
 import { LIVE_UNIT_STATUSES } from '../product-units/live-imei';
 import { lockInventoryRows } from '../stock/lock-inventory-rows';
 import { assertDayOpen } from '../cash-days/day-gate';
+import { DRAFTS_SHARED_LOCK_SQL } from '../cash-days/cash-days.service';
+import { readDraftSnapshots } from './draft-snapshot';
 import { SaleStatus } from './enums/sale-status.enum';
 import { SaleType } from './enums/sale-type.enum';
 import { DiscountType } from './enums/discount-type.enum';
@@ -70,7 +72,10 @@ import {
 } from '../approvals/approvals.service';
 import { UserRole } from '../users/enums/user-role.enum';
 import { AuditAction } from '../audit-log/enums/audit-action.enum';
-import { writeAuditEntry } from '../audit-log/utils/write-audit-entry';
+import {
+  AuditActor,
+  writeAuditEntry,
+} from '../audit-log/utils/write-audit-entry';
 
 /**
  * A return as GET /sales/:id shows it (Phase 6.4 P7-18): who approved and
@@ -281,7 +286,13 @@ export class SalesService {
       // All money fields default to '0' at the DB level
     });
 
-    return this.salesRepository.save(sale);
+    // The branch's draft lock, shared: a day close (exclusive) discards
+    // the drafts it lists, so a draft is made either before that list or
+    // after the close commits, never in between.
+    return this.dataSource.transaction(async (manager) => {
+      await manager.query(DRAFTS_SHARED_LOCK_SQL, [dto.branch_id]);
+      return manager.save(sale);
+    });
   }
 
   /**
@@ -608,66 +619,152 @@ export class SalesService {
    * changed via this endpoint. Attempting to update a COMPLETED or
    * VOIDED sale returns 400 (completed sales are immutable historical
    * records — if the cashier made a mistake, they void and re-create).
+   *
+   * Runs on the sale row locked pessimistic_write, as the line and payment
+   * mutations do, and writes only customer_id and notes. An unlocked
+   * read-then-save() could write a stale DRAFT back over a sale completed
+   * meanwhile, or re-insert a draft a day close had just discarded (save()
+   * inserts when the row is gone).
    */
   async update(id: string, dto: UpdateSaleDto): Promise<Sale> {
-    const sale = await this.findOne(id);
-
-    if (sale.status !== SaleStatus.DRAFT) {
-      throw new BadRequestException(
-        `Cannot update a ${sale.status} sale. Only DRAFT sales are mutable.`,
-      );
-    }
-
-    // DTO layer trims strings and converts empty strings to null.
-    // undefined = don't touch, null = clear, string = set.
-    // If customer_id is being SET (not cleared), validate it references
-    // an existing, non-deleted customer.
-    if (dto.customer_id !== undefined) {
-      // A TRADE_IN payment's intake belongs to the sale's customer, so the
-      // customer is locked once one exists. complete() rejects a detach
-      // anyway; refusing here surfaces the error at the edit, not at commit.
-      // Re-sending the current customer is a no-op and stays allowed.
-      if (
-        dto.customer_id !== sale.customer_id &&
-        sale.payments?.some((p) => p.payment_method === PaymentMethod.TRADE_IN)
-      ) {
+    await this.dataSource.transaction(async (manager) => {
+      const sale = await manager
+        .createQueryBuilder(Sale, 'sale')
+        .setLock('pessimistic_write')
+        .where('sale.id = :id', { id })
+        .getOne();
+      if (!sale) {
+        throw new NotFoundException('Sale not found');
+      }
+      if (sale.status !== SaleStatus.DRAFT) {
         throw new BadRequestException(
-          'Cannot change or detach the customer on a sale with a trade-in ' +
-            'payment. Remove the TRADE_IN payment(s) first.',
+          `Cannot update a ${sale.status} sale. Only DRAFT sales are mutable.`,
         );
       }
-      if (dto.customer_id !== null) {
-        await this.assertCustomerReference(dto.customer_id);
+
+      // DTO layer trims strings and converts empty strings to null.
+      // undefined = don't touch, null = clear, string = set.
+      // If customer_id is being SET (not cleared), validate it references
+      // an existing, non-deleted customer.
+      if (dto.customer_id !== undefined) {
+        // A TRADE_IN payment's intake belongs to the sale's customer, so the
+        // customer is locked once one exists. complete() rejects a detach
+        // anyway; refusing here surfaces the error at the edit, not at commit.
+        // Re-sending the current customer is a no-op and stays allowed.
+        if (
+          dto.customer_id !== sale.customer_id &&
+          (await manager.count(Payment, {
+            where: { sale_id: id, payment_method: PaymentMethod.TRADE_IN },
+          })) > 0
+        ) {
+          throw new BadRequestException(
+            'Cannot change or detach the customer on a sale with a trade-in ' +
+              'payment. Remove the TRADE_IN payment(s) first.',
+          );
+        }
+        if (dto.customer_id !== null) {
+          await this.assertCustomerReference(dto.customer_id);
+        }
       }
-      sale.customer_id = dto.customer_id;
-      // findOne loaded the customer relation, and save() lets a loaded
-      // relation override the FK column — the old customer (or null)
-      // would be written back. Drop it so customer_id drives the write.
-      delete sale.customer;
-    }
-    if (dto.notes !== undefined) sale.notes = dto.notes;
-    await this.salesRepository.save(sale);
+
+      await manager.query(
+        `UPDATE sales
+            SET customer_id = $2, notes = $3, updated_at = now()
+          WHERE id = $1`,
+        [
+          id,
+          dto.customer_id !== undefined ? dto.customer_id : sale.customer_id,
+          dto.notes !== undefined ? dto.notes : sale.notes,
+        ],
+      );
+    });
     // Re-read so the response carries the newly attached customer.
     return this.findOne(id);
   }
 
   /**
    * Discard a DRAFT sale. Hard delete — a DRAFT never became a real
-   * financial record, so no history is lost. Attempting to delete
-   * a COMPLETED or VOIDED sale returns 400.
+   * financial record — with one DRAFT_DISCARDED audit row keeping what it
+   * held. 404 if the sale doesn't exist; 400 for a COMPLETED or VOIDED
+   * sale; 409 DRAFT_HAS_PAYMENTS for a draft with any payment row.
    *
-   * If the sale doesn't exist, throws 404 (via findOne).
+   * On the sale row locked pessimistic_write, which completeSale and every
+   * line and payment mutation take first too: a sale completed or paid
+   * while this waited is seen here and kept. Status comes from the locked
+   * read, payments from their own statement after it, and the DELETE is
+   * guarded again by DRAFT and no payment. All one transaction, so a
+   * failed delete or audit write leaves the draft and writes no audit row.
    */
-  async discardDraft(id: string): Promise<void> {
-    const sale = await this.findOne(id);
+  async discardDraft(
+    id: string,
+    actor: AuditActor,
+    ip?: string | null,
+  ): Promise<void> {
+    await this.dataSource.transaction(async (manager) => {
+      const sale = await manager
+        .createQueryBuilder(Sale, 'sale')
+        .setLock('pessimistic_write')
+        .where('sale.id = :id', { id })
+        .getOne();
+      if (!sale) {
+        throw new NotFoundException('Sale not found');
+      }
+      if (sale.status !== SaleStatus.DRAFT) {
+        throw new BadRequestException(
+          `Cannot delete a ${sale.status} sale. Only DRAFT sales can be discarded.`,
+        );
+      }
+      // Any payment row protects the draft: its type and amount don't matter.
+      if ((await manager.count(Payment, { where: { sale_id: id } })) > 0) {
+        throw new ConflictException({
+          message:
+            'This sale has a payment recorded and cannot be discarded. ' +
+            'Please remove the payment first, or ask an administrator for ' +
+            'assistance.',
+          code: 'DRAFT_HAS_PAYMENTS',
+        });
+      }
 
-    if (sale.status !== SaleStatus.DRAFT) {
-      throw new BadRequestException(
-        `Cannot delete a ${sale.status} sale. Only DRAFT sales can be discarded.`,
+      const [snapshot] = await readDraftSnapshots(manager, [id]);
+      // manager.query answers a DELETE with [rows, affected count].
+      const [, deleted]: [unknown[], number] = await manager.query(
+        `DELETE FROM sales s
+          WHERE s.id = $1
+            AND s.status = 'DRAFT'
+            AND NOT EXISTS (SELECT 1 FROM payments p WHERE p.sale_id = s.id)`,
+        [id],
       );
-    }
+      if (deleted !== 1 || !snapshot) {
+        // The row is locked, so this means the data moved under us:
+        // throwing rolls the discard back.
+        throw new Error(
+          `Sale ${id} discard: ${deleted} rows deleted under the lock. ` +
+            'Nothing was changed.',
+        );
+      }
 
-    await this.salesRepository.remove(sale);
+      await writeAuditEntry(manager, {
+        actor,
+        action: AuditAction.DRAFT_DISCARDED,
+        entityType: 'Sale',
+        entityId: id,
+        description:
+          `Unpaid draft ${id} (${snapshot.lines.length} ` +
+          `${snapshot.lines.length === 1 ? 'line' : 'lines'}, LKR ` +
+          `${snapshot.total}, cashier ` +
+          `${snapshot.cashier_name ?? snapshot.cashier_id}) discarded by ` +
+          `${actor.full_name} (${actor.id}).`,
+        changes: {
+          status: { old: SaleStatus.DRAFT, new: 'DISCARDED' },
+          sale: { old: snapshot, new: null },
+          discard: {
+            old: null,
+            new: { reason: 'MANUAL_DISCARD', discarded_by: actor.id },
+          },
+        },
+        ip,
+      });
+    });
   }
 
   /**

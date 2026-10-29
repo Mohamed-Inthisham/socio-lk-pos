@@ -14,6 +14,10 @@ import { SaleStatus } from './enums/sale-status.enum';
 import { SaleType } from './enums/sale-type.enum';
 import { DiscountType } from './enums/discount-type.enum';
 import { Payment } from './entities/payment.entity';
+import {
+  DRAFTS_LOCK_SQL,
+  DRAFTS_SHARED_LOCK_SQL,
+} from '../cash-days/cash-days.service';
 import { SaleReturn } from './entities/sale-return.entity';
 import { PaymentMethod } from './enums/payment-method.enum';
 import { UpdatePaymentDto } from './dto/update-payment.dto';
@@ -313,7 +317,7 @@ describe('SalesService', () => {
       mockUsersRepo.findOne.mockResolvedValue(seedCashier());
       mockBranchesRepo.findOne.mockResolvedValue(seedActiveBranch());
       mockSalesRepo.create.mockImplementation((e) => e);
-      mockSalesRepo.save.mockImplementation((e) =>
+      mockManager.save.mockImplementationOnce((e) =>
         Promise.resolve({ id: 'sale-1', ...e }),
       );
 
@@ -333,6 +337,52 @@ describe('SalesService', () => {
         }),
       );
       expect(result.id).toBe('sale-1');
+    });
+
+    it("takes the branch's draft lock shared, in the INSERT's transaction, before the INSERT", async () => {
+      // A day close takes the same key exclusive before listing the drafts
+      // it discards, so a draft is never made between that list and its
+      // commit.
+      mockUsersRepo.findOne.mockResolvedValue(seedCashier());
+      mockBranchesRepo.findOne.mockResolvedValue(seedActiveBranch());
+      mockSalesRepo.create.mockImplementation((e) => e);
+      const order: string[] = [];
+      mockManager.query.mockImplementationOnce((sql: string) => {
+        order.push(sql);
+        return Promise.resolve([]);
+      });
+      mockManager.save.mockImplementationOnce((e) => {
+        order.push('save');
+        return Promise.resolve({ id: 'sale-1', ...e });
+      });
+
+      await service.create({ branch_id: 'branch-1' }, 'cashier-1');
+
+      expect(mockDataSource.transaction).toHaveBeenCalledTimes(1);
+      expect(order).toEqual([DRAFTS_SHARED_LOCK_SQL, 'save']);
+      expect(DRAFTS_SHARED_LOCK_SQL).toContain('pg_advisory_xact_lock_shared');
+      expect(mockManager.query).toHaveBeenCalledWith(DRAFTS_SHARED_LOCK_SQL, [
+        'branch-1',
+      ]);
+      // Never the repository's own save, outside the transaction.
+      expect(mockSalesRepo.save).not.toHaveBeenCalled();
+    });
+
+    it('uses the same lock key as the day close', () => {
+      const key = (sql: string) => sql.slice(sql.indexOf('('));
+      expect(key(DRAFTS_SHARED_LOCK_SQL)).toBe(key(DRAFTS_LOCK_SQL));
+      expect(DRAFTS_LOCK_SQL).toContain('pg_advisory_xact_lock(');
+    });
+
+    it('takes no lock and writes nothing when validation fails', async () => {
+      mockUsersRepo.findOne.mockResolvedValue(seedCashier());
+      mockBranchesRepo.findOne.mockResolvedValue(null);
+
+      await expect(
+        service.create({ branch_id: 'missing' }, 'cashier-1'),
+      ).rejects.toThrow(NotFoundException);
+      expect(mockDataSource.transaction).not.toHaveBeenCalled();
+      expect(mockManager.save).not.toHaveBeenCalled();
     });
 
     it('accepts optional customer_id and notes', async () => {
@@ -832,127 +882,158 @@ describe('SalesService', () => {
   });
 
   describe('update', () => {
-    it('updates notes and customer_id on a DRAFT sale', async () => {
-      const sale = {
+    // update() reads the sale locked (pessimistic_write) in a transaction,
+    // counts TRADE_IN payments only when the customer changes, writes
+    // customer_id and notes with one UPDATE, then re-reads the sale for
+    // the response (mockSalesRepo.findOne).
+    beforeEach(() => {
+      mockQueryBuilder.getOne.mockReset();
+      mockManager.query.mockReset();
+    });
+    afterEach(() => {
+      mockQueryBuilder.getOne.mockReset();
+      mockManager.query.mockReset();
+    });
+
+    const lockedSale = (sale: Partial<Sale> | null, tradeIns = 0) => {
+      mockQueryBuilder.getOne.mockResolvedValue(sale);
+      mockManager.count.mockResolvedValue(tradeIns);
+    };
+    const reread = (sale: Partial<Sale>) =>
+      mockSalesRepo.findOne.mockResolvedValue(sale);
+    const updateCalls = () =>
+      (mockManager.query.mock.calls as [string, unknown[]][]).filter(([sql]) =>
+        sql.includes('UPDATE sales'),
+      );
+    // The UPDATE's parameters: [id, customer_id, notes].
+    const written = () => updateCalls()[0]?.[1];
+
+    it('updates notes and customer_id on a DRAFT sale, on the locked row', async () => {
+      lockedSale({
         id: 's1',
         status: SaleStatus.DRAFT,
         customer_id: null,
         notes: null,
-      };
-      mockSalesRepo.findOne.mockResolvedValue(sale);
+      });
       mockCustomersService.findOne.mockResolvedValue({
         id: 'cust-99',
         deleted_at: null,
       });
-      mockSalesRepo.save.mockImplementation((e) => Promise.resolve(e));
+      reread({ id: 's1', customer_id: 'cust-99', notes: 'New notes' });
 
       const result = await service.update('s1', {
         customer_id: 'cust-99',
         notes: 'New notes',
       });
 
+      expect(mockDataSource.transaction).toHaveBeenCalledTimes(1);
+      expect(mockQueryBuilder.setLock).toHaveBeenCalledWith(
+        'pessimistic_write',
+      );
+      expect(mockQueryBuilder.where).toHaveBeenCalledWith('sale.id = :id', {
+        id: 's1',
+      });
+      expect(written()).toEqual(['s1', 'cust-99', 'New notes']);
       expect(result.customer_id).toBe('cust-99');
       expect(result.notes).toBe('New notes');
     });
 
-    it('drops the loaded customer relation before saving a new customer_id', async () => {
-      // Regression: findOne loads `customer`; if it is still on the entity
-      // at save(), TypeORM writes the old relation over the new FK.
-      const sale = {
+    it('writes only customer_id and notes, never save(), then re-reads for the response', async () => {
+      // Regression: save() of a read-then-modified entity wrote every
+      // column that differed from the row (a stale status, a loaded
+      // relation over the FK) and re-inserted a row that was gone.
+      lockedSale({
         id: 's1',
         status: SaleStatus.DRAFT,
         customer_id: null,
-        customer: null,
         notes: null,
-      };
-      mockSalesRepo.findOne.mockResolvedValue(sale);
+      });
       mockCustomersService.findOne.mockResolvedValue({
         id: 'cust-99',
         deleted_at: null,
       });
-      mockSalesRepo.save.mockImplementation((e) => Promise.resolve(e));
+      reread({ id: 's1', customer_id: 'cust-99' });
 
       await service.update('s1', { customer_id: 'cust-99' });
 
-      const saved = mockSalesRepo.save.mock.calls[0][0] as Record<
-        string,
-        unknown
-      >;
-      expect(saved.customer_id).toBe('cust-99');
-      expect('customer' in saved).toBe(false);
-      // Re-read after save so the response has the fresh relation
-      expect(mockSalesRepo.findOne).toHaveBeenCalledTimes(2);
+      expect(updateCalls()).toHaveLength(1);
+      const [sql] = updateCalls()[0];
+      expect(sql).toContain('SET customer_id = $2, notes = $3');
+      expect(sql).not.toContain('status');
+      expect(mockSalesRepo.save).not.toHaveBeenCalled();
+      expect(mockManager.save).not.toHaveBeenCalled();
+      // Re-read after the write so the response has the fresh relation
+      expect(mockSalesRepo.findOne).toHaveBeenCalledTimes(1);
     });
 
     it('clears customer_id when null is passed', async () => {
-      const sale = {
+      lockedSale({
         id: 's1',
         status: SaleStatus.DRAFT,
         customer_id: 'cust-old',
         notes: null,
-      };
-      mockSalesRepo.findOne.mockResolvedValue(sale);
-      mockSalesRepo.save.mockImplementation((e) => Promise.resolve(e));
+      });
+      reread({ id: 's1', customer_id: null });
 
       const result = await service.update('s1', { customer_id: null });
 
+      expect(written()).toEqual(['s1', null, null]);
       expect(result.customer_id).toBeNull();
     });
 
     it('does not touch fields not sent in the DTO', async () => {
-      const sale = {
+      lockedSale({
         id: 's1',
         status: SaleStatus.DRAFT,
         customer_id: 'cust-old',
         notes: 'old notes',
-      };
-      mockSalesRepo.findOne.mockResolvedValue(sale);
-      mockSalesRepo.save.mockImplementation((e) => Promise.resolve(e));
+      });
+      reread({ id: 's1', customer_id: 'cust-old', notes: 'new notes' });
 
       const result = await service.update('s1', { notes: 'new notes' });
 
+      // The locked row's own customer_id is written back unchanged.
+      expect(written()).toEqual(['s1', 'cust-old', 'new notes']);
       expect(result.customer_id).toBe('cust-old');
       expect(result.notes).toBe('new notes');
     });
 
-    it('throws BadRequestException when updating a COMPLETED sale', async () => {
-      mockSalesRepo.findOne.mockResolvedValue({
-        id: 's1',
-        status: SaleStatus.COMPLETED,
-      });
+    it('throws BadRequestException when updating a COMPLETED sale (status read under the lock)', async () => {
+      // A sale completed while the PATCH waited for the lock is seen as
+      // COMPLETED here and never written back as a DRAFT.
+      lockedSale({ id: 's1', status: SaleStatus.COMPLETED });
 
       await expect(
         service.update('s1', { notes: 'try to change' }),
       ).rejects.toThrow(BadRequestException);
+      expect(updateCalls()).toEqual([]);
     });
 
     it('throws BadRequestException when updating a VOIDED sale', async () => {
-      mockSalesRepo.findOne.mockResolvedValue({
-        id: 's1',
-        status: SaleStatus.VOIDED,
-      });
+      lockedSale({ id: 's1', status: SaleStatus.VOIDED });
 
       await expect(
         service.update('s1', { notes: 'try to change' }),
       ).rejects.toThrow(BadRequestException);
+      expect(updateCalls()).toEqual([]);
     });
 
-    it('throws NotFoundException when sale does not exist', async () => {
-      mockSalesRepo.findOne.mockResolvedValue(null);
+    it('throws NotFoundException when sale does not exist (or a day close discarded it meanwhile), writing nothing', async () => {
+      lockedSale(null);
 
       await expect(service.update('missing', {})).rejects.toThrow(
         NotFoundException,
       );
+      // Nothing written, and nothing re-inserted.
+      expect(updateCalls()).toEqual([]);
+      expect(mockSalesRepo.save).not.toHaveBeenCalled();
+      expect(mockManager.save).not.toHaveBeenCalled();
     });
 
     // ---- customer_id validation (Phase 6.3.5 Slice B) ----
 
     it('throws BadRequestException when updating to a nonexistent customer_id', async () => {
-      mockSalesRepo.findOne.mockResolvedValue({
-        id: 's1',
-        status: SaleStatus.DRAFT,
-        customer_id: null,
-      });
+      lockedSale({ id: 's1', status: SaleStatus.DRAFT, customer_id: null });
       mockCustomersService.findOne.mockRejectedValue(
         new NotFoundException('Customer not found'),
       );
@@ -961,16 +1042,12 @@ describe('SalesService', () => {
         service.update('s1', { customer_id: 'missing-cust' }),
       ).rejects.toThrow(BadRequestException);
 
-      // Sale should not be saved when validation fails
-      expect(mockSalesRepo.save).not.toHaveBeenCalled();
+      // Sale should not be written when validation fails
+      expect(updateCalls()).toEqual([]);
     });
 
     it('throws BadRequestException when updating to a soft-deleted customer_id', async () => {
-      mockSalesRepo.findOne.mockResolvedValue({
-        id: 's1',
-        status: SaleStatus.DRAFT,
-        customer_id: null,
-      });
+      lockedSale({ id: 's1', status: SaleStatus.DRAFT, customer_id: null });
       mockCustomersService.findOne.mockResolvedValue({
         id: 'deleted-cust',
         deleted_at: new Date(),
@@ -980,17 +1057,16 @@ describe('SalesService', () => {
         service.update('s1', { customer_id: 'deleted-cust' }),
       ).rejects.toThrow(BadRequestException);
 
-      expect(mockSalesRepo.save).not.toHaveBeenCalled();
+      expect(updateCalls()).toEqual([]);
     });
 
     it('does not call customersService.findOne when clearing customer_id (null)', async () => {
-      const sale = {
+      lockedSale({
         id: 's1',
         status: SaleStatus.DRAFT,
         customer_id: 'cust-old',
-      };
-      mockSalesRepo.findOne.mockResolvedValue(sale);
-      mockSalesRepo.save.mockImplementation((e) => Promise.resolve(e));
+      });
+      reread({ id: 's1', customer_id: null });
 
       await service.update('s1', { customer_id: null });
 
@@ -998,30 +1074,27 @@ describe('SalesService', () => {
     });
 
     it('throws BadRequestException when detaching customer with a TRADE_IN payment present', async () => {
-      mockSalesRepo.findOne.mockResolvedValue({
-        id: 's1',
-        status: SaleStatus.DRAFT,
-        customer_id: 'cust-1',
-        payments: [
-          { id: 'p1', payment_method: PaymentMethod.CASH },
-          { id: 'p2', payment_method: PaymentMethod.TRADE_IN },
-        ],
-      });
+      lockedSale(
+        { id: 's1', status: SaleStatus.DRAFT, customer_id: 'cust-1' },
+        1,
+      );
 
       await expect(service.update('s1', { customer_id: null })).rejects.toThrow(
         /Cannot change or detach the customer/,
       );
 
-      expect(mockSalesRepo.save).not.toHaveBeenCalled();
+      // The TRADE_IN count runs in the transaction, after the lock.
+      expect(mockManager.count).toHaveBeenCalledWith(Payment, {
+        where: { sale_id: 's1', payment_method: PaymentMethod.TRADE_IN },
+      });
+      expect(updateCalls()).toEqual([]);
     });
 
     it('throws BadRequestException when reassigning customer with a TRADE_IN payment present', async () => {
-      mockSalesRepo.findOne.mockResolvedValue({
-        id: 's1',
-        status: SaleStatus.DRAFT,
-        customer_id: 'cust-1',
-        payments: [{ id: 'p1', payment_method: PaymentMethod.TRADE_IN }],
-      });
+      lockedSale(
+        { id: 's1', status: SaleStatus.DRAFT, customer_id: 'cust-1' },
+        1,
+      );
 
       await expect(
         service.update('s1', { customer_id: 'cust-2' }),
@@ -1029,88 +1102,341 @@ describe('SalesService', () => {
 
       // Refused before the reference lookup or any write
       expect(mockCustomersService.findOne).not.toHaveBeenCalled();
-      expect(mockSalesRepo.save).not.toHaveBeenCalled();
+      expect(updateCalls()).toEqual([]);
     });
 
     it('allows re-sending the same customer_id on a sale with a TRADE_IN payment', async () => {
-      const sale = {
-        id: 's1',
-        status: SaleStatus.DRAFT,
-        customer_id: 'cust-1',
-        notes: null,
-        payments: [{ id: 'p1', payment_method: PaymentMethod.TRADE_IN }],
-      };
-      mockSalesRepo.findOne.mockResolvedValue(sale);
+      lockedSale(
+        {
+          id: 's1',
+          status: SaleStatus.DRAFT,
+          customer_id: 'cust-1',
+          notes: null,
+        },
+        1,
+      );
       mockCustomersService.findOne.mockResolvedValue({
         id: 'cust-1',
         deleted_at: null,
       });
-      mockSalesRepo.save.mockImplementation((e) => Promise.resolve(e));
+      reread({ id: 's1', customer_id: 'cust-1' });
 
       const result = await service.update('s1', { customer_id: 'cust-1' });
 
       expect(result.customer_id).toBe('cust-1');
-      expect(mockSalesRepo.save).toHaveBeenCalledTimes(1);
+      expect(updateCalls()).toHaveLength(1);
     });
 
     it('allows updating notes without customer_id on a sale with a TRADE_IN payment', async () => {
-      const sale = {
-        id: 's1',
-        status: SaleStatus.DRAFT,
-        customer_id: 'cust-1',
-        notes: null,
-        payments: [{ id: 'p1', payment_method: PaymentMethod.TRADE_IN }],
-      };
-      mockSalesRepo.findOne.mockResolvedValue(sale);
-      mockSalesRepo.save.mockImplementation((e) => Promise.resolve(e));
+      lockedSale(
+        {
+          id: 's1',
+          status: SaleStatus.DRAFT,
+          customer_id: 'cust-1',
+          notes: null,
+        },
+        1,
+      );
+      reread({ id: 's1', customer_id: 'cust-1', notes: 'Box included' });
 
       const result = await service.update('s1', { notes: 'Box included' });
 
+      expect(written()).toEqual(['s1', 'cust-1', 'Box included']);
       expect(result.notes).toBe('Box included');
       expect(result.customer_id).toBe('cust-1');
     });
   });
 
   describe('discardDraft', () => {
-    it('removes a DRAFT sale', async () => {
-      const sale = { id: 's1', status: SaleStatus.DRAFT };
-      mockSalesRepo.findOne.mockResolvedValue(sale);
-      mockSalesRepo.remove.mockResolvedValue(sale);
+    // One transaction on the sale row locked pessimistic_write: status from
+    // the locked read, a payment count, the snapshot reads, a DELETE guarded
+    // by DRAFT and no payment, then one DRAFT_DISCARDED audit row. `events`
+    // records each step in order, with "!tx" if it ran outside the
+    // transaction callback.
+    const actor = {
+      id: 'cashier-1',
+      full_name: 'Till Cashier',
+      role: UserRole.CASHIER,
+    };
+    const snapshotSale = {
+      id: 's1',
+      branch_id: 'branch-1',
+      cashier_id: 'cashier-1',
+      cashier_name: 'Till Cashier',
+      customer_id: null,
+      subtotal: '1980.00',
+      discount_total: '0.00',
+      tax_total: '0.00',
+      total: '1980.00',
+      notes: null,
+      created_at: new Date('2026-10-20T04:00:00Z'),
+      updated_at: new Date('2026-10-20T04:05:00Z'),
+    };
+    const snapshotLine = {
+      line_number: 1,
+      product_id: 'prod-1',
+      product_sku_snapshot: 'SLP-0001',
+      product_name_snapshot: 'Tempered Glass',
+      quantity: 2,
+      unit_price: '990.00',
+      discount_type: null,
+      discount_value: null,
+      discount_amount: '0.00',
+      line_total: '1980.00',
+      product_unit_id: null,
+      imei_snapshot: null,
+      identifier_type_snapshot: null,
+    };
 
-      await service.discardDraft('s1');
+    let inTx: boolean;
+    let events: string[];
+    let paymentRows: number;
+    let deletedRows: number;
+    const step = (name: string) => events.push(inTx ? name : `${name}!tx`);
+    const locked = (sale: Partial<Sale> | null) =>
+      mockQueryBuilder.getOne.mockImplementation(() => {
+        step('lock');
+        return Promise.resolve(sale);
+      });
+    const sqlOf = (needle: string) =>
+      (mockManager.query.mock.calls as [string, unknown[]][]).find(([sql]) =>
+        sql.includes(needle),
+      );
 
-      expect(mockSalesRepo.remove).toHaveBeenCalledWith(sale);
+    beforeEach(() => {
+      inTx = false;
+      events = [];
+      paymentRows = 0;
+      deletedRows = 1;
+      mockQueryBuilder.getOne.mockReset();
+      mockManager.query.mockReset();
+      mockAuditRepo.save.mockReset();
+      mockDataSource.transaction.mockImplementation(
+        async (cb: (m: typeof mockManager) => unknown) => {
+          inTx = true;
+          try {
+            return await cb(mockManager);
+          } finally {
+            inTx = false;
+          }
+        },
+      );
+      mockManager.count.mockImplementation(() => {
+        step('count');
+        return Promise.resolve(paymentRows);
+      });
+      mockManager.query.mockImplementation((sql: string) => {
+        if (sql.includes('LEFT JOIN users u')) {
+          step('snapshot');
+          return Promise.resolve([snapshotSale]);
+        }
+        if (sql.includes('FROM sale_lines sl')) {
+          step('snapshot-lines');
+          return Promise.resolve([{ sale_id: 's1', ...snapshotLine }]);
+        }
+        if (sql.includes('DELETE FROM sales')) {
+          step('delete');
+          // The Postgres driver answers a DELETE with [rows, affected count].
+          return Promise.resolve([[], deletedRows]);
+        }
+        throw new Error(`unexpected query: ${sql}`);
+      });
+      mockAuditRepo.save.mockImplementation((row: unknown) => {
+        step('audit');
+        return Promise.resolve(row);
+      });
+    });
+    afterEach(() => {
+      mockQueryBuilder.getOne.mockReset();
+      mockManager.query.mockReset();
+      mockAuditRepo.save.mockReset();
     });
 
-    it('throws BadRequestException when discarding a COMPLETED sale', async () => {
-      mockSalesRepo.findOne.mockResolvedValue({
-        id: 's1',
-        status: SaleStatus.COMPLETED,
-      });
+    it('deletes an unpaid draft: locked read, payment count, snapshot, guarded DELETE, audit, in one transaction', async () => {
+      locked({ id: 's1', status: SaleStatus.DRAFT });
 
-      await expect(service.discardDraft('s1')).rejects.toThrow(
-        BadRequestException,
+      await service.discardDraft('s1', actor, '10.0.0.5');
+
+      expect(mockDataSource.transaction).toHaveBeenCalledTimes(1);
+      expect(mockQueryBuilder.setLock).toHaveBeenCalledWith(
+        'pessimistic_write',
       );
+      expect(mockQueryBuilder.where).toHaveBeenCalledWith('sale.id = :id', {
+        id: 's1',
+      });
+      expect(events).toEqual([
+        'lock',
+        'count',
+        'snapshot',
+        'snapshot-lines',
+        'delete',
+        'audit',
+      ]);
+      const [deleteSql, deleteParams] = sqlOf('DELETE FROM sales')!;
+      expect(deleteSql).toContain('s.id = $1');
+      expect(deleteSql).toContain("s.status = 'DRAFT'");
+      expect(deleteSql).toContain(
+        'NOT EXISTS (SELECT 1 FROM payments p WHERE p.sale_id = s.id)',
+      );
+      expect(deleteParams).toEqual(['s1']);
+      // Never the old unlocked read-then-remove.
+      expect(mockSalesRepo.findOne).not.toHaveBeenCalled();
       expect(mockSalesRepo.remove).not.toHaveBeenCalled();
     });
 
-    it('throws BadRequestException when discarding a VOIDED sale', async () => {
-      mockSalesRepo.findOne.mockResolvedValue({
-        id: 's1',
-        status: SaleStatus.VOIDED,
-      });
+    it('writes one DRAFT_DISCARDED row: the draft, its lines, the reason and who discarded it; no cost price', async () => {
+      locked({ id: 's1', status: SaleStatus.DRAFT });
 
-      await expect(service.discardDraft('s1')).rejects.toThrow(
-        BadRequestException,
-      );
+      await service.discardDraft('s1', actor, '10.0.0.5');
+
+      expect(mockAuditRepo.save).toHaveBeenCalledTimes(1);
+      const row = mockAuditRepo.save.mock.calls[0][0] as Record<
+        string,
+        unknown
+      >;
+      expect(row).toEqual({
+        user_id: 'cashier-1',
+        user_name: 'Till Cashier',
+        user_role: UserRole.CASHIER,
+        action: AuditAction.DRAFT_DISCARDED,
+        entity_type: 'Sale',
+        entity_id: 's1',
+        description:
+          'Unpaid draft s1 (1 line, LKR 1980.00, cashier Till Cashier) ' +
+          'discarded by Till Cashier (cashier-1).',
+        changes: {
+          status: { old: SaleStatus.DRAFT, new: 'DISCARDED' },
+          sale: { old: { ...snapshotSale, lines: [snapshotLine] }, new: null },
+          discard: {
+            old: null,
+            new: { reason: 'MANUAL_DISCARD', discarded_by: 'cashier-1' },
+          },
+        },
+        ip_address: '10.0.0.5',
+      });
+      expect(JSON.stringify(row)).not.toMatch(/cost/);
+      expect(sqlOf('FROM sale_lines sl')![0]).not.toMatch(/cost/);
     });
 
-    it('throws NotFoundException when sale does not exist', async () => {
-      mockSalesRepo.findOne.mockResolvedValue(null);
+    it('keeps a draft with any payment row: 409 DRAFT_HAS_PAYMENTS, no DELETE, no audit', async () => {
+      locked({ id: 's1', status: SaleStatus.DRAFT });
+      paymentRows = 1;
 
-      await expect(service.discardDraft('missing')).rejects.toThrow(
-        NotFoundException,
+      const err = await service
+        .discardDraft('s1', actor, '10.0.0.5')
+        .catch((e: unknown) => e);
+
+      expect(err).toBeInstanceOf(ConflictException);
+      expect((err as ConflictException).getResponse()).toEqual({
+        message:
+          'This sale has a payment recorded and cannot be discarded. ' +
+          'Please remove the payment first, or ask an administrator for ' +
+          'assistance.',
+        code: 'DRAFT_HAS_PAYMENTS',
+      });
+      // Any payment row counts: no method, amount or status filter.
+      expect(mockManager.count).toHaveBeenCalledWith(Payment, {
+        where: { sale_id: 's1' },
+      });
+      expect(events).toEqual(['lock', 'count']);
+      expect(sqlOf('DELETE FROM sales')).toBeUndefined();
+      expect(mockAuditRepo.save).not.toHaveBeenCalled();
+    });
+
+    it.each([SaleStatus.COMPLETED, SaleStatus.VOIDED])(
+      'refuses a %s sale with 400 and deletes nothing',
+      async (status) => {
+        locked({ id: 's1', status });
+
+        await expect(
+          service.discardDraft('s1', actor, '10.0.0.5'),
+        ).rejects.toThrow(
+          new BadRequestException(
+            `Cannot delete a ${status} sale. Only DRAFT sales can be discarded.`,
+          ),
+        );
+        expect(events).toEqual(['lock']);
+        expect(sqlOf('DELETE FROM sales')).toBeUndefined();
+        expect(mockAuditRepo.save).not.toHaveBeenCalled();
+      },
+    );
+
+    it('keeps a sale completed while the discard waited for the lock: status comes from the locked read', async () => {
+      // completeSale locks the sale first too; once it commits, the locked
+      // read returns the COMPLETED row. No unlocked read decides anything.
+      locked({ id: 's1', status: SaleStatus.COMPLETED });
+
+      await expect(
+        service.discardDraft('s1', actor, '10.0.0.5'),
+      ).rejects.toThrow(BadRequestException);
+
+      expect(mockSalesRepo.findOne).not.toHaveBeenCalled();
+      expect(mockManager.count).not.toHaveBeenCalled();
+      expect(sqlOf('DELETE FROM sales')).toBeUndefined();
+    });
+
+    it('404 when the sale does not exist (or was deleted meanwhile), writing nothing', async () => {
+      locked(null);
+
+      await expect(
+        service.discardDraft('missing', actor, '10.0.0.5'),
+      ).rejects.toThrow(new NotFoundException('Sale not found'));
+      expect(events).toEqual(['lock']);
+      expect(mockAuditRepo.save).not.toHaveBeenCalled();
+    });
+
+    it('a DELETE that removes no row throws inside the transaction and writes no audit', async () => {
+      locked({ id: 's1', status: SaleStatus.DRAFT });
+      deletedRows = 0;
+
+      await expect(
+        service.discardDraft('s1', actor, '10.0.0.5'),
+      ).rejects.toThrow('0 rows deleted under the lock');
+      expect(events).toEqual([
+        'lock',
+        'count',
+        'snapshot',
+        'snapshot-lines',
+        'delete',
+      ]);
+      expect(mockAuditRepo.save).not.toHaveBeenCalled();
+    });
+
+    it('a failing audit write fails the discard from inside the transaction that deleted', async () => {
+      // The DELETE and the audit row go through the same transaction, so
+      // the error out of it rolls the DELETE back.
+      locked({ id: 's1', status: SaleStatus.DRAFT });
+      mockAuditRepo.save.mockImplementation(() => {
+        step('audit');
+        return Promise.reject(new Error('audit write failed'));
+      });
+
+      await expect(
+        service.discardDraft('s1', actor, '10.0.0.5'),
+      ).rejects.toThrow('audit write failed');
+      expect(events).toEqual([
+        'lock',
+        'count',
+        'snapshot',
+        'snapshot-lines',
+        'delete',
+        'audit',
+      ]);
+    });
+
+    it('a failing DELETE writes no audit and propagates out of the transaction', async () => {
+      locked({ id: 's1', status: SaleStatus.DRAFT });
+      const answer = mockManager.query.getMockImplementation()!;
+      mockManager.query.mockImplementation((sql: string, params?: unknown[]) =>
+        sql.includes('DELETE FROM sales')
+          ? Promise.reject(new Error('delete failed'))
+          : answer(sql, params),
       );
+
+      await expect(
+        service.discardDraft('s1', actor, '10.0.0.5'),
+      ).rejects.toThrow('delete failed');
+      expect(mockAuditRepo.save).not.toHaveBeenCalled();
     });
   });
 
