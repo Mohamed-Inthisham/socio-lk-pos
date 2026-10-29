@@ -24,6 +24,7 @@ import {
   detachCustomer,
   discardDraftSale,
   ensureDraftSale,
+  refreshCartStock,
   reloadDraftSale,
   removeLine,
   removePayment,
@@ -32,6 +33,7 @@ import {
   selectAttachedCustomer,
   selectBalanceDue,
   selectCanComplete,
+  selectCanPay,
   selectCartLines,
   selectCartSyncing,
   selectCompleteError,
@@ -44,6 +46,7 @@ import {
   selectIsFullyPaid,
   selectPaidTotal,
   selectPayments,
+  selectStockShortfall,
   selectStockWarnings,
   selectTradeInImeis,
   updateLineDiscount,
@@ -1684,5 +1687,107 @@ describe("posTerminal complete (P5)", () => {
     ])("with %s → %s", (_, posTerminal, expected) => {
       expect(selectCanComplete(stateWith(posTerminal))).toBe(expected);
     });
+  });
+});
+
+describe("posTerminal stock shortfall before payment", () => {
+  const glassLine = (overrides = {}) =>
+    saleLine({
+      id: "line-glass",
+      line_number: 2,
+      product_id: "p-glass",
+      product_name_snapshot: "TEST Tempered Glass",
+      unit_price: "990.00",
+      ...overrides,
+    });
+  const tracked = (quantity) => ({ quantity, manage_stock: true });
+  // A ready draft with a balance left and nothing in flight: only stock decides selectCanPay.
+  const stateWith = (lines, stockByProduct) => ({
+    posTerminal: {
+      status: "ready",
+      draftSale: draftSale({ lines, subtotal: "1500.00", total: "1500.00", amount_paid: "0.00" }),
+      stockByProduct,
+      pendingLines: [],
+      busyLineIds: [],
+      pendingPayments: [],
+      removingPaymentIds: [],
+    },
+  });
+
+  it("one short product: listed with what the sale needs and what the branch has, and Pay blocked", () => {
+    const state = stateWith([glassLine({ quantity: 26 })], { "p-glass": tracked(25) });
+
+    expect(selectStockShortfall(state)).toEqual([
+      { product_id: "p-glass", name: "TEST Tempered Glass", required: 26, available: 25 },
+    ]);
+    expect(selectCanPay(state)).toBe(false);
+  });
+
+  it("several short products: each listed, in cart order", () => {
+    const state = stateWith([saleLine({ quantity: 3 }), glassLine({ quantity: 2 })], {
+      [cableProduct.id]: tracked(1),
+      "p-glass": tracked(0),
+    });
+
+    expect(selectStockShortfall(state)).toEqual([
+      { product_id: cableProduct.id, name: cableProduct.name, required: 3, available: 1 },
+      { product_id: "p-glass", name: "TEST Tempered Glass", required: 2, available: 0 },
+    ]);
+    expect(selectCanPay(state)).toBe(false);
+  });
+
+  it("adds up several lines of one product, and lists it once", () => {
+    const state = stateWith(
+      [glassLine({ quantity: 15 }), glassLine({ id: "line-glass-2", line_number: 3, quantity: 11 })],
+      { "p-glass": tracked(25) },
+    );
+
+    expect(selectStockWarnings(state)).toEqual({
+      "line-glass": { available: 25, required: 26 },
+      "line-glass-2": { available: 25, required: 26 },
+    });
+    expect(selectStockShortfall(state)).toEqual([
+      { product_id: "p-glass", name: "TEST Tempered Glass", required: 26, available: 25 },
+    ]);
+  });
+
+  it.each([
+    ["another shop's line (no stock is taken for it)", [glassLine({ quantity: 30, external_supplier_id: "sup-1" })], { "p-glass": tracked(25) }],
+    [
+      "another shop's line beside an in-house one that fits",
+      [glassLine({ quantity: 20 }), glassLine({ id: "line-ext", line_number: 3, quantity: 10, external_supplier_id: "sup-1" })],
+      { "p-glass": tracked(25) },
+    ],
+    ["an untracked product", [glassLine({ quantity: 26 })], { "p-glass": { quantity: 0, manage_stock: false } }],
+    ["unknown stock (never read, or the read failed)", [glassLine({ quantity: 26 })], {}],
+    ["no stock read at all yet", [glassLine({ quantity: 26 })], undefined],
+  ])("%s is never short and doesn't block Pay", (_, lines, stockByProduct) => {
+    const state = stateWith(lines, stockByProduct);
+
+    expect(selectStockShortfall(state)).toEqual([]);
+    expect(selectCanPay(state)).toBe(true);
+  });
+
+  it("Pay comes back once the quantity is reduced to what is in stock", () => {
+    expect(selectCanPay(stateWith([glassLine({ quantity: 26 })], { "p-glass": tracked(25) }))).toBe(false);
+    expect(selectCanPay(stateWith([glassLine({ quantity: 25 })], { "p-glass": tracked(25) }))).toBe(true);
+  });
+
+  it("Pay comes back once refreshed stock covers the sale", async () => {
+    stockService.listStock.mockResolvedValue([
+      { product_id: "p-glass", branch_id: "branch-main", quantity: 30, manage_stock: true },
+    ]);
+    const store = createTestStore({
+      posTerminal: posTerminalState({
+        draftSale: draftSale({ lines: [glassLine({ quantity: 26 })], subtotal: "25740.00", total: "25740.00" }),
+        stockByProduct: { "p-glass": tracked(25) },
+      }),
+    });
+    expect(selectCanPay(store.getState())).toBe(false);
+
+    await store.dispatch(refreshCartStock({ branchId: "branch-main", productIds: ["p-glass"] }));
+
+    expect(selectStockShortfall(store.getState())).toEqual([]);
+    expect(selectCanPay(store.getState())).toBe(true);
   });
 });

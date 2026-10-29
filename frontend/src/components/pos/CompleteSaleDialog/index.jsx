@@ -1,8 +1,9 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useDispatch, useSelector, useStore } from "react-redux";
-import { AlertCircle, AlertTriangle, Loader2, ShieldCheck } from "lucide-react";
+import { AlertCircle, Loader2, ShieldCheck } from "lucide-react";
 import Dialog from "../../common/Dialog";
 import Button from "../../common/Button";
+import StockShortfallAlert from "../StockShortfallAlert";
 import { methodLabel, tenderDetail } from "../PaymentDialog/methods";
 import TradeInCustomerPanel from "../PaymentDialog/TradeInCustomerPanel";
 import { describeCompleteError } from "./completeErrorCopy";
@@ -19,7 +20,7 @@ import {
   selectDraftSale,
   selectIsCompleting,
   selectLastCompletedSale,
-  selectStockWarnings,
+  selectStockShortfall,
 } from "../../../store/slices/posTerminalSlice";
 import { recheckCashDay } from "../../../store/slices/cashDaySlice";
 import { whenDayRechecked } from "../../../utils/posFocus";
@@ -94,7 +95,8 @@ const CompleteSaleDialog = ({ open, onClose, onCompleted, afterLeave }) => {
   const lastCompleted = useSelector(selectLastCompletedSale);
   const completing = useSelector(selectIsCompleting);
   const completeError = useSelector(selectCompleteError);
-  const warnings = useSelector(selectStockWarnings);
+  // One entry per product that is short.
+  const shortfall = useSelector(selectStockShortfall);
   const customer = useSelector(selectAttachedCustomer);
   const [check, setCheck] = useState(CHECK_IDLE);
   const checkRequest = useRef(null);
@@ -126,18 +128,6 @@ const CompleteSaleDialog = ({ open, onClose, onCompleted, afterLeave }) => {
     dispatch(clearCompleteError());
     runCheck();
   }, [open, branchId, productIdsKey, runCheck, dispatch]);
-
-  // One entry per product that is short (warnings are per line).
-  const shortfall = useMemo(() => {
-    const byProduct = new Map();
-    for (const line of draft?.lines ?? []) {
-      const warning = warnings[line.id];
-      if (warning && !byProduct.has(line.product_id)) {
-        byProduct.set(line.product_id, { name: line.product_name_snapshot, ...warning });
-      }
-    }
-    return [...byProduct.values()];
-  }, [draft, warnings]);
 
   const issue = completeError && !completeError.gone ? describeCompleteError(completeError) : null;
   const checking = check === CHECK_IDLE;
@@ -186,7 +176,7 @@ const CompleteSaleDialog = ({ open, onClose, onCompleted, afterLeave }) => {
     if (completing || blocked) return;
     if (checking && checkRequest.current) {
       const answer = await checkRequest.current;
-      if (answer === CHECK_DONE && Object.keys(selectStockWarnings(store.getState())).length) return;
+      if (answer === CHECK_DONE && selectStockShortfall(store.getState()).length) return;
     }
     const result = await dispatch(completeSale());
     if (completeSale.fulfilled.match(result) || result.payload?.gone) {
@@ -310,24 +300,9 @@ const CompleteSaleDialog = ({ open, onClose, onCompleted, afterLeave }) => {
           </p>
         )}
         {shortOfStock && !issue && (
-          <div
-            role="alert"
-            className="rounded-lg border border-amber-200 dark:border-amber-900 bg-amber-50 dark:bg-amber-950/40 px-3 py-2 text-amber-800 dark:text-amber-200"
-          >
-            <p className="flex items-center gap-1.5 font-semibold">
-              <AlertTriangle size={14} aria-hidden="true" />
-              Not enough stock
-            </p>
-            <ul className="mt-1 space-y-0.5">
-              {shortfall.map((item) => (
-                <li key={item.name}>
-                  {item.name}: {item.required} needed, {item.available} in stock
-                </li>
-              ))}
-            </ul>
-            <p className="mt-1 text-xs">Remove or reduce the item, or ask a manager to adjust stock.</p>
+          <StockShortfallAlert items={shortfall}>
             <Button size="sm" variant="secondary" className="mt-2" label="Check again" onClick={checkAgain} />
-          </div>
+          </StockShortfallAlert>
         )}
       </div>
 

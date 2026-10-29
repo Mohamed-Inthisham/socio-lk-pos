@@ -37,8 +37,9 @@ import {
  *   "−20%" / "160.00 each" badge that reopens the dialog under the line
  *   total (in the card on mobile) — so its row is no taller.
  * - Stock warning (Q1 b): a yellow "Only N in stock" badge when the
- *   branch has fewer units than the cart needs. Warns only — the 409 at
- *   complete is the real guard.
+ *   branch has fewer units than the cart needs. The line stays; payment
+ *   is blocked until it fits (selectCanPay), and the 409 at complete is
+ *   still the final guard.
  * - Pending rows (add in flight) and busy rows (qty edit / delete in
  *   flight) are dimmed with their controls disabled, so rapid clicks
  *   can't race the server.
@@ -123,7 +124,7 @@ const StepButton = ({ icon: Icon, label, busy, onClick, ...props }) => (
 const StockBadge = ({ warning }) => (
   <span
     role="status"
-    title={`Cart needs ${warning.required}, branch stock shows ${warning.available}. The sale can still be rung up; completing it will fail if stock is really short.`}
+    title={`Cart needs ${warning.required}, branch stock shows ${warning.available}. Payment stays unavailable until the quantity fits the stock.`}
     className="
       mt-1 inline-flex items-center gap-1 px-1.5 py-0.5 rounded-md
       text-[11px] font-semibold

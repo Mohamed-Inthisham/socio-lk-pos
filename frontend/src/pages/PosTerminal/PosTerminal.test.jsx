@@ -1,5 +1,5 @@
 import { vi } from "vitest";
-import { fireEvent, screen, waitFor, within } from "@testing-library/react";
+import { act, fireEvent, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { Link, Route, Routes } from "react-router-dom";
 import PosTerminal from ".";
@@ -12,6 +12,7 @@ import {
 } from "../../test/renderWithProviders";
 import { cashierUser, mainShop } from "../../test/fixtures";
 import {
+  cableProduct,
   completedSaleForReceipt,
   customer,
   draftSale,
@@ -925,5 +926,208 @@ describe("PosTerminal round trip through /pos/sales (P6-1)", () => {
     expect(salesService.createSale).toHaveBeenCalledTimes(2);
     expect(salesService.discardSale).not.toHaveBeenCalled();
     print.mockRestore();
+  });
+});
+
+describe("PosTerminal: not enough stock before payment", () => {
+  const takePayment = () => screen.queryByRole("dialog", { name: "Take payment" });
+  const payButton = () => screen.getByRole("button", { name: /^Pay / });
+  const glass = (quantity) =>
+    saleLine({
+      id: "line-2",
+      line_number: 2,
+      product_id: "p-glass",
+      product_name_snapshot: "TEST Tempered Glass",
+      quantity,
+      unit_price: "990.00",
+      line_total: (990 * quantity).toFixed(2),
+    });
+  // 3 cables and `glassQty` glasses, nothing paid.
+  const saleWith = (glassQty = 26) =>
+    draftSale({
+      lines: [saleLine({ quantity: 3, line_total: "4500.00" }), glass(glassQty)],
+      subtotal: "30240.00",
+      total: "30240.00",
+    });
+  const stockRow = (product_id, quantity) => ({ product_id, branch_id: "branch-main", quantity, manage_stock: true });
+  // GET /stock answers both the per-product read (after a qty change) and the branch-wide one.
+  const stockIs = (rows) =>
+    stockService.listStock.mockImplementation(async ({ productId } = {}) =>
+      productId ? rows.filter((r) => r.product_id === productId) : rows,
+    );
+  const branchReads = () => stockService.listStock.mock.calls.filter(([params]) => !params?.productId).length;
+  // A resumed draft reads its stock on open, so a known shortage shows at once.
+  const resumeTerminal = async (sale) => {
+    useTerminalSessionStore.getState().setDraftSaleId("sale-1");
+    salesService.getSale.mockResolvedValue(sale);
+    return renderTerminal();
+  };
+
+  it("Pay re-reads the cart's stock; a shortage it finds opens no payment and lists every short product", async () => {
+    salesService.createSale.mockResolvedValue(saleWith(26));
+    const user = userEvent.setup();
+    await renderTerminal();
+    expect(payButton()).toBeEnabled(); // nothing known about stock yet
+
+    // Meanwhile stock ran short (another till, a stock count).
+    stockIs([stockRow(cableProduct.id, 1), stockRow("p-glass", 25)]);
+    await user.click(payButton());
+
+    const alert = await screen.findByTestId("stock-shortfall");
+    expect(stockService.listStock).toHaveBeenCalledWith({ branchId: "branch-main" });
+    expect(alert).toHaveTextContent("Not enough stock");
+    expect(within(alert).getAllByRole("listitem").map((item) => item.textContent)).toEqual([
+      "USB-C Cable 1m: 3 needed, 1 in stock",
+      "TEST Tempered Glass: 26 needed, 25 in stock",
+    ]);
+    expect(alert).toHaveTextContent("Remove or reduce the item, or ask a manager to adjust stock.");
+    expect(takePayment()).not.toBeInTheDocument();
+    expect(payButton()).toBeDisabled();
+    expect(screen.getByTestId("pay-blocked-reason")).toHaveTextContent("Not enough stock for this sale.");
+  });
+
+  it("Pay re-reads the stock before the payment dialog opens, and enough stock opens it as before", async () => {
+    salesService.createSale.mockResolvedValue(saleWith(25));
+    stockIs([stockRow(cableProduct.id, 10), stockRow("p-glass", 25)]);
+    const user = userEvent.setup();
+    await renderTerminal();
+    const readsBefore = branchReads();
+
+    await user.click(payButton());
+
+    expect(await screen.findByRole("dialog", { name: "Take payment" })).toBeInTheDocument();
+    expect(branchReads()).toBe(readsBefore + 1);
+    expect(screen.queryByTestId("stock-shortfall")).not.toBeInTheDocument();
+  });
+
+  it("a known shortage shows at once, and neither F4 nor F6 gets past it", async () => {
+    stockIs([stockRow(cableProduct.id, 10), stockRow("p-glass", 25)]);
+    const user = userEvent.setup();
+    await resumeTerminal(saleWith(26));
+
+    const alert = await screen.findByTestId("stock-shortfall");
+    expect(alert).toHaveTextContent("TEST Tempered Glass: 26 needed, 25 in stock");
+    expect(payButton()).toBeDisabled();
+    const readsBefore = branchReads();
+
+    await user.keyboard("[F4]");
+    await user.keyboard("[F6]");
+
+    expect(takePayment()).not.toBeInTheDocument();
+    expect(screen.queryByRole("dialog", { name: "Attach customer" })).not.toBeInTheDocument();
+    expect(branchReads()).toBe(readsBefore);
+  });
+
+  it("reducing the quantity to what is in stock clears the alert, and Pay works again", async () => {
+    stockIs([stockRow(cableProduct.id, 10), stockRow("p-glass", 25)]);
+    salesService.updateSaleLine.mockResolvedValue(saleWith(25));
+    const user = userEvent.setup();
+    await resumeTerminal(saleWith(26));
+    await screen.findByTestId("stock-shortfall");
+
+    const qty = within(row("TEST Tempered Glass")).getByLabelText(/quantity for/i);
+    await user.clear(qty);
+    await user.type(qty, "25{Enter}");
+
+    await waitFor(() => expect(screen.queryByTestId("stock-shortfall")).not.toBeInTheDocument());
+    expect(salesService.updateSaleLine).toHaveBeenCalledWith("sale-1", "line-2", { quantity: 25 });
+    expect(payButton()).toBeEnabled();
+    expect(screen.queryByTestId("pay-blocked-reason")).not.toBeInTheDocument();
+
+    await user.click(payButton());
+    expect(await screen.findByRole("dialog", { name: "Take payment" })).toBeInTheDocument();
+  });
+
+  it("a failed stock read with no known shortage lets the payment go ahead (the server checks at complete)", async () => {
+    salesService.createSale.mockResolvedValue(saleWith(26));
+    const user = userEvent.setup();
+    await renderTerminal();
+
+    stockService.listStock.mockRejectedValue(new Error("Network Error"));
+    await user.click(payButton());
+
+    expect(await screen.findByRole("dialog", { name: "Take payment" })).toBeInTheDocument();
+    expect(screen.queryByTestId("stock-shortfall")).not.toBeInTheDocument();
+  });
+
+  it("one stock read at a time: a second Pay or F4 while it runs starts nothing", async () => {
+    salesService.createSale.mockResolvedValue(saleWith(25));
+    const user = userEvent.setup();
+    await renderTerminal();
+    let answer;
+    stockService.listStock.mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          answer = resolve;
+        }),
+    );
+
+    await user.click(payButton());
+    expect(payButton()).toBeDisabled(); // spinning while it reads
+    await user.keyboard("[F4]");
+    expect(branchReads()).toBe(1);
+
+    await act(async () => answer([stockRow(cableProduct.id, 10), stockRow("p-glass", 25)]));
+
+    expect(await screen.findByRole("dialog", { name: "Take payment" })).toBeInTheDocument();
+    expect(branchReads()).toBe(1);
+  });
+});
+
+describe("PosTerminal: the stock alert is brought into view when Pay's check finds a shortage", () => {
+  const glass = (quantity) =>
+    saleLine({
+      id: "line-2",
+      line_number: 2,
+      product_id: "p-glass",
+      product_name_snapshot: "TEST Tempered Glass",
+      quantity,
+      unit_price: "990.00",
+      line_total: (990 * quantity).toFixed(2),
+    });
+  const saleWith = (glassQty) =>
+    draftSale({ lines: [saleLine(), glass(glassQty)], subtotal: "26240.00", total: "26240.00" });
+  const stockRow = (product_id, quantity) => ({ product_id, branch_id: "branch-main", quantity, manage_stock: true });
+  let scrollIntoView;
+
+  beforeEach(() => {
+    // jsdom has no scrollIntoView (as in Table.test.jsx).
+    scrollIntoView = vi.fn();
+    Element.prototype.scrollIntoView = scrollIntoView;
+  });
+  afterEach(() => {
+    delete Element.prototype.scrollIntoView;
+  });
+
+  it("scrolls the alert into view, nearest, when the fresh check blocks payment", async () => {
+    salesService.createSale.mockResolvedValue(saleWith(26));
+    const user = userEvent.setup();
+    await renderTerminal();
+    stockService.listStock.mockResolvedValue([stockRow(cableProduct.id, 10), stockRow("p-glass", 25)]);
+
+    await user.click(screen.getByRole("button", { name: /^Pay / }));
+
+    const alert = await screen.findByTestId("stock-shortfall");
+    await waitFor(() => expect(scrollIntoView).toHaveBeenCalledWith({ block: "nearest" }));
+    expect(scrollIntoView).toHaveBeenCalledTimes(1);
+    expect(scrollIntoView.mock.contexts[0]).toContainElement(alert);
+    expect(screen.queryByRole("dialog", { name: "Take payment" })).not.toBeInTheDocument();
+  });
+
+  it("doesn't scroll when the check finds enough stock: the payment dialog opens", async () => {
+    salesService.createSale.mockResolvedValue(saleWith(25));
+    const user = userEvent.setup();
+    await renderTerminal();
+    stockService.listStock.mockResolvedValue([stockRow(cableProduct.id, 10), stockRow("p-glass", 25)]);
+
+    await user.click(screen.getByRole("button", { name: /^Pay / }));
+
+    expect(await screen.findByRole("dialog", { name: "Take payment" })).toBeInTheDocument();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    const scrolledToAlert = scrollIntoView.mock.contexts.some((el) =>
+      el?.querySelector?.('[data-testid="stock-shortfall"]'),
+    );
+    expect(scrolledToAlert).toBe(false);
+    expect(screen.queryByTestId("stock-shortfall")).not.toBeInTheDocument();
   });
 });
