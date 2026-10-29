@@ -31,6 +31,7 @@ import {
   earlierDayNotClosedError,
   expectedChangedError,
   openCashDayEntity,
+  openSalesError,
   pastDaysResponse,
   reasonRequiredError,
 } from "../../test/cashDayEntities";
@@ -552,6 +553,34 @@ describe("cashDaySlice close (P9-11, P9-18)", () => {
 
     expect(cashDay(store).close.error).toMatchObject({ kind: CASH_DAY_ERROR.ALREADY_CLOSED, blocks: true });
     await vi.waitFor(() => expect(cashDay(store).current.status).toBe(GATE.CLOSED));
+  });
+
+  it("OPEN_SALES: refused and retryable, the day not closed and current not re-read; the next send reuses the dialog's id", async () => {
+    const store = await storeWithCloseDialog();
+    const id = cashDay(store).close.clientRequestId;
+    const reads = service.getCurrentCashDay.mock.calls.length;
+    service.closeCashDay.mockRejectedValueOnce(openSalesError(1));
+
+    const result = await store.dispatch(closeDay({ countedCents: 1550000 }));
+
+    expect(closeDay.rejected.match(result)).toBe(true);
+    expect(cashDay(store).close).toMatchObject({
+      status: "error",
+      closedDay: null,
+      unconfirmed: false,
+      sentBody: null,
+      error: { kind: CASH_DAY_ERROR.OPEN_SALES, blocks: false, refresh: false, sale_count: 1 },
+    });
+    expect(cashDay(store).current.status).toBe(GATE.OPEN);
+    expect(service.getCurrentCashDay).toHaveBeenCalledTimes(reads);
+
+    // The paid sale was dealt with: the same dialog sends again.
+    service.closeCashDay.mockResolvedValueOnce(closedCashDayEntity());
+    service.getCurrentCashDay.mockResolvedValueOnce(todayClosed());
+    await store.dispatch(closeDay({ countedCents: 1550000 }));
+
+    expect(closeBodies()[1]).toEqual({ counted_balance: 15500, expected_seen: 15500, client_request_id: id });
+    expect(cashDay(store).close.status).toBe("closed");
   });
 
   it("a lost answer, and GET /cash-days/:id shows it closed: fulfilled with that day, nothing resent", async () => {

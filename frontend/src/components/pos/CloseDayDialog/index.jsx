@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { useDispatch, useSelector } from "react-redux";
 import { useForm, useWatch } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
-import { AlertCircle, AlertTriangle } from "lucide-react";
+import { AlertCircle } from "lucide-react";
 import Dialog from "../../common/Dialog";
 import Button from "../../common/Button";
 import InputField from "../../common/InputField";
@@ -42,8 +42,11 @@ import { focusTerminalMain } from "../../../utils/posFocus";
  *   difference in the till's words (describeDifferenceForDisplay). The
  *   reason box shows from 1.00 either way (the rounding rule). The open
  *   sale's items are warned about and block closing until the sale is
- *   completed or discarded (P9-12). The backend also blocks drafts from
- *   another terminal. Esc cancels; nothing is sent.
+ *   completed or discarded (P9-12). A notice says the close discards
+ *   unfinished sales without a payment on every till at the branch; one
+ *   with a payment makes the server refuse (OPEN_SALES), which can be
+ *   sent again from Confirm once it is dealt with. Esc cancels; nothing
+ *   is sent.
  * - Confirm: the count and reason read-only, then "No more sales today
  *   after closing. This can't be undone." Focus on Back, so a stray Enter
  *   never closes the day; Esc goes back.
@@ -252,6 +255,11 @@ const CloseDayDialog = () => {
               before closing the day.
             </p>
           </div>
+        )}
+        {shown === "count" && (
+          <p data-testid="close-day-cleanup-notice" className="mb-4 text-xs text-slate-500 dark:text-slate-400">
+            Unfinished sales without a payment, on any till at this branch, are discarded when the day closes.
+          </p>
         )}
         <form
           id={FORM_ID}

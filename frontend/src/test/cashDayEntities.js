@@ -205,6 +205,19 @@ export const expectedChangedError = () =>
     }),
   });
 
+/**
+ * P9-12: `count` drafts at the branch have a payment row, so the close is
+ * refused (backend cash-days.service.ts applyClose; unpaid drafts would
+ * have been discarded with the close).
+ */
+export const openSalesError = (count = 1) =>
+  axiosError(409, {
+    message:
+      "An unfinished sale with a payment cannot be discarded automatically. Please ask an administrator to resolve it before closing the cash day.",
+    code: "OPEN_SALES",
+    sale_count: count,
+  });
+
 /** C9 */
 export const reasonRequiredError = (difference = "-1500.00") =>
   axiosError(400, {
