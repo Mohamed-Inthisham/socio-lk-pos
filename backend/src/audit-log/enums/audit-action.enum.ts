@@ -20,4 +20,7 @@ export enum AuditAction {
   // The day's opening and closing balance (Phase 6.4 P9-19).
   DAY_OPEN = 'DAY_OPEN',
   DAY_CLOSE = 'DAY_CLOSE',
+  // An unpaid draft sale discarded by its branch's day close: one row per
+  // draft, with its lines (no cost prices).
+  DRAFT_DISCARDED = 'DRAFT_DISCARDED',
 }
