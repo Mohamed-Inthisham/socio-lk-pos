@@ -24,6 +24,7 @@ import { CreateUserDto } from './dto/create-user.dto';
 import { UpdateUserDto } from './dto/update-user.dto';
 import { ListUsersQueryDto } from './dto/list-users-query.dto';
 import { ChangeRoleDto } from './dto/change-role.dto';
+import { ResetPasswordDto } from './dto/reset-password.dto';
 import { Roles } from '../auth/decorators/roles.decorator';
 import { CurrentUser } from '../auth/decorators/current-user.decorator';
 import type { AuthenticatedUser } from '../auth/strategies/jwt.strategy';
@@ -32,8 +33,8 @@ import { Auditable } from '../audit-log/decorators/auditable.decorator';
 import { AuditAction } from '../audit-log/enums/audit-action.enum';
 
 /**
- * Admin-only user management. Create, role change, deactivate and
- * reactivate are not @Auditable: the service writes their audit rows in
+ * Admin-only user management. Create, role change, password reset,
+ * deactivate and reactivate are not @Auditable: the service writes their audit rows in
  * the same transaction as the change (the interceptor writes after the
  * response, and can lose the row).
  */
@@ -157,6 +158,36 @@ export class UsersController {
   ) {
     await this.usersService.changeRole(id, dto, user, ip);
     return this.findOne(id);
+  }
+
+  @Post(':id/password')
+  @HttpCode(HttpStatus.NO_CONTENT)
+  @ApiOperation({
+    summary: "Reset another user's password",
+    description:
+      'Admin-only. Sets a new password (at least 8 characters, at most 72 ' +
+      "bytes in UTF-8) without the old one. Revokes the user's refresh " +
+      'tokens. Works for inactive users. Refused for your own account (use ' +
+      'PUT /auth/me/password). Writes a PASSWORD_RESET audit entry (never ' +
+      'the password).',
+  })
+  @ApiParam({ name: 'id', description: 'User UUID', format: 'uuid' })
+  @ApiResponse({ status: 204, description: 'Password reset' })
+  @ApiResponse({
+    status: 400,
+    description:
+      'Password too short or too long, or { message, code: CANNOT_RESET_OWN_PASSWORD }',
+  })
+  @ApiResponse({ status: 401, description: 'Not authenticated' })
+  @ApiResponse({ status: 403, description: 'Not an admin' })
+  @ApiResponse({ status: 404, description: 'User not found' })
+  async resetPassword(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body() dto: ResetPasswordDto,
+    @CurrentUser() user: AuthenticatedUser,
+    @Ip() ip: string,
+  ): Promise<void> {
+    await this.usersService.resetPassword(id, dto, user, ip);
   }
 
   @Post(':id/deactivate')

@@ -5,9 +5,12 @@ import {
   HttpCode,
   HttpStatus,
   Post,
+  Put,
   Req,
   Res,
+  ServiceUnavailableException,
   UnauthorizedException,
+  Logger,
 } from '@nestjs/common';
 import type { Request, Response, CookieOptions } from 'express';
 import {
@@ -18,12 +21,14 @@ import {
 } from '@nestjs/swagger';
 import { AuthService } from './auth.service';
 import { LoginDto } from './dto/login.dto';
+import { TokensDto } from './dto/tokens.dto';
 import { CurrentUser } from './decorators/current-user.decorator';
-import { AuthenticatedUser } from './strategies/jwt.strategy';
+import type { AuthenticatedUser } from './strategies/jwt.strategy';
 import { TypedConfigService } from '../config/typed-config.service';
 import { Public } from './decorators/public.decorator';
 import { LoginThrottle } from '../config/throttle';
 import { UsersService } from '../users/users.service';
+import { ChangePasswordDto } from '../users/dto/change-password.dto';
 
 const ACCESS_TOKEN_COOKIE = 'access_token';
 const REFRESH_TOKEN_COOKIE = 'refresh_token';
@@ -35,6 +40,8 @@ const REFRESH_COOKIE_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
 @ApiTags('Auth')
 @Controller('auth')
 export class AuthController {
+  private readonly logger = new Logger(AuthController.name);
+
   constructor(
     private readonly authService: AuthService,
     private readonly usersService: UsersService,
@@ -167,6 +174,79 @@ export class AuthController {
   getMe(@CurrentUser() user: AuthenticatedUser | undefined) {
     if (!user) throw new UnauthorizedException();
     return { user };
+  }
+
+  @Put('me/password')
+  @HttpCode(HttpStatus.NO_CONTENT)
+  @ApiCookieAuth('access_token')
+  @ApiOperation({
+    summary: 'Change your own password',
+    description:
+      'Any signed-in user. Needs your current password; the new one is at ' +
+      'least 8 characters, at most 72 bytes in UTF-8, and different from ' +
+      'the current one. Revokes every refresh token of yours (other ' +
+      'devices must log in again once their access token expires) and ' +
+      'sets fresh session cookies for this one. Writes a PASSWORD_CHANGED ' +
+      'audit entry (never a password).',
+  })
+  @ApiResponse({ status: 204, description: 'Password changed, cookies set' })
+  @ApiResponse({
+    status: 400,
+    description:
+      'Validation failed, or { message, code: SAME_PASSWORD } for an unchanged password',
+  })
+  @ApiResponse({ status: 401, description: 'Not authenticated' })
+  @ApiResponse({
+    status: 403,
+    description: 'Current password wrong ({ message, code: WRONG_PASSWORD })',
+  })
+  @ApiResponse({
+    status: 503,
+    description:
+      'Password changed, but no new session could be started: no cookies ' +
+      'set, log in again ({ message, code: PASSWORD_CHANGED_SIGN_IN_AGAIN })',
+  })
+  async changeOwnPassword(
+    @Body() dto: ChangePasswordDto,
+    @CurrentUser() user: AuthenticatedUser,
+    @Req() req: Request,
+    @Res({ passthrough: true }) res: Response,
+  ): Promise<void> {
+    await this.usersService.changeOwnPassword(user, dto, req.ip ?? null);
+
+    // The change revoked every refresh token, this device's too (its
+    // refresh cookie isn't sent here: it's scoped to /auth/refresh). Keep
+    // this device signed in with a new pair, as login does.
+    let tokens: TokensDto | undefined;
+    try {
+      const fresh = await this.usersService.findByIdForAuth(user.id);
+      if (fresh?.is_active) {
+        tokens = await this.authService.login(
+          fresh,
+          req.ip ?? null,
+          this.extractUserAgent(req),
+        );
+      }
+    } catch (error) {
+      // The password change is committed and stays: say so, so the client
+      // sends the user to log in instead of retrying with the old password.
+      // Only the error's name and message are logged, never a token.
+      const reason =
+        error instanceof Error ? `${error.name}: ${error.message}` : 'unknown';
+      this.logger.error(
+        `New session not issued after user ${user.id} changed their password (${reason})`,
+      );
+      throw new ServiceUnavailableException({
+        message: 'Your password was changed. Please sign in again.',
+        code: 'PASSWORD_CHANGED_SIGN_IN_AGAIN',
+      });
+    }
+    if (!tokens) {
+      // Deactivated or deleted meanwhile: no new session.
+      throw new UnauthorizedException();
+    }
+    this.setAccessCookie(res, tokens.access_token);
+    this.setRefreshCookie(res, tokens.refresh_token);
   }
 
   // ---------- private helpers (unchanged) ----------
