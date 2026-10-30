@@ -26,4 +26,8 @@ export enum AuditAction {
   // A user's role and/or branch changed by an admin (Task 2.2): old and new
   // role and branch only.
   ROLE_CHANGED = 'ROLE_CHANGED',
+  // A password set by an admin for another user, or changed by its owner
+  // (Task 2.3). Who and whose only: never a password or a hash.
+  PASSWORD_RESET = 'PASSWORD_RESET',
+  PASSWORD_CHANGED = 'PASSWORD_CHANGED',
 }

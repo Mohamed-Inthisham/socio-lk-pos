@@ -18,6 +18,7 @@ import { AuditAction } from '../audit-log/enums/audit-action.enum';
 
 jest.mock('bcrypt', () => ({
   hash: jest.fn().mockResolvedValue('hashed-password'),
+  compare: jest.fn(),
 }));
 
 describe('UsersService', () => {
@@ -67,6 +68,7 @@ describe('UsersService', () => {
   // (getOne) and the active admins (getMany).
   const mockLockQueryBuilder = {
     setLock: jest.fn().mockReturnThis(),
+    addSelect: jest.fn().mockReturnThis(),
     where: jest.fn().mockReturnThis(),
     andWhere: jest.fn().mockReturnThis(),
     orderBy: jest.fn().mockReturnThis(),
@@ -949,6 +951,188 @@ describe('UsersService', () => {
       await expect(
         service.changeRole('u1', { role: UserRole.ADMIN }, actor),
       ).rejects.toBe(failure);
+      expect(transactionOutcome).toBe('rolled back');
+    });
+  });
+
+  describe('resetPassword', () => {
+    const targetRow = { id: 'u1', full_name: 'Shop Cashier' };
+
+    beforeEach(() => {
+      mockManager.update.mockResolvedValue({ affected: 1 });
+    });
+
+    it('hashes the new password, revokes tokens and audits, in one transaction', async () => {
+      mockLockQueryBuilder.getOne.mockResolvedValue(targetRow);
+
+      await service.resetPassword(
+        'u1',
+        { new_password: 'brand-new-pass' },
+        actor,
+        '10.0.0.5',
+      );
+
+      expect(bcrypt.hash).toHaveBeenCalledWith('brand-new-pass', 4);
+      expect(mockManager.update).toHaveBeenNthCalledWith(1, User, 'u1', {
+        password_hash: 'hashed-password',
+      });
+      expect(mockManager.update).toHaveBeenNthCalledWith(2, ...tokenRevocation);
+      expect(mockAuditRepo.save).toHaveBeenCalledWith({
+        user_id: 'admin-1',
+        user_name: 'Head Admin',
+        user_role: UserRole.ADMIN,
+        action: AuditAction.PASSWORD_RESET,
+        entity_type: 'User',
+        entity_id: 'u1',
+        changes: null,
+        description: 'Password of Shop Cashier reset by an admin.',
+        ip_address: '10.0.0.5',
+      });
+      expect(transactionOutcome).toBe('committed');
+    });
+
+    it("refuses the caller's own account (400 CANNOT_RESET_OWN_PASSWORD) before hashing", async () => {
+      await expect(
+        service.resetPassword(
+          'admin-1',
+          { new_password: 'brand-new-pass' },
+          actor,
+        ),
+      ).rejects.toMatchObject({
+        status: 400,
+        response: expect.objectContaining({
+          code: 'CANNOT_RESET_OWN_PASSWORD',
+        }) as object,
+      });
+      expect(bcrypt.hash).not.toHaveBeenCalled();
+      expect(mockDataSource.transaction).not.toHaveBeenCalled();
+    });
+
+    it('refuses a password over 72 bytes before hashing', async () => {
+      await expect(
+        service.resetPassword('u1', { new_password: 'é'.repeat(37) }, actor),
+      ).rejects.toThrow(PASSWORD_TOO_LONG_MESSAGE);
+      expect(bcrypt.hash).not.toHaveBeenCalled();
+    });
+
+    it('throws NotFoundException for an unknown user, changing nothing', async () => {
+      mockLockQueryBuilder.getOne.mockResolvedValue(null);
+      await expect(
+        service.resetPassword(
+          'missing',
+          { new_password: 'brand-new-pass' },
+          actor,
+        ),
+      ).rejects.toThrow(NotFoundException);
+      expect(mockManager.update).not.toHaveBeenCalled();
+      expect(mockAuditRepo.save).not.toHaveBeenCalled();
+    });
+
+    it('rolls the change back when the audit row fails', async () => {
+      mockLockQueryBuilder.getOne.mockResolvedValue(targetRow);
+      const failure = new Error('connection lost');
+      mockAuditRepo.save.mockRejectedValueOnce(failure);
+      await expect(
+        service.resetPassword('u1', { new_password: 'brand-new-pass' }, actor),
+      ).rejects.toBe(failure);
+      expect(transactionOutcome).toBe('rolled back');
+    });
+  });
+
+  describe('changeOwnPassword', () => {
+    const self = {
+      id: 'u1',
+      full_name: 'Shop Cashier',
+      role: UserRole.CASHIER,
+    };
+    const dto = {
+      current_password: 'old-password',
+      new_password: 'brand-new-pass',
+    };
+    const compare = bcrypt.compare as jest.Mock;
+    // bcrypt.compare(plain, hash) matches only the given plain password.
+    const passwordIs = (stored: string) =>
+      compare.mockImplementation((plain: string) =>
+        Promise.resolve(plain === stored),
+      );
+
+    beforeEach(() => {
+      mockManager.update.mockResolvedValue({ affected: 1 });
+      mockLockQueryBuilder.getOne.mockResolvedValue({
+        id: 'u1',
+        password_hash: 'stored-hash',
+      });
+      passwordIs('old-password');
+    });
+
+    it('checks the current password on the locked row, then hashes, revokes and audits', async () => {
+      await service.changeOwnPassword(self, dto, '10.0.0.7');
+
+      expect(mockLockQueryBuilder.setLock).toHaveBeenCalledWith(
+        'pessimistic_write',
+      );
+      expect(mockLockQueryBuilder.addSelect).toHaveBeenCalledWith(
+        'user.password_hash',
+      );
+      expect(compare).toHaveBeenCalledWith('old-password', 'stored-hash');
+      expect(bcrypt.hash).toHaveBeenCalledWith('brand-new-pass', 4);
+      expect(mockManager.update).toHaveBeenNthCalledWith(1, User, 'u1', {
+        password_hash: 'hashed-password',
+      });
+      expect(mockManager.update).toHaveBeenNthCalledWith(2, ...tokenRevocation);
+      expect(mockAuditRepo.save).toHaveBeenCalledWith({
+        user_id: 'u1',
+        user_name: 'Shop Cashier',
+        user_role: UserRole.CASHIER,
+        action: AuditAction.PASSWORD_CHANGED,
+        entity_type: 'User',
+        entity_id: 'u1',
+        changes: null,
+        description: 'Password changed.',
+        ip_address: '10.0.0.7',
+      });
+      expect(transactionOutcome).toBe('committed');
+    });
+
+    it('403 WRONG_PASSWORD for a wrong current password, writing nothing', async () => {
+      passwordIs('something-else');
+      await expect(service.changeOwnPassword(self, dto)).rejects.toMatchObject({
+        status: 403,
+        response: expect.objectContaining({
+          code: 'WRONG_PASSWORD',
+        }) as object,
+      });
+      expect(bcrypt.hash).not.toHaveBeenCalled();
+      expect(mockManager.update).not.toHaveBeenCalled();
+      expect(mockAuditRepo.save).not.toHaveBeenCalled();
+    });
+
+    it('400 SAME_PASSWORD when the new password matches the stored hash', async () => {
+      compare.mockResolvedValue(true);
+      await expect(service.changeOwnPassword(self, dto)).rejects.toMatchObject({
+        status: 400,
+        response: expect.objectContaining({
+          code: 'SAME_PASSWORD',
+        }) as object,
+      });
+      expect(compare).toHaveBeenLastCalledWith('brand-new-pass', 'stored-hash');
+      expect(mockManager.update).not.toHaveBeenCalled();
+    });
+
+    it('refuses a new password over 72 bytes before any lock', async () => {
+      await expect(
+        service.changeOwnPassword(self, {
+          ...dto,
+          new_password: 'é'.repeat(37),
+        }),
+      ).rejects.toThrow(PASSWORD_TOO_LONG_MESSAGE);
+      expect(mockDataSource.transaction).not.toHaveBeenCalled();
+    });
+
+    it('rolls the change back when the audit row fails', async () => {
+      const failure = new Error('connection lost');
+      mockAuditRepo.save.mockRejectedValueOnce(failure);
+      await expect(service.changeOwnPassword(self, dto)).rejects.toBe(failure);
       expect(transactionOutcome).toBe('rolled back');
     });
   });

@@ -3,6 +3,7 @@ import {
   ConflictException,
   NotFoundException,
   BadRequestException,
+  ForbiddenException,
 } from '@nestjs/common';
 import { InjectDataSource, InjectRepository } from '@nestjs/typeorm';
 import {
@@ -21,6 +22,8 @@ import { CreateUserDto } from './dto/create-user.dto';
 import { UpdateUserDto } from './dto/update-user.dto';
 import { ListUsersQueryDto } from './dto/list-users-query.dto';
 import { ChangeRoleDto } from './dto/change-role.dto';
+import { ResetPasswordDto } from './dto/reset-password.dto';
+import { ChangePasswordDto } from './dto/change-password.dto';
 import { TypedConfigService } from '../config/typed-config.service';
 import { assertBcryptPasswordLength } from '../common/bcrypt-input';
 import {
@@ -64,8 +67,8 @@ function toSafeUser(user: User): SafeUser {
  * Revoke every unrevoked refresh token of a user, inside the caller's
  * transaction. The same predicate as AuthService's reuse revocation, so a
  * token already revoked keeps its original revoked_at. Used when a user
- * stops being able to log in (deactivate, softDelete); a future
- * reactivation flow must call it too.
+ * stops being able to log in (deactivate, softDelete), on reactivation,
+ * and when their role, branch or password changes.
  *
  * A refresh racing with this can commit a replacement token after it ran;
  * that token is unusable while the user is inactive or deleted (refresh and
@@ -280,8 +283,8 @@ export class UsersService {
   }
 
   /**
-   * Partial update. Password is not updatable here (and there is no
-   * password-change endpoint yet — see FOLLOWUPS.md).
+   * Partial update. Password is not updatable here: resetPassword() and
+   * changeOwnPassword() do that.
    * Role is not changed here (the DTO omits it): changeRole() does that.
    * Branch transfers are allowed for staff; admins cannot be given a branch.
    */
@@ -411,6 +414,118 @@ export class UsersService {
             : `Role of ${target.full_name} changed from ${target.role} to ${dto.role}.` +
               (clearPin ? ' Approval PIN cleared.' : ''),
         changes,
+        ip,
+      });
+    });
+  }
+
+  /**
+   * POST /users/:id/password: an admin sets another user's password, e.g.
+   * when it's forgotten. Allowed for inactive users (so they can be given
+   * a new one before reactivation); soft-deleted users are 404. The
+   * caller's own account is refused (400): changeOwnPassword() asks for
+   * the current password, this doesn't.
+   *
+   * The update, the refresh-token revocation and the PASSWORD_RESET audit
+   * row commit together. The approval PIN is left as it is.
+   */
+  async resetPassword(
+    id: string,
+    dto: ResetPasswordDto,
+    actor: AuditActor,
+    ip?: string | null,
+  ): Promise<void> {
+    if (id === actor.id) {
+      throw new BadRequestException({
+        message:
+          'You cannot reset your own password here. Change it with your current password instead.',
+        code: 'CANNOT_RESET_OWN_PASSWORD',
+      });
+    }
+
+    // Also enforced by ResetPasswordDto (see create()). Hashed before the
+    // lock, so the row isn't held while bcrypt runs.
+    assertBcryptPasswordLength(dto.new_password);
+    const password_hash = await bcrypt.hash(
+      dto.new_password,
+      this.bcryptRounds,
+    );
+
+    await this.dataSource.transaction(async (manager) => {
+      const target = await lockUser(manager, id);
+      if (!target) {
+        throw new NotFoundException('User not found');
+      }
+
+      await manager.update(User, id, { password_hash });
+      await revokeRefreshTokens(manager, id);
+      await writeAuditEntry(manager, {
+        actor,
+        action: AuditAction.PASSWORD_RESET,
+        entityType: 'User',
+        entityId: id,
+        description: `Password of ${target.full_name} reset by an admin.`,
+        ip,
+      });
+    });
+  }
+
+  /**
+   * PUT /auth/me/password: a user changes their own password. The current
+   * password is checked on the locked row, so of two changes at once the
+   * second sees the first's new hash (and fails unless it knows it).
+   *
+   * Refused: a wrong current password (403 WRONG_PASSWORD, nothing
+   * written), and a new password the same as the current one (400
+   * SAME_PASSWORD). The update, the revocation of every refresh token of
+   * the user and the PASSWORD_CHANGED audit row commit together; the
+   * caller (AuthController) then starts a new session for this device.
+   */
+  async changeOwnPassword(
+    actor: AuditActor,
+    dto: ChangePasswordDto,
+    ip?: string | null,
+  ): Promise<void> {
+    assertBcryptPasswordLength(dto.new_password);
+
+    await this.dataSource.transaction(async (manager) => {
+      const user = await manager
+        .createQueryBuilder(User, 'user')
+        .setLock('pessimistic_write')
+        .addSelect('user.password_hash')
+        .where('user.id = :id', { id: actor.id })
+        .getOne();
+      if (!user) {
+        throw new NotFoundException('User not found');
+      }
+
+      if (!(await bcrypt.compare(dto.current_password, user.password_hash))) {
+        throw new ForbiddenException({
+          message: 'Current password is incorrect.',
+          code: 'WRONG_PASSWORD',
+        });
+      }
+      // Compared with the hash, not the typed current password: bcrypt
+      // ignores bytes past 72, so different strings can be one password.
+      if (await bcrypt.compare(dto.new_password, user.password_hash)) {
+        throw new BadRequestException({
+          message: 'The new password must be different from the current one.',
+          code: 'SAME_PASSWORD',
+        });
+      }
+
+      const password_hash = await bcrypt.hash(
+        dto.new_password,
+        this.bcryptRounds,
+      );
+      await manager.update(User, actor.id, { password_hash });
+      await revokeRefreshTokens(manager, actor.id);
+      await writeAuditEntry(manager, {
+        actor,
+        action: AuditAction.PASSWORD_CHANGED,
+        entityType: 'User',
+        entityId: actor.id,
+        description: 'Password changed.',
         ip,
       });
     });
