@@ -50,7 +50,10 @@ describe("usersService", () => {
   describe("createUser", () => {
     it("posts a staff user with its branch", async () => {
       api.post.mockResolvedValue({ data: user });
-      const payload = { full_name: "Nimal Silva", email: "n@x.lk", password: "secret-pw", role: "cashier", branch_id: "b1" };
+      const payload = {
+        full_name: "Nimal Silva", email: "n@x.lk", password: "secret-pw", role: "cashier", branch_id: "b1",
+        phone: "0778822391", nic: "199012345678", address: "12 Temple Road, Kandy",
+      };
 
       await expect(createUser(payload)).resolves.toEqual(user);
       expect(api.post).toHaveBeenCalledWith("/users", payload);
@@ -58,9 +61,9 @@ describe("usersService", () => {
 
     it("never sends a branch for an admin", async () => {
       api.post.mockResolvedValue({ data: { ...user, role: "admin" } });
-      await createUser({ full_name: "A", email: "a@x.lk", password: "secret-pw", role: "admin", branch_id: "b1" });
+      await createUser({ full_name: "A", email: "a@x.lk", password: "secret-pw", role: "admin", branch_id: "b1", phone: "0771234567", nic: "901234567V", address: "Kandy" });
       expect(api.post).toHaveBeenCalledWith("/users", {
-        full_name: "A", email: "a@x.lk", password: "secret-pw", role: "admin",
+        full_name: "A", email: "a@x.lk", password: "secret-pw", role: "admin", phone: "0771234567", nic: "901234567V", address: "Kandy",
       });
     });
 
@@ -80,9 +83,15 @@ describe("usersService", () => {
       expect(api.patch).toHaveBeenCalledWith("/users/u1", { full_name: "Nimal S", email: "n@x.lk" });
     });
 
+    it("patches contact details", async () => {
+      api.patch.mockResolvedValue({ data: user });
+      await updateUser("u1", { phone: "0778822391", nic: "901234567V", address: "4 Lake Road" });
+      expect(api.patch).toHaveBeenCalledWith("/users/u1", { phone: "0778822391", nic: "901234567V", address: "4 Lake Road" });
+    });
+
     it("never sends a null branch_id or other nulls", async () => {
       api.patch.mockResolvedValue({ data: user });
-      await updateUser("u1", { full_name: "Nimal S", email: null, branch_id: null });
+      await updateUser("u1", { full_name: "Nimal S", email: null, branch_id: null, phone: null, nic: undefined });
       expect(api.patch).toHaveBeenCalledWith("/users/u1", { full_name: "Nimal S" });
     });
   });

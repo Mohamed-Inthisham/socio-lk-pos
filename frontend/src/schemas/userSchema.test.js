@@ -6,8 +6,11 @@ import {
   changeRoleSchema,
   createUserDefaults,
   createUserSchema,
-  editUserSchema,
+  editUserDefaults,
+  editUserSchemaFor,
   isRoleChange,
+  NIC_MESSAGE,
+  PHONE_MESSAGE,
 } from "./userSchema";
 import { PASSWORD_MISMATCH_MESSAGE, PASSWORD_TOO_LONG_MESSAGE } from "./passwordSchema";
 
@@ -23,7 +26,11 @@ const validCreate = {
   password: "fresh-pass-1",
   confirm_password: "fresh-pass-1",
   branch_id: "b1",
+  phone: "0771234567",
+  nic: "199012345678",
+  address: "12 Temple Road, Kandy",
 };
+const contact = { phone: "0771234567", nic: "199012345678", address: "12 Temple Road, Kandy" };
 
 describe("createUserSchema", () => {
   it("defaults to a cashier and accepts a complete form", () => {
@@ -38,7 +45,27 @@ describe("createUserSchema", () => {
       password: "Use at least 8 characters",
       confirm_password: "Enter the password again",
       branch_id: BRANCH_REQUIRED_MESSAGE,
+      phone: "Enter a contact number",
+      nic: "Enter the NIC",
+      address: "Enter the address",
     });
+  });
+
+  it.each([
+    ["phone", "12345", PHONE_MESSAGE],
+    ["phone", "0071234567", PHONE_MESSAGE],
+    ["nic", "90123456V", NIC_MESSAGE],
+    ["nic", "199012345678V", NIC_MESSAGE],
+    ["nic", "1990 1234 5678", NIC_MESSAGE],
+    ["address", "   ", "Enter the address"],
+    ["address", "x".repeat(501), "The address must be 500 characters or fewer"],
+  ])("refuses %s %j", (field, value, message) => {
+    expect(issues(createUserSchema, { ...validCreate, [field]: value })).toEqual({ [field]: message });
+  });
+
+  it("sends the contact number as 0XXXXXXXXX and the NIC uppercase, trimmed", () => {
+    const parsed = createUserSchema.parse({ ...validCreate, phone: " +94 77 123-4567 ", nic: " 901234567v ", address: "  4 Lake Road " });
+    expect(buildCreateUserPayload(parsed)).toMatchObject({ phone: "0771234567", nic: "901234567V", address: "4 Lake Road" });
   });
 
   it("checks the email and the name length", () => {
@@ -72,6 +99,7 @@ describe("createUserSchema", () => {
       email: "nimal@socio.lk",
       password: "fresh-pass-1",
       role: "admin",
+      ...contact,
     });
   });
 
@@ -83,25 +111,58 @@ describe("createUserSchema", () => {
       password: "fresh-pass-1",
       role: "cashier",
       branch_id: "b1",
+      ...contact,
     });
   });
 });
 
-describe("editUserSchema", () => {
-  const user = { id: "u1", full_name: "Nimal Silva", email: "nimal@socio.lk", role: "cashier", branch_id: "b1" };
+describe("editUserSchemaFor", () => {
+  const user = { id: "u1", full_name: "Nimal Silva", email: "nimal@socio.lk", role: "cashier", branch_id: "b1", ...contact };
+  // Added before contact details: none yet.
+  const older = { ...user, phone: null, nic: null, address: null };
 
   it("validates name and email", () => {
-    expect(issues(editUserSchema, { full_name: "Nimal", email: "nimal@socio.lk" })).toEqual({});
-    expect(issues(editUserSchema, { full_name: "", email: "x" })).toEqual({
+    const schema = editUserSchemaFor(user);
+    expect(issues(schema, editUserDefaults(user))).toEqual({});
+    expect(issues(schema, { ...editUserDefaults(user), full_name: "", email: "x" })).toEqual({
       full_name: "Enter the full name (at least 2 characters)",
       email: "Enter a valid email address",
     });
   });
 
+  it("starts from the user's details, empty where they have none", () => {
+    expect(editUserDefaults(older)).toEqual({ full_name: "Nimal Silva", email: "nimal@socio.lk", phone: "", nic: "", address: "" });
+  });
+
+  it("won't let a contact detail the user has be emptied", () => {
+    expect(issues(editUserSchemaFor(user), { ...editUserDefaults(user), phone: "", nic: " ", address: "" })).toEqual({
+      phone: "Enter a contact number",
+      nic: "Enter the NIC",
+      address: "Enter the address",
+    });
+  });
+
+  it("lets a user added before contact details keep them empty, but checks any typed", () => {
+    const schema = editUserSchemaFor(older);
+    expect(issues(schema, editUserDefaults(older))).toEqual({});
+    expect(issues(schema, { ...editUserDefaults(older), phone: "123", nic: "abc" })).toEqual({
+      phone: PHONE_MESSAGE,
+      nic: NIC_MESSAGE,
+    });
+  });
+
+  it("sends changed contact details normalized, and never an empty one", () => {
+    expect(buildEditUserPayload({ ...editUserDefaults(user), phone: "+94712345678", nic: "901234567V", address: "4 Lake Road" }, user))
+      .toEqual({ phone: "0712345678", nic: "901234567V", address: "4 Lake Road" });
+    expect(buildEditUserPayload({ ...editUserDefaults(user), phone: "077 123 4567" }, user)).toEqual({});
+    expect(buildEditUserPayload(editUserDefaults(older), older)).toEqual({});
+  });
+
   it("sends only what changed, never role or branch", () => {
-    expect(buildEditUserPayload({ full_name: "Nimal S", email: "nimal@socio.lk" }, user)).toEqual({ full_name: "Nimal S" });
-    expect(buildEditUserPayload({ full_name: "Nimal Silva", email: "NIMAL@socio.lk" }, user)).toEqual({});
-    expect(buildEditUserPayload({ full_name: "Nimal Silva", email: "n2@socio.lk" }, user)).toEqual({ email: "n2@socio.lk" });
+    const same = editUserDefaults(user);
+    expect(buildEditUserPayload({ ...same, full_name: "Nimal S" }, user)).toEqual({ full_name: "Nimal S" });
+    expect(buildEditUserPayload({ ...same, email: "NIMAL@socio.lk" }, user)).toEqual({});
+    expect(buildEditUserPayload({ ...same, email: "n2@socio.lk" }, user)).toEqual({ email: "n2@socio.lk" });
   });
 });
 

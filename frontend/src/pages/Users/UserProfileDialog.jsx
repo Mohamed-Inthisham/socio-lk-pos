@@ -4,14 +4,17 @@ import Dialog from "../../components/common/Dialog";
 import Button from "../../components/common/Button";
 import { ROLE_INFO } from "../../constants/rolePermissions";
 import { formatColomboDateTime } from "../../utils/colomboTime";
+import { formatSlPhone } from "../../utils/phone";
 import { ROLE_BADGE, branchLabel, initialsOf, statusBadge } from "./userDisplay";
 
 /**
  * UserProfileDialog (Task 2.4)
  *
- * The profile card a row opens on the Users page: who the user is, their
- * role, branch and status, whether they hold an approval PIN, and when the
- * account was added and last changed. Built from the list row: no request.
+ * The profile card a row opens on the Users page: who the user is, how to
+ * reach them (contact number, NIC, address: "Not added" for users added
+ * before those), their role, branch and status, whether they hold an
+ * approval PIN, and when the account was added and last changed. Built
+ * from the list row: no request.
  *
  * The same actions as the row. Each one closes the card and opens its own
  * dialog (the page does that through the callbacks). On the admin's own
@@ -26,6 +29,8 @@ const pinText = (user) => {
   if (user.approval_pin_set_at) return `Set on ${formatColomboDateTime(user.approval_pin_set_at)}`;
   return user.role === "cashier" ? "Cashiers don't hold one" : "Not set";
 };
+
+const NOT_ADDED = <span className="text-slate-400 dark:text-slate-500">Not added</span>;
 
 function Detail({ label, wide = false, children }) {
   return (
@@ -70,6 +75,9 @@ export default function UserProfileDialog({ user, isSelf, onClose, onEdit, onCha
 
           <dl className="grid gap-4 border-t border-slate-200 pt-4 sm:grid-cols-2 dark:border-slate-800">
             <Detail label="Email" wide>{u.email}</Detail>
+            <Detail label="Contact number">{u.phone ? formatSlPhone(u.phone) : NOT_ADDED}</Detail>
+            <Detail label="NIC">{u.nic || NOT_ADDED}</Detail>
+            <Detail label="Address" wide>{u.address ? <span className="whitespace-pre-line">{u.address}</span> : NOT_ADDED}</Detail>
             <Detail label="Branch">{branchLabel(u)}</Detail>
             <Detail label="Approval PIN">
               <span className="inline-flex items-center gap-1">

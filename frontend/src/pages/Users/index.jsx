@@ -19,7 +19,8 @@ import { ROLE_BADGE, branchLabel, statusBadge } from "./userDisplay";
  * Users page (Task 2.4, admin only: the route and the sidebar item are
  * limited to admins; the backend refuses everyone else).
  *
- * Server-side list (GET /users): search (name or email, debounced 300 ms),
+ * Server-side list (GET /users): search (name, email, NIC or contact
+ * number, debounced 300 ms),
  * role, status (Active by default) and branch filters, 20 a page. Every
  * filter change goes back to page 1; every successful action reloads.
  *
@@ -247,7 +248,7 @@ export default function Users() {
         <div className="space-y-3 border-b border-slate-200 p-4 dark:border-slate-800">
           <h2 className="font-semibold">Users <span className="ml-1 text-sm font-normal text-slate-500">({result.total})</span></h2>
           <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-[minmax(0,2fr)_repeat(3,minmax(0,1fr))]">
-            <InputField label="Search" aria-label="Search users" name="user-search" type="search" icon={Search} placeholder="Search name or email" value={search} onChange={(event) => setSearch(event.target.value)} />
+            <InputField label="Search" aria-label="Search users" name="user-search" type="search" icon={Search} placeholder="Search name, email, NIC or phone" value={search} onChange={(event) => setSearch(event.target.value)} />
             <InputField type="select" label="Role" name="user-role-filter" options={ROLE_OPTIONS} value={filters.role} onChange={setFilter("role")} />
             <InputField type="select" label="Status" name="user-status-filter" options={STATUS_OPTIONS} value={filters.status} onChange={setFilter("status")} />
             <InputField type="select" label="Branch" name="user-branch-filter" options={branchOptions} value={filters.branchId} onChange={setFilter("branchId")} />
