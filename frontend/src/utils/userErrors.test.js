@@ -14,6 +14,7 @@ describe("userErrorOf", () => {
     ["CANNOT_RESET_OWN_PASSWORD", 400, /Change password in your user menu/, null],
     ["WRONG_PASSWORD", 403, /current password is incorrect/, "current_password"],
     ["SAME_PASSWORD", 400, /different from your current one/, "new_password"],
+    ["NIC_ALREADY_REGISTERED", 409, /That NIC is already registered/, "nic"],
   ])("maps %s to plain words", (code, status, message, field) => {
     const result = userErrorOf(failure(status, { message: "server words", code }), "fallback");
     expect(result).toMatchObject({ code, status, field });
@@ -45,6 +46,15 @@ describe("userErrorOf", () => {
       message: "Password must be at least 8 characters",
       field: "password",
     });
+  });
+
+  it.each([
+    ["Contact number must be a valid Sri Lankan number (e.g. 0771234567 or +94771234567)", "phone"],
+    ["NIC must be 9 digits followed by V or X (e.g. 901234567V) or 12 digits (e.g. 199012345678)", "nic"],
+    ["Address is required", "address"],
+    ["Email must be a valid email address", "email"],
+  ])("puts %j under %s", (message, field) => {
+    expect(userErrorOf(failure(400, { message: [message] }), "f")).toMatchObject({ message, field });
   });
 
   it("never shows a branch id", () => {

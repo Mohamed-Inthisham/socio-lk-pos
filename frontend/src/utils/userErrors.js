@@ -30,6 +30,7 @@ const CODE_MESSAGES = {
   WRONG_PASSWORD: ["Your current password is incorrect.", "current_password"],
   SAME_PASSWORD: ["Choose a password different from your current one.", "new_password"],
   PASSWORD_CHANGED_SIGN_IN_AGAIN: [SIGN_IN_AGAIN_MESSAGE, null],
+  NIC_ALREADY_REGISTERED: ["That NIC is already registered to another user.", "nic"],
 };
 
 const firstMessage = (data) => (Array.isArray(data?.message) ? data.message[0] : data?.message);
@@ -38,7 +39,10 @@ const firstMessage = (data) => (Array.isArray(data?.message) ? data.message[0] :
 const fieldOf = (message) => {
   if (/branch/i.test(message)) return "branch_id";
   if (/password/i.test(message)) return "password";
-  if (/email/i.test(message)) return "email";
+  if (/email/i.test(message)) return "email"; // before address: "valid email address"
+  if (/contact number|phone/i.test(message)) return "phone";
+  if (message.startsWith("NIC")) return "nic";
+  if (/address/i.test(message)) return "address";
   if (/full_name|name/i.test(message)) return "full_name";
   if (/role/i.test(message)) return "role";
   return null;
@@ -57,6 +61,7 @@ export const userErrorOf = (error, fallback) => {
   const result = (text, field = null) => ({ message: text, field, code, status });
 
   if (code && CODE_MESSAGES[code]) return result(...CODE_MESSAGES[code]);
+  // Only a duplicate NIC carries a code; a duplicate email has none.
   if (status === 409) return result("That email is already registered to another user.", "email");
   if (status === 404) return result("This user no longer exists. Close this and the list will refresh.");
   if (status === 403) return result("Only admins can manage users.");

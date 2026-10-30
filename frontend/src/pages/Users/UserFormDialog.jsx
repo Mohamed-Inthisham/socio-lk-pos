@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useForm, useWatch } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { useSelector } from "react-redux";
@@ -11,7 +11,8 @@ import {
   buildEditUserPayload,
   createUserDefaults,
   createUserSchema,
-  editUserSchema,
+  editUserDefaults,
+  editUserSchemaFor,
   needsBranch,
 } from "../../schemas/userSchema";
 import { createUser, updateUser } from "../../services/usersService";
@@ -20,16 +21,19 @@ import { userErrorOf } from "../../utils/userErrors";
 /**
  * UserFormDialog (Task 2.4)
  *
- * Create mode (user = null): full name, email, password + confirmation,
- * role (Cashier by default) and, for a manager or cashier, an active
- * branch. POST /users; an admin is sent no branch.
+ * Create mode (user = null): full name, email, contact number, NIC,
+ * address, password + confirmation, role (Cashier by default) and, for a
+ * manager or cashier, an active branch. POST /users; an admin is sent no
+ * branch.
  *
- * Edit mode: full name and email only. PATCH /users/:id with just what
- * changed: never a role or branch (ChangeRoleDialog does those, with
- * their audit row and session revocation), never null.
+ * Edit mode: full name, email and contact details. PATCH /users/:id with
+ * just what changed: never a role or branch (ChangeRoleDialog does those,
+ * with their audit row and session revocation), never null or empty. A
+ * contact detail the user already has can't be emptied; users added
+ * before contact details may keep theirs empty.
  *
- * Server refusals land under their field (409 email, a branch message)
- * or in the alert. Passwords live only in this form while it is open and
+ * Server refusals land under their field (409 email, 409 NIC, a branch or
+ * format message) or in the alert. Passwords live only in this form while it is open and
  * are cleared on close; the axios error (which carries them) is never
  * kept or logged.
  *
@@ -108,7 +112,7 @@ function CreateUserDialog({ open, onClose, onSaved }) {
       onClose();
     } catch (error) {
       showServerError(error, "Couldn't create the user. Try again.",
-        ["full_name", "email", "password", "branch_id", "role"], setError, setApiError);
+        ["full_name", "email", "phone", "nic", "address", "password", "branch_id", "role"], setError, setApiError);
     }
   };
 
@@ -120,6 +124,14 @@ function CreateUserDialog({ open, onClose, onSaved }) {
       <form id="user-create-form" onSubmit={handleSubmit(onSubmit)} noValidate className="flex flex-col gap-4">
         <InputField label="Full name" name="user-full-name" autoComplete="off" required error={errors.full_name?.message} data-autofocus {...register("full_name")} />
         <InputField label="Email" name="user-email" type="email" autoComplete="off" required error={errors.email?.message} {...register("email")} />
+        <div className="grid gap-4 sm:grid-cols-2">
+          <InputField label="Contact number" name="user-phone" type="tel" autoComplete="off" required={true}
+            hint="0771234567 or +94771234567" error={errors.phone?.message} {...register("phone")} />
+          <InputField label="NIC" name="user-nic" autoComplete="off" required={true}
+            hint="901234567V or 199012345678" error={errors.nic?.message} {...register("nic")} />
+        </div>
+        <InputField label="Address" name="user-address" type="textarea" rows={2} autoComplete="off" required={true}
+          error={errors.address?.message} {...register("address")} />
         <div className="grid gap-4 sm:grid-cols-2">
           <InputField label="Password" name="user-password" type="password" autoComplete="new-password" required
             hint="At least 8 characters" error={errors.password?.message} {...register("password")} />
@@ -147,6 +159,8 @@ function EditUserDialog({ open, user, onClose, onSaved }) {
     setWasOpen(open);
     if (open) setApiError(null);
   }
+  // A contact detail is required once the user has it.
+  const schema = useMemo(() => editUserSchemaFor(user), [user]);
   const {
     register,
     handleSubmit,
@@ -154,14 +168,14 @@ function EditUserDialog({ open, user, onClose, onSaved }) {
     setError,
     formState: { errors, isSubmitting },
   } = useForm({
-    resolver: zodResolver(editUserSchema),
-    defaultValues: { full_name: user.full_name, email: user.email },
+    resolver: zodResolver(schema),
+    defaultValues: editUserDefaults(user),
     mode: "onSubmit",
     reValidateMode: "onChange",
   });
 
   useEffect(() => {
-    if (open) reset({ full_name: user.full_name, email: user.email });
+    if (open) reset(editUserDefaults(user));
   }, [open, user, reset]);
 
   const close = () => {
@@ -181,18 +195,26 @@ function EditUserDialog({ open, user, onClose, onSaved }) {
       onSaved?.();
       onClose();
     } catch (error) {
-      showServerError(error, "Couldn't save the changes. Try again.", ["full_name", "email"], setError, setApiError);
+      showServerError(error, "Couldn't save the changes. Try again.", ["full_name", "email", "phone", "nic", "address"], setError, setApiError);
     }
   };
 
   return (
     <Dialog open={open} onClose={close} title="Edit user"
-      description="Name and email. Change the role or branch with Change role." size="md" dismissible={!isSubmitting}
+      description="Name, email and contact details. Change the role or branch with Change role." size="md" dismissible={!isSubmitting}
       footer={footerFor("user-edit-form", "Save changes", isSubmitting, close)}>
       <FormAlert message={apiError} />
       <form id="user-edit-form" onSubmit={handleSubmit(onSubmit)} noValidate className="flex flex-col gap-4">
         <InputField label="Full name" name="user-full-name" autoComplete="off" required error={errors.full_name?.message} data-autofocus {...register("full_name")} />
         <InputField label="Email" name="user-email" type="email" autoComplete="off" required hint="They sign in with this email." error={errors.email?.message} {...register("email")} />
+        <div className="grid gap-4 sm:grid-cols-2">
+          <InputField label="Contact number" name="user-phone" type="tel" autoComplete="off" required={!!user.phone}
+            hint="0771234567 or +94771234567" error={errors.phone?.message} {...register("phone")} />
+          <InputField label="NIC" name="user-nic" autoComplete="off" required={!!user.nic}
+            hint="901234567V or 199012345678" error={errors.nic?.message} {...register("nic")} />
+        </div>
+        <InputField label="Address" name="user-address" type="textarea" rows={2} autoComplete="off" required={!!user.address}
+          error={errors.address?.message} {...register("address")} />
       </form>
     </Dialog>
   );

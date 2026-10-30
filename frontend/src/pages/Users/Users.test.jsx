@@ -228,6 +228,9 @@ describe("Users page", () => {
       const dialog = await screen.findByRole("dialog", { name: "Add user" });
       await user.type(within(dialog).getByLabelText(/Full name/), "Kamal Perera");
       await user.type(within(dialog).getByLabelText(/^Email/), "kamal@socio.lk");
+      await user.type(within(dialog).getByLabelText(/Contact number/), "0771234567");
+      await user.type(within(dialog).getByLabelText(/^NIC/), "199012345678");
+      await user.type(within(dialog).getByLabelText(/^Address/), "12 Temple Road, Kandy");
       await user.type(within(dialog).getByLabelText(/^Password/), "fresh-pass-1");
       await user.type(within(dialog).getByLabelText(/Confirm password/), "fresh-pass-1");
       await user.selectOptions(within(dialog).getByLabelText(/Branch/), "branch-main");

@@ -45,7 +45,11 @@ export const listUsers = async (filters = {}) => {
 
 /**
  * Create a user. An admin has no branch, so `branch_id` is sent only for
- * staff. 409 when the email is taken.
+ * staff. 409 when the email is taken, or 409 NIC_ALREADY_REGISTERED when
+ * the NIC is.
+ *
+ * Only the fields below are copied into the body: a field added to the
+ * form has to be added here too, or it is silently dropped.
  *
  * @param {Object} payload
  * @param {string} payload.full_name
@@ -53,23 +57,27 @@ export const listUsers = async (filters = {}) => {
  * @param {string} payload.password - 8 characters to 72 UTF-8 bytes
  * @param {string} payload.role
  * @param {string} [payload.branch_id] - required for manager and cashier
+ * @param {string} payload.phone - 0XXXXXXXXX
+ * @param {string} payload.nic
+ * @param {string} payload.address
  */
-export const createUser = async ({ full_name, email, password, role, branch_id }) => {
-  const body = { full_name, email, password, role };
+export const createUser = async ({ full_name, email, password, role, branch_id, phone, nic, address }) => {
+  const body = { full_name, email, password, role, phone, nic, address };
   if (role !== "admin" && branch_id) body.branch_id = branch_id;
   const response = await api.post("/users", body);
   return response.data;
 };
 
 /**
- * Update a user's name and email. Only those two fields are ever sent:
- * role and branch change through changeUserRole.
+ * Update a user's name, email and contact details. Only those fields are
+ * ever sent, and never a null: role and branch change through
+ * changeUserRole, and the server never clears contact details.
  *
  * @param {string} id
- * @param {{ full_name?: string, email?: string }} payload
+ * @param {{ full_name?: string, email?: string, phone?: string, nic?: string, address?: string }} payload
  */
-export const updateUser = async (id, { full_name, email } = {}) => {
-  const response = await api.patch(`/users/${id}`, definedOnly({ full_name, email }));
+export const updateUser = async (id, { full_name, email, phone, nic, address } = {}) => {
+  const response = await api.patch(`/users/${id}`, definedOnly({ full_name, email, phone, nic, address }));
   return response.data;
 };
 

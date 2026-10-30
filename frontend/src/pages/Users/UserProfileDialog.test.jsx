@@ -30,6 +30,20 @@ describe("UserProfileDialog", () => {
     expect(card).toHaveTextContent("Cashiers don't hold one");
   });
 
+  it("shows how to reach them", () => {
+    const card = show(userRow());
+    expect(card).toHaveTextContent("Contact number077 123 4567");
+    expect(card).toHaveTextContent("NIC199012345678");
+    expect(card).toHaveTextContent("Address12 Temple Road, Kandy");
+  });
+
+  it("says Not added for a user added before contact details", () => {
+    const card = show(userRow({ phone: null, nic: null, address: null }));
+    expect(card).toHaveTextContent("Contact numberNot added");
+    expect(card).toHaveTextContent("NICNot added");
+    expect(card).toHaveTextContent("AddressNot added");
+  });
+
   it("shows an admin's branches and when their PIN was set", () => {
     const card = show(adminRow());
     expect(card).toHaveTextContent("Administrator");
