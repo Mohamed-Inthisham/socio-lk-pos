@@ -3,7 +3,7 @@ import { vi } from "vitest";
 import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { Provider } from "react-redux";
-import { MemoryRouter } from "react-router-dom";
+import { MemoryRouter, useLocation } from "react-router-dom";
 import ReturnDialog from ".";
 import { authState, cashDayState, createTestStore } from "../../../test/renderWithProviders";
 import {
@@ -53,11 +53,18 @@ vi.mock("../../../services/cashDaysService");
 // 10:30 on Fri 23 Oct 2026 in Colombo; saleEntity was completed on the 21st.
 const NOW = new Date("2026-10-23T05:00:00.000Z");
 
+// The router's current path, so a test can see where a link went.
+const Where = () => {
+  const location = useLocation();
+  return <p data-testid="where">{location.pathname}</p>;
+};
+
 /**
  * The dialog in a store and router; `rerender` keeps them, so the dialog
- * can be closed and opened again as the page does.
+ * can be closed and opened again as the page does. `salesPath` as the
+ * Sales area passes it; omitted, the dialog's own default applies.
  */
-const renderDialog = ({ sale = saleEntity(), open = true, user = cashierUser } = {}) => {
+const renderDialog = ({ sale = saleEntity(), open = true, user = cashierUser, salesPath } = {}) => {
   const onClose = vi.fn();
   const onReturned = vi.fn();
   const onSaleChanged = vi.fn();
@@ -71,7 +78,9 @@ const renderDialog = ({ sale = saleEntity(), open = true, user = cashierUser } =
           sale={props.sale}
           onReturned={onReturned}
           onSaleChanged={onSaleChanged}
+          salesPath={salesPath}
         />
+        <Where />
       </MemoryRouter>
     </Provider>
   );
@@ -708,6 +717,64 @@ describe("ReturnDialog: sending (P7-9, P7-15)", () => {
 
     const link = await within(dialog()).findByRole("link", { name: "INV-20261022-0015" });
     expect(link).toHaveAttribute("href", "/pos/sales/sale-15");
+    expect(within(dialog()).getByRole("alert")).toHaveTextContent(
+      "The phone (IMEI 356789012345671) was traded back in on INV-20261022-0015. It can't be returned on this sale.",
+    );
+  });
+
+  it("in the Sales area, the later sale's link stays in the Sales area", async () => {
+    const user = userEvent.setup();
+    salesService.createReturn.mockRejectedValue(phoneTakenBackError("TAKEN_BACK_ON_SALE"));
+    renderDialog({ salesPath: "/sales/history" });
+    await fillFixtureReturn(user);
+    await user.click(returnButton());
+
+    const link = await within(dialog()).findByRole("link", { name: "INV-20261022-0015" });
+    expect(link).toHaveAttribute("href", "/sales/history/sale-15");
+  });
+
+  it("the later sale's link opens that sale and closes the dialog", async () => {
+    const user = userEvent.setup();
+    salesService.createReturn.mockRejectedValue(phoneTakenBackError("TAKEN_BACK_ON_SALE"));
+    const { onClose } = renderDialog();
+    await fillFixtureReturn(user);
+    await user.click(returnButton());
+
+    await user.click(await within(dialog()).findByRole("link", { name: "INV-20261022-0015" }));
+    await waitFor(() => expect(screen.getByTestId("where")).toHaveTextContent("/pos/sales/sale-15"));
+    expect(onClose).toHaveBeenCalledTimes(1);
+  });
+
+  it("a phone bought back on a later purchase: no link, and Return stays disabled", async () => {
+    const user = userEvent.setup();
+    salesService.createReturn.mockRejectedValue(phoneTakenBackError("BOUGHT_BACK_ON_PURCHASE"));
+    renderDialog();
+    await fillFixtureReturn(user);
+    await user.click(returnButton());
+
+    const alert = await within(dialog()).findByRole("alert");
+    expect(alert).toHaveTextContent(
+      "The phone (IMEI 356789012345671) was bought back on a later purchase. It can't be returned on this sale.",
+    );
+    expect(within(alert).queryByRole("link")).not.toBeInTheDocument();
+    await user.type(within(dialog()).getByLabelText("Approval PIN"), PIN);
+    expect(returnButton()).toBeDisabled();
+  });
+
+  it("a phone taken back with no detail: the general message, no link, and Return still works", async () => {
+    const user = userEvent.setup();
+    salesService.createReturn.mockRejectedValue(phoneTakenBackError(null));
+    renderDialog();
+    await fillFixtureReturn(user);
+    await user.click(returnButton());
+
+    const alert = await within(dialog()).findByRole("alert");
+    expect(alert).toHaveTextContent(
+      "The phone (IMEI 356789012345671) was taken back on a later sale or purchase. It can't be returned on this sale.",
+    );
+    expect(within(alert).queryByRole("link")).not.toBeInTheDocument();
+    await user.type(within(dialog()).getByLabelText("Approval PIN"), PIN);
+    expect(returnButton()).toBeEnabled();
   });
 
   it("another return meanwhile: re-reads the sale and goes back to the items", async () => {

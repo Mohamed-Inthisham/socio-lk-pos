@@ -80,7 +80,6 @@ const RefundStep = ({
   serverErrors,
   approval,
   busy,
-  salesPath = "/pos/sales",
 }) => {
   const reasonGroup = useRef(null);
   const seen = (path) => touched.has(path) || touched.has("*");
@@ -330,9 +329,10 @@ const RefundStep = ({
  * outside the scroll area, so an error is never scrolled away.
  *
  * PROPS: sale; alert ({ message, laterSale, lead, tail } | null);
- * onLeave (close the dialog, for the link); checking
+ * onLeave (close the dialog, for the link); checking; salesPath (where
+ * the link opens the later sale: /pos/sales, or /sales/history)
  */
-export const RefundNotices = ({ sale, alert, onLeave, checking }) => (
+export const RefundNotices = ({ sale, alert, onLeave, checking, salesPath = "/pos/sales" }) => (
   <>
     <p className="text-xs text-slate-600 dark:text-slate-300" data-testid="return-paid">
       {paidLine(sale)}
