@@ -19,7 +19,8 @@ import { Branch } from '../../branches/entities/branch.entity';
 @Check('CHK_users_branch_role', `role = 'admin' OR branch_id IS NOT NULL`)
 // Approval PIN (Phase 6.4 P6-15): only admins and managers hold one, its
 // set time is present exactly when the hash is, and the count is never
-// negative. A route that makes a user a cashier must clear the PIN first.
+// negative. A route that makes a user a cashier must clear the PIN in the
+// same UPDATE (UsersService.changeRole does).
 @Check(
   'CHK_users_approval_pin_role',
   `approval_pin_hash IS NULL OR role IN ('admin', 'manager')`,

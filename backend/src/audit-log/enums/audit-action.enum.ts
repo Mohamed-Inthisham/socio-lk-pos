@@ -23,4 +23,7 @@ export enum AuditAction {
   // An unpaid draft sale discarded by its branch's day close: one row per
   // draft, with its lines (no cost prices).
   DRAFT_DISCARDED = 'DRAFT_DISCARDED',
+  // A user's role and/or branch changed by an admin (Task 2.2): old and new
+  // role and branch only.
+  ROLE_CHANGED = 'ROLE_CHANGED',
 }
