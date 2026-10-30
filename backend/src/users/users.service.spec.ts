@@ -723,6 +723,236 @@ describe('UsersService', () => {
   ];
   const isTokenRevocation = (entity: unknown) => entity === RefreshToken;
 
+  describe('changeRole', () => {
+    const setAt = new Date('2026-10-01T00:00:00.000Z');
+    const managerRow = {
+      id: 'u1',
+      full_name: 'Shop Manager',
+      role: UserRole.MANAGER,
+      branch_id: 'branch-1',
+      is_active: true,
+      approval_pin_set_at: setAt,
+    };
+    const adminRow = {
+      id: 'u1',
+      full_name: 'Second Admin',
+      role: UserRole.ADMIN,
+      branch_id: null,
+      is_active: true,
+      approval_pin_set_at: null,
+    };
+    const lockRows = (target: object | null, admins: object[]) => {
+      mockLockQueryBuilder.getOne.mockResolvedValue(target);
+      mockLockQueryBuilder.getMany.mockResolvedValue(admins);
+    };
+    const pinCleared = {
+      approval_pin_hash: null,
+      approval_pin_set_at: null,
+      approval_pin_failed_attempts: 0,
+      approval_pin_locked_until: null,
+    };
+
+    beforeEach(() => {
+      mockManager.update.mockResolvedValue({ affected: 1 });
+      mockBranchesRepo.findOne.mockResolvedValue(activeBranch);
+    });
+
+    it('demotes a manager to cashier: clears the PIN in the same UPDATE, revokes tokens and audits, in one transaction', async () => {
+      lockRows(managerRow, [{ id: 'admin-1' }]);
+
+      await service.changeRole(
+        'u1',
+        { role: UserRole.CASHIER, branch_id: 'branch-1' },
+        actor,
+        '10.0.0.5',
+      );
+
+      expect(mockManager.update).toHaveBeenNthCalledWith(1, User, 'u1', {
+        role: UserRole.CASHIER,
+        branch_id: 'branch-1',
+        ...pinCleared,
+      });
+      expect(mockManager.update).toHaveBeenNthCalledWith(2, ...tokenRevocation);
+      expect(mockAuditRepo.save).toHaveBeenCalledWith({
+        user_id: 'admin-1',
+        user_name: 'Head Admin',
+        user_role: UserRole.ADMIN,
+        action: AuditAction.ROLE_CHANGED,
+        entity_type: 'User',
+        entity_id: 'u1',
+        changes: {
+          role: { old: UserRole.MANAGER, new: UserRole.CASHIER },
+          branch_id: { old: 'branch-1', new: 'branch-1' },
+          approval_pin_set_at: { old: setAt, new: null },
+        },
+        description:
+          'Role of Shop Manager changed from manager to cashier. Approval PIN cleared.',
+        ip_address: '10.0.0.5',
+      });
+      expect(transactionOutcome).toBe('committed');
+    });
+
+    it('promotes a manager to admin: branch cleared, PIN kept', async () => {
+      lockRows(managerRow, [{ id: 'admin-1' }]);
+
+      await service.changeRole('u1', { role: UserRole.ADMIN }, actor);
+
+      expect(mockManager.update).toHaveBeenNthCalledWith(1, User, 'u1', {
+        role: UserRole.ADMIN,
+        branch_id: null,
+      });
+      expect(mockBranchesRepo.findOne).not.toHaveBeenCalled();
+    });
+
+    it('accepts branch_id: null for an admin', async () => {
+      lockRows(managerRow, [{ id: 'admin-1' }]);
+      await service.changeRole(
+        'u1',
+        { role: UserRole.ADMIN, branch_id: null },
+        actor,
+      );
+      expect(mockManager.update).toHaveBeenNthCalledWith(1, User, 'u1', {
+        role: UserRole.ADMIN,
+        branch_id: null,
+      });
+    });
+
+    it('moves an admin to manager at an active branch while another admin remains', async () => {
+      lockRows(adminRow, [{ id: 'admin-1' }, adminRow]);
+      await service.changeRole(
+        'u1',
+        { role: UserRole.MANAGER, branch_id: 'branch-1' },
+        actor,
+      );
+      expect(mockManager.update).toHaveBeenNthCalledWith(1, User, 'u1', {
+        role: UserRole.MANAGER,
+        branch_id: 'branch-1',
+      });
+      expect(transactionOutcome).toBe('committed');
+    });
+
+    it('transfers a staff user, keeping the role, as a branch move', async () => {
+      lockRows(managerRow, [{ id: 'admin-1' }]);
+      await service.changeRole(
+        'u1',
+        { role: UserRole.MANAGER, branch_id: 'branch-9' },
+        actor,
+      );
+      expect(mockAuditRepo.save).toHaveBeenCalledWith(
+        expect.objectContaining({
+          changes: {
+            role: { old: UserRole.MANAGER, new: UserRole.MANAGER },
+            branch_id: { old: 'branch-1', new: 'branch-9' },
+          },
+          description: 'Shop Manager moved to another branch as manager.',
+        }),
+      );
+    });
+
+    it('changes nothing when the role and branch are already set', async () => {
+      lockRows(managerRow, [{ id: 'admin-1' }]);
+      await service.changeRole(
+        'u1',
+        { role: UserRole.MANAGER, branch_id: 'branch-1' },
+        actor,
+      );
+      expect(mockManager.update).not.toHaveBeenCalled();
+      expect(mockAuditRepo.save).not.toHaveBeenCalled();
+    });
+
+    it.each([
+      ['staff without a branch', { role: UserRole.CASHIER }],
+      ['staff with a null branch', { role: UserRole.MANAGER, branch_id: null }],
+      ['an admin with a branch', { role: UserRole.ADMIN, branch_id: 'b' }],
+    ])('400 for %s, before any lock', async (_, dto) => {
+      await expect(service.changeRole('u1', dto, actor)).rejects.toThrow(
+        BadRequestException,
+      );
+      expect(mockDataSource.transaction).not.toHaveBeenCalled();
+    });
+
+    it('400 for staff at an inactive branch', async () => {
+      mockBranchesRepo.findOne.mockResolvedValue(inactiveBranch);
+      await expect(
+        service.changeRole(
+          'u1',
+          { role: UserRole.CASHIER, branch_id: 'branch-2' },
+          actor,
+        ),
+      ).rejects.toThrow(BadRequestException);
+      expect(mockDataSource.transaction).not.toHaveBeenCalled();
+    });
+
+    it("refuses the caller's own account (400 CANNOT_CHANGE_OWN_ROLE)", async () => {
+      await expect(
+        service.changeRole(
+          'admin-1',
+          { role: UserRole.MANAGER, branch_id: 'branch-1' },
+          actor,
+        ),
+      ).rejects.toMatchObject({
+        status: 400,
+        response: expect.objectContaining({
+          code: 'CANNOT_CHANGE_OWN_ROLE',
+        }) as object,
+      });
+      expect(mockDataSource.transaction).not.toHaveBeenCalled();
+    });
+
+    it('refuses demoting the last active admin (400 LAST_ACTIVE_ADMIN), changing nothing', async () => {
+      lockRows(adminRow, [adminRow]);
+      await expect(
+        service.changeRole(
+          'u1',
+          { role: UserRole.CASHIER, branch_id: 'branch-1' },
+          actor,
+        ),
+      ).rejects.toMatchObject({
+        response: expect.objectContaining({
+          code: 'LAST_ACTIVE_ADMIN',
+        }) as object,
+      });
+      expect(mockManager.update).not.toHaveBeenCalled();
+      expect(transactionOutcome).toBe('rolled back');
+    });
+
+    it('demotes an inactive admin even when only one admin is active', async () => {
+      lockRows({ ...adminRow, is_active: false }, [{ id: 'admin-1' }]);
+      await service.changeRole(
+        'u1',
+        { role: UserRole.CASHIER, branch_id: 'branch-1' },
+        actor,
+      );
+      expect(transactionOutcome).toBe('committed');
+    });
+
+    it('locks the active admins before the target user', async () => {
+      lockRows(managerRow, [{ id: 'admin-1' }]);
+      await service.changeRole('u1', { role: UserRole.ADMIN }, actor);
+      expect(
+        mockLockQueryBuilder.getMany.mock.invocationCallOrder[0],
+      ).toBeLessThan(mockLockQueryBuilder.getOne.mock.invocationCallOrder[0]);
+    });
+
+    it('throws NotFoundException for an unknown user', async () => {
+      lockRows(null, [{ id: 'admin-1' }]);
+      await expect(
+        service.changeRole('missing', { role: UserRole.ADMIN }, actor),
+      ).rejects.toThrow(NotFoundException);
+      expect(mockManager.update).not.toHaveBeenCalled();
+    });
+
+    it('rolls the change back when the audit row fails', async () => {
+      lockRows(managerRow, [{ id: 'admin-1' }]);
+      const failure = new Error('connection lost');
+      mockAuditRepo.save.mockRejectedValueOnce(failure);
+      await expect(
+        service.changeRole('u1', { role: UserRole.ADMIN }, actor),
+      ).rejects.toBe(failure);
+      expect(transactionOutcome).toBe('rolled back');
+    });
+  });
+
   describe('deactivate', () => {
     const cashierRow = {
       id: 'u1',

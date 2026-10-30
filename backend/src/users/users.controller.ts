@@ -23,6 +23,7 @@ import { UsersService } from './users.service';
 import { CreateUserDto } from './dto/create-user.dto';
 import { UpdateUserDto } from './dto/update-user.dto';
 import { ListUsersQueryDto } from './dto/list-users-query.dto';
+import { ChangeRoleDto } from './dto/change-role.dto';
 import { Roles } from '../auth/decorators/roles.decorator';
 import { CurrentUser } from '../auth/decorators/current-user.decorator';
 import type { AuthenticatedUser } from '../auth/strategies/jwt.strategy';
@@ -31,10 +32,10 @@ import { Auditable } from '../audit-log/decorators/auditable.decorator';
 import { AuditAction } from '../audit-log/enums/audit-action.enum';
 
 /**
- * Admin-only user management. Create, deactivate and reactivate are not
- * @Auditable: the service writes their audit rows in the same transaction
- * as the change (the interceptor writes after the response, and can lose
- * the row).
+ * Admin-only user management. Create, role change, deactivate and
+ * reactivate are not @Auditable: the service writes their audit rows in
+ * the same transaction as the change (the interceptor writes after the
+ * response, and can lose the row).
  */
 @ApiTags('Users')
 @ApiCookieAuth('access_token')
@@ -124,6 +125,38 @@ export class UsersController {
     @Body() dto: UpdateUserDto,
   ) {
     return this.usersService.update(id, dto);
+  }
+
+  @Patch(':id/role')
+  @ApiOperation({
+    summary: "Change a user's role and branch",
+    description:
+      'Admin-only. Admins have no branch (omit branch_id or send null); ' +
+      'managers and cashiers need an active one. Also moves a staff user ' +
+      'to another branch. Becoming a cashier clears the approval PIN. ' +
+      "Revokes the user's refresh tokens; the new role applies to their " +
+      'next request. Refused for your own account and for the last active ' +
+      'admin. Returns the user. Writes a ROLE_CHANGED audit entry.',
+  })
+  @ApiParam({ name: 'id', description: 'User UUID', format: 'uuid' })
+  @ApiResponse({ status: 200, description: 'Role changed (or unchanged)' })
+  @ApiResponse({
+    status: 400,
+    description:
+      'Validation failed, branch missing, inactive or not allowed, or ' +
+      '{ message, code: CANNOT_CHANGE_OWN_ROLE | LAST_ACTIVE_ADMIN }',
+  })
+  @ApiResponse({ status: 401, description: 'Not authenticated' })
+  @ApiResponse({ status: 403, description: 'Not an admin' })
+  @ApiResponse({ status: 404, description: 'User not found' })
+  async changeRole(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body() dto: ChangeRoleDto,
+    @CurrentUser() user: AuthenticatedUser,
+    @Ip() ip: string,
+  ) {
+    await this.usersService.changeRole(id, dto, user, ip);
+    return this.findOne(id);
   }
 
   @Post(':id/deactivate')

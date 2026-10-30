@@ -20,6 +20,7 @@ import { Branch } from '../branches/entities/branch.entity';
 import { CreateUserDto } from './dto/create-user.dto';
 import { UpdateUserDto } from './dto/update-user.dto';
 import { ListUsersQueryDto } from './dto/list-users-query.dto';
+import { ChangeRoleDto } from './dto/change-role.dto';
 import { TypedConfigService } from '../config/typed-config.service';
 import { assertBcryptPasswordLength } from '../common/bcrypt-input';
 import {
@@ -281,7 +282,7 @@ export class UsersService {
   /**
    * Partial update. Password is not updatable here (and there is no
    * password-change endpoint yet — see FOLLOWUPS.md).
-   * Role is IMMUTABLE post-creation (enforced at both DTO and service layers).
+   * Role is not changed here (the DTO omits it): changeRole() does that.
    * Branch transfers are allowed for staff; admins cannot be given a branch.
    */
   async update(id: string, dto: UpdateUserDto): Promise<SafeUser> {
@@ -316,6 +317,103 @@ export class UsersService {
 
     const saved = await this.usersRepository.save(user);
     return toSafeUser(saved);
+  }
+
+  /**
+   * PATCH /users/:id/role: set a user's role and branch together, with the
+   * same branch rule as create (admin: none; staff: an active branch). Also
+   * moves a staff user to another branch with the same role.
+   *
+   * - Refused (400) for the caller's own account and for the last active
+   *   admin, under the same locks as deactivate().
+   * - Becoming a cashier clears the approval PIN, its count and lock in
+   *   the same UPDATE (CHK_users_approval_pin_role). Admin ↔ manager keeps
+   *   the PIN.
+   * - Any change revokes the user's refresh tokens, so their next refresh
+   *   sends them to log in again and their app reloads the new role and
+   *   branch. Access tokens need nothing: every request re-reads the user.
+   * - The update, the revocation and the ROLE_CHANGED audit row commit
+   *   together. Asking for the current role and branch changes nothing.
+   */
+  async changeRole(
+    id: string,
+    dto: ChangeRoleDto,
+    actor: AuditActor,
+    ip?: string | null,
+  ): Promise<void> {
+    if (id === actor.id) {
+      throw new BadRequestException({
+        message: 'You cannot change your own role.',
+        code: 'CANNOT_CHANGE_OWN_ROLE',
+      });
+    }
+    // null and omitted mean the same thing: no branch.
+    const branchId = await this.resolveBranchForRole(
+      dto.role,
+      dto.branch_id ?? undefined,
+    );
+
+    await this.dataSource.transaction(async (manager) => {
+      // Admins first, then the target: the lock order deactivate() uses.
+      const activeAdmins = await lockActiveAdmins(manager);
+      const target = await lockUser(manager, id);
+      if (!target) {
+        throw new NotFoundException('User not found');
+      }
+      if (target.role === dto.role && target.branch_id === branchId) return;
+
+      if (
+        target.role === UserRole.ADMIN &&
+        dto.role !== UserRole.ADMIN &&
+        target.is_active &&
+        activeAdmins.length <= 1
+      ) {
+        throw new BadRequestException({
+          message:
+            'Cannot change the role of the last active admin. At least one active admin must exist.',
+          code: 'LAST_ACTIVE_ADMIN',
+        });
+      }
+
+      const clearPin =
+        dto.role === UserRole.CASHIER && target.approval_pin_set_at !== null;
+      await manager.update(User, id, {
+        role: dto.role,
+        branch_id: branchId,
+        // Cleared even without a set time: no leftover count or lock either.
+        ...(dto.role === UserRole.CASHIER && {
+          approval_pin_hash: null,
+          approval_pin_set_at: null,
+          approval_pin_failed_attempts: 0,
+          approval_pin_locked_until: null,
+        }),
+      });
+      await revokeRefreshTokens(manager, id);
+
+      const changes: Record<string, { old: unknown; new: unknown }> = {
+        role: { old: target.role, new: dto.role },
+        branch_id: { old: target.branch_id, new: branchId },
+      };
+      if (clearPin) {
+        changes.approval_pin_set_at = {
+          old: target.approval_pin_set_at,
+          new: null,
+        };
+      }
+      await writeAuditEntry(manager, {
+        actor,
+        action: AuditAction.ROLE_CHANGED,
+        entityType: 'User',
+        entityId: id,
+        description:
+          target.role === dto.role
+            ? `${target.full_name} moved to another branch as ${dto.role}.`
+            : `Role of ${target.full_name} changed from ${target.role} to ${dto.role}.` +
+              (clearPin ? ' Approval PIN cleared.' : ''),
+        changes,
+        ip,
+      });
+    });
   }
 
   /**
