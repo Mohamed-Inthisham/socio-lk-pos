@@ -1,6 +1,7 @@
 import { vi } from "vitest";
 import api, { withAuthLock } from "./api";
 import {
+  changeOwnPassword,
   getCurrentUser,
   LOGIN_RATE_LIMITED_MESSAGE,
   loginAPI,
@@ -8,7 +9,7 @@ import {
 } from "./authService";
 
 vi.mock("./api", () => ({
-  default: { get: vi.fn(), post: vi.fn() },
+  default: { get: vi.fn(), post: vi.fn(), put: vi.fn() },
   withAuthLock: vi.fn((task) => task()),
 }));
 
@@ -200,5 +201,32 @@ describe("authService user mapping", () => {
 
     expect(user.has_approval_pin).toBe(false);
     expect(user.approval_pin_set_at).toBeNull();
+  });
+});
+
+describe("changeOwnPassword", () => {
+  it("puts only the current and new password, resolving to nothing on 204", async () => {
+    api.put.mockResolvedValueOnce({ status: 204, data: "" });
+
+    await expect(
+      changeOwnPassword({ current_password: "old-pass-1", new_password: "new-pass-1", confirm_password: "new-pass-1" }),
+    ).resolves.toBeUndefined();
+
+    expect(api.put).toHaveBeenCalledWith("/auth/me/password", {
+      current_password: "old-pass-1",
+      new_password: "new-pass-1",
+    });
+  });
+
+  it("propagates the 503 PASSWORD_CHANGED_SIGN_IN_AGAIN error without retrying", async () => {
+    const error = Object.assign(new Error("Request failed"), {
+      response: { status: 503, data: { code: "PASSWORD_CHANGED_SIGN_IN_AGAIN" } },
+    });
+    api.put.mockRejectedValueOnce(error);
+
+    await expect(
+      changeOwnPassword({ current_password: "old-pass-1", new_password: "new-pass-1" }),
+    ).rejects.toBe(error);
+    expect(api.put).toHaveBeenCalledTimes(1);
   });
 });

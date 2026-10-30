@@ -13,7 +13,7 @@ vi.mock("../../../services/authService", () => ({
   getCurrentUser: vi.fn(),
 }));
 
-const renderLogin = (route = "/login") =>
+const renderLogin = (route = "/login", options = {}) =>
   renderWithProviders(
     <Routes>
       <Route path="/login" element={<LoginForm />} />
@@ -21,7 +21,7 @@ const renderLogin = (route = "/login") =>
       <Route path="/dashboard" element={<p>dashboard page</p>} />
       <Route path="/products" element={<p>products page</p>} />
     </Routes>,
-    { route },
+    { route, ...options },
   );
 
 const signIn = async () => {
@@ -53,5 +53,28 @@ describe("LoginForm redirect", () => {
     });
     await signIn();
     expect(await screen.findByText("products page")).toBeInTheDocument();
+  });
+});
+
+describe("LoginForm sign-in notice (Task 2.4)", () => {
+  const NOTICE = "Your password was changed successfully. Please sign in again with your new password.";
+  const signedOut = (signInNotice) => ({
+    auth: { user: null, isAuthenticated: false, loading: false, error: null, initialized: true, signInNotice },
+  });
+
+  it("shows the notice once, clearing it from the store", () => {
+    const { store, unmount } = renderLogin("/login", { preloadedState: signedOut(NOTICE) });
+
+    expect(screen.getByRole("status")).toHaveTextContent(NOTICE);
+    expect(store.getState().auth.signInNotice).toBeNull();
+
+    unmount();
+    renderLogin("/login", { store });
+    expect(screen.queryByRole("status")).not.toBeInTheDocument();
+  });
+
+  it("shows nothing without a notice", () => {
+    renderLogin("/login", { preloadedState: signedOut(null) });
+    expect(screen.queryByRole("status")).not.toBeInTheDocument();
   });
 });

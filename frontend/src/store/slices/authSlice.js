@@ -92,6 +92,10 @@ const initialState = {
   loading: false,
   error: null,
   initialized: false,
+  // A message for the login page after a forced sign-out (Task 2.4: the
+  // password was changed but no new session could start). Survives
+  // logoutUser; LoginForm shows it once and clears it. Never a secret.
+  signInNotice: null,
 };
 
 // ============================================
@@ -112,6 +116,12 @@ const authSlice = createSlice({
       if (!state.user) return;
       state.user.has_approval_pin = action.payload.has_approval_pin;
       state.user.approval_pin_set_at = action.payload.approval_pin_set_at;
+    },
+    setSignInNotice: (state, action) => {
+      state.signInNotice = action.payload;
+    },
+    clearSignInNotice: (state) => {
+      state.signInNotice = null;
     },
   },
 
@@ -170,5 +180,5 @@ const authSlice = createSlice({
   },
 });
 
-export const { clearError, approvalPinSet } = authSlice.actions;
+export const { clearError, approvalPinSet, setSignInNotice, clearSignInNotice } = authSlice.actions;
 export default authSlice.reducer;

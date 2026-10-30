@@ -15,6 +15,7 @@ import {
   ScanBarcode,
   Barcode,
   ShoppingCart,
+  UserCog,
 } from "lucide-react";
 import Tooltip from "../../common/Tooltip";
 import useLayoutStore from "../../../store/zustand/layoutStore";
@@ -134,6 +135,12 @@ const NAV_ITEMS = [
     label: "Barcode Labels",
     icon: Barcode,
     roles: ["admin", "manager"],
+  },
+  {
+    to: "/users",
+    label: "Users",
+    icon: UserCog,
+    roles: ["admin"],
   },
 ];
 

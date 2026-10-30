@@ -25,6 +25,7 @@ import SalesOverview from "./pages/SalesOverview";
 import Customers from "./pages/Customers";
 import CustomerDetail from "./pages/CustomerDetail";
 import Suppliers from "./pages/Suppliers";
+import Users from "./pages/Users";
 import StockPurchases from "./pages/StockPurchases";
 import StockPurchaseCreate from "./pages/StockPurchaseCreate";
 import StockPurchaseDetail from "./pages/StockPurchaseDetail";
@@ -154,6 +155,15 @@ function App() {
         <Route path="/customers" element={<Customers />} />
         <Route path="/customers/:id" element={<CustomerDetail />} />
         <Route path="/suppliers" element={<Suppliers />} />
+        {/* Users (Task 2.4): admins only; the backend refuses everyone else */}
+        <Route
+          path="/users"
+          element={
+            <RoleProtectedRoute allowedRoles={["admin"]}>
+              <Users />
+            </RoleProtectedRoute>
+          }
+        />
         <Route
           path="/stock-purchases"
           element={

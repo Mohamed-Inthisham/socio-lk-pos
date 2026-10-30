@@ -9,7 +9,7 @@ import { Inbox } from "lucide-react";
  * same columns config, different layout — no code duplication at call site.
  *
  * COLUMNS CONFIG:
- * Each column is { key, header, render?, align?, mobileHidden?, primary?, secondary? }
+ * Each column is { key, header, render?, align?, mobileHidden?, primary?, secondary?, className? }
  * - key: unique string, used as React key
  * - header: label for the column header (desktop) or hidden on mobile
  * - render: (row) => ReactNode. If omitted, uses row[key] as-is.
@@ -17,6 +17,8 @@ import { Inbox } from "lucide-react";
  * - mobileHidden: hide this column on mobile card view
  * - primary: mark the column that becomes the card's headline on mobile
  * - secondary: mark the column that becomes the card's subtext on mobile
+ * - className: extra classes on the column's desktop header and cells,
+ *   e.g. "hidden lg:table-cell" to drop it on tablets (cards ignore it)
  *
  * If no primary is marked, the first non-hidden column is used.
  *
@@ -128,6 +130,7 @@ const Table = ({
                   key={col.key}
                   className={`
                     ${alignClass(col.align)}
+                    ${col.className ?? ""}
                     px-4 ${headPad}
                     text-xs font-semibold uppercase tracking-wider
                     text-slate-500 dark:text-slate-400
@@ -168,6 +171,7 @@ const Table = ({
                       key={col.key}
                       className={`
                         ${alignClass(col.align)}
+                        ${col.className ?? ""}
                         px-4 ${cellPad}
                         text-slate-700 dark:text-slate-200
                       `}
