@@ -719,7 +719,13 @@ const ReturnDialog = ({ open, onClose, sale, onReturned, onSaleChanged, afterLea
         }}
       >
         {summary}
-        <RefundNotices sale={sale} alert={alert} onLeave={close} checking={phase === "checking"} />
+        <RefundNotices
+          sale={sale}
+          alert={alert}
+          onLeave={close}
+          checking={phase === "checking"}
+          salesPath={salesPath}
+        />
         <ScrollFade className="min-h-0 flex flex-col" scrollClassName="min-h-0 overflow-y-auto pr-1" testId="return-refund-scroll">
           <RefundStep
             sale={sale}
@@ -740,7 +746,6 @@ const ReturnDialog = ({ open, onClose, sale, onReturned, onSaleChanged, afterLea
             serverErrors={serverErrors}
             approval={{ sessionUser, setApprover, onStatus: setApprovers }}
             busy={busy || phase === "unknown"}
-            salesPath={salesPath}
           />
         </ScrollFade>
       </form>
