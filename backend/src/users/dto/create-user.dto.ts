@@ -4,7 +4,6 @@ import {
   IsString,
   MaxLength,
   MinLength,
-  IsOptional,
   IsUUID,
 } from 'class-validator';
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
@@ -68,7 +67,10 @@ export class CreateUserDto {
       'FORBIDDEN for admin role. Admins are un-branched and see all branches.',
     format: 'uuid',
   })
-  @IsOptional()
+  // Not @IsOptional: null is never a valid branch_id here (an admin omits
+  // it, staff must have one), and on PATCH it used to reach the service
+  // and end in a 500 on CHK_users_branch_role.
+  @IsOptionalNotNull()
   @IsUUID(undefined, { message: 'branch_id must be a valid UUID' })
   branch_id?: string;
 }

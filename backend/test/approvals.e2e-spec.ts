@@ -847,8 +847,9 @@ describe('Approval PIN (e2e)', () => {
         `UPDATE users SET approval_pin_failed_attempts = 2 WHERE id = $1`,
         [manager.id],
       );
+      const admin = await seedUser(UserRole.ADMIN, null);
 
-      await app.get(UsersService).deactivate(manager.id);
+      await app.get(UsersService).deactivate(manager.id, admin);
 
       const user = await dataSource
         .getRepository(User)

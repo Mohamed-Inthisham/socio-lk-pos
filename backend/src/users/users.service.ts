@@ -5,7 +5,13 @@ import {
   BadRequestException,
 } from '@nestjs/common';
 import { InjectDataSource, InjectRepository } from '@nestjs/typeorm';
-import { DataSource, EntityManager, IsNull, Repository } from 'typeorm';
+import {
+  Brackets,
+  DataSource,
+  EntityManager,
+  IsNull,
+  Repository,
+} from 'typeorm';
 import * as bcrypt from 'bcrypt';
 import { User } from './entities/user.entity';
 import { RefreshToken } from '../auth/entities/refresh-token.entity';
@@ -13,8 +19,18 @@ import { UserRole } from './enums/user-role.enum';
 import { Branch } from '../branches/entities/branch.entity';
 import { CreateUserDto } from './dto/create-user.dto';
 import { UpdateUserDto } from './dto/update-user.dto';
+import { ListUsersQueryDto } from './dto/list-users-query.dto';
 import { TypedConfigService } from '../config/typed-config.service';
 import { assertBcryptPasswordLength } from '../common/bcrypt-input';
+import {
+  PaginatedResponse,
+  paginate,
+} from '../common/dto/paginated-response.dto';
+import {
+  AuditActor,
+  writeAuditEntry,
+} from '../audit-log/utils/write-audit-entry';
+import { AuditAction } from '../audit-log/enums/audit-action.enum';
 
 /** User fields never returned to a client. */
 type SecretUserField =
@@ -52,7 +68,8 @@ function toSafeUser(user: User): SafeUser {
  *
  * A refresh racing with this can commit a replacement token after it ran;
  * that token is unusable while the user is inactive or deleted (refresh and
- * every request check the user), so only reactivation would revive it.
+ * every request check the user), so only reactivation would revive it;
+ * reactivate() revokes again for exactly that reason.
  */
 async function revokeRefreshTokens(
   manager: EntityManager,
@@ -63,6 +80,30 @@ async function revokeRefreshTokens(
     { user_id: userId, revoked_at: IsNull() },
     { revoked_at: new Date() },
   );
+}
+
+/** A user row locked FOR UPDATE in the caller's transaction (not deleted). */
+function lockUser(manager: EntityManager, id: string): Promise<User | null> {
+  return manager
+    .createQueryBuilder(User, 'user')
+    .setLock('pessimistic_write')
+    .where('user.id = :id', { id })
+    .getOne();
+}
+
+/**
+ * Lock every active admin, always in id order. Two admins deactivating
+ * each other at once both lock the same rows first, so the second waits,
+ * then sees the first's change and finds itself the last admin.
+ */
+function lockActiveAdmins(manager: EntityManager): Promise<User[]> {
+  return manager
+    .createQueryBuilder(User, 'user')
+    .setLock('pessimistic_write')
+    .where('user.role = :role', { role: UserRole.ADMIN })
+    .andWhere('user.is_active = true')
+    .orderBy('user.id', 'ASC')
+    .getMany();
 }
 
 @Injectable()
@@ -119,10 +160,58 @@ export class UsersService {
   }
 
   /**
+   * GET /users: a page of users with their branch, by name. Each row goes
+   * through toSafeUser, like findById. Soft-deleted users are left out.
+   */
+  async findAll(
+    query: ListUsersQueryDto,
+  ): Promise<PaginatedResponse<SafeUser>> {
+    const page = query.page ?? 1;
+    const limit = query.limit ?? 50;
+
+    const qb = this.usersRepository
+      .createQueryBuilder('user')
+      .leftJoinAndSelect('user.branch', 'branch');
+
+    if (query.search) {
+      const pattern = `%${query.search.replace(/[\\%_]/g, '\\$&')}%`;
+      qb.andWhere(
+        new Brackets((sub) => {
+          sub
+            .where('user.full_name ILIKE :pattern', { pattern })
+            .orWhere('user.email ILIKE :pattern', { pattern });
+        }),
+      );
+    }
+    if (query.role) {
+      qb.andWhere('user.role = :role', { role: query.role });
+    }
+    if (query.branchId) {
+      qb.andWhere('user.branch_id = :branchId', { branchId: query.branchId });
+    }
+    if (query.isActive !== undefined) {
+      qb.andWhere('user.is_active = :isActive', { isActive: query.isActive });
+    }
+
+    qb.orderBy('user.full_name', 'ASC')
+      .addOrderBy('user.id', 'ASC')
+      .skip((page - 1) * limit)
+      .take(limit);
+
+    const [rows, total] = await qb.getManyAndCount();
+    return paginate(rows.map(toSafeUser), total, page, limit);
+  }
+
+  /**
    * Create a new user. Hashes password, enforces email uniqueness,
    * enforces the branch/role invariant (admin: no branch; staff: required).
+   * The insert and its CREATE audit row commit together.
    */
-  async create(dto: CreateUserDto): Promise<SafeUser> {
+  async create(
+    dto: CreateUserDto,
+    actor: AuditActor,
+    ip?: string | null,
+  ): Promise<SafeUser> {
     const normalizedEmail = dto.email.toLowerCase();
 
     const existing = await this.usersRepository.findOne({
@@ -155,7 +244,37 @@ export class UsersService {
       branch_id: resolvedBranchId,
     });
 
-    const saved = await this.usersRepository.save(user);
+    const saved = await this.dataSource.transaction(async (manager) => {
+      let created: User;
+      try {
+        created = await manager.save(user);
+      } catch (error) {
+        // The same email registered between the check above and here.
+        const detail = error as { code?: string; constraint?: string };
+        if (
+          detail.code === '23505' &&
+          detail.constraint === 'idx_users_email'
+        ) {
+          throw new ConflictException('Email is already registered');
+        }
+        throw error;
+      }
+      await writeAuditEntry(manager, {
+        actor,
+        action: AuditAction.CREATE,
+        entityType: 'User',
+        entityId: created.id,
+        description: `User ${created.full_name} created as ${created.role}.`,
+        changes: {
+          email: { old: null, new: created.email },
+          full_name: { old: null, new: created.full_name },
+          role: { old: null, new: created.role },
+          branch_id: { old: null, new: created.branch_id },
+        },
+        ip,
+      });
+      return created;
+    });
     return toSafeUser(saved);
   }
 
@@ -207,22 +326,102 @@ export class UsersService {
    * an inactive user never approves anything.
    *
    * Revokes the user's refresh tokens in the same transaction, so a later
-   * reactivation can't bring old sessions back; any reactivation flow must
-   * revoke them again too (see revokeRefreshTokens).
+   * reactivation can't bring old sessions back; reactivate() revokes them
+   * again too (see revokeRefreshTokens).
+   *
+   * Refused (400) for the caller's own account and for the last active
+   * admin. Repeating it on an inactive user clears and revokes again but
+   * writes no second DEACTIVATE audit row.
    */
-  async deactivate(id: string): Promise<void> {
+  async deactivate(
+    id: string,
+    actor: AuditActor,
+    ip?: string | null,
+  ): Promise<void> {
+    if (id === actor.id) {
+      throw new BadRequestException({
+        message: 'You cannot deactivate your own account.',
+        code: 'CANNOT_DEACTIVATE_SELF',
+      });
+    }
+
     await this.dataSource.transaction(async (manager) => {
-      const result = await manager.update(User, id, {
+      // Admins first, then the target: one lock order for every call.
+      const activeAdmins = await lockActiveAdmins(manager);
+      const target = await lockUser(manager, id);
+      if (!target) {
+        throw new NotFoundException('User not found');
+      }
+      if (
+        target.role === UserRole.ADMIN &&
+        target.is_active &&
+        activeAdmins.length <= 1
+      ) {
+        throw new BadRequestException({
+          message:
+            'Cannot deactivate the last active admin. At least one active admin must exist.',
+          code: 'LAST_ACTIVE_ADMIN',
+        });
+      }
+
+      await manager.update(User, id, {
         is_active: false,
         approval_pin_hash: null,
         approval_pin_set_at: null,
         approval_pin_failed_attempts: 0,
         approval_pin_locked_until: null,
       });
-      if (result.affected === 0) {
+      await revokeRefreshTokens(manager, id);
+
+      if (target.is_active) {
+        await writeAuditEntry(manager, {
+          actor,
+          action: AuditAction.DEACTIVATE,
+          entityType: 'User',
+          entityId: id,
+          description: `User ${target.full_name} deactivated.`,
+          changes: { is_active: { old: true, new: false } },
+          ip,
+        });
+      }
+    });
+  }
+
+  /**
+   * Let a deactivated user log in again, keeping their role and branch.
+   * A staff user's branch must still be active (400 otherwise, as on
+   * create and transfer). Revokes their refresh tokens again in the same
+   * transaction, so no session from before the deactivation, nor one a
+   * racing refresh committed, comes back. The approval PIN stays cleared;
+   * a manager sets a new one. An already active user is left alone.
+   */
+  async reactivate(
+    id: string,
+    actor: AuditActor,
+    ip?: string | null,
+  ): Promise<void> {
+    await this.dataSource.transaction(async (manager) => {
+      const target = await lockUser(manager, id);
+      if (!target) {
         throw new NotFoundException('User not found');
       }
+      if (target.is_active) return;
+
+      if (target.branch_id) {
+        await this.assertActiveBranch(target.branch_id);
+      }
+
       await revokeRefreshTokens(manager, id);
+      await manager.update(User, id, { is_active: true });
+      await writeAuditEntry(manager, {
+        actor,
+        action: AuditAction.REACTIVATE,
+        entityType: 'User',
+        entityId: id,
+        description: `User ${target.full_name} reactivated.`,
+        changes: { is_active: { old: false, new: true } },
+        ip,
+      });
     });
   }
 
@@ -280,8 +479,14 @@ export class UsersService {
   /**
    * Confirms a branch exists AND is currently active. Produces a clean 400
    * instead of letting Postgres throw an FK error at insert time.
+   *
+   * A null id is refused first: TypeORM drops a null where-value, so the
+   * findOne below would otherwise load an arbitrary branch.
    */
   private async assertActiveBranch(branchId: string): Promise<void> {
+    if (!branchId) {
+      throw new BadRequestException('branch_id must not be null');
+    }
     const branch = await this.branchesRepository.findOne({
       where: { id: branchId },
     });

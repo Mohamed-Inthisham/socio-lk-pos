@@ -17,8 +17,8 @@ const EARLIER = new Date('2026-01-01T00:00:00.000Z');
 
 /**
  * UsersService.deactivate / softDelete revoke the user's refresh tokens in
- * the same transaction (no route calls them yet, so the service is called
- * directly), against real Postgres.
+ * the same transaction, against real Postgres. The service is called
+ * directly (admin Y deactivating X); users.e2e-spec.ts covers the route.
  */
 describe('User deactivation revokes refresh tokens (e2e)', () => {
   let app: INestApplication;
@@ -98,6 +98,7 @@ describe('User deactivation revokes refresh tokens (e2e)', () => {
 
   interface Fixture {
     x: User;
+    y: User;
     xSessions: string[];
     xRevoked: RefreshToken;
     yToken: string;
@@ -109,7 +110,7 @@ describe('User deactivation revokes refresh tokens (e2e)', () => {
     const xSessions = [await session(x.email), await session(x.email)];
     const xRevoked = await seedRevokedToken(x);
     const yToken = await session(y.email);
-    return { x, xSessions, xRevoked, yToken };
+    return { x, y, xSessions, xRevoked, yToken };
   }
 
   /** X's active sessions are revoked, the old revocation and Y are untouched. */
@@ -145,7 +146,7 @@ describe('User deactivation revokes refresh tokens (e2e)', () => {
     it('revokes every active session, keeps an earlier revocation, and leaves other users alone', async () => {
       const f = await fixture();
 
-      await users.deactivate(f.x.id);
+      await users.deactivate(f.x.id, f.y);
 
       expect((await userRow(f.x.id)).is_active).toBe(false);
       await expectRevoked(f);
@@ -153,7 +154,7 @@ describe('User deactivation revokes refresh tokens (e2e)', () => {
 
     it('refuses refresh with an old session and a new login afterwards', async () => {
       const f = await fixture();
-      await users.deactivate(f.x.id);
+      await users.deactivate(f.x.id, f.y);
 
       await refresh(f.xSessions[0]).expect(401);
       await login(f.x.email).expect(401);
@@ -163,10 +164,10 @@ describe('User deactivation revokes refresh tokens (e2e)', () => {
 
     it('can be repeated: no error, and revocation times stay as first set', async () => {
       const f = await fixture();
-      await users.deactivate(f.x.id);
+      await users.deactivate(f.x.id, f.y);
       const first = (await rowFor(f.xSessions[0])).revoked_at?.toISOString();
 
-      await expect(users.deactivate(f.x.id)).resolves.toBeUndefined();
+      await expect(users.deactivate(f.x.id, f.y)).resolves.toBeUndefined();
 
       expect((await rowFor(f.xSessions[0])).revoked_at?.toISOString()).toBe(
         first,
@@ -178,7 +179,7 @@ describe('User deactivation revokes refresh tokens (e2e)', () => {
       const f = await fixture();
       const spy = failTokenRevocation();
       try {
-        await expect(users.deactivate(f.x.id)).rejects.toThrow(
+        await expect(users.deactivate(f.x.id, f.y)).rejects.toThrow(
           'Simulated revocation failure',
         );
       } finally {
