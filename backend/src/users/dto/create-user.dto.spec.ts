@@ -1,6 +1,7 @@
 import { plainToInstance } from 'class-transformer';
 import { validate } from 'class-validator';
 import { CreateUserDto } from './create-user.dto';
+import { UpdateUserDto } from './update-user.dto';
 import { LoginDto } from '../../auth/dto/login.dto';
 import { SetApprovalPinDto } from '../../approvals/dto/set-approval-pin.dto';
 import { PASSWORD_TOO_LONG_MESSAGE } from '../../common/bcrypt-input';
@@ -84,5 +85,97 @@ describe('password checks stay unchanged', () => {
         'current_password',
       ),
     ).toEqual([]);
+  });
+});
+
+describe('contact details (Task 2.5)', () => {
+  const valid = {
+    email: 'new@socio.lk',
+    password: 'abcd1234',
+    full_name: 'New User',
+    role: UserRole.ADMIN,
+    phone: '0771234567',
+    nic: '199012345678',
+    address: '12 Temple Road, Kandy',
+  };
+
+  const check = async <T extends object>(cls: new () => T, body: object) => {
+    const dto = plainToInstance(cls, body);
+    const errors = await validate(dto, { forbidUnknownValues: true });
+    const messages = Object.fromEntries(
+      errors.map((e) => [e.property, Object.values(e.constraints ?? {})]),
+    );
+    return { dto: dto as Record<string, unknown>, messages };
+  };
+
+  it('accepts and normalizes them', async () => {
+    const { dto, messages } = await check(CreateUserDto, {
+      ...valid,
+      phone: '+94 77 123-4567',
+      nic: ' 901234567v ',
+      address: '  12 Temple Road, Kandy  ',
+    });
+    expect(messages).toEqual({});
+    expect(dto).toMatchObject({
+      phone: '0771234567',
+      nic: '901234567V',
+      address: '12 Temple Road, Kandy',
+    });
+  });
+
+  it.each(['phone', 'nic', 'address'])(
+    'requires %s on create',
+    async (field) => {
+      const body: Record<string, unknown> = { ...valid };
+      delete body[field];
+      const { messages } = await check(CreateUserDto, body);
+      expect(Object.keys(messages)).toEqual([field]);
+    },
+  );
+
+  it.each([
+    ['phone', '12345', 'Contact number must be a valid Sri Lankan number'],
+    ['phone', 'abcdefghij', 'Contact number must be a valid Sri Lankan number'],
+    ['phone', '0071234567', 'Contact number must be a valid Sri Lankan number'],
+    ['nic', '90123456V', 'NIC must be 9 digits followed by V or X'],
+    ['nic', '199012345678V', 'NIC must be 9 digits followed by V or X'],
+    ['nic', '1990 1234 5678', 'NIC must be 9 digits followed by V or X'],
+    ['address', '   ', 'Address is required'],
+    ['address', 'x'.repeat(501), 'Address must be at most 500 characters'],
+  ])('refuses %s %j', async (field, value, message) => {
+    const { messages } = await check(CreateUserDto, {
+      ...valid,
+      [field]: value,
+    });
+    expect(Object.keys(messages)).toEqual([field]);
+    expect(messages[field].join(' ')).toContain(message);
+  });
+
+  describe('UpdateUserDto', () => {
+    it('lets them be left out (users created before them have none)', async () => {
+      const { messages } = await check(UpdateUserDto, { full_name: 'Renamed' });
+      expect(messages).toEqual({});
+    });
+
+    it('changes them with the same normalization', async () => {
+      const { dto, messages } = await check(UpdateUserDto, {
+        phone: '94712345678',
+        nic: '901234567x',
+      });
+      expect(messages).toEqual({});
+      expect(dto).toMatchObject({ phone: '0712345678', nic: '901234567X' });
+    });
+
+    it.each([
+      ['phone', null],
+      ['phone', ''],
+      ['nic', null],
+      ['nic', ''],
+      ['address', null],
+      ['address', '  '],
+    ])('never clears %s (%j is a 400)', async (field, value) => {
+      const { messages } = await check(UpdateUserDto, { [field]: value });
+      expect(Object.keys(messages)).toEqual([field]);
+    });
   });
 });

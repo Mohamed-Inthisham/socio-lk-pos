@@ -53,6 +53,23 @@ export class User {
   @Column({ type: 'varchar', length: 100, name: 'full_name' })
   full_name!: string;
 
+  // Contact details (Task 2.5). Required when a user is created
+  // (CreateUserDto) but nullable here: users created before them have
+  // none. Once set they can be changed, never cleared.
+  // Phone: normalized by normalizeSlPhone (0XXXXXXXXX).
+  @Column({ type: 'varchar', length: 20, nullable: true })
+  phone!: string | null;
+
+  // NIC: normalized by normalizeSlNic (trimmed, uppercase). Unique among
+  // users that aren't deleted, by the partial index idx_users_nic_unique
+  // (see AddUserContactDetails); not declared here, since @Index can't
+  // carry its WHERE clause.
+  @Column({ type: 'varchar', length: 20, nullable: true })
+  nic!: string | null;
+
+  @Column({ type: 'text', nullable: true })
+  address!: string | null;
+
   // Manager approval PIN (Phase 6.4 P6-15), bcrypt like password_hash and
   // guarded the same way: never loaded by default (select: false), never
   // serialized (@Exclude). ApprovalsService opts in with addSelect.

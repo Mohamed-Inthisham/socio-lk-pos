@@ -18,7 +18,9 @@ import { UserRole } from '../enums/user-role.enum';
  * (default 1 / 50, max limit 200).
  *
  * Filters (all optional, combined with AND):
- * - search: case-insensitive substring match on full name or email.
+ * - search: case-insensitive substring match on full name, email, NIC or
+ *   contact number; a search that is a Sri Lankan number also finds its
+ *   stored 0XXXXXXXXX form.
  *   Trimmed first; empty/whitespace-only is treated as absent.
  * - role: admin | manager | cashier.
  * - branchId: the user's branch (admins have none, so never match).
@@ -29,8 +31,9 @@ import { UserRole } from '../enums/user-role.enum';
 export class ListUsersQueryDto extends PaginationQueryDto {
   @ApiPropertyOptional({
     description:
-      'Case-insensitive substring match on full name or email. Trimmed; ' +
-      'empty is ignored.',
+      'Case-insensitive substring match on full name, email, NIC or ' +
+      'contact number (+94 numbers also match their 0XXXXXXXXX form). ' +
+      'Trimmed; empty is ignored.',
     example: 'perera',
     maxLength: 100,
   })

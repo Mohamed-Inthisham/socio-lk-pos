@@ -69,9 +69,9 @@ export class UsersController {
   @ApiOperation({
     summary: 'Create a user',
     description:
-      'Admin-only. Admins have no branch; managers and cashiers need an ' +
-      'active one. Role defaults to cashier. Writes a CREATE audit entry ' +
-      '(never the password).',
+      'Admin-only. Contact number, NIC and address are required. Admins ' +
+      'have no branch; managers and cashiers need an active one. Role ' +
+      'defaults to cashier. Writes a CREATE audit entry (never the password).',
   })
   @ApiResponse({ status: 201, description: 'User created' })
   @ApiResponse({
@@ -81,7 +81,11 @@ export class UsersController {
   })
   @ApiResponse({ status: 401, description: 'Not authenticated' })
   @ApiResponse({ status: 403, description: 'Not an admin' })
-  @ApiResponse({ status: 409, description: 'Email is already registered' })
+  @ApiResponse({
+    status: 409,
+    description:
+      'Email is already registered, or NIC already registered (code NIC_ALREADY_REGISTERED)',
+  })
   async create(
     @Body() dto: CreateUserDto,
     @CurrentUser() user: AuthenticatedUser,
@@ -113,7 +117,9 @@ export class UsersController {
   @ApiOperation({
     summary: 'Update a user',
     description:
-      'Admin-only. Partially updates the user with the given UUID. Writes an audit log entry.',
+      'Admin-only. Partially updates the user with the given UUID: name, ' +
+      'email, contact number, NIC, address. Contact details can be changed ' +
+      'but not cleared (null or empty is a 400). Writes an audit log entry.',
   })
   @ApiParam({ name: 'id', description: 'User UUID', format: 'uuid' })
   @ApiResponse({ status: 200, description: 'User updated' })
@@ -121,6 +127,11 @@ export class UsersController {
   @ApiResponse({ status: 401, description: 'Not authenticated' })
   @ApiResponse({ status: 403, description: 'Not an admin' })
   @ApiResponse({ status: 404, description: 'User not found' })
+  @ApiResponse({
+    status: 409,
+    description:
+      'Email is already registered, or NIC already registered (code NIC_ALREADY_REGISTERED)',
+  })
   async update(
     @Param('id', ParseUUIDPipe) id: string,
     @Body() dto: UpdateUserDto,

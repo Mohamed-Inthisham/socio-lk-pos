@@ -11,6 +11,7 @@ import {
   DataSource,
   EntityManager,
   IsNull,
+  Not,
   Repository,
 } from 'typeorm';
 import * as bcrypt from 'bcrypt';
@@ -35,6 +36,31 @@ import {
   writeAuditEntry,
 } from '../audit-log/utils/write-audit-entry';
 import { AuditAction } from '../audit-log/enums/audit-action.enum';
+import { normalizeSlPhone } from '../common/utils/sl-phone';
+
+const EMAIL_TAKEN = 'Email is already registered';
+
+/** 409 for an NIC another user holds (Task 2.5). */
+const nicTaken = () =>
+  new ConflictException({
+    message: 'NIC is already registered to another user',
+    code: 'NIC_ALREADY_REGISTERED',
+  });
+
+/**
+ * The 409 for a unique index a save ran into: the same email or NIC
+ * registered between the service's check and the write. null for any
+ * other error.
+ */
+function uniqueConflictOf(error: unknown): ConflictException | null {
+  const detail = error as { code?: string; constraint?: string };
+  if (detail.code !== '23505') return null;
+  if (detail.constraint === 'idx_users_email') {
+    return new ConflictException(EMAIL_TAKEN);
+  }
+  if (detail.constraint === 'idx_users_nic_unique') return nicTaken();
+  return null;
+}
 
 /** User fields never returned to a client. */
 type SecretUserField =
@@ -183,7 +209,12 @@ export class UsersService {
         new Brackets((sub) => {
           sub
             .where('user.full_name ILIKE :pattern', { pattern })
-            .orWhere('user.email ILIKE :pattern', { pattern });
+            .orWhere('user.email ILIKE :pattern', { pattern })
+            .orWhere('user.nic ILIKE :pattern', { pattern })
+            .orWhere('user.phone ILIKE :pattern', { pattern });
+          // A number typed as +94 77 123 4567 finds 0771234567.
+          const phone = normalizeSlPhone(query.search);
+          if (phone) sub.orWhere('user.phone = :phone', { phone });
         }),
       );
     }
@@ -207,7 +238,7 @@ export class UsersService {
   }
 
   /**
-   * Create a new user. Hashes password, enforces email uniqueness,
+   * Create a new user. Hashes password, enforces email and NIC uniqueness,
    * enforces the branch/role invariant (admin: no branch; staff: required).
    * The insert and its CREATE audit row commit together.
    */
@@ -222,8 +253,9 @@ export class UsersService {
       where: { email: normalizedEmail },
     });
     if (existing) {
-      throw new ConflictException('Email is already registered');
+      throw new ConflictException(EMAIL_TAKEN);
     }
+    await this.assertNicFree(dto.nic);
 
     // Resolve effective role: DTO omits → entity default (CASHIER).
     const effectiveRole = dto.role ?? UserRole.CASHIER;
@@ -244,6 +276,9 @@ export class UsersService {
       email: normalizedEmail,
       password_hash,
       full_name: dto.full_name,
+      phone: dto.phone,
+      nic: dto.nic,
+      address: dto.address,
       role: dto.role, // undefined → entity default ('cashier')
       branch_id: resolvedBranchId,
     });
@@ -253,15 +288,8 @@ export class UsersService {
       try {
         created = await manager.save(user);
       } catch (error) {
-        // The same email registered between the check above and here.
-        const detail = error as { code?: string; constraint?: string };
-        if (
-          detail.code === '23505' &&
-          detail.constraint === 'idx_users_email'
-        ) {
-          throw new ConflictException('Email is already registered');
-        }
-        throw error;
+        // The same email or NIC registered between the checks above and here.
+        throw uniqueConflictOf(error) ?? error;
       }
       await writeAuditEntry(manager, {
         actor,
@@ -272,6 +300,9 @@ export class UsersService {
         changes: {
           email: { old: null, new: created.email },
           full_name: { old: null, new: created.full_name },
+          phone: { old: null, new: created.phone },
+          nic: { old: null, new: created.nic },
+          address: { old: null, new: created.address },
           role: { old: null, new: created.role },
           branch_id: { old: null, new: created.branch_id },
         },
@@ -301,12 +332,18 @@ export class UsersService {
           where: { email: normalized },
         });
         if (clash) {
-          throw new ConflictException('Email is already registered');
+          throw new ConflictException(EMAIL_TAKEN);
         }
         user.email = normalized;
       }
     }
     if (dto.full_name !== undefined) user.full_name = dto.full_name;
+    if (dto.phone !== undefined) user.phone = dto.phone;
+    if (dto.address !== undefined) user.address = dto.address;
+    if (dto.nic !== undefined && dto.nic !== user.nic) {
+      await this.assertNicFree(dto.nic, id);
+      user.nic = dto.nic;
+    }
 
     if (dto.branch_id !== undefined) {
       if (user.role === UserRole.ADMIN) {
@@ -318,8 +355,25 @@ export class UsersService {
       user.branch_id = dto.branch_id;
     }
 
-    const saved = await this.usersRepository.save(user);
+    let saved: User;
+    try {
+      saved = await this.usersRepository.save(user);
+    } catch (error) {
+      throw uniqueConflictOf(error) ?? error;
+    }
     return toSafeUser(saved);
+  }
+
+  /**
+   * 409 NIC_ALREADY_REGISTERED when another user that isn't deleted holds
+   * this NIC (the scope of idx_users_nic_unique). `exceptId`: the user
+   * being edited.
+   */
+  private async assertNicFree(nic: string, exceptId?: string): Promise<void> {
+    const clash = await this.usersRepository.findOne({
+      where: exceptId ? { nic, id: Not(exceptId) } : { nic },
+    });
+    if (clash) throw nicTaken();
   }
 
   /**
