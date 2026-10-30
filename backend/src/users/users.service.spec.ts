@@ -14,6 +14,7 @@ import { Branch } from '../branches/entities/branch.entity';
 import { TypedConfigService } from '../config/typed-config.service';
 import * as bcrypt from 'bcrypt';
 import { PASSWORD_TOO_LONG_MESSAGE } from '../common/bcrypt-input';
+import { AuditAction } from '../audit-log/enums/audit-action.enum';
 
 jest.mock('bcrypt', () => ({
   hash: jest.fn().mockResolvedValue('hashed-password'),
@@ -62,11 +63,33 @@ describe('UsersService', () => {
     is_active: false,
   };
 
-  // deactivate / softDelete run in a transaction: its manager's writes, and
-  // whether the last transaction committed or rolled back.
+  // Rows the transaction's locking reads return: the target user
+  // (getOne) and the active admins (getMany).
+  const mockLockQueryBuilder = {
+    setLock: jest.fn().mockReturnThis(),
+    where: jest.fn().mockReturnThis(),
+    andWhere: jest.fn().mockReturnThis(),
+    orderBy: jest.fn().mockReturnThis(),
+    getOne: jest.fn(),
+    getMany: jest.fn(),
+  };
+  const mockAuditRepo = { save: jest.fn() };
+
+  // create / deactivate / reactivate / softDelete run in a transaction: its
+  // manager's writes, and whether the last transaction committed or rolled
+  // back.
   const mockManager = {
     update: jest.fn(),
     softDelete: jest.fn(),
+    save: jest.fn(),
+    createQueryBuilder: jest.fn(() => mockLockQueryBuilder),
+    getRepository: jest.fn(() => mockAuditRepo),
+  };
+
+  const actor = {
+    id: 'admin-1',
+    full_name: 'Head Admin',
+    role: UserRole.ADMIN,
   };
   let transactionOutcome: 'committed' | 'rolled back' | undefined;
   const mockDataSource = {
@@ -205,22 +228,104 @@ describe('UsersService', () => {
     });
   });
 
+  describe('findAll', () => {
+    const listQueryBuilder = {
+      leftJoinAndSelect: jest.fn().mockReturnThis(),
+      andWhere: jest.fn().mockReturnThis(),
+      orderBy: jest.fn().mockReturnThis(),
+      addOrderBy: jest.fn().mockReturnThis(),
+      skip: jest.fn().mockReturnThis(),
+      take: jest.fn().mockReturnThis(),
+      getManyAndCount: jest.fn(),
+    };
+
+    beforeEach(() => {
+      mockUsersRepo.createQueryBuilder.mockReturnValueOnce(
+        listQueryBuilder as unknown as typeof mockQueryBuilder,
+      );
+    });
+
+    it('returns a page of safe users with the pagination meta', async () => {
+      listQueryBuilder.getManyAndCount.mockResolvedValue([
+        [
+          {
+            id: 'u1',
+            full_name: 'Manager',
+            password_hash: 'secret',
+            approval_pin_hash: '$2b$04$pin',
+            approval_pin_failed_attempts: 2,
+            approval_pin_locked_until: null,
+            approval_pin_set_at: null,
+          },
+        ],
+        3,
+      ]);
+
+      const result = await service.findAll({ page: 2, limit: 2 });
+
+      expect(result).toEqual({
+        data: [{ id: 'u1', full_name: 'Manager', approval_pin_set_at: null }],
+        meta: {
+          total: 3,
+          page: 2,
+          limit: 2,
+          totalPages: 2,
+          hasNext: false,
+          hasPrev: true,
+        },
+      });
+      expect(listQueryBuilder.leftJoinAndSelect).toHaveBeenCalledWith(
+        'user.branch',
+        'branch',
+      );
+      expect(listQueryBuilder.skip).toHaveBeenCalledWith(2);
+      expect(listQueryBuilder.take).toHaveBeenCalledWith(2);
+      expect(listQueryBuilder.andWhere).not.toHaveBeenCalled();
+    });
+
+    it('applies role, branch and active filters', async () => {
+      listQueryBuilder.getManyAndCount.mockResolvedValue([[], 0]);
+
+      await service.findAll({
+        role: UserRole.MANAGER,
+        branchId: 'branch-1',
+        isActive: false,
+      });
+
+      expect(listQueryBuilder.andWhere).toHaveBeenCalledWith(
+        'user.role = :role',
+        { role: UserRole.MANAGER },
+      );
+      expect(listQueryBuilder.andWhere).toHaveBeenCalledWith(
+        'user.branch_id = :branchId',
+        { branchId: 'branch-1' },
+      );
+      expect(listQueryBuilder.andWhere).toHaveBeenCalledWith(
+        'user.is_active = :isActive',
+        { isActive: false },
+      );
+    });
+  });
+
   describe('create', () => {
     beforeEach(() => {
       mockUsersRepo.findOne.mockResolvedValue(null);
-      mockUsersRepo.save.mockImplementation((u) =>
+      mockManager.save.mockImplementation((u) =>
         Promise.resolve({ ...u, id: 'new-user' }),
       );
       mockUsersRepo.create.mockImplementation((u) => u);
     });
 
     it('creates an admin user without a branch', async () => {
-      const result = await service.create({
-        email: 'admin@t.com',
-        password: 'pw12345678',
-        full_name: 'Admin',
-        role: UserRole.ADMIN,
-      });
+      const result = await service.create(
+        {
+          email: 'admin@t.com',
+          password: 'pw12345678',
+          full_name: 'Admin',
+          role: UserRole.ADMIN,
+        },
+        actor,
+      );
 
       expect(mockBranchesRepo.findOne).not.toHaveBeenCalled();
       expect(mockUsersRepo.create).toHaveBeenCalledWith(
@@ -235,25 +340,31 @@ describe('UsersService', () => {
 
     it('rejects admin with branch_id (400)', async () => {
       await expect(
-        service.create({
-          email: 'admin@t.com',
-          password: 'pw12345678',
-          full_name: 'Admin',
-          role: UserRole.ADMIN,
-          branch_id: 'branch-1',
-        }),
+        service.create(
+          {
+            email: 'admin@t.com',
+            password: 'pw12345678',
+            full_name: 'Admin',
+            role: UserRole.ADMIN,
+            branch_id: 'branch-1',
+          },
+          actor,
+        ),
       ).rejects.toThrow(BadRequestException);
     });
 
     it('creates a cashier with an active branch', async () => {
       mockBranchesRepo.findOne.mockResolvedValue(activeBranch);
-      await service.create({
-        email: 'c@t.com',
-        password: 'pw12345678',
-        full_name: 'Cashier',
-        role: UserRole.CASHIER,
-        branch_id: 'branch-1',
-      });
+      await service.create(
+        {
+          email: 'c@t.com',
+          password: 'pw12345678',
+          full_name: 'Cashier',
+          role: UserRole.CASHIER,
+          branch_id: 'branch-1',
+        },
+        actor,
+      );
       expect(mockUsersRepo.create).toHaveBeenCalledWith(
         expect.objectContaining({
           role: UserRole.CASHIER,
@@ -265,12 +376,15 @@ describe('UsersService', () => {
     describe('password byte length (bcrypt reads only 72 bytes)', () => {
       const SINHALA = 'ම'; // 1 UTF-16 unit, 3 bytes in UTF-8
       const createAdmin = (password: string) =>
-        service.create({
-          email: 'admin@t.com',
-          password,
-          full_name: 'Admin',
-          role: UserRole.ADMIN,
-        });
+        service.create(
+          {
+            email: 'admin@t.com',
+            password,
+            full_name: 'Admin',
+            role: UserRole.ADMIN,
+          },
+          actor,
+        );
 
       it.each([
         ['72 ASCII characters', 'a'.repeat(72)],
@@ -289,7 +403,7 @@ describe('UsersService', () => {
         await expect(attempt).rejects.toThrow(BadRequestException);
         await expect(attempt).rejects.toThrow(PASSWORD_TOO_LONG_MESSAGE);
         expect(bcrypt.hash).not.toHaveBeenCalled();
-        expect(mockUsersRepo.save).not.toHaveBeenCalled();
+        expect(mockManager.save).not.toHaveBeenCalled();
       });
 
       it('never puts the password in the error', async () => {
@@ -304,13 +418,16 @@ describe('UsersService', () => {
 
     it('creates a manager with an active branch', async () => {
       mockBranchesRepo.findOne.mockResolvedValue(activeBranch);
-      await service.create({
-        email: 'm@t.com',
-        password: 'pw12345678',
-        full_name: 'Manager',
-        role: UserRole.MANAGER,
-        branch_id: 'branch-1',
-      });
+      await service.create(
+        {
+          email: 'm@t.com',
+          password: 'pw12345678',
+          full_name: 'Manager',
+          role: UserRole.MANAGER,
+          branch_id: 'branch-1',
+        },
+        actor,
+      );
       expect(mockUsersRepo.create).toHaveBeenCalledWith(
         expect.objectContaining({
           role: UserRole.MANAGER,
@@ -321,84 +438,184 @@ describe('UsersService', () => {
 
     it('defaults role to CASHIER when omitted → still requires branch_id', async () => {
       await expect(
-        service.create({
-          email: 'x@t.com',
-          password: 'pw12345678',
-          full_name: 'X',
-        }),
+        service.create(
+          {
+            email: 'x@t.com',
+            password: 'pw12345678',
+            full_name: 'X',
+          },
+          actor,
+        ),
       ).rejects.toThrow(BadRequestException);
     });
 
     it('rejects cashier without branch_id (400)', async () => {
       await expect(
-        service.create({
-          email: 'c@t.com',
-          password: 'pw12345678',
-          full_name: 'Cashier',
-          role: UserRole.CASHIER,
-        }),
+        service.create(
+          {
+            email: 'c@t.com',
+            password: 'pw12345678',
+            full_name: 'Cashier',
+            role: UserRole.CASHIER,
+          },
+          actor,
+        ),
       ).rejects.toThrow(BadRequestException);
     });
 
     it('rejects manager without branch_id (400)', async () => {
       await expect(
-        service.create({
-          email: 'm@t.com',
-          password: 'pw12345678',
-          full_name: 'Manager',
-          role: UserRole.MANAGER,
-        }),
+        service.create(
+          {
+            email: 'm@t.com',
+            password: 'pw12345678',
+            full_name: 'Manager',
+            role: UserRole.MANAGER,
+          },
+          actor,
+        ),
       ).rejects.toThrow(BadRequestException);
     });
 
     it('rejects staff with a nonexistent branch_id (400)', async () => {
       mockBranchesRepo.findOne.mockResolvedValue(null);
       await expect(
-        service.create({
-          email: 'c@t.com',
-          password: 'pw12345678',
-          full_name: 'Cashier',
-          role: UserRole.CASHIER,
-          branch_id: 'ghost',
-        }),
+        service.create(
+          {
+            email: 'c@t.com',
+            password: 'pw12345678',
+            full_name: 'Cashier',
+            role: UserRole.CASHIER,
+            branch_id: 'ghost',
+          },
+          actor,
+        ),
       ).rejects.toThrow(BadRequestException);
     });
 
     it('rejects staff with an inactive branch_id (400)', async () => {
       mockBranchesRepo.findOne.mockResolvedValue(inactiveBranch);
       await expect(
-        service.create({
-          email: 'c@t.com',
-          password: 'pw12345678',
-          full_name: 'Cashier',
-          role: UserRole.CASHIER,
-          branch_id: 'branch-2',
-        }),
+        service.create(
+          {
+            email: 'c@t.com',
+            password: 'pw12345678',
+            full_name: 'Cashier',
+            role: UserRole.CASHIER,
+            branch_id: 'branch-2',
+          },
+          actor,
+        ),
       ).rejects.toThrow(BadRequestException);
     });
 
     it('rejects duplicate email with ConflictException (409)', async () => {
       mockUsersRepo.findOne.mockResolvedValue({ id: 'existing' });
       await expect(
-        service.create({
-          email: 'exists@t.com',
-          password: 'pw12345678',
-          full_name: 'Dup',
-          role: UserRole.ADMIN,
-        }),
+        service.create(
+          {
+            email: 'exists@t.com',
+            password: 'pw12345678',
+            full_name: 'Dup',
+            role: UserRole.ADMIN,
+          },
+          actor,
+        ),
       ).rejects.toThrow(ConflictException);
     });
 
     it('normalizes email to lowercase before insert', async () => {
-      await service.create({
-        email: 'Admin@Test.COM',
-        password: 'pw12345678',
-        full_name: 'A',
-        role: UserRole.ADMIN,
-      });
+      await service.create(
+        {
+          email: 'Admin@Test.COM',
+          password: 'pw12345678',
+          full_name: 'A',
+          role: UserRole.ADMIN,
+        },
+        actor,
+      );
       expect(mockUsersRepo.create).toHaveBeenCalledWith(
         expect.objectContaining({ email: 'admin@test.com' }),
       );
+    });
+    it('saves the user and its CREATE audit row in one transaction, never the password', async () => {
+      mockBranchesRepo.findOne.mockResolvedValue(activeBranch);
+      await service.create(
+        {
+          email: 'c@t.com',
+          password: 'pw12345678',
+          full_name: 'Cashier',
+          role: UserRole.CASHIER,
+          branch_id: 'branch-1',
+        },
+        actor,
+        '10.0.0.5',
+      );
+
+      expect(mockDataSource.transaction).toHaveBeenCalledTimes(1);
+      expect(mockManager.save).toHaveBeenCalledTimes(1);
+      expect(mockAuditRepo.save).toHaveBeenCalledWith({
+        user_id: 'admin-1',
+        user_name: 'Head Admin',
+        user_role: UserRole.ADMIN,
+        action: AuditAction.CREATE,
+        entity_type: 'User',
+        entity_id: 'new-user',
+        changes: {
+          email: { old: null, new: 'c@t.com' },
+          full_name: { old: null, new: 'Cashier' },
+          role: { old: null, new: UserRole.CASHIER },
+          branch_id: { old: null, new: 'branch-1' },
+        },
+        description: 'User Cashier created as cashier.',
+        ip_address: '10.0.0.5',
+      });
+      expect(JSON.stringify(mockAuditRepo.save.mock.calls)).not.toContain(
+        'pw12345678',
+      );
+      expect(JSON.stringify(mockAuditRepo.save.mock.calls)).not.toContain(
+        'hashed-password',
+      );
+      expect(transactionOutcome).toBe('committed');
+    });
+
+    it('maps a racing duplicate email (23505 on idx_users_email) to 409, with no audit row', async () => {
+      mockManager.save.mockRejectedValueOnce(
+        Object.assign(new Error('duplicate key'), {
+          code: '23505',
+          constraint: 'idx_users_email',
+        }),
+      );
+      await expect(
+        service.create(
+          {
+            email: 'admin@t.com',
+            password: 'pw12345678',
+            full_name: 'Admin',
+            role: UserRole.ADMIN,
+          },
+          actor,
+        ),
+      ).rejects.toThrow(ConflictException);
+      expect(mockAuditRepo.save).not.toHaveBeenCalled();
+      expect(transactionOutcome).toBe('rolled back');
+    });
+
+    it('rolls the user back when the audit row fails', async () => {
+      const failure = new Error('connection lost');
+      mockAuditRepo.save.mockRejectedValueOnce(failure);
+      await expect(
+        service.create(
+          {
+            email: 'admin@t.com',
+            password: 'pw12345678',
+            full_name: 'Admin',
+            role: UserRole.ADMIN,
+          },
+          actor,
+        ),
+      ).rejects.toBe(failure);
+      expect(transactionOutcome).toBe('rolled back');
     });
   });
 
@@ -488,6 +705,14 @@ describe('UsersService', () => {
         service.update('u1', { branch_id: 'ghost' }),
       ).rejects.toThrow(BadRequestException);
     });
+    it('refuses a null branch_id (400) without looking a branch up', async () => {
+      mockUsersRepo.findOne.mockResolvedValue({ ...cashier });
+      await expect(
+        service.update('u1', { branch_id: null as unknown as string }),
+      ).rejects.toThrow('branch_id must not be null');
+      expect(mockBranchesRepo.findOne).not.toHaveBeenCalled();
+      expect(mockUsersRepo.save).not.toHaveBeenCalled();
+    });
   });
 
   // The user's unrevoked refresh tokens, revoked in the same transaction.
@@ -499,14 +724,30 @@ describe('UsersService', () => {
   const isTokenRevocation = (entity: unknown) => entity === RefreshToken;
 
   describe('deactivate', () => {
-    const userUpdateAffects = (affected: number) =>
-      mockManager.update.mockImplementation((entity: unknown) =>
-        Promise.resolve({ affected: isTokenRevocation(entity) ? 2 : affected }),
-      );
+    const cashierRow = {
+      id: 'u1',
+      full_name: 'Cashier',
+      role: UserRole.CASHIER,
+      is_active: true,
+    };
+    const otherAdmin = {
+      id: 'u1',
+      full_name: 'Second Admin',
+      role: UserRole.ADMIN,
+      is_active: true,
+    };
+    const lockRows = (target: object | null, admins: object[]) => {
+      mockLockQueryBuilder.getOne.mockResolvedValue(target);
+      mockLockQueryBuilder.getMany.mockResolvedValue(admins);
+    };
 
-    it('flips is_active to false, clears the approval PIN (P6-15) and revokes refresh tokens, in one transaction', async () => {
-      userUpdateAffects(1);
-      await service.deactivate('u1');
+    beforeEach(() => {
+      mockManager.update.mockResolvedValue({ affected: 1 });
+    });
+
+    it('flips is_active to false, clears the approval PIN (P6-15), revokes refresh tokens and audits, in one transaction', async () => {
+      lockRows(cashierRow, [{ id: 'admin-1' }]);
+      await service.deactivate('u1', actor, '10.0.0.5');
 
       expect(mockDataSource.transaction).toHaveBeenCalledTimes(1);
       expect(mockManager.update).toHaveBeenNthCalledWith(1, User, 'u1', {
@@ -517,39 +758,176 @@ describe('UsersService', () => {
         approval_pin_locked_until: null,
       });
       expect(mockManager.update).toHaveBeenNthCalledWith(2, ...tokenRevocation);
+      expect(mockAuditRepo.save).toHaveBeenCalledWith({
+        user_id: 'admin-1',
+        user_name: 'Head Admin',
+        user_role: UserRole.ADMIN,
+        action: AuditAction.DEACTIVATE,
+        entity_type: 'User',
+        entity_id: 'u1',
+        changes: { is_active: { old: true, new: false } },
+        description: 'User Cashier deactivated.',
+        ip_address: '10.0.0.5',
+      });
       expect(transactionOutcome).toBe('committed');
       expect(mockUsersRepo.update).not.toHaveBeenCalled();
     });
 
+    it('locks the active admins before the target user', async () => {
+      lockRows(cashierRow, [{ id: 'admin-1' }]);
+      await service.deactivate('u1', actor);
+
+      expect(mockLockQueryBuilder.setLock).toHaveBeenCalledWith(
+        'pessimistic_write',
+      );
+      expect(
+        mockLockQueryBuilder.getMany.mock.invocationCallOrder[0],
+      ).toBeLessThan(mockLockQueryBuilder.getOne.mock.invocationCallOrder[0]);
+      expect(mockLockQueryBuilder.orderBy).toHaveBeenCalledWith(
+        'user.id',
+        'ASC',
+      );
+    });
+
+    it("refuses the caller's own account (400 CANNOT_DEACTIVATE_SELF) before any write", async () => {
+      await expect(service.deactivate('admin-1', actor)).rejects.toMatchObject({
+        status: 400,
+        response: expect.objectContaining({
+          code: 'CANNOT_DEACTIVATE_SELF',
+        }) as object,
+      });
+      expect(mockDataSource.transaction).not.toHaveBeenCalled();
+      expect(mockManager.update).not.toHaveBeenCalled();
+    });
+
+    it('refuses the last active admin (400 LAST_ACTIVE_ADMIN), changing nothing', async () => {
+      lockRows(otherAdmin, [otherAdmin]);
+      await expect(service.deactivate('u1', actor)).rejects.toMatchObject({
+        status: 400,
+        response: expect.objectContaining({
+          code: 'LAST_ACTIVE_ADMIN',
+        }) as object,
+      });
+      expect(mockManager.update).not.toHaveBeenCalled();
+      expect(mockAuditRepo.save).not.toHaveBeenCalled();
+      expect(transactionOutcome).toBe('rolled back');
+    });
+
+    it('deactivates an admin while another active admin remains', async () => {
+      lockRows(otherAdmin, [{ id: 'admin-1' }, otherAdmin]);
+      await service.deactivate('u1', actor);
+      expect(mockManager.update).toHaveBeenCalledTimes(2);
+      expect(transactionOutcome).toBe('committed');
+    });
+
     it('throws NotFoundException when user does not exist, revoking nothing', async () => {
-      userUpdateAffects(0);
-      await expect(service.deactivate('missing')).rejects.toThrow(
+      lockRows(null, [{ id: 'admin-1' }]);
+      await expect(service.deactivate('missing', actor)).rejects.toThrow(
         NotFoundException,
       );
-      expect(mockManager.update).toHaveBeenCalledTimes(1);
+      expect(mockManager.update).not.toHaveBeenCalled();
       expect(transactionOutcome).toBe('rolled back');
     });
 
     it('rolls the deactivation back when revoking the tokens fails', async () => {
+      lockRows(cashierRow, [{ id: 'admin-1' }]);
       const failure = new Error('connection lost');
       mockManager.update.mockImplementation((entity: unknown) =>
         isTokenRevocation(entity)
           ? Promise.reject(failure)
           : Promise.resolve({ affected: 1 }),
       );
-      await expect(service.deactivate('u1')).rejects.toBe(failure);
+      await expect(service.deactivate('u1', actor)).rejects.toBe(failure);
+      expect(mockAuditRepo.save).not.toHaveBeenCalled();
       expect(transactionOutcome).toBe('rolled back');
     });
 
-    it('can be repeated on an already inactive user, revoking again', async () => {
-      userUpdateAffects(1); // Postgres counts the matched row
-      await service.deactivate('u1');
-      await service.deactivate('u1');
+    it('can be repeated on an already inactive user, revoking again without a second audit row', async () => {
+      lockRows({ ...cashierRow, is_active: false }, [{ id: 'admin-1' }]);
+      await service.deactivate('u1', actor);
+      await service.deactivate('u1', actor);
       const revocations = mockManager.update.mock.calls.filter(([entity]) =>
         isTokenRevocation(entity),
       );
       expect(revocations).toEqual([tokenRevocation, tokenRevocation]);
+      expect(mockAuditRepo.save).not.toHaveBeenCalled();
       expect(transactionOutcome).toBe('committed');
+    });
+  });
+
+  describe('reactivate', () => {
+    const inactiveCashier = {
+      id: 'u1',
+      full_name: 'Cashier',
+      role: UserRole.CASHIER,
+      branch_id: 'branch-1',
+      is_active: false,
+    };
+
+    beforeEach(() => {
+      mockManager.update.mockResolvedValue({ affected: 1 });
+    });
+
+    it('revokes old refresh tokens, sets is_active and audits, in one transaction, keeping role and branch', async () => {
+      mockLockQueryBuilder.getOne.mockResolvedValue(inactiveCashier);
+      mockBranchesRepo.findOne.mockResolvedValue(activeBranch);
+
+      await service.reactivate('u1', actor, '10.0.0.5');
+
+      expect(mockManager.update).toHaveBeenNthCalledWith(1, ...tokenRevocation);
+      expect(mockManager.update).toHaveBeenNthCalledWith(2, User, 'u1', {
+        is_active: true,
+      });
+      expect(mockAuditRepo.save).toHaveBeenCalledWith(
+        expect.objectContaining({
+          action: AuditAction.REACTIVATE,
+          entity_id: 'u1',
+          user_id: 'admin-1',
+          changes: { is_active: { old: false, new: true } },
+          ip_address: '10.0.0.5',
+        }),
+      );
+      expect(transactionOutcome).toBe('committed');
+    });
+
+    it('refuses a staff user whose branch is inactive (400), changing nothing', async () => {
+      mockLockQueryBuilder.getOne.mockResolvedValue(inactiveCashier);
+      mockBranchesRepo.findOne.mockResolvedValue(inactiveBranch);
+
+      await expect(service.reactivate('u1', actor)).rejects.toThrow(
+        BadRequestException,
+      );
+      expect(mockManager.update).not.toHaveBeenCalled();
+      expect(transactionOutcome).toBe('rolled back');
+    });
+
+    it('reactivates an admin without a branch check', async () => {
+      mockLockQueryBuilder.getOne.mockResolvedValue({
+        ...inactiveCashier,
+        role: UserRole.ADMIN,
+        branch_id: null,
+      });
+      await service.reactivate('u1', actor);
+      expect(mockBranchesRepo.findOne).not.toHaveBeenCalled();
+      expect(mockManager.update).toHaveBeenCalledTimes(2);
+    });
+
+    it('leaves an already active user alone: no revocation, no audit', async () => {
+      mockLockQueryBuilder.getOne.mockResolvedValue({
+        ...inactiveCashier,
+        is_active: true,
+      });
+      await service.reactivate('u1', actor);
+      expect(mockManager.update).not.toHaveBeenCalled();
+      expect(mockAuditRepo.save).not.toHaveBeenCalled();
+    });
+
+    it('throws NotFoundException when user does not exist', async () => {
+      mockLockQueryBuilder.getOne.mockResolvedValue(null);
+      await expect(service.reactivate('missing', actor)).rejects.toThrow(
+        NotFoundException,
+      );
+      expect(mockManager.update).not.toHaveBeenCalled();
     });
   });
 
