@@ -102,3 +102,22 @@ export const getCurrentUser = async () => {
     user: mapBackendUser(response.data.user),
   };
 };
+
+/**
+ * Change the session user's own password (any role). 204: the server
+ * revoked every refresh token of the user and set new session cookies
+ * for this device, so the user stays signed in.
+ *
+ * Errors are left to the caller, which reads only status, code and
+ * message (the axios error also carries the request body, the passwords):
+ * - 403 WRONG_PASSWORD: the current password is wrong
+ * - 400 SAME_PASSWORD, or a validation message
+ * - 503 PASSWORD_CHANGED_SIGN_IN_AGAIN: the password WAS changed, but no
+ *   new session could be started; the user must sign in again. Never
+ *   retried: the old password no longer works.
+ *
+ * @param {{ current_password: string, new_password: string }} payload
+ */
+export const changeOwnPassword = async ({ current_password, new_password }) => {
+  await api.put("/auth/me/password", { current_password, new_password });
+};

@@ -3,7 +3,7 @@ import { useDispatch, useSelector } from "react-redux";
 import { useNavigate, useLocation } from "react-router-dom";
 import InputField from "../../common/InputField";
 import Button from "../../common/Button";
-import { loginUser, clearError } from "../../../store/slices/authSlice";
+import { loginUser, clearError, clearSignInNotice } from "../../../store/slices/authSlice";
 import { ROLES } from "../../../constants/rolePermissions";
 
 const LoginForm = () => {
@@ -16,6 +16,14 @@ const LoginForm = () => {
 
   const [formData, setFormData] = useState({ email: "", password: "" });
   const [errors, setErrors] = useState({});
+
+  // Why the user was signed out (e.g. after a password change): kept for
+  // this visit to the page, cleared from Redux so it shows only once.
+  const signInNotice = useSelector((state) => state.auth.signInNotice);
+  const [notice] = useState(signInNotice);
+  useEffect(() => {
+    if (signInNotice) dispatch(clearSignInNotice());
+  }, [signInNotice, dispatch]);
 
   // Get the page user was trying to access before login.
   // Otherwise cashiers land on the POS terminal, everyone else on the dashboard.
@@ -68,6 +76,11 @@ const LoginForm = () => {
 
   return (
     <form onSubmit={handleSubmit} className="flex flex-col gap-4">
+      {notice && (
+        <p role="status" className="rounded-lg border border-emerald-300 bg-emerald-50 p-3 text-sm text-emerald-800 dark:border-emerald-800 dark:bg-emerald-950/40 dark:text-emerald-200">
+          {notice}
+        </p>
+      )}
       <InputField
         label="Email"
         type="email"

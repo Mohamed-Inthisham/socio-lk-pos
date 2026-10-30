@@ -73,3 +73,22 @@ describe("UserMenu: Approval PIN (P6-18)", () => {
     expect(pinItem()).toHaveTextContent("Set on 22 Oct 2026, 2:35 PM");
   });
 });
+
+describe("UserMenu: Change password (Task 2.4)", () => {
+  it.each([
+    ["admin", adminSessionUser, "Ruwan Fernando"],
+    ["manager", managerSessionUser, "Asha Perera"],
+    ["cashier", cashierSessionUser, "Nimal Silva"],
+  ])("a %s sees Change password above Log out, and it opens the dialog", async (_, sessionUser, name) => {
+    const user = userEvent.setup();
+    renderMenu(sessionUser());
+    const menu = await openMenu(user, name);
+
+    const items = within(menu).getAllByRole("menuitem").map((item) => item.textContent);
+    expect(items.indexOf("Change password")).toBe(items.length - 2);
+    expect(items.at(-1)).toBe("Log out");
+
+    await user.click(within(menu).getByRole("menuitem", { name: "Change password" }));
+    expect(await screen.findByRole("dialog", { name: "Change password" })).toBeInTheDocument();
+  });
+});

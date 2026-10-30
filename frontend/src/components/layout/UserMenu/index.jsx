@@ -7,10 +7,11 @@ import {
   Transition,
 } from "@headlessui/react";
 import { useDispatch, useSelector } from "react-redux";
-import { LogOut, ChevronDown, KeyRound } from "lucide-react";
+import { LogOut, ChevronDown, KeyRound, LockKeyhole } from "lucide-react";
 import { logoutUser } from "../../../store/slices/authSlice";
 import { PERMISSIONS, ROLE_INFO, hasPermission } from "../../../constants/rolePermissions";
 import ApprovalPinDialog from "../../pos/ApprovalPinDialog";
+import ChangePasswordDialog from "../../auth/ChangePasswordDialog";
 import { receiptDateTime } from "../../../utils/receipt";
 
 /**
@@ -30,6 +31,7 @@ import { receiptDateTime } from "../../../utils/receipt";
  * - Approval PIN (admins and managers, P6-18): "Set on <date>" or "Not
  *   set"; opens ApprovalPinDialog. Hidden for cashiers, who never hold a
  *   PIN (the backend's CHK_users_approval_pin_role).
+ * - Change password (every role, Task 2.4): opens ChangePasswordDialog.
  * - Logout action
  */
 
@@ -53,6 +55,7 @@ const UserMenu = ({ rounded = "rounded-full" }) => {
   const dispatch = useDispatch();
   const user = useSelector((state) => state.auth.user);
   const [pinOpen, setPinOpen] = useState(false);
+  const [passwordOpen, setPasswordOpen] = useState(false);
 
   if (!user) return null;
 
@@ -166,6 +169,22 @@ const UserMenu = ({ rounded = "rounded-full" }) => {
             <MenuItem>
               <button
                 type="button"
+                onClick={() => setPasswordOpen(true)}
+                className="
+                  w-full flex items-center gap-2.5
+                  px-3 py-2 rounded-md
+                  text-sm text-slate-700 dark:text-slate-200
+                  data-[focus]:bg-slate-100 dark:data-[focus]:bg-slate-800
+                  transition-colors
+                "
+              >
+                <LockKeyhole size={16} className="flex-shrink-0" aria-hidden="true" />
+                <span>Change password</span>
+              </button>
+            </MenuItem>
+            <MenuItem>
+              <button
+                type="button"
                 onClick={handleLogout}
                 className="
                   w-full flex items-center gap-2.5
@@ -186,6 +205,7 @@ const UserMenu = ({ rounded = "rounded-full" }) => {
 
       {/* Rendered in a portal; here only so it shares the menu's lifetime. */}
       {canSetPin && <ApprovalPinDialog open={pinOpen} onClose={() => setPinOpen(false)} />}
+      <ChangePasswordDialog open={passwordOpen} onClose={() => setPasswordOpen(false)} />
     </Menu>
   );
 };
