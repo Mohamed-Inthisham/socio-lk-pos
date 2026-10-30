@@ -1,6 +1,6 @@
 import { Test, TestingModule } from '@nestjs/testing';
 import { getDataSourceToken, getRepositoryToken } from '@nestjs/typeorm';
-import { IsNull } from 'typeorm';
+import { IsNull, Not } from 'typeorm';
 import {
   ConflictException,
   NotFoundException,
@@ -310,6 +310,12 @@ describe('UsersService', () => {
   });
 
   describe('create', () => {
+    const contact = {
+      phone: '0771234567',
+      nic: '199012345678',
+      address: '12 Temple Road, Kandy',
+    };
+
     beforeEach(() => {
       mockUsersRepo.findOne.mockResolvedValue(null);
       mockManager.save.mockImplementation((u) =>
@@ -323,6 +329,7 @@ describe('UsersService', () => {
         {
           email: 'admin@t.com',
           password: 'pw12345678',
+          ...contact,
           full_name: 'Admin',
           role: UserRole.ADMIN,
         },
@@ -346,6 +353,7 @@ describe('UsersService', () => {
           {
             email: 'admin@t.com',
             password: 'pw12345678',
+            ...contact,
             full_name: 'Admin',
             role: UserRole.ADMIN,
             branch_id: 'branch-1',
@@ -361,6 +369,7 @@ describe('UsersService', () => {
         {
           email: 'c@t.com',
           password: 'pw12345678',
+          ...contact,
           full_name: 'Cashier',
           role: UserRole.CASHIER,
           branch_id: 'branch-1',
@@ -382,6 +391,7 @@ describe('UsersService', () => {
           {
             email: 'admin@t.com',
             password,
+            ...contact,
             full_name: 'Admin',
             role: UserRole.ADMIN,
           },
@@ -424,6 +434,7 @@ describe('UsersService', () => {
         {
           email: 'm@t.com',
           password: 'pw12345678',
+          ...contact,
           full_name: 'Manager',
           role: UserRole.MANAGER,
           branch_id: 'branch-1',
@@ -444,6 +455,7 @@ describe('UsersService', () => {
           {
             email: 'x@t.com',
             password: 'pw12345678',
+            ...contact,
             full_name: 'X',
           },
           actor,
@@ -457,6 +469,7 @@ describe('UsersService', () => {
           {
             email: 'c@t.com',
             password: 'pw12345678',
+            ...contact,
             full_name: 'Cashier',
             role: UserRole.CASHIER,
           },
@@ -471,6 +484,7 @@ describe('UsersService', () => {
           {
             email: 'm@t.com',
             password: 'pw12345678',
+            ...contact,
             full_name: 'Manager',
             role: UserRole.MANAGER,
           },
@@ -486,6 +500,7 @@ describe('UsersService', () => {
           {
             email: 'c@t.com',
             password: 'pw12345678',
+            ...contact,
             full_name: 'Cashier',
             role: UserRole.CASHIER,
             branch_id: 'ghost',
@@ -502,6 +517,7 @@ describe('UsersService', () => {
           {
             email: 'c@t.com',
             password: 'pw12345678',
+            ...contact,
             full_name: 'Cashier',
             role: UserRole.CASHIER,
             branch_id: 'branch-2',
@@ -518,6 +534,7 @@ describe('UsersService', () => {
           {
             email: 'exists@t.com',
             password: 'pw12345678',
+            ...contact,
             full_name: 'Dup',
             role: UserRole.ADMIN,
           },
@@ -531,6 +548,7 @@ describe('UsersService', () => {
         {
           email: 'Admin@Test.COM',
           password: 'pw12345678',
+          ...contact,
           full_name: 'A',
           role: UserRole.ADMIN,
         },
@@ -546,6 +564,7 @@ describe('UsersService', () => {
         {
           email: 'c@t.com',
           password: 'pw12345678',
+          ...contact,
           full_name: 'Cashier',
           role: UserRole.CASHIER,
           branch_id: 'branch-1',
@@ -566,6 +585,9 @@ describe('UsersService', () => {
         changes: {
           email: { old: null, new: 'c@t.com' },
           full_name: { old: null, new: 'Cashier' },
+          phone: { old: null, new: '0771234567' },
+          nic: { old: null, new: '199012345678' },
+          address: { old: null, new: '12 Temple Road, Kandy' },
           role: { old: null, new: UserRole.CASHIER },
           branch_id: { old: null, new: 'branch-1' },
         },
@@ -593,6 +615,7 @@ describe('UsersService', () => {
           {
             email: 'admin@t.com',
             password: 'pw12345678',
+            ...contact,
             full_name: 'Admin',
             role: UserRole.ADMIN,
           },
@@ -611,12 +634,80 @@ describe('UsersService', () => {
           {
             email: 'admin@t.com',
             password: 'pw12345678',
+            ...contact,
             full_name: 'Admin',
             role: UserRole.ADMIN,
           },
           actor,
         ),
       ).rejects.toBe(failure);
+      expect(transactionOutcome).toBe('rolled back');
+    });
+
+    it('stores the contact details', async () => {
+      await service.create(
+        {
+          email: 'admin@t.com',
+          password: 'pw12345678',
+          ...contact,
+          full_name: 'Admin',
+          role: UserRole.ADMIN,
+        },
+        actor,
+      );
+      expect(mockUsersRepo.create).toHaveBeenCalledWith(
+        expect.objectContaining(contact),
+      );
+    });
+
+    it('refuses an NIC another user holds (409 NIC_ALREADY_REGISTERED) before hashing', async () => {
+      mockUsersRepo.findOne
+        .mockResolvedValueOnce(null) // the email is free
+        .mockResolvedValueOnce({ id: 'other' }); // the NIC isn't
+      const attempt = service.create(
+        {
+          email: 'admin@t.com',
+          password: 'pw12345678',
+          ...contact,
+          full_name: 'Admin',
+          role: UserRole.ADMIN,
+        },
+        actor,
+      );
+      await expect(attempt).rejects.toThrow(ConflictException);
+      await expect(attempt).rejects.toMatchObject({
+        response: { code: 'NIC_ALREADY_REGISTERED' },
+      });
+      expect(mockUsersRepo.findOne).toHaveBeenLastCalledWith({
+        where: { nic: '199012345678' },
+      });
+      expect(bcrypt.hash).not.toHaveBeenCalled();
+      expect(mockManager.save).not.toHaveBeenCalled();
+    });
+
+    it('maps a racing duplicate NIC (23505 on idx_users_nic_unique) to 409, with no audit row', async () => {
+      mockManager.save.mockRejectedValueOnce(
+        Object.assign(new Error('duplicate key'), {
+          code: '23505',
+          constraint: 'idx_users_nic_unique',
+        }),
+      );
+      await expect(
+        service.create(
+          {
+            email: 'admin@t.com',
+            password: 'pw12345678',
+            ...contact,
+            full_name: 'Admin',
+            role: UserRole.ADMIN,
+          },
+          actor,
+        ),
+      ).rejects.toMatchObject({
+        status: 409,
+        response: { code: 'NIC_ALREADY_REGISTERED' },
+      });
+      expect(mockAuditRepo.save).not.toHaveBeenCalled();
       expect(transactionOutcome).toBe('rolled back');
     });
   });
@@ -707,6 +798,83 @@ describe('UsersService', () => {
         service.update('u1', { branch_id: 'ghost' }),
       ).rejects.toThrow(BadRequestException);
     });
+    it('changes the contact number and address', async () => {
+      mockUsersRepo.findOne.mockResolvedValue({ ...cashier });
+      mockUsersRepo.save.mockImplementation((u) => Promise.resolve(u));
+      const result = await service.update('u1', {
+        phone: '0712345678',
+        address: '4 Lake Road, Galle',
+      });
+      expect(result).toMatchObject({
+        phone: '0712345678',
+        address: '4 Lake Road, Galle',
+      });
+    });
+
+    it('changes the NIC after checking no other user holds it', async () => {
+      mockUsersRepo.findOne
+        .mockResolvedValueOnce({ ...cashier, nic: '901234567V' })
+        .mockResolvedValueOnce(null);
+      mockUsersRepo.save.mockImplementation((u) => Promise.resolve(u));
+      const result = await service.update('u1', { nic: '199012345678' });
+      expect(result.nic).toBe('199012345678');
+      expect(mockUsersRepo.findOne).toHaveBeenLastCalledWith({
+        where: { nic: '199012345678', id: Not('u1') },
+      });
+    });
+
+    it('skips the NIC check when the NIC is unchanged', async () => {
+      mockUsersRepo.findOne.mockResolvedValue({
+        ...cashier,
+        nic: '901234567V',
+      });
+      mockUsersRepo.save.mockImplementation((u) => Promise.resolve(u));
+      await service.update('u1', { nic: '901234567V' });
+      expect(mockUsersRepo.findOne).toHaveBeenCalledTimes(1);
+    });
+
+    it('refuses an NIC another user holds (409), saving nothing', async () => {
+      mockUsersRepo.findOne
+        .mockResolvedValueOnce({ ...cashier })
+        .mockResolvedValueOnce({ id: 'other' });
+      await expect(
+        service.update('u1', { nic: '199012345678' }),
+      ).rejects.toMatchObject({
+        status: 409,
+        response: { code: 'NIC_ALREADY_REGISTERED' },
+      });
+      expect(mockUsersRepo.save).not.toHaveBeenCalled();
+    });
+
+    it.each([
+      [
+        'NIC',
+        'idx_users_nic_unique',
+        { nic: '199012345678' },
+        'NIC is already registered',
+      ],
+      [
+        'email',
+        'idx_users_email',
+        { email: 'n@t.com' },
+        'Email is already registered',
+      ],
+    ])(
+      'maps a racing duplicate %s on save to 409',
+      async (_, constraint, change, message) => {
+        mockUsersRepo.findOne
+          .mockResolvedValueOnce({ ...cashier })
+          .mockResolvedValueOnce(null);
+        mockUsersRepo.save.mockRejectedValueOnce(
+          Object.assign(new Error('duplicate key'), {
+            code: '23505',
+            constraint,
+          }),
+        );
+        await expect(service.update('u1', change)).rejects.toThrow(message);
+      },
+    );
+
     it('refuses a null branch_id (400) without looking a branch up', async () => {
       mockUsersRepo.findOne.mockResolvedValue({ ...cashier });
       await expect(

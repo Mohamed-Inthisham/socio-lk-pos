@@ -61,7 +61,12 @@ describe('Users API (e2e)', () => {
   async function seedUser(
     role: UserRole,
     branchId: string | null,
-    opts: { active?: boolean; name?: string } = {},
+    opts: {
+      active?: boolean;
+      name?: string;
+      nic?: string | null;
+      phone?: string | null;
+    } = {},
   ): Promise<User> {
     const repo = dataSource.getRepository(User);
     const n = ++seq;
@@ -73,6 +78,8 @@ describe('Users API (e2e)', () => {
         role,
         is_active: opts.active ?? true,
         branch_id: role === UserRole.ADMIN ? null : branchId,
+        nic: opts.nic ?? null,
+        phone: opts.phone ?? null,
       }),
     );
   }
@@ -92,6 +99,9 @@ describe('Users API (e2e)', () => {
 
   const refresh = (token: string) =>
     http().post('/api/v1/auth/refresh').set('Cookie', `refresh_token=${token}`);
+
+  /** A new-format NIC no other test uses. */
+  const freshNic = () => String(199000000000 + ++seq);
 
   const userRow = (id: string) =>
     dataSource.getRepository(User).findOneByOrFail({ id });
@@ -310,6 +320,9 @@ describe('Users API (e2e)', () => {
         full_name: 'New Cashier',
         role: UserRole.CASHIER,
         branch_id: branch.id,
+        phone: '0771234567',
+        nic: freshNic(),
+        address: '12 Temple Road, Kandy',
         ...overrides,
       });
 
@@ -382,6 +395,13 @@ describe('Users API (e2e)', () => {
         ['a 73-byte password', { password: 'a'.repeat(73) }],
         ['an unknown role', { role: 'owner' }],
         ['an extra field', { is_active: false }],
+        ['no contact number', { phone: undefined }],
+        ['no NIC', { nic: undefined }],
+        ['no address', { address: undefined }],
+        ['a contact number that is not Sri Lankan', { phone: '12345' }],
+        ['an NIC with 10 digits and a V', { nic: '9012345678V' }],
+        ['an NIC with 11 digits', { nic: '19901234567' }],
+        ['a blank address', { address: '   ' }],
       ])('400 for %s, creating nothing', async (_, overrides) => {
         const before = await dataSource.getRepository(User).count();
         await http()
@@ -390,6 +410,71 @@ describe('Users API (e2e)', () => {
           .send(body(overrides))
           .expect(400);
         expect(await dataSource.getRepository(User).count()).toBe(before);
+      });
+
+      it('stores the contact details normalized, returns and audits them', async () => {
+        const res = await http()
+          .post('/api/v1/users')
+          .set('Cookie', adminCookies)
+          .send(
+            body({
+              phone: '+94 77 765-4321',
+              nic: ' 851234567v ',
+              address: '  4 Lake Road, Galle ',
+            }),
+          )
+          .expect(201);
+
+        const contact = {
+          phone: '0777654321',
+          nic: '851234567V',
+          address: '4 Lake Road, Galle',
+        };
+        expect(res.body).toMatchObject(contact);
+        expect(await userRow((res.body as User).id)).toMatchObject(contact);
+        const [audit] = await auditRows(
+          AuditAction.CREATE,
+          (res.body as User).id,
+        );
+        expect(audit.changes).toMatchObject({
+          phone: { old: null, new: contact.phone },
+          nic: { old: null, new: contact.nic },
+          address: { old: null, new: contact.address },
+        });
+      });
+
+      it('409 NIC_ALREADY_REGISTERED for an NIC another user holds (any case), with no user or audit row', async () => {
+        await seedUser(UserRole.CASHIER, branch.id, { nic: '781234567X' });
+        const usersBefore = await dataSource.getRepository(User).count();
+        const auditsBefore = await dataSource.getRepository(AuditLog).count();
+
+        const res = await http()
+          .post('/api/v1/users')
+          .set('Cookie', adminCookies)
+          .send(body({ nic: '781234567x' }))
+          .expect(409);
+
+        expect(res.body).toMatchObject({
+          message: 'NIC is already registered to another user',
+          code: 'NIC_ALREADY_REGISTERED',
+        });
+        expect(await dataSource.getRepository(User).count()).toBe(usersBefore);
+        expect(await dataSource.getRepository(AuditLog).count()).toBe(
+          auditsBefore,
+        );
+      });
+
+      it("reuses a deleted user's NIC", async () => {
+        const nic = freshNic();
+        const gone = await seedUser(UserRole.CASHIER, branch.id, { nic });
+        await dataSource.getRepository(User).softDelete(gone.id);
+
+        const res = await http()
+          .post('/api/v1/users')
+          .set('Cookie', adminCookies)
+          .send(body({ nic }))
+          .expect(201);
+        expect(res.body).toMatchObject({ nic });
       });
 
       it('400 for a staff user on an inactive branch', async () => {
@@ -431,6 +516,110 @@ describe('Users API (e2e)', () => {
           .send({ branch_id: other.id })
           .expect(200);
         expect((await userRow(target.id)).branch_id).toBe(other.id);
+      });
+    });
+
+    describe('PATCH /users/:id contact details', () => {
+      const patch = (id: string, change: object) =>
+        http()
+          .patch(`/api/v1/users/${id}`)
+          .set('Cookie', adminCookies)
+          .send(change);
+
+      it('lets a user created before them be renamed without adding them', async () => {
+        const target = await seedUser(UserRole.CASHIER, branch.id);
+        const res = await patch(target.id, { full_name: 'Renamed' }).expect(
+          200,
+        );
+        expect(res.body).toMatchObject({
+          full_name: 'Renamed',
+          phone: null,
+          nic: null,
+          address: null,
+        });
+      });
+
+      it('adds and changes them, normalized', async () => {
+        const target = await seedUser(UserRole.CASHIER, branch.id);
+        await patch(target.id, {
+          phone: '94712345678',
+          nic: '921234567v',
+          address: ' 7 Hill Street, Kandy ',
+        }).expect(200);
+        expect(await userRow(target.id)).toMatchObject({
+          phone: '0712345678',
+          nic: '921234567V',
+          address: '7 Hill Street, Kandy',
+        });
+
+        const nic = freshNic();
+        await patch(target.id, { nic }).expect(200);
+        expect((await userRow(target.id)).nic).toBe(nic);
+      });
+
+      it('keeps its own NIC on a save that sends it again', async () => {
+        const nic = freshNic();
+        const target = await seedUser(UserRole.CASHIER, branch.id, { nic });
+        await patch(target.id, { nic, full_name: 'Same NIC' }).expect(200);
+      });
+
+      it('409 NIC_ALREADY_REGISTERED for an NIC another user holds, changing nothing', async () => {
+        const nic = freshNic();
+        await seedUser(UserRole.CASHIER, branch.id, { nic });
+        const target = await seedUser(UserRole.CASHIER, branch.id, {
+          nic: freshNic(),
+        });
+        const res = await patch(target.id, {
+          nic,
+          full_name: 'Should Not Stick',
+        }).expect(409);
+        expect(res.body).toMatchObject({ code: 'NIC_ALREADY_REGISTERED' });
+        expect(await userRow(target.id)).toMatchObject({
+          nic: target.nic,
+          full_name: target.full_name,
+        });
+      });
+
+      it.each([
+        ['a null contact number', { phone: null }],
+        ['an empty contact number', { phone: '' }],
+        ['a null NIC', { nic: null }],
+        ['an empty NIC', { nic: '' }],
+        ['a null address', { address: null }],
+        ['a blank address', { address: '  ' }],
+        ['an invalid NIC', { nic: '12345' }],
+      ])('400 for %s: never cleared', async (_, change) => {
+        const target = await seedUser(UserRole.CASHIER, branch.id, {
+          nic: freshNic(),
+          phone: '0771234567',
+        });
+        await patch(target.id, change).expect(400);
+        expect(await userRow(target.id)).toMatchObject({
+          nic: target.nic,
+          phone: '0771234567',
+        });
+      });
+    });
+
+    describe('GET /users search by contact details', () => {
+      it('finds a user by NIC and by contact number typed with +94', async () => {
+        const nic = freshNic();
+        const target = await seedUser(UserRole.CASHIER, branch.id, {
+          nic,
+          phone: '0759876543',
+        });
+        const ids = async (search: string) => {
+          const res = await http()
+            .get('/api/v1/users')
+            .query({ search, limit: 200 })
+            .set('Cookie', adminCookies)
+            .expect(200);
+          return (res.body as { data: User[] }).data.map((u) => u.id);
+        };
+
+        expect(await ids(nic.toLowerCase())).toEqual([target.id]);
+        expect(await ids('+94 75 987 6543')).toEqual([target.id]);
+        expect(await ids('0759876543')).toEqual([target.id]);
       });
     });
 
