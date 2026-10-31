@@ -12,7 +12,10 @@ import { ProductUnit } from '../product-units/entities/product-unit.entity';
 import { ProductUnitStatus } from '../product-units/enums/product-unit-status.enum';
 import { StockService } from '../stock/stock.service';
 import { EntityManager, In, QueryFailedError } from 'typeorm';
-import { lockInventoryRows } from '../stock/lock-inventory-rows';
+import {
+  ensureStockRows,
+  lockInventoryRows,
+} from '../stock/lock-inventory-rows';
 
 // The global lock order's helper takes its own queries on the manager;
 // mocked so the per-call manager mocks below stay exact (Phase 6.4 P7-25).
@@ -581,10 +584,16 @@ describe('PhonePurchasesService', () => {
         stock: [{ productId: 'prod-1', branchId: 'branch-1' }],
       });
       const lockOrder = lockMock.mock.invocationCallOrder[0];
+      // A model never brought in at this branch gets its stock row first.
+      const ensureMock = jest.mocked(ensureStockRows);
+      expect(ensureMock).toHaveBeenCalledWith(mockManager, [
+        { productId: 'prod-1', branchId: 'branch-1' },
+      ]);
       // The 5th findOne is the IMEI pre-check.
       expect(mockManager.findOne.mock.invocationCallOrder[4]).toBeLessThan(
-        lockOrder,
+        ensureMock.mock.invocationCallOrder[0],
       );
+      expect(ensureMock.mock.invocationCallOrder[0]).toBeLessThan(lockOrder);
       expect(lockOrder).toBeLessThan(
         mockManager.save.mock.invocationCallOrder[0],
       );
@@ -602,6 +611,7 @@ describe('PhonePurchasesService', () => {
       await expect(
         service.create(validCreateDto(), 'cashier-1'),
       ).rejects.toThrow(ConflictException);
+      expect(ensureStockRows).not.toHaveBeenCalled();
       expect(lockInventoryRows).not.toHaveBeenCalled();
     });
   });
@@ -641,9 +651,14 @@ describe('PhonePurchasesService', () => {
         stock: [{ productId: 'prod-1', branchId: 'branch-1' }],
       });
       const lockOrder = lockMock.mock.invocationCallOrder[0];
+      const ensureMock = jest.mocked(ensureStockRows);
+      expect(ensureMock).toHaveBeenCalledWith(mockManager, [
+        { productId: 'prod-1', branchId: 'branch-1' },
+      ]);
       expect(mockManager.findOne.mock.invocationCallOrder[1]).toBeLessThan(
-        lockOrder,
+        ensureMock.mock.invocationCallOrder[0],
       );
+      expect(ensureMock.mock.invocationCallOrder[0]).toBeLessThan(lockOrder);
       expect(lockOrder).toBeLessThan(
         mockManager.save.mock.invocationCallOrder[0],
       );

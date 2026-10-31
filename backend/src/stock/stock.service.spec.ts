@@ -484,18 +484,25 @@ describe('StockService', () => {
       });
     });
 
-    it('throws when stock row is missing (data integrity failure)', async () => {
+    it('answers the insufficient-stock 409 with available 0 when the branch has no stock row', async () => {
       mockManager.createQueryBuilder.mockReturnValueOnce(buildSelectQB(null));
 
-      await expect(
-        service.decrementForSale(
+      const err = await service
+        .decrementForSale(
           mockManager as never,
-          'ghost-product',
+          'never-stocked',
           'b1',
           1,
-          'Ghost Product',
-        ),
-      ).rejects.toThrow(/Stock row missing/);
+          'UGREEN Cable',
+        )
+        .catch((e: unknown) => e);
+      expect(err).toBeInstanceOf(ConflictException);
+      expect((err as ConflictException).getResponse()).toEqual({
+        message:
+          'Insufficient stock for "UGREEN Cable": requested 1, available 0',
+        product_id: 'never-stocked',
+      });
+      expect(mockManager.createQueryBuilder).toHaveBeenCalledTimes(1);
     });
 
     it('acquires pessimistic_write lock on the stock row', async () => {
