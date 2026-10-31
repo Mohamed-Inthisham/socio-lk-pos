@@ -16,6 +16,10 @@ import { ProductUnitStatus } from '../product-units/enums/product-unit-status.en
 import { LIVE_UNIT_STATUSES } from '../product-units/live-imei';
 import { Supplier } from '../suppliers/entities/supplier.entity';
 import { StockService } from '../stock/stock.service';
+import {
+  ensureStockRows,
+  lockInventoryRows,
+} from '../stock/lock-inventory-rows';
 import { UserRole } from '../users/enums/user-role.enum';
 import { CreateStockPurchaseDto } from './dto/create-stock-purchase.dto';
 import { CreateStockPurchasePaymentDto } from './dto/create-stock-purchase-payment.dto';
@@ -197,20 +201,15 @@ export class StockPurchasesService {
         }
       }
 
-      for (const item of dto.items) {
-        await manager.query(
-          `INSERT INTO "stock" ("product_id", "branch_id", "quantity", "min_quantity", "manage_stock")
-           VALUES ($1, $2, 0, 0, true)
-           ON CONFLICT ("product_id", "branch_id") DO NOTHING`,
-          [item.product_id, dto.branch_id],
-        );
-      }
-      await manager.query(
-        `SELECT "id" FROM "stock" WHERE ("product_id", "branch_id") IN (${dto.items
-          .map((_, index) => `($${index * 2 + 1}, $${index * 2 + 2})`)
-          .join(', ')}) FOR UPDATE`,
-        dto.items.flatMap((item) => [item.product_id, dto.branch_id]),
-      );
+      // Create any missing stock rows, then lock them, both in the global
+      // lock order (P7-25), so two purchases listing the same products in
+      // a different order can't deadlock.
+      const stockTargets = dto.items.map((item) => ({
+        productId: item.product_id,
+        branchId: dto.branch_id,
+      }));
+      await ensureStockRows(manager, stockTargets);
+      await lockInventoryRows(manager, { stock: stockTargets });
 
       const purchase = manager.create(StockPurchase, {
         id,
@@ -542,7 +541,16 @@ export class StockPurchasesService {
     manager: EntityManager,
     dto: CreateStockPurchaseDto,
   ): Promise<void> {
-    for (const item of dto.items) {
+    // Advisory locks in product order, so two purchases with the same
+    // serial-tracked products in a different order can't deadlock.
+    const items = [...dto.items].sort((a, b) =>
+      a.product_id.toLowerCase() < b.product_id.toLowerCase()
+        ? -1
+        : a.product_id.toLowerCase() > b.product_id.toLowerCase()
+          ? 1
+          : 0,
+    );
+    for (const item of items) {
       const serials = unitIdentifierPairs(item).flatMap((pair) =>
         pair.serial_number ? [pair.serial_number] : [],
       );

@@ -205,10 +205,10 @@ export class StockService {
    * back with it. Never opens its own transaction.
    *
    * Behavior:
-   *   - If no stock row exists for (product, branch): 500-level error.
-   *     Stock rows are auto-created at product creation (Phase 6.1), so
-   *     a missing row means data integrity is broken, not a business
-   *     condition the cashier can fix. Fail loudly.
+   *   - If no stock row exists for (product, branch): the insufficient-
+   *     stock 409 below with available 0. Products are a global catalog
+   *     (MakeProductsCatalogGlobal), so a product never brought in at
+   *     this branch has no row: the branch simply has none to sell.
    *   - If stock.manage_stock is false: silent no-op. Untracked
    *     products (services, unlimited SIMs, etc.) don't move inventory.
    *   - If stock.quantity < qty: throw 409 Conflict with the product
@@ -250,28 +250,19 @@ export class StockService {
       .andWhere('stock.branch_id = :branchId', { branchId })
       .getOne();
 
-    if (!stock) {
-      // Data integrity failure — stock rows should always exist by
-      // the time a sale is completed. Bubble up as 500.
-      throw new Error(
-        `Stock row missing for product ${productId} at branch ${branchId}. ` +
-          `This indicates a data integrity issue — every product should have ` +
-          `a stock row auto-created at product creation.`,
-      );
-    }
-
     // Untracked products (services, reloads, etc.) don't move inventory.
-    if (!stock.manage_stock) {
+    if (stock && !stock.manage_stock) {
       return;
     }
 
-    if (stock.quantity < qty) {
+    const available = stock?.quantity ?? 0;
+    if (!stock || available < qty) {
       // product_id lets the till find the line(s) (Phase 6.4 P5-2);
       // completeSale adds the sale_line_id.
       throw new ConflictException({
         message:
           `Insufficient stock for "${productNameForError}": ` +
-          `requested ${qty}, available ${stock.quantity}`,
+          `requested ${qty}, available ${available}`,
         product_id: productId,
       });
     }

@@ -26,7 +26,10 @@ import { Stock } from '../stock/entities/stock.entity';
 import { ProductUnitStatus } from '../product-units/enums/product-unit-status.enum';
 import { ProductUnitsService } from '../product-units/product-units.service';
 import { LIVE_UNIT_STATUSES } from '../product-units/live-imei';
-import { lockInventoryRows } from '../stock/lock-inventory-rows';
+import {
+  ensureStockRows,
+  lockInventoryRows,
+} from '../stock/lock-inventory-rows';
 import { assertDayOpen } from '../cash-days/day-gate';
 import { DRAFTS_SHARED_LOCK_SQL } from '../cash-days/cash-days.service';
 import { readDraftSnapshots } from './draft-snapshot';
@@ -1653,11 +1656,19 @@ export class SalesService {
       //     the in-house lines' stock and the trade-ins' stock, then the
       //     lines' units. Trade-in units don't exist yet (step 3b inserts
       //     them after these locks). Locks only; every check below still
-      //     runs where it did.
+      //     runs where it did. A trade-in is an intake, so its stock row
+      //     is created first if this branch has none for the model
+      //     (ensureStockRows); a line's missing row stays missing and
+      //     decrementForSale answers 409 with available 0.
       const tradeInPayments = await manager.find(Payment, {
         where: { sale_id: saleId, payment_method: PaymentMethod.TRADE_IN },
         order: { created_at: 'ASC' },
       });
+      const tradeInStock = tradeInPayments.map((payment) => ({
+        productId: payment.trade_in_product_id!,
+        branchId: sale.branch_id,
+      }));
+      await ensureStockRows(manager, tradeInStock);
       await lockInventoryRows(manager, {
         stock: [
           ...lines
@@ -1666,10 +1677,7 @@ export class SalesService {
               productId: line.product_id,
               branchId: sale.branch_id,
             })),
-          ...tradeInPayments.map((payment) => ({
-            productId: payment.trade_in_product_id!,
-            branchId: sale.branch_id,
-          })),
+          ...tradeInStock,
         ],
         unitIds: lines
           .map((line) => line.product_unit_id)

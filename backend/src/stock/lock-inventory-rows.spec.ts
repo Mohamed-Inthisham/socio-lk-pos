@@ -1,5 +1,5 @@
 import { EntityManager } from 'typeorm';
-import { lockInventoryRows } from './lock-inventory-rows';
+import { ensureStockRows, lockInventoryRows } from './lock-inventory-rows';
 import { Stock } from './entities/stock.entity';
 import { ProductUnit } from '../product-units/entities/product-unit.entity';
 
@@ -124,5 +124,45 @@ describe('lockInventoryRows (Phase 6.4 P7-25)', () => {
         unitIds: ['missing-unit'],
       }),
     ).resolves.toBeUndefined();
+  });
+});
+
+describe('ensureStockRows', () => {
+  const queryManager = () => {
+    const query = jest.fn().mockResolvedValue([]);
+    return { manager: { query } as unknown as EntityManager, query };
+  };
+
+  it('inserts each missing row with ON CONFLICT DO NOTHING, in the lock order, once per row', async () => {
+    const { manager, query } = queryManager();
+
+    await ensureStockRows(manager, [
+      { productId: 'p-2', branchId: 'b-1' },
+      { productId: 'P-1', branchId: 'B-2' },
+      { productId: 'p-1', branchId: 'b-1' },
+      { productId: 'p-1', branchId: 'b-2' },
+    ]);
+
+    expect(query.mock.calls.map(([, params]) => params)).toEqual([
+      ['p-1', 'b-1'],
+      ['p-1', 'b-2'],
+      ['p-2', 'b-1'],
+    ]);
+    for (const [sql] of query.mock.calls as [string][]) {
+      expect(sql).toMatch(/INSERT INTO "stock"/);
+      expect(sql).toMatch(/VALUES \(\$1, \$2, 0, 0, true\)/);
+      expect(sql).toMatch(
+        /ON CONFLICT \("product_id", "branch_id"\) DO NOTHING/,
+      );
+    }
+  });
+
+  it('sends nothing when there are no rows', async () => {
+    const { manager, query } = queryManager();
+
+    await ensureStockRows(manager, []);
+    await ensureStockRows(manager, undefined);
+
+    expect(query).not.toHaveBeenCalled();
   });
 });

@@ -38,7 +38,10 @@ import { UserRole } from '../users/enums/user-role.enum';
 import { AuditAction } from '../audit-log/enums/audit-action.enum';
 import { WarrantyPeriod } from '../products/enums/warranty-period.enum';
 import { TrackingMethod } from '../products/enums/tracking-method.enum';
-import { lockInventoryRows } from '../stock/lock-inventory-rows';
+import {
+  ensureStockRows,
+  lockInventoryRows,
+} from '../stock/lock-inventory-rows';
 import { assertDayOpen } from '../cash-days/day-gate';
 
 // The global lock order's helper takes its own queries on the manager;
@@ -4896,6 +4899,99 @@ describe('SalesService', () => {
         BadRequestException,
       );
       expect(lockMock).not.toHaveBeenCalled();
+    });
+
+    // ---- Missing stock rows (T0): only trade-ins create one ----
+
+    const ensureMock = ensureStockRows as jest.MockedFunction<
+      typeof ensureStockRows
+    >;
+
+    const arrangeCompletableWithTradeIns = (payments: unknown[]) => {
+      mockQueryBuilder.getOne.mockResolvedValueOnce({
+        id: 'sale-1',
+        status: SaleStatus.DRAFT,
+        branch_id: 'branch-1',
+        cashier_id: 'cashier-1',
+        customer_id: 'cust-1',
+        total: '500.00',
+        amount_paid: '500.00',
+      });
+      arrangeManagerFind(lines, payments);
+      mockManager.findOne.mockResolvedValue({
+        id: 'cust-1',
+        nic: '199012345678',
+      });
+      mockStockService.decrementForSale.mockResolvedValue(undefined);
+      mockProductUnitsService.markSoldForSale.mockResolvedValue(undefined);
+      mockPhonePurchasesService.createForTradeIn.mockResolvedValue({
+        phone_purchase: { id: 'pp-1' },
+        product_unit: { id: 'unit-ti' },
+      });
+      mockSaleNumberCountersService.generateNext.mockResolvedValue(
+        'INV-20261023-0001',
+      );
+      mockManager.query.mockResolvedValue(undefined);
+    };
+
+    it('completeSale creates stock rows for the trade-ins only, before the inventory locks', async () => {
+      arrangeCompletableWithTradeIns([
+        { ...tradeInPayment, trade_in_phone_purchase_id: null },
+        {
+          ...tradeInPayment,
+          id: 'pay-ti-2',
+          trade_in_product_id: 'prod-used-2',
+          trade_in_imei: '490154203237518',
+          trade_in_phone_purchase_id: null,
+        },
+      ]);
+
+      await service.completeSale('sale-1');
+
+      expect(ensureMock).toHaveBeenCalledTimes(1);
+      expect(ensureMock).toHaveBeenCalledWith(mockManager, [
+        { productId: 'prod-used', branchId: 'branch-1' },
+        { productId: 'prod-used-2', branchId: 'branch-1' },
+      ]);
+      // Not the sale's own products: a sale never creates stock.
+      const ensured = ensureMock.mock.calls[0][1] ?? [];
+      for (const lineProduct of ['prod-1', 'prod-2', 'prod-3']) {
+        expect(ensured.map((t) => t.productId)).not.toContain(lineProduct);
+      }
+      expect(ensureMock.mock.invocationCallOrder[0]).toBeLessThan(
+        lockMock.mock.invocationCallOrder[0],
+      );
+      expect(ensureMock.mock.invocationCallOrder[0]).toBeLessThan(
+        mockStockService.decrementForSale.mock.invocationCallOrder[0],
+      );
+    });
+
+    it('completeSale without trade-ins creates no stock rows (empty targets)', async () => {
+      arrangeCompletableWithTradeIns([]);
+
+      await service.completeSale('sale-1');
+
+      expect(ensureMock).toHaveBeenCalledTimes(1);
+      expect(ensureMock).toHaveBeenCalledWith(mockManager, []);
+      expect(ensureMock.mock.invocationCallOrder[0]).toBeLessThan(
+        lockMock.mock.invocationCallOrder[0],
+      );
+    });
+
+    it('completeSale creates no stock rows when a check fails first', async () => {
+      mockQueryBuilder.getOne.mockResolvedValueOnce({
+        id: 'sale-1',
+        status: SaleStatus.DRAFT,
+        branch_id: 'branch-1',
+        total: '500.00',
+        amount_paid: '400.00',
+      });
+      arrangeManagerFind(lines, [tradeInPayment]);
+
+      await expect(service.completeSale('sale-1')).rejects.toThrow(
+        BadRequestException,
+      );
+      expect(ensureMock).not.toHaveBeenCalled();
     });
 
     it('voidSale locks the lines and trade-in units stock, then the lines and trade-in units, before any change', async () => {

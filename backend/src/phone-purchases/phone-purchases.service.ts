@@ -19,7 +19,10 @@ import { Branch } from '../branches/entities/branch.entity';
 import { Product } from '../products/entities/product.entity';
 import { User } from '../users/entities/user.entity';
 import { StockService } from '../stock/stock.service';
-import { lockInventoryRows } from '../stock/lock-inventory-rows';
+import {
+  ensureStockRows,
+  lockInventoryRows,
+} from '../stock/lock-inventory-rows';
 import { CreatePhonePurchaseDto } from './dto/create-phone-purchase.dto';
 import { PHONE_PURCHASE_NEEDS_NIC } from './customer-nic';
 import { ListPhonePurchasesQueryDto } from './dto/list-phone-purchases-query.dto';
@@ -108,9 +111,12 @@ export class PhonePurchasesService {
       //     P7-25): a concurrent intake of the same IMEI then queues on
       //     this row instead of on the live-IMEI index while holding it.
       //     After the IMEI pre-check, so a race still gets the same 409.
-      await lockInventoryRows(manager, {
-        stock: [{ productId: dto.product_id, branchId: dto.branch_id }],
-      });
+      //     The first intake of a model at this branch creates its row.
+      const stockTargets = [
+        { productId: dto.product_id, branchId: dto.branch_id },
+      ];
+      await ensureStockRows(manager, stockTargets);
+      await lockInventoryRows(manager, { stock: stockTargets });
 
       // 4. Create the PhonePurchase row. total_amount equals buying_price
       //    for single-unit purchases (all Slice D supports).
@@ -140,9 +146,7 @@ export class PhonePurchasesService {
 
       // 6. Increment stock. Pessimistic lock on the Stock row is
       //    inside StockService.incrementForReversal (see Phase 6.3).
-      //    The method throws if the Stock row is missing — a data
-      //    integrity invariant (every Product has a Stock row per
-      //    Phase 6.1's ProductsService.create → createForNewProduct).
+      //    The row exists: step 3b created it if it was missing.
       await this.stockService.incrementForReversal(
         manager,
         dto.product_id,
@@ -259,7 +263,8 @@ export class PhonePurchasesService {
    * Steps:
    *   1. assertProductReference (product exists, at branch, serialized)
    *   2. assertImeiAvailable (409 + existing_unit payload on collision)
-   *   2b. Lock the Stock row (lockInventoryRows, Phase 6.4 P7-25)
+   *   2b. Create the Stock row if missing (ensureStockRows), then lock
+   *       it (lockInventoryRows, Phase 6.4 P7-25)
    *   3. Insert PhonePurchase row (total_amount = buying_price for
    *      single-unit purchases, same as create())
    *   4. Insert ProductUnit row (IN_STOCK, linked to purchase)
@@ -302,12 +307,15 @@ export class PhonePurchasesService {
     //    on collision. uq_product_units_imei_live backstops any race.
     await this.assertImeiAvailable(input.imei, manager);
 
-    // 2b. Lock the stock row before inserting (the global lock order,
-    //     P7-25). Inside completeSale it is already held, so this costs
-    //     nothing; it keeps any other caller in order too.
-    await lockInventoryRows(manager, {
-      stock: [{ productId: input.product_id, branchId: input.branch_id }],
-    });
+    // 2b. Create the stock row if this branch has none for the model, and
+    //     lock it before inserting (the global lock order, P7-25). Inside
+    //     completeSale both were already done, so this costs nothing; it
+    //     keeps any other caller in order too.
+    const stockTargets = [
+      { productId: input.product_id, branchId: input.branch_id },
+    ];
+    await ensureStockRows(manager, stockTargets);
+    await lockInventoryRows(manager, { stock: stockTargets });
 
     // 3. Insert PhonePurchase. total_amount = buying_price (single
     //    unit per purchase). buying_price is already a numeric string
