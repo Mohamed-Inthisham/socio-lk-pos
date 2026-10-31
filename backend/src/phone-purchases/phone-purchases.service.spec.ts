@@ -10,6 +10,10 @@ import { PhonePurchasesService } from './phone-purchases.service';
 import { PhonePurchase } from './entities/phone-purchase.entity';
 import { ProductUnit } from '../product-units/entities/product-unit.entity';
 import { ProductUnitStatus } from '../product-units/enums/product-unit-status.enum';
+import {
+  StockMovementReferenceType,
+  StockMovementType,
+} from '../stock/enums/stock-movement-type.enum';
 import { StockService } from '../stock/stock.service';
 import { EntityManager, In, QueryFailedError } from 'typeorm';
 import {
@@ -214,12 +218,22 @@ describe('PhonePurchasesService', () => {
         }),
       );
 
-      // Stock incremented via StockService with the transaction manager
+      // Stock incremented via StockService with the transaction manager,
+      // recorded as this phone purchase's PURCHASE (Phase 1 T1)
       expect(mockStockService.incrementForReversal).toHaveBeenCalledWith(
         mockManager,
         'prod-1',
         'branch-1',
         1,
+        expect.objectContaining({
+          type: StockMovementType.PURCHASE,
+          referenceType: StockMovementReferenceType.PHONE_PURCHASE,
+          createdById: 'cashier-1',
+          unit: expect.objectContaining({
+            from: null,
+            to: ProductUnitStatus.IN_STOCK,
+          }) as unknown,
+        }),
       );
 
       // Post-commit fresh read for hydrated response
@@ -623,6 +637,8 @@ describe('PhonePurchasesService', () => {
       customer_id: 'cust-1',
       branch_id: 'branch-1',
       cashier_id: 'cashier-1',
+      payment_id: 'pay-ti-1',
+      completed_by_id: 'completer-1',
       product_id: 'prod-1',
       imei: '356938035643809',
       buying_price: '60000.00',
@@ -847,6 +863,8 @@ describe('PhonePurchasesService', () => {
       customer_id: string;
       branch_id: string;
       cashier_id: string;
+      payment_id: string;
+      completed_by_id: string;
       product_id: string;
       imei: string;
       buying_price: string;
@@ -856,6 +874,8 @@ describe('PhonePurchasesService', () => {
       customer_id: 'cust-1',
       branch_id: 'branch-1',
       cashier_id: 'cashier-1',
+      payment_id: 'pay-ti-1',
+      completed_by_id: 'completer-1',
       product_id: 'prod-1',
       imei: '356938035643809',
       buying_price: '60000.00',
@@ -926,12 +946,23 @@ describe('PhonePurchasesService', () => {
         }),
       );
 
-      // Stock incremented via the caller's manager (enlistment proof)
+      // Stock incremented via the caller's manager (enlistment proof),
+      // recorded as the TRADE_IN of its payment by the completing user
       expect(mockStockService.incrementForReversal).toHaveBeenCalledWith(
         mockManager,
         'prod-1',
         'branch-1',
         1,
+        expect.objectContaining({
+          type: StockMovementType.TRADE_IN,
+          referenceType: StockMovementReferenceType.PAYMENT,
+          referenceId: 'pay-ti-1',
+          createdById: 'completer-1',
+          unit: expect.objectContaining({
+            from: null,
+            to: ProductUnitStatus.IN_STOCK,
+          }) as unknown,
+        }),
       );
 
       // Returned shape gives caller both the PP (for stamping) and PU

@@ -26,8 +26,22 @@ export interface StockMovementInput {
     to: ProductUnitStatus;
   };
   reversesMovementId?: string | null;
+  /**
+   * For a REVERSAL: the event it undoes, by the unique key. The writer
+   * looks the movement up (findStockMovementId) and stores its id, or
+   * null when there is none (a sale completed before the ledger).
+   */
+  reverses?: StockMovementKey;
   reasonCode?: string | null;
   note?: string | null;
+}
+
+/** A business event's movement, by the unique indexes' key. */
+export interface StockMovementKey {
+  type: StockMovementType;
+  referenceType: StockMovementReferenceType;
+  referenceId: string;
+  unitId?: string | null;
 }
 
 /** One ledger row, as StockService has worked it out. */
@@ -48,12 +62,23 @@ export interface StockMovementRow {
  * order. The table's CHECKs, foreign keys and unique indexes refuse a
  * malformed or repeated row; that error propagates and rolls back the
  * whole transaction, change included.
+ *
+ * Invariant: the transaction has already locked (FOR UPDATE) or written
+ * the stock row this movement belongs to. The opening-balance backfill
+ * relies on it: it takes EXCLUSIVE on stock before SHARE ROW EXCLUSIVE on
+ * stock_movements, which can only wait on a ledger writer, never
+ * deadlock with one, while every writer holds stock first.
  */
 export async function insertStockMovement(
   manager: EntityManager,
   row: StockMovementRow,
 ): Promise<string> {
   const { movement } = row;
+  const reversesMovementId =
+    movement.reversesMovementId ??
+    (movement.reverses
+      ? await findStockMovementId(manager, movement.reverses)
+      : null);
   const rows: { id: string }[] = await manager.query(
     `INSERT INTO "stock_movements" (
        "product_id", "branch_id", "product_unit_id", "movement_type",
@@ -78,10 +103,35 @@ export async function insertStockMovement(
       movement.note ?? null,
       movement.referenceType,
       movement.referenceId,
-      movement.reversesMovementId ?? null,
+      reversesMovementId,
       movement.createdById,
       movement.approvedById ?? null,
     ],
   );
   return rows[0].id;
+}
+
+/**
+ * The movement a business event recorded, found by the same key as the
+ * unique indexes (uq_stock_movements_event_quantity / _unit): type,
+ * reference and, for a unit movement, the unit. A REVERSAL uses it to
+ * point at the SALE or TRADE_IN it undoes. null when there is none, as
+ * for a sale completed before the ledger existed.
+ */
+export async function findStockMovementId(
+  manager: EntityManager,
+  key: StockMovementKey,
+): Promise<string | null> {
+  const unitId = key.unitId ?? null;
+  const rows: { id: string }[] = await manager.query(
+    `SELECT "id" FROM "stock_movements"
+      WHERE "movement_type" = $1
+        AND "reference_type" = $2
+        AND "reference_id" = $3
+        AND ${unitId === null ? '"product_unit_id" IS NULL' : '"product_unit_id" = $4'}`,
+    unitId === null
+      ? [key.type, key.referenceType, key.referenceId]
+      : [key.type, key.referenceType, key.referenceId, unitId],
+  );
+  return rows[0]?.id ?? null;
 }

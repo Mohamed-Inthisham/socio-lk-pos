@@ -30,14 +30,43 @@ describe('StockService', () => {
   const mockManager = {
     createQueryBuilder: jest.fn(),
     query: jest.fn(),
+    create: jest.fn(),
+    save: jest.fn(),
+    update: jest.fn(),
   };
+  // create and update run in a transaction (Phase 1 T1).
+  Object.assign(mockRepo, {
+    manager: {
+      transaction: jest.fn((cb: (m: typeof mockManager) => unknown) =>
+        cb(mockManager),
+      ),
+    },
+  });
+  const admin = { id: 'admin-1' };
 
   const activeProduct = { id: 'p1', name: 'iPhone', is_active: true };
   const activeBranch = { id: 'b1', name: 'Main Shop', is_active: true };
 
+  // Every stock change records a movement (Phase 1 T1); tests about the
+  // stock change itself pass this one. The ledger rows are checked under
+  // "stock movement ledger".
+  const anyMovement = {
+    type: StockMovementType.SALE,
+    referenceType: StockMovementReferenceType.SALE_LINE,
+    referenceId: 'line-1',
+    createdById: 'user-1',
+  };
+
   beforeEach(async () => {
     jest.clearAllMocks();
     mockManager.createQueryBuilder.mockReset();
+    mockManager.query.mockReset();
+    // The ledger INSERT returns the new row's id; anything else, no rows.
+    mockManager.query.mockImplementation((sql: string) =>
+      Promise.resolve(
+        sql.includes('INSERT INTO "stock_movements"') ? [{ id: 'm-1' }] : [],
+      ),
+    );
 
     const module: TestingModule = await Test.createTestingModule({
       providers: [
@@ -55,72 +84,96 @@ describe('StockService', () => {
     expect(service).toBeDefined();
   });
 
+  /** Each ledger INSERT's parameters, in call order. */
+  const ledgerInserts = () =>
+    (mockManager.query.mock.calls as [string, unknown[]][])
+      .filter(([sql]) => sql.includes('INSERT INTO "stock_movements"'))
+      .map(([, params]) => params);
+
   describe('create', () => {
     beforeEach(() => {
       mockProductsService.findOne.mockResolvedValue(activeProduct);
       mockBranchesService.findOne.mockResolvedValue(activeBranch);
       mockRepo.findOne.mockResolvedValue(null); // uniqueness check passes
-      mockRepo.create.mockImplementation((e) => e);
-      mockRepo.save.mockImplementation((e) =>
+      mockManager.create.mockImplementation((_entity: unknown, e: object) => e);
+      mockManager.save.mockImplementation((e: object) =>
         Promise.resolve({ id: 'new-stock-id', ...e }),
       );
     });
 
-    it('creates a stock row when product and branch are active', async () => {
+    const created = (quantity: number) => ({
+      id: 'new-stock-id',
+      product_id: 'p1',
+      branch_id: 'b1',
+      quantity,
+      min_quantity: 0,
+      manage_stock: true,
+      product: activeProduct,
+      branch: activeBranch,
+    });
+
+    it('creates a stock row with its opening balance, by the actor, in one transaction', async () => {
       // Second findOne is the refetch with relations
       mockRepo.findOne
         .mockResolvedValueOnce(null) // uniqueness check
-        .mockResolvedValueOnce({
-          id: 'new-stock-id',
-          product_id: 'p1',
-          branch_id: 'b1',
-          quantity: 10,
-          min_quantity: 0,
-          manage_stock: true,
-          product: activeProduct,
-          branch: activeBranch,
-        });
+        .mockResolvedValueOnce(created(10));
 
-      const result = await service.create({
-        product_id: 'p1',
-        branch_id: 'b1',
-        quantity: 10,
-      });
+      const result = await service.create(
+        { product_id: 'p1', branch_id: 'b1', quantity: 10 },
+        admin,
+      );
 
       expect(result.quantity).toBe(10);
-      expect(mockRepo.create).toHaveBeenCalledWith(
+      expect(mockManager.create).toHaveBeenCalledWith(
+        Stock,
         expect.objectContaining({
           product_id: 'p1',
           branch_id: 'b1',
           quantity: 10,
         }),
       );
+      expect(ledgerInserts()).toEqual([
+        [
+          'p1',
+          'b1',
+          null,
+          'OPENING_BALANCE',
+          10,
+          0,
+          10,
+          true,
+          null,
+          null,
+          null,
+          null,
+          'STOCK',
+          'new-stock-id',
+          null,
+          'admin-1',
+          null,
+        ],
+      ]);
     });
 
-    it('defaults quantity to 0 when omitted', async () => {
-      mockRepo.findOne.mockResolvedValueOnce(null).mockResolvedValueOnce({
-        id: 'new-stock-id',
-        product_id: 'p1',
-        branch_id: 'b1',
-        quantity: 0,
-        min_quantity: 0,
-        manage_stock: true,
-        product: activeProduct,
-        branch: activeBranch,
-      });
+    it('defaults quantity to 0 when omitted, and records no opening balance', async () => {
+      mockRepo.findOne
+        .mockResolvedValueOnce(null)
+        .mockResolvedValueOnce(created(0));
 
-      await service.create({ product_id: 'p1', branch_id: 'b1' });
+      await service.create({ product_id: 'p1', branch_id: 'b1' }, admin);
 
-      expect(mockRepo.create).toHaveBeenCalledWith(
+      expect(mockManager.create).toHaveBeenCalledWith(
+        Stock,
         expect.objectContaining({ quantity: 0 }),
       );
+      expect(ledgerInserts()).toEqual([]);
     });
 
     it('throws BadRequestException when product does not exist', async () => {
       mockProductsService.findOne.mockResolvedValue(null);
 
       await expect(
-        service.create({ product_id: 'missing', branch_id: 'b1' }),
+        service.create({ product_id: 'missing', branch_id: 'b1' }, admin),
       ).rejects.toThrow(BadRequestException);
     });
 
@@ -131,7 +184,7 @@ describe('StockService', () => {
       });
 
       await expect(
-        service.create({ product_id: 'p1', branch_id: 'b1' }),
+        service.create({ product_id: 'p1', branch_id: 'b1' }, admin),
       ).rejects.toThrow(BadRequestException);
     });
 
@@ -142,7 +195,7 @@ describe('StockService', () => {
       });
 
       await expect(
-        service.create({ product_id: 'p1', branch_id: 'b1' }),
+        service.create({ product_id: 'p1', branch_id: 'b1' }, admin),
       ).rejects.toThrow(BadRequestException);
     });
 
@@ -150,8 +203,9 @@ describe('StockService', () => {
       mockRepo.findOne.mockResolvedValue({ id: 'existing' });
 
       await expect(
-        service.create({ product_id: 'p1', branch_id: 'b1' }),
+        service.create({ product_id: 'p1', branch_id: 'b1' }, admin),
       ).rejects.toThrow(ConflictException);
+      expect(mockManager.save).not.toHaveBeenCalled();
     });
   });
 
@@ -282,44 +336,131 @@ describe('StockService', () => {
       manage_stock: true,
     };
 
-    it('updates quantity', async () => {
-      mockRepo.findOne.mockResolvedValueOnce(existing).mockResolvedValueOnce({
+    // The row as locked (FOR UPDATE) inside the transaction.
+    const lockRow = (row: unknown) => {
+      const qb = {
+        setLock: jest.fn().mockReturnThis(),
+        where: jest.fn().mockReturnThis(),
+        getOne: jest.fn().mockResolvedValue(row),
+      };
+      mockManager.createQueryBuilder.mockReturnValueOnce(qb);
+      return qb;
+    };
+    // The refetch after commit.
+    const refetch = (row: Record<string, unknown>) =>
+      mockRepo.findOne.mockResolvedValueOnce({
         ...existing,
-        quantity: 25,
+        ...row,
         product: activeProduct,
         branch: activeBranch,
       });
-      mockRepo.save.mockImplementation((e) => Promise.resolve(e));
 
-      const result = await service.update('s1', { quantity: 25 });
+    it('updates quantity under the row lock and records ADJUSTMENT_IN by the actor', async () => {
+      const qb = lockRow(existing);
+      refetch({ quantity: 25 });
+
+      const result = await service.update('s1', { quantity: 25 }, admin);
 
       expect(result.quantity).toBe(25);
+      expect(qb.setLock).toHaveBeenCalledWith('pessimistic_write');
+      expect(mockManager.update).toHaveBeenCalledWith(Stock, 's1', {
+        quantity: 25,
+      });
+      const [row] = ledgerInserts();
+      expect(row.slice(0, 8)).toEqual([
+        'p1',
+        'b1',
+        null,
+        'ADJUSTMENT_IN',
+        15,
+        10,
+        25,
+        true,
+      ]);
+      expect(row[10]).toBe('MANUAL_ADJUSTMENT');
+      expect(row[12]).toBe('STOCK_ADJUSTMENT');
+      expect(row[13]).toMatch(/^[0-9a-f-]{36}$/);
+      expect(row[15]).toBe('admin-1');
     });
 
-    it('updates min_quantity and recomputes low_stock_alert on return', async () => {
-      mockRepo.findOne
-        .mockResolvedValueOnce({ ...existing, quantity: 5, min_quantity: 3 })
-        .mockResolvedValueOnce({
-          ...existing,
-          quantity: 5,
-          min_quantity: 10, // raised above quantity
-          product: activeProduct,
-          branch: activeBranch,
-        });
-      mockRepo.save.mockImplementation((e) => Promise.resolve(e));
+    it('records ADJUSTMENT_OUT for a decrease', async () => {
+      lockRow(existing);
+      refetch({ quantity: 7 });
 
-      const result = await service.update('s1', { min_quantity: 10 });
+      await service.update('s1', { quantity: 7, expected_quantity: 10 }, admin);
+
+      expect(ledgerInserts()[0].slice(3, 7)).toEqual([
+        'ADJUSTMENT_OUT',
+        -3,
+        10,
+        7,
+      ]);
+    });
+
+    it('refuses a stale expected_quantity with 409 STOCK_QUANTITY_CHANGED and writes nothing', async () => {
+      lockRow({ ...existing, quantity: 8 });
+
+      const err = await service
+        .update('s1', { quantity: 7, expected_quantity: 10 }, admin)
+        .catch((e: unknown) => e);
+
+      expect(err).toBeInstanceOf(ConflictException);
+      expect((err as ConflictException).getResponse()).toEqual({
+        message:
+          'The stock for this product changed to 8 while you were editing. ' +
+          'Check the new quantity and save again.',
+        code: 'STOCK_QUANTITY_CHANGED',
+        stock_id: 's1',
+        expected_quantity: 10,
+        current_quantity: 8,
+      });
+      expect(mockManager.update).not.toHaveBeenCalled();
+      expect(ledgerInserts()).toEqual([]);
+    });
+
+    it('updates min_quantity alone without a movement, and recomputes low_stock_alert on return', async () => {
+      lockRow({ ...existing, quantity: 5, min_quantity: 3 });
+      refetch({ quantity: 5, min_quantity: 10 }); // raised above quantity
+
+      const result = await service.update('s1', { min_quantity: 10 }, admin);
 
       expect(result.min_quantity).toBe(10);
       expect(result.low_stock_alert).toBe(true); // 5 <= 10
+      expect(mockManager.update).toHaveBeenCalledWith(Stock, 's1', {
+        min_quantity: 10,
+      });
+      expect(ledgerInserts()).toEqual([]);
+    });
+
+    it('records no movement when the quantity sent is the current one', async () => {
+      lockRow(existing);
+      refetch({});
+
+      await service.update('s1', { quantity: 10, manage_stock: false }, admin);
+
+      expect(ledgerInserts()).toEqual([]);
+    });
+
+    it('records a quantity change on an untracked row, with stock_managed as it is after the update', async () => {
+      lockRow({ ...existing, manage_stock: false });
+      refetch({ quantity: 4 });
+
+      await service.update('s1', { quantity: 4 }, admin);
+      expect(ledgerInserts()[0][7]).toBe(false);
+
+      lockRow({ ...existing, manage_stock: false });
+      refetch({ quantity: 12, manage_stock: true });
+      await service.update('s1', { quantity: 12, manage_stock: true }, admin);
+      expect(ledgerInserts()[1][7]).toBe(true);
     });
 
     it('throws NotFoundException when the row is missing', async () => {
-      mockRepo.findOne.mockResolvedValue(null);
+      lockRow(null);
 
-      await expect(service.update('missing', { quantity: 10 })).rejects.toThrow(
-        NotFoundException,
-      );
+      await expect(
+        service.update('missing', { quantity: 10 }, admin),
+      ).rejects.toThrow(NotFoundException);
+      expect(mockManager.update).not.toHaveBeenCalled();
     });
   });
 
@@ -388,6 +529,7 @@ describe('StockService', () => {
         'b1',
         3,
         'iPhone 15 Pro',
+        anyMovement,
       );
 
       // UPDATE was called with SQL-side arithmetic and scoped to the row id
@@ -425,6 +567,7 @@ describe('StockService', () => {
           'b1',
           5,
           'Mobile reload',
+          anyMovement,
         ),
       ).resolves.toBeUndefined();
 
@@ -451,6 +594,7 @@ describe('StockService', () => {
           'b1',
           5,
           'iPhone 15 Pro',
+          anyMovement,
         ),
       ).rejects.toThrow(ConflictException);
 
@@ -465,6 +609,7 @@ describe('StockService', () => {
           'b1',
           5,
           'iPhone 15 Pro',
+          anyMovement,
         ),
       ).rejects.toThrow(/iPhone 15 Pro.*requested 5.*available 2/);
     });
@@ -481,7 +626,14 @@ describe('StockService', () => {
       );
 
       const err = await service
-        .decrementForSale(mockManager as never, 'p1', 'b1', 5, 'iPhone 15 Pro')
+        .decrementForSale(
+          mockManager as never,
+          'p1',
+          'b1',
+          5,
+          'iPhone 15 Pro',
+          anyMovement,
+        )
         .catch((e: unknown) => e);
       expect((err as ConflictException).getResponse()).toEqual({
         message:
@@ -500,6 +652,7 @@ describe('StockService', () => {
           'b1',
           1,
           'UGREEN Cable',
+          anyMovement,
         )
         .catch((e: unknown) => e);
       expect(err).toBeInstanceOf(ConflictException);
@@ -530,6 +683,7 @@ describe('StockService', () => {
         'b1',
         1,
         'iPhone',
+        anyMovement,
       );
 
       expect(selectQB.setLock).toHaveBeenCalledWith('pessimistic_write');
@@ -563,6 +717,7 @@ describe('StockService', () => {
           'b1',
           3, // == quantity, should succeed
           'Last iPhone',
+          anyMovement,
         ),
       ).resolves.toBeUndefined();
 
@@ -604,7 +759,13 @@ describe('StockService', () => {
         .mockReturnValueOnce(buildSelectQB(stockRow))
         .mockReturnValueOnce(updateQB);
 
-      await service.incrementForReversal(mockManager as never, 'p1', 'b1', 3);
+      await service.incrementForReversal(
+        mockManager as never,
+        'p1',
+        'b1',
+        3,
+        anyMovement,
+      );
 
       // UPDATE was called with SQL-side arithmetic — 'quantity + 3', not
       // a read-then-write JS expression. This is the anti-lost-update path.
@@ -632,7 +793,13 @@ describe('StockService', () => {
       );
 
       await expect(
-        service.incrementForReversal(mockManager as never, 'p1', 'b1', 5),
+        service.incrementForReversal(
+          mockManager as never,
+          'p1',
+          'b1',
+          5,
+          anyMovement,
+        ),
       ).resolves.toBeUndefined();
 
       // Only SELECT was called; no UPDATE ever built. Symmetric to
@@ -649,6 +816,7 @@ describe('StockService', () => {
           'ghost-product',
           'b1',
           1,
+          anyMovement,
         ),
       ).rejects.toThrow(/Stock row missing/);
     });
@@ -666,7 +834,13 @@ describe('StockService', () => {
         .mockReturnValueOnce(selectQB)
         .mockReturnValueOnce(buildUpdateQB());
 
-      await service.incrementForReversal(mockManager as never, 'p1', 'b1', 1);
+      await service.incrementForReversal(
+        mockManager as never,
+        'p1',
+        'b1',
+        1,
+        anyMovement,
+      );
 
       // Locking is non-negotiable even though increment can't fail on
       // business grounds — races with concurrent decrements would
@@ -698,7 +872,13 @@ describe('StockService', () => {
         .mockReturnValueOnce(updateQB);
 
       await expect(
-        service.incrementForReversal(mockManager as never, 'p1', 'b1', 10000),
+        service.incrementForReversal(
+          mockManager as never,
+          'p1',
+          'b1',
+          10000,
+          anyMovement,
+        ),
       ).resolves.toBeUndefined();
 
       const setArg = updateQB.set.mock.calls[0][0] as {
@@ -720,7 +900,13 @@ describe('StockService', () => {
         .mockReturnValueOnce(buildSelectQB(stockRow))
         .mockReturnValueOnce(updateQB);
 
-      await service.incrementForReversal(mockManager as never, 'p1', 'b1', 1);
+      await service.incrementForReversal(
+        mockManager as never,
+        'p1',
+        'b1',
+        1,
+        anyMovement,
+      );
 
       const setArg = updateQB.set.mock.calls[0][0] as {
         quantity: () => string;
@@ -768,6 +954,7 @@ describe('StockService', () => {
         'p1',
         'b1',
         1,
+        anyMovement,
       );
 
       // SQL-side arithmetic — mirrors decrementForSale exactly.
@@ -798,7 +985,13 @@ describe('StockService', () => {
       );
 
       await expect(
-        service.decrementForVoidedTradeIn(mockManager as never, 'p1', 'b1', 1),
+        service.decrementForVoidedTradeIn(
+          mockManager as never,
+          'p1',
+          'b1',
+          1,
+          anyMovement,
+        ),
       ).resolves.toBeUndefined();
 
       // Only SELECT was called; no UPDATE.
@@ -814,6 +1007,7 @@ describe('StockService', () => {
           'ghost-product',
           'b1',
           1,
+          anyMovement,
         ),
       ).rejects.toThrow(/Stock row missing/);
     });
@@ -838,10 +1032,22 @@ describe('StockService', () => {
         .mockReturnValueOnce(buildSelectQB(stockRow));
 
       await expect(
-        service.decrementForVoidedTradeIn(mockManager as never, 'p1', 'b1', 1),
+        service.decrementForVoidedTradeIn(
+          mockManager as never,
+          'p1',
+          'b1',
+          1,
+          anyMovement,
+        ),
       ).rejects.toThrow(ConflictException);
       await expect(
-        service.decrementForVoidedTradeIn(mockManager as never, 'p1', 'b1', 1),
+        service.decrementForVoidedTradeIn(
+          mockManager as never,
+          'p1',
+          'b1',
+          1,
+          anyMovement,
+        ),
       ).rejects.toThrow(/voided trade-in/);
     });
 
@@ -863,6 +1069,7 @@ describe('StockService', () => {
         'p1',
         'b1',
         1,
+        anyMovement,
       );
 
       expect(selectQB.setLock).toHaveBeenCalledWith('pessimistic_write');
@@ -898,6 +1105,7 @@ describe('StockService', () => {
         'p1',
         'b1',
         1,
+        anyMovement,
       );
 
       const setArg = updateQB.set.mock.calls[0][0] as {
@@ -1099,22 +1307,6 @@ describe('StockService', () => {
         ).rejects.toThrow(ConflictException);
         expect(ledgerRows()).toEqual([]);
       });
-
-      it('records nothing without a movement (callers not yet wired)', async () => {
-        mockManager.createQueryBuilder
-          .mockReturnValueOnce(lockQB(stockRow()))
-          .mockReturnValueOnce(updateQB());
-
-        await service.decrementForSale(
-          mockManager as never,
-          'p1',
-          'b1',
-          1,
-          'UGREEN Cable',
-        );
-
-        expect(mockManager.query).not.toHaveBeenCalled();
-      });
     });
 
     it('incrementForReversal records a REVERSAL with its approver and the original movement', async () => {
@@ -1273,13 +1465,6 @@ describe('StockService', () => {
           }),
         ).rejects.toThrow(/names 2 units/);
         expect(ledgerRows()).toEqual([]);
-      });
-
-      it('records nothing without a movement', async () => {
-        await service.receivePurchase(mockManager as never, 'p1', 'b1', 5);
-
-        expect(ledgerRows()).toEqual([]);
-        expect(mockManager.query).toHaveBeenCalledTimes(1);
       });
     });
 

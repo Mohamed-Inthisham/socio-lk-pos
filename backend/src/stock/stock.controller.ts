@@ -24,6 +24,8 @@ import { Roles } from '../auth/decorators/roles.decorator';
 import { UserRole } from '../users/enums/user-role.enum';
 import { Auditable } from '../audit-log/decorators/auditable.decorator';
 import { AuditAction } from '../audit-log/enums/audit-action.enum';
+import { CurrentUser } from '../auth/decorators/current-user.decorator';
+import type { AuthenticatedUser } from '../auth/strategies/jwt.strategy';
 
 @ApiTags('Stock')
 @ApiCookieAuth('access_token')
@@ -128,8 +130,11 @@ export class StockController {
     status: 409,
     description: 'Stock row for this product+branch already exists',
   })
-  async create(@Body() dto: CreateStockDto) {
-    return this.stockService.create(dto);
+  async create(
+    @Body() dto: CreateStockDto,
+    @CurrentUser() user: AuthenticatedUser,
+  ) {
+    return this.stockService.create(dto, user);
   }
 
   @Patch(':id')
@@ -148,10 +153,18 @@ export class StockController {
   @ApiResponse({ status: 401, description: 'Not authenticated' })
   @ApiResponse({ status: 403, description: 'Not an admin' })
   @ApiResponse({ status: 404, description: 'Stock row not found' })
+  @ApiResponse({
+    status: 409,
+    description:
+      '{ message, code: STOCK_QUANTITY_CHANGED, stock_id, ' +
+      'expected_quantity, current_quantity }: expected_quantity no longer ' +
+      'matches the stock. Nothing was written.',
+  })
   async update(
     @Param('id', ParseUUIDPipe) id: string,
     @Body() dto: UpdateStockDto,
+    @CurrentUser() user: AuthenticatedUser,
   ) {
-    return this.stockService.update(id, dto);
+    return this.stockService.update(id, dto, user);
   }
 }

@@ -20,6 +20,10 @@ import { Product } from '../products/entities/product.entity';
 import { User } from '../users/entities/user.entity';
 import { StockService } from '../stock/stock.service';
 import {
+  StockMovementReferenceType,
+  StockMovementType,
+} from '../stock/enums/stock-movement-type.enum';
+import {
   ensureStockRows,
   lockInventoryRows,
 } from '../stock/lock-inventory-rows';
@@ -142,16 +146,28 @@ export class PhonePurchasesService {
           dto.selling_price != null ? dto.selling_price.toFixed(2) : null,
         phone_purchase_id: savedPurchase.id,
       });
-      await this.saveUnitOrRejectLiveImei(manager, unit);
+      const savedUnit = await this.saveUnitOrRejectLiveImei(manager, unit);
 
-      // 6. Increment stock. Pessimistic lock on the Stock row is
-      //    inside StockService.incrementForReversal (see Phase 6.3).
-      //    The row exists: step 3b created it if it was missing.
+      // 6. Increment stock and record the PURCHASE (Phase 1 T1).
+      //    Pessimistic lock on the Stock row is inside
+      //    StockService.incrementForReversal (see Phase 6.3). The row
+      //    exists: step 3b created it if it was missing.
       await this.stockService.incrementForReversal(
         manager,
         dto.product_id,
         dto.branch_id,
         1,
+        {
+          type: StockMovementType.PURCHASE,
+          referenceType: StockMovementReferenceType.PHONE_PURCHASE,
+          referenceId: savedPurchase.id,
+          createdById: cashierId,
+          unit: {
+            id: savedUnit.id,
+            from: null,
+            to: ProductUnitStatus.IN_STOCK,
+          },
+        },
       );
 
       return savedPurchase.id;
@@ -285,7 +301,12 @@ export class PhonePurchasesService {
     input: {
       customer_id: string;
       branch_id: string;
+      /** Stored on the phone purchase: the sale's cashier. */
       cashier_id: string;
+      /** The TRADE_IN payment this trade-in pays (the ledger reference). */
+      payment_id: string;
+      /** Who completed the sale: the ledger's created_by_id. */
+      completed_by_id: string;
       product_id: string;
       imei: string;
       buying_price: string;
@@ -343,14 +364,26 @@ export class PhonePurchasesService {
     });
     const savedUnit = await this.saveUnitOrRejectLiveImei(manager, unit);
 
-    // 5. Increment Stock. Reuses the existing dual-purpose
-    //    incrementForReversal (already used for both intake via
-    //    create() and void reversal). Locks the Stock row internally.
+    // 5. Increment Stock and record the TRADE_IN (Phase 1 T1). Reuses the
+    //    existing dual-purpose incrementForReversal (already used for both
+    //    intake via create() and void reversal). Locks the Stock row
+    //    internally.
     await this.stockService.incrementForReversal(
       manager,
       input.product_id,
       input.branch_id,
       1,
+      {
+        type: StockMovementType.TRADE_IN,
+        referenceType: StockMovementReferenceType.PAYMENT,
+        referenceId: input.payment_id,
+        createdById: input.completed_by_id,
+        unit: {
+          id: savedUnit.id,
+          from: null,
+          to: ProductUnitStatus.IN_STOCK,
+        },
+      },
     );
 
     return { phone_purchase: savedPurchase, product_unit: savedUnit };
