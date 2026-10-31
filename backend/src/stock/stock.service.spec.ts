@@ -9,6 +9,11 @@ import { StockService } from './stock.service';
 import { Stock } from './entities/stock.entity';
 import { ProductsService } from '../products/products.service';
 import { BranchesService } from '../branches/branches.service';
+import { ProductUnitStatus } from '../product-units/enums/product-unit-status.enum';
+import {
+  StockMovementReferenceType,
+  StockMovementType,
+} from './enums/stock-movement-type.enum';
 
 describe('StockService', () => {
   let service: StockService;
@@ -24,6 +29,7 @@ describe('StockService', () => {
   const mockBranchesService = { findOne: jest.fn() };
   const mockManager = {
     createQueryBuilder: jest.fn(),
+    query: jest.fn(),
   };
 
   const activeProduct = { id: 'p1', name: 'iPhone', is_active: true };
@@ -898,6 +904,455 @@ describe('StockService', () => {
         quantity: () => string;
       };
       expect(setArg.quantity()).toBe('quantity - 1');
+    });
+  });
+
+  // ---- Stock movement ledger (Phase 1 T1a) ----
+
+  describe('stock movement ledger', () => {
+    const lockQB = (row: unknown) => ({
+      setLock: jest.fn().mockReturnThis(),
+      where: jest.fn().mockReturnThis(),
+      andWhere: jest.fn().mockReturnThis(),
+      getOne: jest.fn().mockResolvedValue(row),
+    });
+    const updateQB = () => ({
+      update: jest.fn().mockReturnThis(),
+      set: jest.fn().mockReturnThis(),
+      where: jest.fn().mockReturnThis(),
+      execute: jest.fn().mockResolvedValue({ affected: 1 }),
+    });
+    const stockRow = (overrides: Record<string, unknown> = {}) => ({
+      id: 'stock-1',
+      product_id: 'p1',
+      branch_id: 'b1',
+      quantity: 10,
+      manage_stock: true,
+      ...overrides,
+    });
+    const sale = {
+      type: StockMovementType.SALE,
+      referenceType: StockMovementReferenceType.SALE_LINE,
+      referenceId: 'line-1',
+      createdById: 'user-1',
+    };
+    const phoneSold = {
+      id: 'unit-1',
+      from: ProductUnitStatus.IN_STOCK,
+      to: ProductUnitStatus.SOLD,
+    };
+
+    const isLedgerInsert = (sql: unknown) =>
+      typeof sql === 'string' && sql.includes('INSERT INTO "stock_movements"');
+
+    /** Each ledger INSERT's parameters, keyed by column, in call order. */
+    const ledgerRows = () =>
+      (mockManager.query.mock.calls as [string, unknown[]][])
+        .filter(([sql]) => isLedgerInsert(sql))
+        .map(([, p]) => ({
+          product_id: p[0],
+          branch_id: p[1],
+          product_unit_id: p[2],
+          movement_type: p[3],
+          quantity_delta: p[4],
+          quantity_before: p[5],
+          quantity_after: p[6],
+          stock_managed: p[7],
+          unit_status_from: p[8],
+          unit_status_to: p[9],
+          reason_code: p[10],
+          note: p[11],
+          reference_type: p[12],
+          reference_id: p[13],
+          reverses_movement_id: p[14],
+          created_by_id: p[15],
+          approved_by_id: p[16],
+        }));
+
+    beforeEach(() => {
+      mockManager.query.mockImplementation((sql: string) =>
+        Promise.resolve(isLedgerInsert(sql) ? [{ id: 'movement-1' }] : []),
+      );
+    });
+
+    describe('decrementForSale', () => {
+      it('records a SALE row with the locked quantity as before', async () => {
+        mockManager.createQueryBuilder
+          .mockReturnValueOnce(lockQB(stockRow()))
+          .mockReturnValueOnce(updateQB());
+
+        await service.decrementForSale(
+          mockManager as never,
+          'p1',
+          'b1',
+          3,
+          'UGREEN Cable',
+          sale,
+        );
+
+        expect(ledgerRows()).toEqual([
+          {
+            product_id: 'p1',
+            branch_id: 'b1',
+            product_unit_id: null,
+            movement_type: 'SALE',
+            quantity_delta: -3,
+            quantity_before: 10,
+            quantity_after: 7,
+            stock_managed: true,
+            unit_status_from: null,
+            unit_status_to: null,
+            reason_code: null,
+            note: null,
+            reference_type: 'SALE_LINE',
+            reference_id: 'line-1',
+            reverses_movement_id: null,
+            created_by_id: 'user-1',
+            approved_by_id: null,
+          },
+        ]);
+      });
+
+      it('records the unit status change with the quantity change, in one row', async () => {
+        mockManager.createQueryBuilder
+          .mockReturnValueOnce(lockQB(stockRow({ quantity: 1 })))
+          .mockReturnValueOnce(updateQB());
+
+        await service.decrementForSale(
+          mockManager as never,
+          'p1',
+          'b1',
+          1,
+          'iPhone 15',
+          { ...sale, unit: phoneSold },
+        );
+
+        expect(ledgerRows()).toEqual([
+          expect.objectContaining({
+            product_unit_id: 'unit-1',
+            quantity_delta: -1,
+            quantity_before: 1,
+            quantity_after: 0,
+            unit_status_from: 'IN_STOCK',
+            unit_status_to: 'SOLD',
+          }),
+        ]);
+      });
+
+      it('on an untracked row records the unit change with delta 0 and stock_managed false', async () => {
+        mockManager.createQueryBuilder.mockReturnValueOnce(
+          lockQB(stockRow({ quantity: 4, manage_stock: false })),
+        );
+
+        await service.decrementForSale(
+          mockManager as never,
+          'p1',
+          'b1',
+          1,
+          'iPhone 15',
+          { ...sale, unit: phoneSold },
+        );
+
+        expect(ledgerRows()).toEqual([
+          expect.objectContaining({
+            quantity_delta: 0,
+            quantity_before: 4,
+            quantity_after: 4,
+            stock_managed: false,
+            unit_status_from: 'IN_STOCK',
+            unit_status_to: 'SOLD',
+          }),
+        ]);
+      });
+
+      it('on an untracked row without a unit records nothing', async () => {
+        mockManager.createQueryBuilder.mockReturnValueOnce(
+          lockQB(stockRow({ manage_stock: false })),
+        );
+
+        await service.decrementForSale(
+          mockManager as never,
+          'p1',
+          'b1',
+          1,
+          'Reload',
+          sale,
+        );
+
+        expect(ledgerRows()).toEqual([]);
+      });
+
+      it('records nothing when the sale is refused for stock', async () => {
+        mockManager.createQueryBuilder.mockReturnValueOnce(
+          lockQB(stockRow({ quantity: 1 })),
+        );
+
+        await expect(
+          service.decrementForSale(
+            mockManager as never,
+            'p1',
+            'b1',
+            2,
+            'UGREEN Cable',
+            sale,
+          ),
+        ).rejects.toThrow(ConflictException);
+        expect(ledgerRows()).toEqual([]);
+      });
+
+      it('records nothing without a movement (callers not yet wired)', async () => {
+        mockManager.createQueryBuilder
+          .mockReturnValueOnce(lockQB(stockRow()))
+          .mockReturnValueOnce(updateQB());
+
+        await service.decrementForSale(
+          mockManager as never,
+          'p1',
+          'b1',
+          1,
+          'UGREEN Cable',
+        );
+
+        expect(mockManager.query).not.toHaveBeenCalled();
+      });
+    });
+
+    it('incrementForReversal records a REVERSAL with its approver and the original movement', async () => {
+      mockManager.createQueryBuilder
+        .mockReturnValueOnce(lockQB(stockRow({ quantity: 0 })))
+        .mockReturnValueOnce(updateQB());
+
+      await service.incrementForReversal(mockManager as never, 'p1', 'b1', 1, {
+        type: StockMovementType.REVERSAL,
+        referenceType: StockMovementReferenceType.SALE_LINE,
+        referenceId: 'line-1',
+        createdById: 'cashier-1',
+        approvedById: 'manager-1',
+        reversesMovementId: 'movement-sale',
+        unit: {
+          id: 'unit-1',
+          from: ProductUnitStatus.SOLD,
+          to: ProductUnitStatus.IN_STOCK,
+        },
+      });
+
+      expect(ledgerRows()).toEqual([
+        expect.objectContaining({
+          movement_type: 'REVERSAL',
+          quantity_delta: 1,
+          quantity_before: 0,
+          quantity_after: 1,
+          created_by_id: 'cashier-1',
+          approved_by_id: 'manager-1',
+          reverses_movement_id: 'movement-sale',
+          unit_status_from: 'SOLD',
+          unit_status_to: 'IN_STOCK',
+        }),
+      ]);
+    });
+
+    it('decrementForVoidedTradeIn records the trade-in reversal', async () => {
+      mockManager.createQueryBuilder
+        .mockReturnValueOnce(lockQB(stockRow({ quantity: 2 })))
+        .mockReturnValueOnce(updateQB());
+
+      await service.decrementForVoidedTradeIn(
+        mockManager as never,
+        'p1',
+        'b1',
+        1,
+        {
+          type: StockMovementType.REVERSAL,
+          referenceType: StockMovementReferenceType.PAYMENT,
+          referenceId: 'payment-1',
+          createdById: 'cashier-1',
+          approvedById: 'manager-1',
+          unit: {
+            id: 'unit-ti',
+            from: ProductUnitStatus.IN_STOCK,
+            to: ProductUnitStatus.RETURNED,
+          },
+        },
+      );
+
+      expect(ledgerRows()).toEqual([
+        expect.objectContaining({
+          quantity_delta: -1,
+          quantity_before: 2,
+          quantity_after: 1,
+          reference_type: 'PAYMENT',
+          reference_id: 'payment-1',
+        }),
+      ]);
+    });
+
+    describe('receivePurchase', () => {
+      const purchase = {
+        type: StockMovementType.PURCHASE,
+        referenceType: StockMovementReferenceType.STOCK_PURCHASE_ITEM,
+        referenceId: 'item-1',
+        createdById: 'manager-1',
+      };
+
+      beforeEach(() => {
+        // The upsert returns the row's quantity after this receipt: 3 + 5.
+        mockManager.query.mockImplementation((sql: string) =>
+          Promise.resolve(
+            isLedgerInsert(sql) ? [{ id: 'movement-1' }] : [{ quantity: 8 }],
+          ),
+        );
+      });
+
+      it('records one row per unit, then one for the rest, chained from the quantity before', async () => {
+        await service.receivePurchase(mockManager as never, 'p1', 'b1', 5, {
+          ...purchase,
+          unitIds: ['unit-a', 'unit-b'],
+        });
+
+        expect(
+          ledgerRows().map((r) => [
+            r.product_unit_id,
+            r.quantity_delta,
+            r.quantity_before,
+            r.quantity_after,
+            r.unit_status_from,
+            r.unit_status_to,
+          ]),
+        ).toEqual([
+          ['unit-a', 1, 3, 4, null, 'IN_STOCK'],
+          ['unit-b', 1, 4, 5, null, 'IN_STOCK'],
+          [null, 3, 5, 8, null, null],
+        ]);
+        for (const row of ledgerRows()) {
+          expect(row).toMatchObject({
+            movement_type: 'PURCHASE',
+            reference_type: 'STOCK_PURCHASE_ITEM',
+            reference_id: 'item-1',
+            created_by_id: 'manager-1',
+            stock_managed: true,
+          });
+        }
+      });
+
+      it('records one row for a quantity-only line', async () => {
+        await service.receivePurchase(
+          mockManager as never,
+          'p1',
+          'b1',
+          5,
+          purchase,
+        );
+
+        expect(ledgerRows()).toEqual([
+          expect.objectContaining({
+            product_unit_id: null,
+            quantity_delta: 5,
+            quantity_before: 3,
+            quantity_after: 8,
+          }),
+        ]);
+      });
+
+      it('records no remainder row when every unit is identified', async () => {
+        await service.receivePurchase(mockManager as never, 'p1', 'b1', 2, {
+          ...purchase,
+          unitIds: ['unit-a', 'unit-b'],
+        });
+
+        expect(ledgerRows().map((r) => r.product_unit_id)).toEqual([
+          'unit-a',
+          'unit-b',
+        ]);
+      });
+
+      it('refuses more units than the received quantity, recording nothing', async () => {
+        await expect(
+          service.receivePurchase(mockManager as never, 'p1', 'b1', 1, {
+            ...purchase,
+            unitIds: ['unit-a', 'unit-b'],
+          }),
+        ).rejects.toThrow(/names 2 units/);
+        expect(ledgerRows()).toEqual([]);
+      });
+
+      it('records nothing without a movement', async () => {
+        await service.receivePurchase(mockManager as never, 'p1', 'b1', 5);
+
+        expect(ledgerRows()).toEqual([]);
+        expect(mockManager.query).toHaveBeenCalledTimes(1);
+      });
+    });
+
+    describe('recordUnitEvent', () => {
+      const phoneReturned = {
+        type: StockMovementType.CUSTOMER_RETURN,
+        referenceType: StockMovementReferenceType.SALE_RETURN_LINE,
+        referenceId: 'return-line-1',
+        createdById: 'cashier-1',
+        approvedById: 'manager-1',
+        unit: {
+          id: 'unit-1',
+          from: ProductUnitStatus.SOLD,
+          to: ProductUnitStatus.INSPECTION,
+        },
+      };
+
+      it('locks the stock row and records delta 0 with its quantity as before and after', async () => {
+        const qb = lockQB(stockRow({ quantity: 6 }));
+        mockManager.createQueryBuilder.mockReturnValueOnce(qb);
+
+        const id = await service.recordUnitEvent(
+          mockManager as never,
+          'p1',
+          'b1',
+          phoneReturned,
+        );
+
+        expect(id).toBe('movement-1');
+        expect(qb.setLock).toHaveBeenCalledWith('pessimistic_write');
+        expect(ledgerRows()).toEqual([
+          expect.objectContaining({
+            movement_type: 'CUSTOMER_RETURN',
+            product_unit_id: 'unit-1',
+            quantity_delta: 0,
+            quantity_before: 6,
+            quantity_after: 6,
+            stock_managed: true,
+            unit_status_from: 'SOLD',
+            unit_status_to: 'INSPECTION',
+            approved_by_id: 'manager-1',
+          }),
+        ]);
+      });
+
+      it('records stock_managed false for an untracked row', async () => {
+        mockManager.createQueryBuilder.mockReturnValueOnce(
+          lockQB(stockRow({ manage_stock: false })),
+        );
+
+        await service.recordUnitEvent(
+          mockManager as never,
+          'p1',
+          'b1',
+          phoneReturned,
+        );
+
+        expect(ledgerRows()[0].stock_managed).toBe(false);
+      });
+
+      it('throws (integrity) and records nothing when the stock row is missing', async () => {
+        mockManager.createQueryBuilder.mockReturnValueOnce(lockQB(null));
+
+        await expect(
+          service.recordUnitEvent(
+            mockManager as never,
+            'p1',
+            'b1',
+            phoneReturned,
+          ),
+        ).rejects.toThrow(/Stock row missing/);
+        expect(ledgerRows()).toEqual([]);
+      });
     });
   });
 });

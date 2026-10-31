@@ -13,6 +13,22 @@ import { CreateStockDto } from './dto/create-stock.dto';
 import { UpdateStockDto } from './dto/update-stock.dto';
 import { ProductsService } from '../products/products.service';
 import { BranchesService } from '../branches/branches.service';
+import { ProductUnitStatus } from '../product-units/enums/product-unit-status.enum';
+import { insertStockMovement, StockMovementInput } from './stock-movements';
+
+/**
+ * A stock purchase line's movement (Phase 1 T1): one PURCHASE row per
+ * received unit (each created IN_STOCK) and one for the rest of the
+ * quantity, which has no per-unit identifier.
+ */
+export type PurchaseMovementInput = Omit<StockMovementInput, 'unit'> & {
+  unitIds?: readonly string[];
+};
+
+/** A status-only change of one unit: its quantity_delta is 0. */
+export type UnitEventInput = StockMovementInput & {
+  unit: NonNullable<StockMovementInput['unit']>;
+};
 
 /**
  * Response shape helper — adds the computed low_stock_alert flag to
@@ -179,22 +195,131 @@ export class StockService {
    * Add received units to a branch stock balance inside the caller's
    * transaction. Creates a row for a new catalog product and uses an atomic
    * upsert so concurrent receipts cannot lose quantity increments.
+   *
+   * With `movement`, records the receipt in the ledger (Phase 1 T1): one
+   * PURCHASE row of +1 per received unit, chained in the order given, then
+   * one for the rest of the quantity. The caller holds the row's lock
+   * (lockInventoryRows), so the quantity the upsert returns, less this
+   * receipt, is the quantity before it.
    */
   async receivePurchase(
     manager: EntityManager,
     productId: string,
     branchId: string,
     quantity: number,
+    movement?: PurchaseMovementInput,
   ): Promise<void> {
-    await manager.query(
+    const rows: { quantity: number }[] = await manager.query(
       `INSERT INTO "stock" ("product_id", "branch_id", "quantity", "min_quantity", "manage_stock")
        VALUES ($1, $2, $3, 0, true)
        ON CONFLICT ("product_id", "branch_id") DO UPDATE
        SET "quantity" = "stock"."quantity" + EXCLUDED."quantity",
            "manage_stock" = true,
-           "updated_at" = now()`,
+           "updated_at" = now()
+       RETURNING "quantity"`,
       [productId, branchId, quantity],
     );
+    if (!movement) return;
+
+    const { unitIds = [], ...base } = movement;
+    if (unitIds.length > quantity) {
+      throw new Error(
+        `Stock purchase of ${quantity} for product ${productId} names ` +
+          `${unitIds.length} units. The caller should have refused it.`,
+      );
+    }
+    let before = rows[0].quantity - quantity;
+    for (const unitId of unitIds) {
+      await insertStockMovement(manager, {
+        productId,
+        branchId,
+        quantityDelta: 1,
+        quantityBefore: before,
+        stockManaged: true,
+        movement: {
+          ...base,
+          unit: { id: unitId, from: null, to: ProductUnitStatus.IN_STOCK },
+        },
+      });
+      before += 1;
+    }
+    const untracked = quantity - unitIds.length;
+    if (untracked > 0) {
+      await insertStockMovement(manager, {
+        productId,
+        branchId,
+        quantityDelta: untracked,
+        quantityBefore: before,
+        stockManaged: true,
+        movement: base,
+      });
+    }
+  }
+
+  /**
+   * Record a unit's status change that moves no stock (Phase 1 T1), such
+   * as a returned phone going SOLD → INSPECTION: one ledger row with
+   * quantity_delta 0 and the stock row's quantity as both before and
+   * after. Locks the stock row (the caller already holds it, in the
+   * global lock order) so the row sits in its place in the stock row's
+   * chain. Must be called inside a transaction.
+   *
+   * A missing stock row is an integrity error (500): the unit was taken in
+   * through that row.
+   */
+  async recordUnitEvent(
+    manager: EntityManager,
+    productId: string,
+    branchId: string,
+    movement: UnitEventInput,
+  ): Promise<string> {
+    const stock = await manager
+      .createQueryBuilder(Stock, 'stock')
+      .setLock('pessimistic_write')
+      .where('stock.product_id = :productId', { productId })
+      .andWhere('stock.branch_id = :branchId', { branchId })
+      .getOne();
+    if (!stock) {
+      throw new Error(
+        `Stock row missing for product ${productId} at branch ${branchId}. ` +
+          `This indicates a data integrity issue — unit ${movement.unit.id} ` +
+          `came into stock through this row.`,
+      );
+    }
+    return insertStockMovement(manager, {
+      productId,
+      branchId,
+      quantityDelta: 0,
+      quantityBefore: stock.quantity,
+      stockManaged: stock.manage_stock,
+      movement,
+    });
+  }
+
+  /**
+   * Record a change StockService just made to a locked stock row (Phase 1
+   * T1), when the caller passed a movement. `stock` is the row as read
+   * under the lock, before the change. An untracked row (manage_stock
+   * false) doesn't move: its unit's status change is still recorded, with
+   * quantity_delta 0 and stock_managed false; without a unit there's
+   * nothing to record.
+   */
+  private async recordChange(
+    manager: EntityManager,
+    stock: Stock,
+    quantityDelta: number,
+    movement: StockMovementInput | undefined,
+  ): Promise<void> {
+    if (!movement) return;
+    if (!stock.manage_stock && !movement.unit) return;
+    await insertStockMovement(manager, {
+      productId: stock.product_id,
+      branchId: stock.branch_id,
+      quantityDelta: stock.manage_stock ? quantityDelta : 0,
+      quantityBefore: stock.quantity,
+      stockManaged: stock.manage_stock,
+      movement,
+    });
   }
 
   /**
@@ -240,6 +365,7 @@ export class StockService {
     branchId: string,
     qty: number,
     productNameForError: string,
+    movement?: StockMovementInput,
   ): Promise<void> {
     // Lock the stock row for this (product, branch) pair. Serializes
     // concurrent completeSale calls on the same product at the same branch.
@@ -252,6 +378,7 @@ export class StockService {
 
     // Untracked products (services, reloads, etc.) don't move inventory.
     if (stock && !stock.manage_stock) {
+      await this.recordChange(manager, stock, -qty, movement);
       return;
     }
 
@@ -273,6 +400,7 @@ export class StockService {
       .set({ quantity: () => `quantity - ${qty}` })
       .where('id = :id', { id: stock.id })
       .execute();
+    await this.recordChange(manager, stock, -qty, movement);
   }
 
   /**
@@ -317,6 +445,7 @@ export class StockService {
     productId: string,
     branchId: string,
     qty: number,
+    movement?: StockMovementInput,
   ): Promise<void> {
     const stock = await manager
       .createQueryBuilder(Stock, 'stock')
@@ -339,6 +468,7 @@ export class StockService {
 
     // Untracked products don't move inventory in either direction.
     if (!stock.manage_stock) {
+      await this.recordChange(manager, stock, qty, movement);
       return;
     }
 
@@ -348,6 +478,7 @@ export class StockService {
       .set({ quantity: () => `quantity + ${qty}` })
       .where('id = :id', { id: stock.id })
       .execute();
+    await this.recordChange(manager, stock, qty, movement);
   }
 
   /**
@@ -391,6 +522,7 @@ export class StockService {
     productId: string,
     branchId: string,
     qty: number,
+    movement?: StockMovementInput,
   ): Promise<void> {
     const stock = await manager
       .createQueryBuilder(Stock, 'stock')
@@ -413,6 +545,7 @@ export class StockService {
     // product (which always has manage_stock = true), so this branch is
     // defensive.
     if (!stock.manage_stock) {
+      await this.recordChange(manager, stock, -qty, movement);
       return;
     }
 
@@ -432,6 +565,7 @@ export class StockService {
       .set({ quantity: () => `quantity - ${qty}` })
       .where('id = :id', { id: stock.id })
       .execute();
+    await this.recordChange(manager, stock, -qty, movement);
   }
 
   /**
