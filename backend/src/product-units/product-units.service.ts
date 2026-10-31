@@ -17,6 +17,11 @@ import {
 } from '../common/dto/paginated-response.dto';
 import { StockService } from '../stock/stock.service';
 import { lockInventoryRows } from '../stock/lock-inventory-rows';
+import {
+  StockMovementReferenceType,
+  StockMovementType,
+} from '../stock/enums/stock-movement-type.enum';
+import { ReturnDisposition } from '../sales/enums/return-disposition.enum';
 import { UserRole } from '../users/enums/user-role.enum';
 import { AuditAction } from '../audit-log/enums/audit-action.enum';
 import {
@@ -245,11 +250,41 @@ export class ProductUnitsService {
          WHERE id = $2`,
         [ProductUnitStatus.IN_STOCK, id],
       );
+      // The stock ledger's INSPECTION_PASSED (Phase 1 T1) references the
+      // return line that sent the phone to inspection: its latest one, as
+      // a phone can be returned, passed and sold again.
+      const returnLine: { id: string }[] = await manager.query(
+        `SELECT rl.id
+           FROM sale_return_lines rl
+           JOIN sale_returns r ON r.id = rl.sale_return_id
+          WHERE rl.product_unit_id = $1 AND rl.disposition = $2
+          ORDER BY r.created_at DESC, rl.id DESC
+          LIMIT 1`,
+        [id, ReturnDisposition.INSPECTION],
+      );
+      if (!returnLine[0]) {
+        throw new Error(
+          `ProductUnit ${id} is in INSPECTION with no return line that put ` +
+            `it there. Data integrity issue — only a return moves a unit ` +
+            `to INSPECTION.`,
+        );
+      }
       await this.stockService.incrementForReversal(
         manager,
         unit.product_id,
         unit.branch_id,
         1,
+        {
+          type: StockMovementType.INSPECTION_PASSED,
+          referenceType: StockMovementReferenceType.SALE_RETURN_LINE,
+          referenceId: returnLine[0].id,
+          createdById: user.id,
+          unit: {
+            id,
+            from: ProductUnitStatus.INSPECTION,
+            to: ProductUnitStatus.IN_STOCK,
+          },
+        },
       );
       await writeAuditEntry(manager, {
         actor: user,

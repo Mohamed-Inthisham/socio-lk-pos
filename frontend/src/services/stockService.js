@@ -80,8 +80,13 @@ export const createStock = async (payload) => {
  * IMPORTANT: `quantity` is absolute, not a delta. To add stock, the caller
  * must fetch current quantity, add the delta, and PATCH the total.
  *
+ * A changed `quantity` goes with `expected_quantity`, the quantity the user
+ * saw: if the stock moved meanwhile the backend answers 409
+ * STOCK_QUANTITY_CHANGED (with current_quantity) and writes nothing.
+ *
  * @param {string} id      - Stock UUID
- * @param {Object} payload - UpdateStockDto (quantity, min_quantity, manage_stock)
+ * @param {Object} payload - UpdateStockDto (quantity, expected_quantity,
+ *                           min_quantity, manage_stock)
  * @returns {Promise<Object>} Updated stock row
  */
 export const updateStock = async (id, payload) => {

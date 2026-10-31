@@ -24,6 +24,10 @@ import { Product } from '../products/entities/product.entity';
 import { TrackingMethod } from '../products/enums/tracking-method.enum';
 import { Stock } from '../stock/entities/stock.entity';
 import { ProductUnitStatus } from '../product-units/enums/product-unit-status.enum';
+import {
+  StockMovementReferenceType,
+  StockMovementType,
+} from '../stock/enums/stock-movement-type.enum';
 import { ProductUnitsService } from '../product-units/product-units.service';
 import { LIVE_UNIT_STATUSES } from '../product-units/live-imei';
 import {
@@ -1605,8 +1609,16 @@ export class SalesService {
    *
    * @Auditable('Sale', AuditAction.COMPLETE) lands on the controller
    * endpoint in Slice F2, not here (audit decorators are controller-level).
+   *
+   * `completedBy` is the user completing the sale (Phase 1 T1): the stock
+   * ledger's created_by_id for its SALE and TRADE_IN movements. It may
+   * differ from sale.cashier_id, the draft's creator, which stays the
+   * trade-in phone purchase's cashier.
    */
-  async completeSale(saleId: string): Promise<void> {
+  async completeSale(
+    saleId: string,
+    completedBy: { id: string },
+  ): Promise<void> {
     await this.dataSource.transaction(async (manager) => {
       // 1. Load + lock the sale
       const sale = await manager
@@ -1749,6 +1761,21 @@ export class SalesService {
               sale.branch_id,
               line.quantity,
               line.product_name_snapshot,
+              {
+                type: StockMovementType.SALE,
+                referenceType: StockMovementReferenceType.SALE_LINE,
+                referenceId: line.id,
+                createdById: completedBy.id,
+                // markSoldForSale below flips the unit (and refuses one
+                // that isn't IN_STOCK, rolling this row back with it).
+                ...(line.product_unit_id !== null && {
+                  unit: {
+                    id: line.product_unit_id,
+                    from: ProductUnitStatus.IN_STOCK,
+                    to: ProductUnitStatus.SOLD,
+                  },
+                }),
+              },
             );
           } catch (err) {
             // StockService names the product; the sale names the line.
@@ -1800,6 +1827,8 @@ export class SalesService {
               customer_id: sale.customer_id!,
               branch_id: sale.branch_id,
               cashier_id: sale.cashier_id,
+              payment_id: payment.id,
+              completed_by_id: completedBy.id,
               product_id: payment.trade_in_product_id!,
               imei: payment.trade_in_imei!,
               buying_price: payment.trade_in_buying_price!,
@@ -2044,6 +2073,13 @@ export class SalesService {
       //    sale's serialized in-house lines MUST have their PUs in
       //    SOLD status (completeSale flipped them). Any other status
       //    means the state machine was bypassed.
+      //    Each reversal is recorded in the stock ledger (Phase 1 T1) with
+      //    the requester and the approver, pointing at the movement it
+      //    undoes; null for a sale completed before the ledger existed.
+      const actors = {
+        createdById: approval.requestedBy.id,
+        approvedById: approval.approver.id,
+      };
       for (const line of lines) {
         if (line.external_supplier_id === null) {
           await this.stockService.incrementForReversal(
@@ -2051,6 +2087,25 @@ export class SalesService {
             line.product_id,
             sale.branch_id,
             line.quantity,
+            {
+              type: StockMovementType.REVERSAL,
+              referenceType: StockMovementReferenceType.SALE_LINE,
+              referenceId: line.id,
+              ...actors,
+              reverses: {
+                type: StockMovementType.SALE,
+                referenceType: StockMovementReferenceType.SALE_LINE,
+                referenceId: line.id,
+                unitId: line.product_unit_id,
+              },
+              ...(line.product_unit_id !== null && {
+                unit: {
+                  id: line.product_unit_id,
+                  from: ProductUnitStatus.SOLD,
+                  to: ProductUnitStatus.IN_STOCK,
+                },
+              }),
+            },
           );
         }
         if (line.product_unit_id !== null) {
@@ -2093,6 +2148,23 @@ export class SalesService {
           unit.product_id,
           unit.branch_id,
           1,
+          {
+            type: StockMovementType.REVERSAL,
+            referenceType: StockMovementReferenceType.PAYMENT,
+            referenceId: payment.id,
+            ...actors,
+            reverses: {
+              type: StockMovementType.TRADE_IN,
+              referenceType: StockMovementReferenceType.PAYMENT,
+              referenceId: payment.id,
+              unitId: unit.id,
+            },
+            unit: {
+              id: unit.id,
+              from: ProductUnitStatus.IN_STOCK,
+              to: ProductUnitStatus.RETURNED,
+            },
+          },
         );
       }
 

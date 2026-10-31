@@ -42,6 +42,11 @@ export async function createTestApp(): Promise<INestApplication> {
  *
  * The `migrations` table is deliberately excluded so migration state is
  * preserved between tests. Fast: single Postgres command with CASCADE.
+ *
+ * stock_movements is append-only: its trigger refuses TRUNCATE unless the
+ * session sets socio.allow_ledger_truncate (CreateStockMovements
+ * migration). The reset sets it with SET LOCAL, so it lasts only for this
+ * one transaction on this one connection.
  */
 export async function truncateAllTables(app: INestApplication): Promise<void> {
   const dataSource = app.get(DataSource);
@@ -57,7 +62,10 @@ export async function truncateAllTables(app: INestApplication): Promise<void> {
 
   if (!tableNames) return;
 
-  await dataSource.query(
-    `TRUNCATE TABLE ${tableNames} RESTART IDENTITY CASCADE`,
-  );
+  await dataSource.transaction(async (manager) => {
+    await manager.query(`SET LOCAL socio.allow_ledger_truncate = 'on'`);
+    await manager.query(
+      `TRUNCATE TABLE ${tableNames} RESTART IDENTITY CASCADE`,
+    );
+  });
 }

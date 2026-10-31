@@ -28,6 +28,10 @@ import { ApprovalsService } from '../approvals/approvals.service';
 import { UserRole } from '../users/enums/user-role.enum';
 import { AuditAction } from '../audit-log/enums/audit-action.enum';
 import { lockInventoryRows } from '../stock/lock-inventory-rows';
+import {
+  StockMovementReferenceType,
+  StockMovementType,
+} from '../stock/enums/stock-movement-type.enum';
 import { assertDayOpen } from '../cash-days/day-gate';
 
 // The lock helper takes its own queries; mocked so the manager mock stays
@@ -160,7 +164,10 @@ describe('SaleReturnsService', () => {
   };
   const mockSalesRepo = { findOne: jest.fn() };
   const mockSalesService = { findOne: jest.fn() };
-  const mockStockService = { incrementForReversal: jest.fn() };
+  const mockStockService = {
+    incrementForReversal: jest.fn(),
+    recordUnitEvent: jest.fn(),
+  };
   const mockProductUnitsService = {
     assertNotTakenBackForReturn: jest.fn(),
     markInspectionForReturn: jest.fn(),
@@ -236,8 +243,14 @@ describe('SaleReturnsService', () => {
       return Promise.resolve(undefined);
     });
     mockManager.create.mockImplementation((_: unknown, v: unknown) => v);
+    // The return gets 'ret-1'; its lines 'rl-1', 'rl-2', … in order (the
+    // stock ledger references them, Phase 1 T1).
     mockManager.save.mockImplementation((v: unknown) =>
-      Promise.resolve(Array.isArray(v) ? v : { id: 'ret-1', ...(v as object) }),
+      Promise.resolve(
+        Array.isArray(v)
+          ? v.map((line: object, i) => ({ id: `rl-${i + 1}`, ...line }))
+          : { id: 'ret-1', ...(v as object) },
+      ),
     );
     mockLockQueryBuilder.setLock.mockReturnThis();
     mockLockQueryBuilder.where.mockReturnThis();
@@ -734,6 +747,17 @@ describe('SaleReturnsService', () => {
         'prod-1',
         'branch-1',
         1,
+        {
+          type: StockMovementType.CUSTOMER_RETURN,
+          referenceType: StockMovementReferenceType.SALE_RETURN_LINE,
+          referenceId: 'rl-1',
+          createdById: 'cashier-1',
+          approvedById: 'manager-1',
+        },
+      );
+      // The return and its lines exist before the stock moves.
+      expect(mockManager.save.mock.invocationCallOrder[1]).toBeLessThan(
+        mockStockService.incrementForReversal.mock.invocationCallOrder[0],
       );
       expect(mockCounters.generateNext).toHaveBeenCalledWith(
         'branch-1',
@@ -777,6 +801,29 @@ describe('SaleReturnsService', () => {
         mockProductUnitsService.markInspectionForReturn,
       ).toHaveBeenCalledWith(mockManager, 'unit-1');
       expect(mockStockService.incrementForReversal).not.toHaveBeenCalled();
+      // Recorded as a zero-change unit event in the phone's stock row,
+      // which the return locked (Phase 1 T1).
+      expect(mockStockService.recordUnitEvent).toHaveBeenCalledWith(
+        mockManager,
+        'prod-2',
+        'branch-1',
+        {
+          type: StockMovementType.CUSTOMER_RETURN,
+          referenceType: StockMovementReferenceType.SALE_RETURN_LINE,
+          referenceId: 'rl-1',
+          createdById: 'cashier-1',
+          approvedById: 'manager-1',
+          unit: {
+            id: 'unit-1',
+            from: ProductUnitStatus.SOLD,
+            to: ProductUnitStatus.INSPECTION,
+          },
+        },
+      );
+      expect(lockMock).toHaveBeenCalledWith(mockManager, {
+        stock: [{ productId: 'prod-2', branchId: 'branch-1' }],
+        unitIds: ['unit-1'],
+      });
     });
 
     it('a second send that waited on the sale lock is answered as R3, writing nothing', async () => {

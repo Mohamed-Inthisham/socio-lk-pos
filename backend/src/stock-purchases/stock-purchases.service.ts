@@ -17,6 +17,10 @@ import { LIVE_UNIT_STATUSES } from '../product-units/live-imei';
 import { Supplier } from '../suppliers/entities/supplier.entity';
 import { StockService } from '../stock/stock.service';
 import {
+  StockMovementReferenceType,
+  StockMovementType,
+} from '../stock/enums/stock-movement-type.enum';
+import {
   ensureStockRows,
   lockInventoryRows,
 } from '../stock/lock-inventory-rows';
@@ -261,15 +265,10 @@ export class StockPurchasesService {
           imei_numbers: unitPairs.flatMap((pair) => pair.imei_number ? [pair.imei_number] : []),
           serial_numbers: unitPairs.flatMap((pair) => pair.serial_number ? [pair.serial_number] : []),
         });
-        await manager.save(line);
+        const savedLine = await manager.save(line);
 
-        await this.stockService.receivePurchase(
-          manager,
-          product.id,
-          dto.branch_id,
-          item.quantity,
-        );
-
+        // The units first: the ledger's PURCHASE rows reference them.
+        const unitIds: string[] = [];
         for (const pair of unitPairs) {
           const legacyIdentifier = pair.imei_number ?? pair.serial_number;
           if (!legacyIdentifier) continue;
@@ -285,7 +284,7 @@ export class StockPurchasesService {
             phone_purchase_id: null,
           });
           try {
-            await manager.save(unit);
+            unitIds.push((await manager.save(unit)).id);
           } catch (error) {
             const detail = error as { code?: string; constraint?: string };
             if (
@@ -299,6 +298,20 @@ export class StockPurchasesService {
             throw error;
           }
         }
+
+        await this.stockService.receivePurchase(
+          manager,
+          product.id,
+          dto.branch_id,
+          item.quantity,
+          {
+            type: StockMovementType.PURCHASE,
+            referenceType: StockMovementReferenceType.STOCK_PURCHASE_ITEM,
+            referenceId: savedLine.id,
+            createdById: actor.id,
+            unitIds,
+          },
+        );
 
         await manager.update(Product, product.id, {
           buying_price: centsToAmount(unitBuyingCents),

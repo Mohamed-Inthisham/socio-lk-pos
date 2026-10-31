@@ -488,8 +488,11 @@ export class SalesController {
       'longer IN_STOCK; or a trade-in IMEI already exists in inventory. ' +
       'The IMEI cases include an existing_unit payload.',
   })
-  async completeSale(@Param('id', ParseUUIDPipe) id: string) {
-    await this.salesService.completeSale(id);
+  async completeSale(
+    @Param('id', ParseUUIDPipe) id: string,
+    @CurrentUser() user: AuthenticatedUser,
+  ) {
+    await this.salesService.completeSale(id, user);
     return this.salesService.findOne(id);
   }
 

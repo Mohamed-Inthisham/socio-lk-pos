@@ -525,22 +525,76 @@ describe('Secret exposure (e2e)', () => {
     });
 
     it('POST /product-units/:id/inspection-pass (Phase 6.4 P7-7)', async () => {
-      // Returns ship in P7 step 0b; until then a unit is put in
-      // INSPECTION directly. Passing it puts it back to IN_STOCK.
-      const rows: { id: string }[] = await dataSource.query(
-        `SELECT id FROM product_units WHERE phone_purchase_id = $1`,
+      // The phone bought in above is sold and returned, which puts it in
+      // INSPECTION (P7-6); passing it puts it back to IN_STOCK, recorded
+      // in the stock ledger against that return's line (Phase 1 T1b).
+      const rows: { id: string; imei: string }[] = await dataSource.query(
+        `SELECT id, imei FROM product_units WHERE phone_purchase_id = $1`,
         [purchaseId],
       );
-      await dataSource.query(
-        `UPDATE product_units SET status = 'INSPECTION' WHERE id = $1`,
-        [rows[0].id],
-      );
+      const created = await http()
+        .post('/api/v1/sales')
+        .set('Cookie', cashierCookies)
+        .send({ branch_id: branch.id })
+        .expect(201);
+      const sale = created.body.id as string;
+      await pause(150);
+      const withPhone = await http()
+        .post(`/api/v1/sales/${sale}/lines`)
+        .set('Cookie', cashierCookies)
+        .send({
+          product_id: serializedProduct.id,
+          quantity: 1,
+          imei_snapshot: rows[0].imei,
+        })
+        .expect(201);
+      const total = Number(withPhone.body.total);
+      await pause(150);
+      await http()
+        .post(`/api/v1/sales/${sale}/payments`)
+        .set('Cookie', cashierCookies)
+        .send({
+          payment_method: PaymentMethod.CASH,
+          amount: total,
+          cash_received: total,
+        })
+        .expect(201);
+      await pause(150);
+      await http()
+        .post(`/api/v1/sales/${sale}/complete`)
+        .set('Cookie', cashierCookies)
+        .expect(200);
+      await pause(150);
+      await http()
+        .post(`/api/v1/sales/${sale}/returns`)
+        .set('Cookie', cashierCookies)
+        .send({
+          client_request_id: '4b1d2c6e-0f3a-4e5b-8c7d-9a1b2c3d4e5f',
+          lines: [{ sale_line_id: withPhone.body.lines[0].id, quantity: 1 }],
+          refunds: [],
+          reason: 'secret-exposure probe',
+          // These products have no warranty: the line is outside it (P7-23).
+          override_reason: 'secret-exposure override',
+          approval: { approver_id: manager.id, pin: MANAGER_PIN },
+        })
+        .expect(201);
+
       const res = await http()
         .post(`/api/v1/product-units/${rows[0].id}/inspection-pass`)
         .set('Cookie', adminCookies)
         .expect(200);
       expect(res.body).toMatchObject({ status: 'IN_STOCK' });
       expectNoSecrets(res);
+      const [{ passed, returned }]: { passed: string; returned: string }[] =
+        await dataSource.query(
+          `SELECT (SELECT reference_id FROM stock_movements
+                    WHERE product_unit_id = $1
+                      AND movement_type = 'INSPECTION_PASSED') AS passed,
+                  (SELECT id FROM sale_return_lines
+                    WHERE product_unit_id = $1) AS returned`,
+          [rows[0].id],
+        );
+      expect(passed).toBe(returned);
     });
   });
 

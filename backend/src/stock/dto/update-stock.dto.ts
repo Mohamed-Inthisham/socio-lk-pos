@@ -19,6 +19,19 @@ export class UpdateStockDto {
   quantity?: number;
 
   @ApiPropertyOptional({
+    example: 25,
+    description:
+      'The quantity the client last saw. When sent, the update is refused ' +
+      'with 409 STOCK_QUANTITY_CHANGED (and nothing written) if the stock ' +
+      'has changed since, e.g. a sale completed meanwhile.',
+    minimum: 0,
+  })
+  @IsOptionalNotNull()
+  @IsInt()
+  @Min(0)
+  expected_quantity?: number;
+
+  @ApiPropertyOptional({
     example: 5,
     description: 'New low-stock alert threshold.',
     minimum: 0,

@@ -2,8 +2,13 @@ import { INestApplication } from '@nestjs/common';
 import request from 'supertest';
 import * as bcrypt from 'bcrypt';
 import { DataSource, QueryFailedError } from 'typeorm';
+import { randomUUID } from 'crypto';
 import { createTestApp, truncateAllTables } from './setup';
 import { openToday } from './cash-day.helper';
+import { approvalFor, giveApprovalPin } from './approval-pin.helper';
+import { SaleReturnLine } from '../src/sales/entities/sale-return-line.entity';
+import { StockMovement } from '../src/stock/entities/stock-movement.entity';
+import { StockMovementType } from '../src/stock/enums/stock-movement-type.enum';
 import { User } from '../src/users/entities/user.entity';
 import { UserRole } from '../src/users/enums/user-role.enum';
 import { Sale } from '../src/sales/entities/sale.entity';
@@ -32,8 +37,12 @@ import { AuditAction } from '../src/audit-log/enums/audit-action.enum';
  * uq_product_units_imei_live) but not sellable, until a manager or admin
  * passes it back to IN_STOCK.
  *
- * Nothing creates INSPECTION units through the API until returns ship
- * (step 0b), so these tests set the status directly in the database.
+ * A customer's return (POST /sales/:id/returns, step 0b) is what puts a
+ * phone into INSPECTION, and the inspection pass is recorded in the stock
+ * ledger against that return's line (Phase 1 T1b), so the pass tests get
+ * their phone there through a real sale and return. The tests about what
+ * an INSPECTION unit refuses (its live IMEI, selling it) only need the
+ * status, and still set it directly.
  */
 describe('INSPECTION status (e2e)', () => {
   let app: INestApplication;
@@ -573,21 +582,80 @@ describe('INSPECTION status (e2e)', () => {
   // ---- POST /product-units/:id/inspection-pass ----
 
   describe('POST /product-units/:id/inspection-pass', () => {
+    /**
+     * A phone in INSPECTION the way the shop gets one: in stock (4 of the
+     * model), sold on a completed sale (3 left), then returned by the
+     * customer with the admin's approval PIN (INSPECTION, still 3 in
+     * stock). `returnLine` is the return line that sent it there, which
+     * the pass's stock ledger row references.
+     */
     async function setupPass() {
       const main = await seedBranch('Main Shop');
       const other = await seedBranch('Other Shop');
       const admin = await seedUser(UserRole.ADMIN, 'a@t.com', null);
       const customer = await seedCustomer();
-      const used = await seedProduct(main, 'Used iPhone 12', { stock: 3 });
+      const used = await seedProduct(main, 'Used iPhone 12', { stock: 4 });
       const unit = await seedUnit(
         used,
         customer,
         admin.user,
         IMEI,
-        ProductUnitStatus.INSPECTION,
+        ProductUnitStatus.IN_STOCK,
       );
-      return { main, other, admin, customer, used, unit };
+      await giveApprovalPin(dataSource, admin.user.id);
+
+      const sale = await seedEmptyDraft(main, admin.user);
+      const line = await request(app.getHttpServer())
+        .post(`/api/v1/sales/${sale.id}/lines`)
+        .set('Cookie', admin.cookies)
+        .send({
+          product_id: used.id,
+          quantity: 1,
+          imei_snapshot: IMEI,
+          warranty: WarrantyPeriod.MONTH_12,
+        })
+        .expect(201);
+      await request(app.getHttpServer())
+        .post(`/api/v1/sales/${sale.id}/payments`)
+        .set('Cookie', admin.cookies)
+        .send({
+          payment_method: PaymentMethod.CASH,
+          amount: 1000,
+          cash_received: 1000,
+        })
+        .expect(201);
+      await request(app.getHttpServer())
+        .post(`/api/v1/sales/${sale.id}/complete`)
+        .set('Cookie', admin.cookies)
+        .expect(200);
+      // Adding a line answers with the sale and its lines.
+      const saleLineId = (line.body as { lines: { id: string }[] }).lines[0].id;
+      await request(app.getHttpServer())
+        .post(`/api/v1/sales/${sale.id}/returns`)
+        .set('Cookie', admin.cookies)
+        .send({
+          client_request_id: randomUUID(),
+          lines: [{ sale_line_id: saleLineId, quantity: 1 }],
+          refunds: [],
+          reason: 'Screen flickers',
+          approval: approvalFor(admin.user.id),
+        })
+        .expect(201);
+      const returnLine = await dataSource
+        .getRepository(SaleReturnLine)
+        .findOneByOrFail({ sale_line_id: saleLineId });
+
+      expect(await unitStatus(unit)).toBe(ProductUnitStatus.INSPECTION);
+      expect(await stockQty(used)).toBe(3);
+      return { main, other, admin, customer, used, unit, returnLine };
     }
+
+    /** The pass's stock ledger row (Phase 1 T1b). */
+    const passMovement = (unit: ProductUnit) =>
+      dataSource.getRepository(StockMovement).findOneByOrFail({
+        product_unit_id: unit.id,
+        movement_type: StockMovementType.INSPECTION_PASSED,
+      });
 
     it('a manager at the unit branch passes it: IN_STOCK, stock +1, audited, the unit returned', async () => {
       const ctx = await setupPass();
@@ -607,6 +675,17 @@ describe('INSPECTION status (e2e)', () => {
       );
       expect(await unitStatus(ctx.unit)).toBe(ProductUnitStatus.IN_STOCK);
       expect(await stockQty(ctx.used)).toBe(4);
+      // Recorded against the return line that sent the phone to inspection.
+      expect(await passMovement(ctx.unit)).toEqual(
+        expect.objectContaining({
+          reference_type: 'SALE_RETURN_LINE',
+          reference_id: ctx.returnLine.id,
+          quantity_delta: 1,
+          quantity_before: 3,
+          quantity_after: 4,
+          created_by_id: manager.user.id,
+        }),
+      );
 
       const audits = await dataSource
         .getRepository(AuditLog)
@@ -635,6 +714,9 @@ describe('INSPECTION status (e2e)', () => {
 
       expect(await unitStatus(ctx.unit)).toBe(ProductUnitStatus.IN_STOCK);
       expect(await stockQty(ctx.used)).toBe(4);
+      expect((await passMovement(ctx.unit)).reference_id).toBe(
+        ctx.returnLine.id,
+      );
     });
 
     it.each([ProductUnitStatus.IN_STOCK, ProductUnitStatus.SOLD])(

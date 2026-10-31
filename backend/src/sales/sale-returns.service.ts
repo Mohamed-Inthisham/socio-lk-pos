@@ -28,6 +28,10 @@ import { SalesService } from './sales.service';
 import { refundShareCents, tradeInShareCents } from './return-math';
 import { Stock } from '../stock/entities/stock.entity';
 import { StockService } from '../stock/stock.service';
+import {
+  StockMovementReferenceType,
+  StockMovementType,
+} from '../stock/enums/stock-movement-type.enum';
 import { lockInventoryRows } from '../stock/lock-inventory-rows';
 import { assertDayOpen } from '../cash-days/day-gate';
 import { ProductUnit } from '../product-units/entities/product-unit.entity';
@@ -617,13 +621,16 @@ export class SaleReturnsService {
     const requested = await manager.find(SaleLine, {
       where: { sale_id: saleId, id: In([...conditions.keys()]) },
     });
+    // Stock rows: a resaleable item's (it goes back to stock) and a phone's
+    // (the ledger records its move to INSPECTION in that row's chain,
+    // Phase 1 T1).
     await lockInventoryRows(manager, {
       stock: requested
         .filter(
           (line) =>
             line.external_supplier_id === null &&
-            line.product_unit_id === null &&
-            conditions.get(line.id) === ReturnCondition.RESALEABLE,
+            (line.product_unit_id !== null ||
+              conditions.get(line.id) === ReturnCondition.RESALEABLE),
         )
         .map((line) => ({
           productId: line.product_id,
@@ -639,29 +646,6 @@ export class SaleReturnsService {
     await assertDayOpen(manager, sale.branch_id, { lock: true });
 
     const plan = await this.plan(manager, sale, dto);
-
-    for (const planned of plan.lines) {
-      await manager.query(
-        `UPDATE sale_lines
-         SET returned_quantity = returned_quantity + $1,
-             updated_at = now()
-         WHERE id = $2`,
-        [planned.quantity, planned.line.id],
-      );
-      if (planned.disposition === ReturnDisposition.RESTOCKED) {
-        await this.stockService.incrementForReversal(
-          manager,
-          planned.line.product_id,
-          sale.branch_id,
-          planned.quantity,
-        );
-      } else if (planned.disposition === ReturnDisposition.INSPECTION) {
-        await this.productUnitsService.markInspectionForReturn(
-          manager,
-          planned.line.product_unit_id!,
-        );
-      }
-    }
 
     const returnNumber = await this.saleNumberCountersService.generateNext(
       sale.branch_id,
@@ -700,7 +684,7 @@ export class SaleReturnsService {
         client_request_id: dto.client_request_id,
       }),
     );
-    await manager.save(
+    const savedLines = await manager.save(
       plan.lines.map((planned) =>
         manager.create(SaleReturnLine, {
           sale_return_id: saved.id,
@@ -716,6 +700,51 @@ export class SaleReturnsService {
         }),
       ),
     );
+
+    // The inventory, after the return lines exist: the stock ledger
+    // references each one (Phase 1 T1), with the requester and the
+    // approver. All rows were locked above, so the order is free.
+    for (const [index, planned] of plan.lines.entries()) {
+      await manager.query(
+        `UPDATE sale_lines
+         SET returned_quantity = returned_quantity + $1,
+             updated_at = now()
+         WHERE id = $2`,
+        [planned.quantity, planned.line.id],
+      );
+      const movement = {
+        type: StockMovementType.CUSTOMER_RETURN,
+        referenceType: StockMovementReferenceType.SALE_RETURN_LINE,
+        referenceId: savedLines[index].id,
+        createdById: requestedBy.id,
+        approvedById: approver.id,
+      };
+      if (planned.disposition === ReturnDisposition.RESTOCKED) {
+        await this.stockService.incrementForReversal(
+          manager,
+          planned.line.product_id,
+          sale.branch_id,
+          planned.quantity,
+          movement,
+        );
+      } else if (planned.disposition === ReturnDisposition.INSPECTION) {
+        const unitId = planned.line.product_unit_id!;
+        await this.productUnitsService.markInspectionForReturn(manager, unitId);
+        await this.stockService.recordUnitEvent(
+          manager,
+          planned.line.product_id,
+          sale.branch_id,
+          {
+            ...movement,
+            unit: {
+              id: unitId,
+              from: ProductUnitStatus.SOLD,
+              to: ProductUnitStatus.INSPECTION,
+            },
+          },
+        );
+      }
+    }
     // One at a time, stamped with clock_timestamp(): now() is the same for
     // the whole transaction, and GET /sales/:id lists refunds in the order
     // they were recorded.

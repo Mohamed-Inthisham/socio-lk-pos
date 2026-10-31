@@ -7,6 +7,10 @@ import { ProductUnitStatus } from './enums/product-unit-status.enum';
 import { QueryFailedError } from 'typeorm';
 import { StockService } from '../stock/stock.service';
 import { lockInventoryRows } from '../stock/lock-inventory-rows';
+import {
+  StockMovementReferenceType,
+  StockMovementType,
+} from '../stock/enums/stock-movement-type.enum';
 import { UserRole } from '../users/enums/user-role.enum';
 import { AuditAction } from '../audit-log/enums/audit-action.enum';
 
@@ -1003,7 +1007,13 @@ describe('ProductUnitsService', () => {
       );
       manager.getRepository.mockReturnValue(mockAuditRepo);
       manager.findOneOrFail.mockResolvedValue(inspectionUnit());
-      manager.query.mockResolvedValue(undefined);
+      // The return line that sent the phone to inspection (the stock
+      // ledger's reference, Phase 1 T1); the status UPDATE returns nothing.
+      manager.query.mockImplementation((sql: string) =>
+        Promise.resolve(
+          sql.includes('FROM sale_return_lines') ? [{ id: 'rl-1' }] : undefined,
+        ),
+      );
       mockStockService.incrementForReversal.mockResolvedValue(undefined);
       mockAuditRepo.save.mockResolvedValue(undefined);
     });
@@ -1031,11 +1041,26 @@ describe('ProductUnitsService', () => {
         expect.stringContaining('UPDATE product_units'),
         [ProductUnitStatus.IN_STOCK, 'u-1'],
       );
+      expect(manager.query).toHaveBeenCalledWith(
+        expect.stringContaining('FROM sale_return_lines'),
+        ['u-1', 'INSPECTION'],
+      );
       expect(mockStockService.incrementForReversal).toHaveBeenCalledWith(
         manager,
         'p-1',
         'b-1',
         1,
+        {
+          type: StockMovementType.INSPECTION_PASSED,
+          referenceType: StockMovementReferenceType.SALE_RETURN_LINE,
+          referenceId: 'rl-1',
+          createdById: 'm-1',
+          unit: {
+            id: 'u-1',
+            from: ProductUnitStatus.INSPECTION,
+            to: ProductUnitStatus.IN_STOCK,
+          },
+        },
       );
       expect(mockAuditRepo.save).toHaveBeenCalledWith(
         expect.objectContaining({

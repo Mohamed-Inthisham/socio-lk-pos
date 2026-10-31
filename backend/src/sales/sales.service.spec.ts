@@ -42,6 +42,10 @@ import {
   ensureStockRows,
   lockInventoryRows,
 } from '../stock/lock-inventory-rows';
+import {
+  StockMovementReferenceType,
+  StockMovementType,
+} from '../stock/enums/stock-movement-type.enum';
 import { assertDayOpen } from '../cash-days/day-gate';
 
 // The global lock order's helper takes its own queries on the manager;
@@ -218,6 +222,25 @@ describe('SalesService', () => {
       branch_id: 'branch-1',
       ...overrides,
     }) as User;
+
+  // The user completing a sale: the stock ledger's actor (Phase 1 T1).
+  const completer = { id: 'completer-1' };
+  // The movement completeSale passes for a line, and voidSale for a
+  // reversal (requester and approver from voidApproval).
+  const saleMovement = (fields: Record<string, unknown> = {}) =>
+    expect.objectContaining({
+      type: StockMovementType.SALE,
+      referenceType: StockMovementReferenceType.SALE_LINE,
+      createdById: 'completer-1',
+      ...fields,
+    }) as unknown;
+  const reversalMovement = (fields: Record<string, unknown> = {}) =>
+    expect.objectContaining({
+      type: StockMovementType.REVERSAL,
+      createdById: 'admin-1',
+      approvedById: 'admin-1',
+      ...fields,
+    }) as unknown;
 
   beforeEach(async () => {
     jest.clearAllMocks();
@@ -3878,7 +3901,7 @@ describe('SalesService', () => {
       );
       mockManager.query.mockResolvedValue(undefined);
 
-      await service.completeSale('sale-1');
+      await service.completeSale('sale-1', completer);
 
       // Stock decremented for each in-house line
       expect(mockStockService.decrementForSale).toHaveBeenCalledTimes(2);
@@ -3888,6 +3911,7 @@ describe('SalesService', () => {
         'branch-1',
         2,
         'iPhone 15',
+        saleMovement({ referenceId: 'line-1' }),
       );
       expect(mockStockService.decrementForSale).toHaveBeenCalledWith(
         mockManager,
@@ -3895,6 +3919,7 @@ describe('SalesService', () => {
         'branch-1',
         1,
         'AirPods',
+        saleMovement({ referenceId: 'line-2' }),
       );
 
       // Sale number issued with the transaction's manager (enlistment)
@@ -3929,7 +3954,7 @@ describe('SalesService', () => {
         'INV-20260910-0002',
       );
 
-      await service.completeSale('sale-1');
+      await service.completeSale('sale-1', completer);
 
       expect(mockStockService.decrementForSale).toHaveBeenCalledTimes(1);
       expect(mockStockService.decrementForSale).toHaveBeenCalledWith(
@@ -3938,6 +3963,7 @@ describe('SalesService', () => {
         'branch-1',
         1,
         'iPhone 15',
+        saleMovement({ referenceId: 'line-1' }),
       );
       // Verify the friendly-shop product was NOT decremented
       expect(mockStockService.decrementForSale).not.toHaveBeenCalledWith(
@@ -3952,7 +3978,7 @@ describe('SalesService', () => {
     it('throws NotFoundException when the sale does not exist', async () => {
       mockQueryBuilder.getOne.mockResolvedValueOnce(null);
 
-      await expect(service.completeSale('missing')).rejects.toThrow(
+      await expect(service.completeSale('missing', completer)).rejects.toThrow(
         NotFoundException,
       );
 
@@ -3967,7 +3993,7 @@ describe('SalesService', () => {
         seedCompletableSale({ status: SaleStatus.COMPLETED }),
       );
 
-      await expect(service.completeSale('sale-1')).rejects.toThrow(
+      await expect(service.completeSale('sale-1', completer)).rejects.toThrow(
         BadRequestException,
       );
       expect(mockStockService.decrementForSale).not.toHaveBeenCalled();
@@ -3978,7 +4004,7 @@ describe('SalesService', () => {
         seedCompletableSale({ status: SaleStatus.VOIDED }),
       );
 
-      await expect(service.completeSale('sale-1')).rejects.toThrow(
+      await expect(service.completeSale('sale-1', completer)).rejects.toThrow(
         BadRequestException,
       );
     });
@@ -3987,7 +4013,7 @@ describe('SalesService', () => {
       mockQueryBuilder.getOne.mockResolvedValueOnce(seedCompletableSale());
       arrangeManagerFind([]);
 
-      await expect(service.completeSale('sale-1')).rejects.toThrow(
+      await expect(service.completeSale('sale-1', completer)).rejects.toThrow(
         BadRequestException,
       );
       // Guard fires before stock decrement + number issue
@@ -4001,7 +4027,7 @@ describe('SalesService', () => {
       );
       arrangeManagerFind([seedCompletableLine()]);
 
-      await expect(service.completeSale('sale-1')).rejects.toThrow(
+      await expect(service.completeSale('sale-1', completer)).rejects.toThrow(
         BadRequestException,
       );
       expect(mockStockService.decrementForSale).not.toHaveBeenCalled();
@@ -4020,7 +4046,9 @@ describe('SalesService', () => {
         'INV-20260910-0003',
       );
 
-      await expect(service.completeSale('sale-1')).resolves.toBeUndefined();
+      await expect(
+        service.completeSale('sale-1', completer),
+      ).resolves.toBeUndefined();
     });
 
     it('propagates ConflictException from StockService (insufficient stock rolls back)', async () => {
@@ -4034,7 +4062,7 @@ describe('SalesService', () => {
         ),
       );
 
-      await expect(service.completeSale('sale-1')).rejects.toThrow(
+      await expect(service.completeSale('sale-1', completer)).rejects.toThrow(
         ConflictException,
       );
 
@@ -4052,7 +4080,7 @@ describe('SalesService', () => {
         'INV-20260910-0004',
       );
 
-      await service.completeSale('sale-1');
+      await service.completeSale('sale-1', completer);
 
       expect(mockQueryBuilder.setLock).toHaveBeenCalledWith(
         'pessimistic_write',
@@ -4071,7 +4099,7 @@ describe('SalesService', () => {
         .mockResolvedValueOnce(undefined)
         .mockRejectedValueOnce(new ConflictException('Insufficient stock'));
 
-      await expect(service.completeSale('sale-1')).rejects.toThrow(
+      await expect(service.completeSale('sale-1', completer)).rejects.toThrow(
         ConflictException,
       );
 
@@ -4106,7 +4134,7 @@ describe('SalesService', () => {
         'INV-000001',
       );
 
-      await service.completeSale('sale-1');
+      await service.completeSale('sale-1', completer);
 
       expect(mockStockService.decrementForSale).toHaveBeenCalledWith(
         expect.anything(),
@@ -4114,6 +4142,13 @@ describe('SalesService', () => {
         'branch-1',
         1,
         'iPhone 15',
+        saleMovement({
+          unit: expect.objectContaining({
+            id: 'unit-1',
+            from: ProductUnitStatus.IN_STOCK,
+            to: ProductUnitStatus.SOLD,
+          }),
+        }),
       );
       expect(mockProductUnitsService.markSoldForSale).toHaveBeenCalledWith(
         expect.anything(),
@@ -4144,7 +4179,7 @@ describe('SalesService', () => {
         'INV-000001',
       );
 
-      await service.completeSale('sale-1');
+      await service.completeSale('sale-1', completer);
 
       expect(mockStockService.decrementForSale).not.toHaveBeenCalled();
       expect(mockProductUnitsService.markSoldForSale).not.toHaveBeenCalled();
@@ -4173,7 +4208,7 @@ describe('SalesService', () => {
         'INV-000001',
       );
 
-      await service.completeSale('sale-1');
+      await service.completeSale('sale-1', completer);
 
       expect(mockStockService.decrementForSale).toHaveBeenCalled(); // stock yes
       expect(mockProductUnitsService.markSoldForSale).not.toHaveBeenCalled(); // PU no
@@ -4218,7 +4253,7 @@ describe('SalesService', () => {
         'INV-000001',
       );
 
-      await service.completeSale('sale-1');
+      await service.completeSale('sale-1', completer);
 
       // Stock decrement fires for line-a (in-house serialized) and line-b
       // (non-serialized in-house). NOT for line-c (external).
@@ -4230,6 +4265,7 @@ describe('SalesService', () => {
         'branch-1',
         1,
         'iPhone 15 (in-house)',
+        saleMovement({ unit: expect.objectContaining({ id: 'unit-A' }) }),
       );
       expect(mockStockService.decrementForSale).toHaveBeenNthCalledWith(
         2,
@@ -4238,6 +4274,7 @@ describe('SalesService', () => {
         'branch-1',
         3,
         'Charger',
+        saleMovement(),
       );
 
       // PU flip fires only for line-a (serialized in-house).
@@ -4279,7 +4316,7 @@ describe('SalesService', () => {
         }),
       );
 
-      await expect(service.completeSale('sale-1')).rejects.toThrow(
+      await expect(service.completeSale('sale-1', completer)).rejects.toThrow(
         ConflictException,
       );
       // sale_number should not have been issued if the flip fails
@@ -4319,7 +4356,7 @@ describe('SalesService', () => {
         return Promise.resolve();
       });
 
-      await service.completeSale('sale-1');
+      await service.completeSale('sale-1', completer);
 
       expect(callOrder).toEqual(['stock', 'pu']);
     });
@@ -4382,7 +4419,7 @@ describe('SalesService', () => {
         'INV-000010',
       );
 
-      await service.completeSale('sale-1');
+      await service.completeSale('sale-1', completer);
 
       expect(mockManager.find).toHaveBeenCalledWith(Payment, {
         where: { sale_id: 'sale-1', payment_method: PaymentMethod.TRADE_IN },
@@ -4393,7 +4430,11 @@ describe('SalesService', () => {
         {
           customer_id: 'cust-1',
           branch_id: 'branch-1',
+          // The phone purchase keeps the sale's cashier; the stock ledger
+          // gets the payment and the user completing the sale (Phase 1 T1).
           cashier_id: 'cashier-1',
+          payment_id: 'pay-ti-1',
+          completed_by_id: 'completer-1',
           product_id: 'prod-used',
           imei: '356938035643809',
           buying_price: '60000.00',
@@ -4428,7 +4469,7 @@ describe('SalesService', () => {
         'INV-000011',
       );
 
-      await service.completeSale('sale-1');
+      await service.completeSale('sale-1', completer);
 
       expect(mockPhonePurchasesService.createForTradeIn).toHaveBeenCalledTimes(
         1,
@@ -4465,7 +4506,7 @@ describe('SalesService', () => {
         'INV-000012',
       );
 
-      await service.completeSale('sale-1');
+      await service.completeSale('sale-1', completer);
 
       expect(mockPhonePurchasesService.createForTradeIn).toHaveBeenCalledTimes(
         2,
@@ -4505,7 +4546,7 @@ describe('SalesService', () => {
         }),
       );
 
-      await expect(service.completeSale('sale-1')).rejects.toThrow(
+      await expect(service.completeSale('sale-1', completer)).rejects.toThrow(
         ConflictException,
       );
 
@@ -4523,7 +4564,7 @@ describe('SalesService', () => {
         [seedTradeInRow()],
       );
 
-      await expect(service.completeSale('sale-1')).rejects.toThrow(
+      await expect(service.completeSale('sale-1', completer)).rejects.toThrow(
         /TRADE_IN payments require a customer/,
       );
       expect(mockPhonePurchasesService.createForTradeIn).not.toHaveBeenCalled();
@@ -4541,7 +4582,7 @@ describe('SalesService', () => {
       );
       arrangeTradeInCustomer(null);
 
-      await expect(service.completeSale('sale-1')).rejects.toThrow(
+      await expect(service.completeSale('sale-1', completer)).rejects.toThrow(
         "A trade-in needs the customer's NIC",
       );
       expect(mockManager.findOne).toHaveBeenCalledTimes(1);
@@ -4598,7 +4639,7 @@ describe('SalesService', () => {
         return Promise.resolve('INV-000013');
       });
 
-      await service.completeSale('sale-1');
+      await service.completeSale('sale-1', completer);
 
       expect(callOrder).toEqual([
         'stock',
@@ -4618,7 +4659,7 @@ describe('SalesService', () => {
         'INV-000014',
       );
 
-      await service.completeSale('sale-1');
+      await service.completeSale('sale-1', completer);
 
       expect(mockPhonePurchasesService.createForTradeIn).not.toHaveBeenCalled();
       expect(mockManager.query).not.toHaveBeenCalledWith(
@@ -4642,7 +4683,7 @@ describe('SalesService', () => {
         'INV-000015',
       );
 
-      await service.completeSale('sale-1');
+      await service.completeSale('sale-1', completer);
 
       const warrantyCalls = mockManager.query.mock.calls.filter(
         ([sql]: [string]) => sql.includes('UPDATE sale_lines'),
@@ -4669,7 +4710,7 @@ describe('SalesService', () => {
         }),
       );
 
-      await expect(service.completeSale('sale-1')).rejects.toThrow(
+      await expect(service.completeSale('sale-1', completer)).rejects.toThrow(
         ConflictException,
       );
       expect(mockManager.query).not.toHaveBeenCalledWith(
@@ -4694,7 +4735,9 @@ describe('SalesService', () => {
           }),
         );
 
-      const err = await service.completeSale('sale-1').catch((e: unknown) => e);
+      const err = await service
+        .completeSale('sale-1', completer)
+        .catch((e: unknown) => e);
 
       expect(err).toBeInstanceOf(ConflictException);
       expect((err as ConflictException).getResponse()).toEqual({
@@ -4711,7 +4754,9 @@ describe('SalesService', () => {
         new ConflictException('Insufficient stock'),
       );
 
-      const err = await service.completeSale('sale-1').catch((e: unknown) => e);
+      const err = await service
+        .completeSale('sale-1', completer)
+        .catch((e: unknown) => e);
 
       expect((err as ConflictException).getResponse()).toMatchObject({
         message: 'Insufficient stock',
@@ -4725,7 +4770,9 @@ describe('SalesService', () => {
       const integrity = new Error('Stock row missing for product prod-1');
       mockStockService.decrementForSale.mockRejectedValueOnce(integrity);
 
-      await expect(service.completeSale('sale-1')).rejects.toBe(integrity);
+      await expect(service.completeSale('sale-1', completer)).rejects.toBe(
+        integrity,
+      );
     });
 
     it('adds the payment_id of the colliding trade-in to its 409', async () => {
@@ -4754,7 +4801,9 @@ describe('SalesService', () => {
           }),
         );
 
-      const err = await service.completeSale('sale-1').catch((e: unknown) => e);
+      const err = await service
+        .completeSale('sale-1', completer)
+        .catch((e: unknown) => e);
 
       expect(err).toBeInstanceOf(ConflictException);
       expect((err as ConflictException).getResponse()).toEqual({
@@ -4781,7 +4830,9 @@ describe('SalesService', () => {
         inactive,
       );
 
-      await expect(service.completeSale('sale-1')).rejects.toBe(inactive);
+      await expect(service.completeSale('sale-1', completer)).rejects.toBe(
+        inactive,
+      );
     });
   });
 
@@ -4866,7 +4917,7 @@ describe('SalesService', () => {
       );
       mockManager.query.mockResolvedValue(undefined);
 
-      await service.completeSale('sale-1');
+      await service.completeSale('sale-1', completer);
 
       expect(lockMock).toHaveBeenCalledTimes(1);
       expect(lockMock).toHaveBeenCalledWith(mockManager, {
@@ -4895,7 +4946,7 @@ describe('SalesService', () => {
       });
       arrangeManagerFind(lines);
 
-      await expect(service.completeSale('sale-1')).rejects.toThrow(
+      await expect(service.completeSale('sale-1', completer)).rejects.toThrow(
         BadRequestException,
       );
       expect(lockMock).not.toHaveBeenCalled();
@@ -4946,7 +4997,7 @@ describe('SalesService', () => {
         },
       ]);
 
-      await service.completeSale('sale-1');
+      await service.completeSale('sale-1', completer);
 
       expect(ensureMock).toHaveBeenCalledTimes(1);
       expect(ensureMock).toHaveBeenCalledWith(mockManager, [
@@ -4969,7 +5020,7 @@ describe('SalesService', () => {
     it('completeSale without trade-ins creates no stock rows (empty targets)', async () => {
       arrangeCompletableWithTradeIns([]);
 
-      await service.completeSale('sale-1');
+      await service.completeSale('sale-1', completer);
 
       expect(ensureMock).toHaveBeenCalledTimes(1);
       expect(ensureMock).toHaveBeenCalledWith(mockManager, []);
@@ -4988,7 +5039,7 @@ describe('SalesService', () => {
       });
       arrangeManagerFind(lines, [tradeInPayment]);
 
-      await expect(service.completeSale('sale-1')).rejects.toThrow(
+      await expect(service.completeSale('sale-1', completer)).rejects.toThrow(
         BadRequestException,
       );
       expect(ensureMock).not.toHaveBeenCalled();
@@ -5096,7 +5147,7 @@ describe('SalesService', () => {
       );
       mockManager.query.mockResolvedValue(undefined);
 
-      await service.completeSale('sale-1');
+      await service.completeSale('sale-1', completer);
 
       expect(dayMock).toHaveBeenCalledTimes(1);
       expect(dayMock).toHaveBeenCalledWith(mockManager, 'branch-1', {
@@ -5133,7 +5184,9 @@ describe('SalesService', () => {
       ]);
       dayMock.mockRejectedValueOnce(dayClosed());
 
-      const err = await service.completeSale('sale-1').catch((e: unknown) => e);
+      const err = await service
+        .completeSale('sale-1', completer)
+        .catch((e: unknown) => e);
 
       expect(err).toBeInstanceOf(ConflictException);
       expect((err as ConflictException).getResponse()).toMatchObject({
@@ -5157,7 +5210,7 @@ describe('SalesService', () => {
       });
       arrangeManagerFind(lines);
 
-      await expect(service.completeSale('sale-1')).rejects.toThrow(
+      await expect(service.completeSale('sale-1', completer)).rejects.toThrow(
         BadRequestException,
       );
       expect(dayMock).not.toHaveBeenCalled();
@@ -5315,12 +5368,18 @@ describe('SalesService', () => {
         'prod-1',
         'branch-1',
         2,
+        reversalMovement({
+          referenceType: StockMovementReferenceType.SALE_LINE,
+        }),
       );
       expect(mockStockService.incrementForReversal).toHaveBeenCalledWith(
         mockManager,
         'prod-2',
         'branch-1',
         1,
+        reversalMovement({
+          referenceType: StockMovementReferenceType.SALE_LINE,
+        }),
       );
 
       // Payments UPDATE fires with the trimmed reason
@@ -5419,6 +5478,7 @@ describe('SalesService', () => {
         'prod-in-house',
         'branch-1',
         3,
+        reversalMovement(),
       );
       // Friendly-shop line was NOT re-incremented — symmetric with completeSale's skip
       expect(mockStockService.incrementForReversal).not.toHaveBeenCalledWith(
@@ -5621,6 +5681,17 @@ describe('SalesService', () => {
         'prod-1',
         'branch-1',
         1,
+        reversalMovement({
+          unit: expect.objectContaining({
+            id: 'unit-1',
+            from: ProductUnitStatus.SOLD,
+            to: ProductUnitStatus.IN_STOCK,
+          }),
+          reverses: expect.objectContaining({
+            type: StockMovementType.SALE,
+            unitId: 'unit-1',
+          }),
+        }),
       );
       expect(
         mockProductUnitsService.markAvailableForReversal,
@@ -5829,6 +5900,16 @@ describe('SalesService', () => {
         'prod-used',
         'branch-1',
         1,
+        reversalMovement({
+          referenceType: StockMovementReferenceType.PAYMENT,
+          reverses: expect.objectContaining({
+            type: StockMovementType.TRADE_IN,
+          }),
+          unit: expect.objectContaining({
+            from: ProductUnitStatus.IN_STOCK,
+            to: ProductUnitStatus.RETURNED,
+          }),
+        }),
       );
       // The existing bulk UPDATE reverses the TRADE_IN payment too
       expect(mockManager.query).toHaveBeenCalledWith(
@@ -5868,7 +5949,14 @@ describe('SalesService', () => {
       );
       expect(
         mockStockService.decrementForVoidedTradeIn,
-      ).toHaveBeenNthCalledWith(2, mockManager, 'prod-used-2', 'branch-1', 1);
+      ).toHaveBeenNthCalledWith(
+        2,
+        mockManager,
+        'prod-used-2',
+        'branch-1',
+        1,
+        reversalMovement(),
+      );
     });
 
     it('propagates 409 when the trade-in phone was resold (Q7) and rolls back', async () => {
@@ -5921,6 +6009,7 @@ describe('SalesService', () => {
         'prod-new',
         'branch-1',
         1,
+        reversalMovement(),
       );
       expect(
         mockProductUnitsService.markAvailableForReversal,
@@ -5935,6 +6024,12 @@ describe('SalesService', () => {
         'prod-used',
         'branch-1',
         1,
+        reversalMovement({
+          referenceType: StockMovementReferenceType.PAYMENT,
+          reverses: expect.objectContaining({
+            type: StockMovementType.TRADE_IN,
+          }),
+        }),
       );
     });
 
@@ -6021,6 +6116,7 @@ describe('SalesService', () => {
         'prod-from-pu',
         'branch-pu',
         1,
+        reversalMovement(),
       );
     });
 

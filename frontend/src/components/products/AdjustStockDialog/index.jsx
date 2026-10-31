@@ -15,6 +15,16 @@ import { updateStock } from "../../../services/stockService";
  * themselves. The dialog shows current quantity read-only so admins can
  * see what they're starting from.
  *
+ * STALE QUANTITY (Phase 1 T1):
+ * A changed quantity is sent with expected_quantity, the figure shown as
+ * "Currently in stock". If a sale or another change moved the stock
+ * meanwhile, the backend refuses with 409 STOCK_QUANTITY_CHANGED and
+ * writes nothing; the dialog then shows the new current quantity, keeps
+ * what the admin typed, and the next save is checked against the new
+ * figure. The parent isn't reloaded until a save succeeds, so the typed
+ * value is never reset. An unchanged quantity isn't sent at all, so
+ * changing only the minimum can't put back an old quantity.
+ *
  * REASON FIELD:
  * Deliberately omitted for R1 — the backend has no audit table to persist
  * the reason. Showing a field that gets silently discarded is dishonest
@@ -34,6 +44,9 @@ import { updateStock } from "../../../services/stockService";
 const AdjustStockDialog = ({ open, onClose, onSuccess, stockRow }) => {
   const [quantity, setQuantity] = useState("");
   const [minQuantity, setMinQuantity] = useState("");
+  // The stock as the backend last reported it: the row's quantity when the
+  // dialog opened, or current_quantity from a 409.
+  const [currentQty, setCurrentQty] = useState(0);
   const [submitting, setSubmitting] = useState(false);
   const [errors, setErrors] = useState({});
   const [apiError, setApiError] = useState(null);
@@ -48,6 +61,7 @@ const AdjustStockDialog = ({ open, onClose, onSuccess, stockRow }) => {
       setQuantity(String(stockRow.quantity ?? 0));
       // eslint-disable-next-line react-hooks/set-state-in-effect
       setMinQuantity(String(stockRow.min_quantity ?? 0));
+      setCurrentQty(stockRow.quantity ?? 0);
       // eslint-disable-next-line react-hooks/set-state-in-effect
       setErrors({});
       // eslint-disable-next-line react-hooks/set-state-in-effect
@@ -89,16 +103,26 @@ const AdjustStockDialog = ({ open, onClose, onSuccess, stockRow }) => {
     setSubmitting(true);
     setApiError(null);
 
+    const qty = Number(quantity);
     try {
       await updateStock(stockRow.id, {
-        quantity: Number(quantity),
+        ...(qty !== currentQty && {
+          quantity: qty,
+          expected_quantity: currentQty,
+        }),
         min_quantity: Number(minQuantity),
       });
       onSuccess();
     } catch (err) {
-      setApiError(
-        err.response?.data?.message || err.message || "Couldn't adjust stock.",
-      );
+      const data = err.response?.data;
+      if (
+        err.response?.status === 409 &&
+        data?.code === "STOCK_QUANTITY_CHANGED"
+      ) {
+        // Keep the typed quantity; check the next save against the new figure.
+        setCurrentQty(data.current_quantity);
+      }
+      setApiError(data?.message || err.message || "Couldn't adjust stock.");
       setSubmitting(false);
     }
     // On success, parent unmounts us via open=false
@@ -111,7 +135,6 @@ const AdjustStockDialog = ({ open, onClose, onSuccess, stockRow }) => {
 
   if (!stockRow) return null;
 
-  const currentQty = stockRow.quantity ?? 0;
   const newQty = Number(quantity);
   const delta = Number.isFinite(newQty) ? newQty - currentQty : 0;
 
