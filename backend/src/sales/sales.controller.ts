@@ -8,6 +8,7 @@ import {
   Body,
   Query,
   ParseUUIDPipe,
+  BadRequestException,
   HttpCode,
   HttpStatus,
   Ip,
@@ -36,6 +37,7 @@ import { UserRole } from '../users/enums/user-role.enum';
 import { CurrentUser } from '../auth/decorators/current-user.decorator';
 import type { AuthenticatedUser } from '../auth/strategies/jwt.strategy';
 import { Auditable } from '../audit-log/decorators/auditable.decorator';
+import { scopeBranch } from '../common/utils/branch-scope';
 import { AuditAction } from '../audit-log/enums/audit-action.enum';
 
 @ApiTags('Sales')
@@ -56,8 +58,10 @@ export class SalesController {
       'name or phone by substring, or an exact IMEI on a line or a trade-in). ' +
       'Pagination: page (default 1), limit (default 50, max 200). Sorted by ' +
       'created_at DESC, or completed_at DESC with sort=completed_at. ' +
-      'Note: multi-branch scoping ("only my branch") is deferred to R9; for now ' +
-      'all roles see all sales.',
+      'Branch scoping (Phase 2 P2-1): admins see every branch, or the one ' +
+      'given in branchId; managers and cashiers see only their own branch ' +
+      '(branchId left out or their own), and another branchId is ' +
+      '403 { code: WRONG_BRANCH }.',
   })
   @ApiResponse({
     status: 200,
@@ -68,15 +72,46 @@ export class SalesController {
   })
   @ApiResponse({ status: 400, description: 'Invalid query parameter' })
   @ApiResponse({ status: 401, description: 'Not authenticated' })
-  async findAll(@Query() query: ListSalesQueryDto) {
-    return this.salesService.findAll(query);
+  @ApiResponse({
+    status: 403,
+    description: '{ message, code: WRONG_BRANCH }: another branch, for staff',
+  })
+  async findAll(
+    @Query() query: ListSalesQueryDto,
+    @CurrentUser() user: AuthenticatedUser,
+  ) {
+    return this.salesService.findAll({
+      ...query,
+      branchId: scopeBranch(user, query.branchId),
+    });
   }
 
   @Get('daily-summary')
   @Roles(UserRole.ADMIN, UserRole.MANAGER, UserRole.CASHIER)
-  @ApiOperation({ summary: 'Daily completed sales overview totals' })
-  async dailySummary(@Query() query: SalesDailySummaryQueryDto) {
-    return this.salesService.dailySummary(query);
+  @ApiOperation({
+    summary: 'Daily completed sales overview totals',
+    description:
+      'One branch (Phase 2 P2-1): staff get their own branch (branchId left ' +
+      'out or their own; another is 403 { code: WRONG_BRANCH }); admins must ' +
+      'give branchId (400 without it).',
+  })
+  @ApiResponse({
+    status: 400,
+    description: 'Invalid dates, or no branchId from an admin',
+  })
+  @ApiResponse({
+    status: 403,
+    description: '{ message, code: WRONG_BRANCH }: another branch, for staff',
+  })
+  async dailySummary(
+    @Query() query: SalesDailySummaryQueryDto,
+    @CurrentUser() user: AuthenticatedUser,
+  ) {
+    const branchId = scopeBranch(user, query.branchId);
+    if (!branchId) {
+      throw new BadRequestException('branchId is required.');
+    }
+    return this.salesService.dailySummary({ ...query, branchId });
   }
 
   @Get(':id')
@@ -95,9 +130,17 @@ export class SalesController {
   @ApiParam({ name: 'id', description: 'Sale UUID', format: 'uuid' })
   @ApiResponse({ status: 200, description: 'Sale found' })
   @ApiResponse({ status: 401, description: 'Not authenticated' })
-  @ApiResponse({ status: 404, description: 'Sale not found' })
-  async findOne(@Param('id', ParseUUIDPipe) id: string) {
-    return this.salesService.findOne(id);
+  @ApiResponse({
+    status: 404,
+    description:
+      'Sale not found; also, for staff, a sale at another branch (Phase 2 ' +
+      'P2-1: the same answer, so its existence is not revealed)',
+  })
+  async findOne(
+    @Param('id', ParseUUIDPipe) id: string,
+    @CurrentUser() user: AuthenticatedUser,
+  ) {
+    return this.salesService.findOne(id, { branchId: scopeBranch(user) });
   }
 
   @Post()

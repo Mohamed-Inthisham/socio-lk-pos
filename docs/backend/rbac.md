@@ -93,9 +93,26 @@ async findOne(
 
 This relies on the DB-level `CHK_users_branch_role` invariant (every non-admin user has a non-null `branch_id` — see [database.md](./database.md)), so the comparison never needs a null-check on `user.branch_id`.
 
+### Branch-scoped reads (Phase 2)
+
+`common/utils/branch-scope.ts` holds the shared rule for reads. The actor is the session user (`request.user`), which `JwtStrategy` re-reads from the database on every request; a `branchId` the client sends is never trusted on its own.
+
+- `scopeBranch(actor, requestedBranchId?)`: the branch a read may cover. Admin: the branch requested, or `undefined` for every branch. Manager / cashier: their own branch, whether `branchId` is left out or is their own; another branch is **403** `{ message: 'You can only access data for your own branch.', code: 'WRONG_BRANCH' }`, never silently replaced. A staff user with no branch is refused too.
+- `assertBranchAccess(actor, branchId)`: 403 `WRONG_BRANCH` unless the actor is an admin or at that branch.
+- **One record at another branch is 404**, the same answer as a missing id, so staff can't learn that it exists: the service looks it up with the staff member's branch in the same query.
+- **Writes keep their existing checks and codes** (`SALE_WRONG_BRANCH`, `VOID_WRONG_BRANCH`, `RETURN_WRONG_BRANCH`, `CASH_DAY_WRONG_BRANCH`, …): a write to another branch's record is still 403.
+
+| Endpoint (P2-1) | Admin | Manager / cashier |
+|---|---|---|
+| `GET /sales` (including a customer's history, `customerId`) | every branch, or `branchId` | own branch; another `branchId` → 403 `WRONG_BRANCH` |
+| `GET /sales/:id` | any sale | own branch's sales; another branch's → 404 |
+| `GET /sales/daily-summary` | `branchId` required (400 without it) | own branch; another `branchId` → 403 `WRONG_BRANCH` |
+
+Customers themselves stay global: every role reads the customer record, but their purchase history follows the sales list's scoping.
+
 ### Where this is headed
 
-`GET /branches/:id` is the first application of this pattern, not the only one. Multi-branch launch (R9) will extend the same admin-unrestricted / staff-scoped-to-own-branch check across other branch-owned entities and their **list** endpoints (`GET /branches`, `GET /products`, `GET /stock`, etc., which remain unscoped for now). See [products.md](./products.md) Future Work.
+The other branch-owned reads are still unscoped and follow in later Phase 2 steps: phone purchases, product units and the sellable-IMEI lookup, and stock. Stock purchases, cash days, the inspection list and approvers were already scoped. Behaviour for a deactivated branch's staff is not yet enforced.
 
 ## Design Choices
 

@@ -823,6 +823,42 @@ describe('SalesService', () => {
       );
     });
 
+    it('with a branch scope (GET /sales/:id for staff), looks the sale up at that branch in the same query', async () => {
+      mockSalesRepo.findOne.mockResolvedValue({ id: 's1', lines: [] });
+
+      await service.findOne('s1', { branchId: 'branch-a' });
+
+      expect(mockSalesRepo.findOne).toHaveBeenCalledTimes(1);
+      expect(mockSalesRepo.findOne).toHaveBeenCalledWith(
+        expect.objectContaining({ where: { id: 's1', branch_id: 'branch-a' } }),
+      );
+    });
+
+    it('answers a sale at another branch exactly as a missing one: 404 Sale not found', async () => {
+      // The scoped query finds nothing for a sale at another branch.
+      mockSalesRepo.findOne.mockResolvedValue(null);
+      const otherBranch = await service
+        .findOne('s-other', { branchId: 'branch-a' })
+        .catch((e: unknown) => e);
+      const missing = await service.findOne('missing').catch((e: unknown) => e);
+
+      expect(otherBranch).toBeInstanceOf(NotFoundException);
+      expect((otherBranch as NotFoundException).getResponse()).toEqual(
+        (missing as NotFoundException).getResponse(),
+      );
+    });
+
+    it('with no scope or an admin’s empty one, looks the sale up by id only (internal callers)', async () => {
+      mockSalesRepo.findOne.mockResolvedValue({ id: 's1', lines: [] });
+
+      await service.findOne('s1');
+      await service.findOne('s1', { branchId: undefined });
+
+      for (const [options] of mockSalesRepo.findOne.mock.calls) {
+        expect((options as { where: object }).where).toEqual({ id: 's1' });
+      }
+    });
+
     it('attaches returns, naming approver and requester by id and full_name only (P7-18)', async () => {
       mockSalesRepo.findOne.mockResolvedValue({ id: 's1', lines: [] });
       mockSaleReturnsQueryBuilder.getMany.mockResolvedValue([

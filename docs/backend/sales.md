@@ -423,8 +423,9 @@ All endpoints are prefixed with `/api/v1` and require authentication via the `ac
 
 | Method | Path | Role | Purpose |
 |--------|------|------|---------|
-| GET | `/sales` | any | List sales (paginated, filterable by branch/cashier/status/date range). Rows carry branch, cashier and customer (soft-deleted included). Phase 6.4 P6 adds `completedFrom` / `completedTo` (inclusive / exclusive on `completed_at`; a timestamp with a time and an offset, date-only is a 400; excludes drafts), `sort=completed_at` (newest first, drafts last, ties by `created_at`) and `q` (sale number, customer name or phone by case-insensitive substring, or an exact IMEI on a sale line or a trade-in payment; 2–100 characters). IMEI matches are EXISTS subqueries, so a sale appears once however many of its lines match. Phase 6.4 P7: each row gains `return_state` (`NONE` / `PARTIAL` / `FULL`) and `refunded_total`, and `q` also matches `RET-` numbers ([returns.md](./returns.md)) |
-| GET | `/sales/:id` | any | Get one sale with nested branch, cashier, customer, voider (soft-deleted included), lines (each with `returned_quantity`), payments, and `returns[]` (Phase 6.4 P7; approver and requester as `{ id, full_name }` only) |
+| GET | `/sales` | any | List sales (paginated, filterable by branch/cashier/status/date range). Rows carry branch, cashier and customer (soft-deleted included). Phase 6.4 P6 adds `completedFrom` / `completedTo` (inclusive / exclusive on `completed_at`; a timestamp with a time and an offset, date-only is a 400; excludes drafts), `sort=completed_at` (newest first, drafts last, ties by `created_at`) and `q` (sale number, customer name or phone by case-insensitive substring, or an exact IMEI on a sale line or a trade-in payment; 2–100 characters). IMEI matches are EXISTS subqueries, so a sale appears once however many of its lines match. Phase 6.4 P7: each row gains `return_state` (`NONE` / `PARTIAL` / `FULL`) and `refunded_total`, and `q` also matches `RET-` numbers ([returns.md](./returns.md)). **Branch-scoped (Phase 2 P2-1):** admins see every branch, or the one in `branchId`; managers and cashiers see only their own branch (`branchId` left out or their own), and another `branchId` is 403 `{ code: 'WRONG_BRANCH' }`. This also scopes a customer's purchase history (`customerId`): staff see only their branch's sales to that customer |
+| GET | `/sales/:id` | any | Get one sale with nested branch, cashier, customer, voider (soft-deleted included), lines (each with `returned_quantity`), payments, and `returns[]` (Phase 6.4 P7; approver and requester as `{ id, full_name }` only). **Branch-scoped (P2-1):** for a manager or cashier, a sale at another branch is 404 `Sale not found`, the same answer as a missing id, so its existence isn't revealed |
+| GET | `/sales/daily-summary` | any | One branch's totals for a Colombo date range (`from`, `to`). **Branch-scoped (P2-1):** staff get their own branch (`branchId` left out or their own; another is 403 `WRONG_BRANCH`); admins must give `branchId` (400 without it) |
 | POST | `/sales` | any | Create a DRAFT sale (empty cart) |
 | PATCH | `/sales/:id` | any | Update DRAFT sale (notes, customer_id only) |
 | DELETE | `/sales/:id` | any | Discard an unpaid DRAFT sale (hard delete; its lines cascade). 400 if it isn't DRAFT, 409 `DRAFT_HAS_PAYMENTS` if it has any payment; audited as `DRAFT_DISCARDED` (#75) |
@@ -458,7 +459,8 @@ All endpoints are prefixed with `/api/v1` and require authentication via the `ac
 
 | Operation | Admin | Manager | Cashier |
 |-----------|:-----:|:-------:|:-------:|
-| Read (any sale, supplier, line, payment) | ✅ | ✅ | ✅ |
+| Read sales, lines, payments and the daily summary (managers and cashiers: own branch only, P2-1) | ✅ | ✅ | ✅ |
+| Read suppliers | ✅ | ✅ | ✅ |
 | Read supplier sales-count | ✅ | ❌ | ❌ |
 | Create/update/deactivate suppliers | ✅ | ❌ | ❌ |
 | Create/update/delete DRAFT sales | ✅ | ✅ | ✅ |
@@ -472,7 +474,7 @@ All endpoints are prefixed with `/api/v1` and require authentication via the `ac
 Two design intentions codified in the matrix:
 
 - **Cashiers can do the routine day-to-day**: build carts, take payments, complete sales. They cannot manage suppliers (admin-only), and they void only with a manager's PIN entered at the till (Phase 6.4 P6-17; before that, cashiers could not void at all).
-- **Multi-branch scoping is deferred**: today, all reads are unscoped by branch. When multi-branch launch happens (planned R9), staff will see only their own branch's sales by default.
+- **Sales reads are branch-scoped** (Phase 2 P2-1): staff see only their own branch's sales, sale details and daily summary; admins see every branch. Writes keep their own checks (`SaleBranchGuard`: 403 `SALE_WRONG_BRANCH`; void and return codes). See [rbac.md](./rbac.md#branch-scoping).
 
 ## Migration Notes
 

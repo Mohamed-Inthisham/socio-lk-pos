@@ -34,9 +34,11 @@ export type SaleListSort = (typeof SALE_LIST_SORTS)[number];
  * Extends PaginationQueryDto → gets page + limit for free.
  *
  * All filters optional and combined with AND. If none are provided,
- * returns the most recent page across all sales the caller can see. (In
- * R1 that's every sale since there's no branch scoping. Multi-branch list
- * scoping is a tracked followup for R9.)
+ * returns the most recent page across all sales the caller can see.
+ * (Branch scoping, Phase 2 P2-1: admins see every branch, or the one in
+ * branchId; managers and cashiers see only their own branch, and a
+ * branchId for another branch is 403 WRONG_BRANCH. SalesController
+ * resolves branchId before the service runs.)
  *
  * from/to are ISO date strings — YYYY-MM-DD or full timestamps both work.
  * The service converts them to inclusive-start / exclusive-end bounds:
