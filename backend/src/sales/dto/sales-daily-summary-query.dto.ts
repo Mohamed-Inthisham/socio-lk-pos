@@ -1,10 +1,15 @@
-import { ApiProperty } from '@nestjs/swagger';
-import { IsDateString, IsUUID, Matches } from 'class-validator';
+import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
+import { IsDateString, IsOptional, IsUUID, Matches } from 'class-validator';
 
 export class SalesDailySummaryQueryDto {
-  @ApiProperty({ format: 'uuid' })
+  @ApiPropertyOptional({
+    format: 'uuid',
+    description:
+      'Staff: their own branch when left out; admins must give it (Phase 2 P2-1)',
+  })
+  @IsOptional()
   @IsUUID()
-  branchId!: string;
+  branchId?: string;
 
   @ApiProperty({ example: '2026-10-01', description: 'Inclusive start of the Colombo date range' })
   @IsDateString({ strict: true })

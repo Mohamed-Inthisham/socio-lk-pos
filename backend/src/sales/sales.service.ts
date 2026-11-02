@@ -531,10 +531,21 @@ export class SalesService {
    * returned_quantity column.
    *
    * Throws 404 if the sale doesn't exist.
+   *
+   * scope.branchId (Phase 2 P2-1): only GET /sales/:id passes it, for a
+   * manager or cashier: a sale at another branch is then not found, the
+   * same 404 as a missing id. Internal callers (after a change, a void or
+   * a return, all already branch-checked) pass no scope.
    */
-  async findOne(id: string): Promise<SaleWithReturns> {
+  async findOne(
+    id: string,
+    scope?: { branchId?: string },
+  ): Promise<SaleWithReturns> {
     const sale = await this.salesRepository.findOne({
-      where: { id },
+      where: {
+        id,
+        ...(scope?.branchId !== undefined && { branch_id: scope.branchId }),
+      },
       // payments.trade_in_product: TRADE_IN rows show the traded-in
       // phone's product name (POS payments list, sale detail).
       // voider: who approved the void of a VOIDED sale (sale detail,
