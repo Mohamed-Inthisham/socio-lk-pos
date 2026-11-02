@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
-import { useNavigate, useParams } from "react-router-dom";
+import { useLocation, useNavigate, useParams } from "react-router-dom";
 import { ArrowLeft, Building2, CalendarDays, Plus, Truck } from "lucide-react";
 import Button from "../../components/common/Button";
 import {
@@ -24,6 +24,10 @@ const formatMethod = (method) => ({
 
 export default function StockPurchaseDetail() {
   const navigate = useNavigate();
+  const location = useLocation();
+  // Set by StockPurchaseCreate when the server answered 200: the purchase
+  // had already been recorded with this page visit's request id (T1c).
+  const alreadyRecorded = location.state?.alreadyRecorded === true;
   const { id } = useParams();
   const [purchase, setPurchase] = useState(null);
   const [status, setStatus] = useState("loading");
@@ -70,6 +74,7 @@ export default function StockPurchaseDetail() {
   return (
     <div className="mx-auto max-w-5xl space-y-5 p-4 sm:p-6">
       <Button variant="secondary" icon={ArrowLeft} label="Purchase history" onClick={() => navigate("/stock-purchases")} />
+      {alreadyRecorded && <div role="status" className="rounded-xl border border-cyan-200 bg-cyan-50 p-4 text-sm text-cyan-900 dark:border-cyan-900 dark:bg-cyan-950/30 dark:text-cyan-200">This purchase was already recorded. Showing the existing purchase.</div>}
       <header className="flex flex-wrap items-end justify-between gap-4">
         <div>
           <p className="text-sm text-slate-500">Stock purchase</p>

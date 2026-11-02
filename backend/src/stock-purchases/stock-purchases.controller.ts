@@ -2,11 +2,15 @@ import {
   Body,
   Controller,
   Get,
+  HttpStatus,
+  Ip,
   Param,
   Patch,
   ParseUUIDPipe,
   Post,
+  Res,
 } from '@nestjs/common';
+import type { Response } from 'express';
 import {
   ApiCookieAuth,
   ApiOperation,
@@ -78,21 +82,37 @@ export class StockPurchasesController {
 
   @Post()
   @Roles(UserRole.ADMIN, UserRole.MANAGER)
-  @Auditable('StockPurchase', AuditAction.CREATE)
   @ApiOperation({
     summary: 'Record a stock purchase and receive it into a branch',
     description:
-      'Atomically records supplier cost, updates branch stock, creates one unit record per supplied IMEI or serial number, and optionally records an initial supplier payment. Cheques remain pending until cleared.',
+      'Atomically records supplier cost, updates branch stock, creates one unit record per supplied IMEI or serial number, and optionally records an initial supplier payment. Cheques remain pending until cleared.\n\n' +
+      'client_request_id (Phase 1 T1c): a resend from the same user gets the recorded purchase back with 200; ' +
+      'its body is ignored. From another user: 409 CLIENT_REQUEST_ID_CONFLICT. The CREATE audit row is written ' +
+      'in the purchase transaction, once.',
   })
   @ApiResponse({ status: 201, description: 'Stock purchase recorded and stock received.' })
+  @ApiResponse({
+    status: 200,
+    description:
+      'An accepted resend: the purchase already recorded with this client_request_id.',
+  })
   @ApiResponse({ status: 400, description: 'Invalid or inactive supplier, branch, product, quantity, or identifier count.' })
   @ApiResponse({ status: 403, description: 'Manager attempted to receive stock at another branch.' })
-  @ApiResponse({ status: 409, description: 'An identifier is already assigned to a live product unit.' })
+  @ApiResponse({
+    status: 409,
+    description:
+      'An identifier is already assigned to a live product unit; or { message, code: CLIENT_REQUEST_ID_CONFLICT }: ' +
+      "the client_request_id is another user's purchase.",
+  })
   async create(
     @Body() dto: CreateStockPurchaseDto,
     @CurrentUser() user: AuthenticatedUser,
+    @Ip() ip: string,
+    @Res({ passthrough: true }) res: Response,
   ) {
-    return this.service.create(dto, user);
+    const result = await this.service.create(dto, user, ip);
+    if (!result.created) res.status(HttpStatus.OK);
+    return result.purchase;
   }
 
   @Post(':id/payments')

@@ -68,6 +68,45 @@ showed the user. If the stock changed meanwhile, the answer is
 current_quantity }` and nothing is written. Changing only `min_quantity` or
 `manage_stock` records no movement.
 
+## Duplicate purchase submissions
+
+A resent stock purchase must not receive its stock twice. The ledger can't
+catch it: each purchase line is a new `STOCK_PURCHASE_ITEM` reference, so a
+second purchase writes legitimate-looking `PURCHASE` movements. The purchase
+itself is made idempotent instead (Phase 1 T1c).
+
+- **One id per submission.** `POST /stock-purchases` requires
+  `client_request_id` (a UUID), stored on the purchase under
+  `UQ_stock_purchases_client_request_id`. Purchases recorded before T1c have
+  none.
+- **201 or 200.** A new id records the purchase: **201**. An id already
+  recorded by the same user returns that purchase unchanged: **200**, whatever
+  the rest of the body, and nothing is written. Another user's id is **409**
+  `CLIENT_REQUEST_ID_CONFLICT`, saying nothing about that purchase.
+- **Claim first.** In `StockPurchasesService.create`, the purchase row
+  carrying the id is the transaction's first write: after the checks that only
+  read, before the serial-number advisory locks, the live-identifier check,
+  `ensureStockRows` and the stock locks. Lines, units, stock (with its
+  movements), the first payment and the CREATE audit row all follow in the
+  same transaction.
+- **Simultaneous resends.** A resend that arrives while the first request is
+  still running inserts the same id and waits on the unique index, holding no
+  lock. If the first commits, the resend gets the unique violation, rolls back
+  and is answered from the recorded purchase (200, or 409 for another user).
+  If the first rolls back, its claim goes with it and the resend proceeds.
+  A resend whose read-only checks fail before it reaches the claim (a product
+  deactivated in between, say) gets that error instead; accepted.
+- **Failures release the id.** A purchase refused after its claim (an IMEI
+  already in stock, a total too large) rolls everything back, the claim
+  included: the same id can be sent again once the problem is fixed.
+- **The page keeps its id.** `StockPurchaseCreate` makes the id at the first
+  submit and keeps it for the whole visit, through errors, lost responses and
+  edits. Leaving the page ends the visit, so the next purchase gets a new id.
+  On a 200 the purchase page opens with "This purchase was already recorded.
+  Showing the existing purchase."
+
+`POST /stock-purchases/:id/payments` has no such id yet (FOLLOWUPS).
+
 ## Opening balances and deployment
 
 Migration `1793600000000-BackfillStockOpeningBalances` writes one

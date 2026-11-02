@@ -1,6 +1,7 @@
 import { BadRequestException, ConflictException } from '@nestjs/common';
 import { Test, TestingModule } from '@nestjs/testing';
 import { getDataSourceToken, getRepositoryToken } from '@nestjs/typeorm';
+import { QueryFailedError } from 'typeorm';
 import { StockPurchasesService } from './stock-purchases.service';
 import { StockPurchase } from './entities/stock-purchase.entity';
 import { StockService } from '../stock/stock.service';
@@ -16,6 +17,7 @@ import { ProductUnitStatus } from '../product-units/enums/product-unit-status.en
 import { TrackingMethod } from '../products/enums/tracking-method.enum';
 import { UserRole } from '../users/enums/user-role.enum';
 import { CreateStockPurchaseDto } from './dto/create-stock-purchase.dto';
+import { AuditAction } from '../audit-log/enums/audit-action.enum';
 
 jest.mock('../stock/lock-inventory-rows');
 
@@ -27,7 +29,9 @@ const ADVISORY_SQL =
  * in (T0). Serial-number advisory locks, in product order; then the
  * missing Stock rows are created and every Stock row locked, through
  * ensureStockRows and lockInventoryRows (whose own sorting is tested in
- * lock-inventory-rows.spec.ts); all after the identifier checks.
+ * lock-inventory-rows.spec.ts); all after the identifier checks. The
+ * purchase row (the T1c claim) is written before every one of them; its
+ * lines, units and stock only after the Stock rows are locked.
  */
 describe('StockPurchasesService (inventory lock order)', () => {
   let service: StockPurchasesService;
@@ -63,14 +67,20 @@ describe('StockPurchasesService (inventory lock order)', () => {
   };
   const [HUB, POWER_BANK, CABLE] = Object.keys(products);
 
+  const mockAuditSave = jest.fn();
   const mockManager = {
     findOne: jest.fn(),
     query: jest.fn(),
     create: jest.fn(),
+    insert: jest.fn(),
     save: jest.fn(),
     update: jest.fn(),
+    getRepository: jest.fn(() => ({ save: mockAuditSave })),
   };
+  // Outside the transaction: the client_request_id lookups.
+  const mockOuterManager = { findOne: jest.fn() };
   const mockDataSource = {
+    manager: mockOuterManager,
     transaction: jest.fn((cb: (m: typeof mockManager) => unknown) =>
       cb(mockManager),
     ),
@@ -78,7 +88,13 @@ describe('StockPurchasesService (inventory lock order)', () => {
   const mockRepository = { findOne: jest.fn() };
   const mockStockService = { receivePurchase: jest.fn() };
 
-  const admin = { id: 'admin-1', role: UserRole.ADMIN, branch_id: null };
+  const admin = {
+    id: 'admin-1',
+    full_name: 'Shop Admin',
+    role: UserRole.ADMIN,
+    branch_id: null,
+  };
+  const REQUEST_ID = 'dddddddd-0000-4000-8000-000000000004';
 
   const serialItem = (productId: string, serial: string) => ({
     product_id: productId,
@@ -97,6 +113,7 @@ describe('StockPurchasesService (inventory lock order)', () => {
     supplier_id: 'supplier-1',
     branch_id: 'branch-1',
     items,
+    client_request_id: REQUEST_ID,
   });
 
   beforeEach(async () => {
@@ -120,7 +137,11 @@ describe('StockPurchasesService (inventory lock order)', () => {
     mockManager.save.mockImplementation((data: object) =>
       Promise.resolve(data),
     );
+    mockManager.insert.mockResolvedValue(undefined);
     mockManager.update.mockResolvedValue(undefined);
+    mockAuditSave.mockResolvedValue(undefined);
+    // A new client_request_id: nothing recorded with it yet.
+    mockOuterManager.findOne.mockResolvedValue(null);
     mockStockService.receivePurchase.mockResolvedValue(undefined);
     mockRepository.findOne.mockResolvedValue({
       id: 'purchase-1',
@@ -209,13 +230,66 @@ describe('StockPurchasesService (inventory lock order)', () => {
       expect(advisory).toBeLessThan(ensureOrder);
     }
     expect(ensureOrder).toBeLessThan(lockOrder);
-    // Before anything is written or any stock is added.
-    expect(lockOrder).toBeLessThan(
-      mockManager.save.mock.invocationCallOrder[0],
+    // Only the purchase row (the T1c claim) is written before the locks;
+    // its lines, units and stock (with the ledger) come after them.
+    expect(mockManager.insert.mock.invocationCallOrder[0]).toBeLessThan(
+      ensureOrder,
     );
-    expect(lockOrder).toBeLessThan(
-      mockStockService.receivePurchase.mock.invocationCallOrder[0],
+    for (const save of mockManager.save.mock.invocationCallOrder) {
+      expect(lockOrder).toBeLessThan(save);
+    }
+    for (const receive of mockStockService.receivePurchase.mock
+      .invocationCallOrder) {
+      expect(lockOrder).toBeLessThan(receive);
+    }
+  });
+
+  it('writes the purchase row (the T1c claim) first: before any advisory lock, live-identifier check or Stock row', async () => {
+    await service.create(
+      purchaseOf([
+        serialItem(POWER_BANK, 'SN-PB-1'),
+        cableItem,
+        serialItem(HUB, 'SN-HUB-1'),
+      ]),
+      admin,
     );
+
+    expect(mockManager.insert).toHaveBeenCalledTimes(1);
+    expect(mockManager.insert).toHaveBeenCalledWith(
+      StockPurchase,
+      expect.objectContaining({
+        supplier_id: 'supplier-1',
+        branch_id: 'branch-1',
+        created_by_id: 'admin-1',
+        total_amount: '0.00',
+        client_request_id: REQUEST_ID,
+      }),
+    );
+    const claim = mockManager.insert.mock.invocationCallOrder[0];
+    const advisories = advisoryCallOrders();
+    expect(advisories).toHaveLength(2);
+    for (const advisory of advisories) {
+      expect(claim).toBeLessThan(advisory);
+    }
+    const liveCheck = mockManager.findOne.mock.calls.findIndex(
+      ([entity]) => entity === ProductUnit,
+    );
+    expect(claim).toBeLessThan(
+      mockManager.findOne.mock.invocationCallOrder[liveCheck],
+    );
+    expect(claim).toBeLessThan(
+      jest.mocked(ensureStockRows).mock.invocationCallOrder[0],
+    );
+    expect(claim).toBeLessThan(
+      jest.mocked(lockInventoryRows).mock.invocationCallOrder[0],
+    );
+    // Nothing else is written before it.
+    for (const write of [
+      ...mockManager.save.mock.invocationCallOrder,
+      ...mockManager.update.mock.invocationCallOrder,
+    ]) {
+      expect(claim).toBeLessThan(write);
+    }
   });
 
   it('checks for live identifiers before creating or locking any Stock row', async () => {
@@ -288,5 +362,201 @@ describe('StockPurchasesService (inventory lock order)', () => {
     ).rejects.toThrow(ConflictException);
     expect(ensureStockRows).not.toHaveBeenCalled();
     expect(lockInventoryRows).not.toHaveBeenCalled();
+  });
+
+  /**
+   * client_request_id (Phase 1 T1c): a resend by the same user is answered
+   * from the recorded purchase, without a transaction; anyone else's id is
+   * 409; a clash on the claim (a resend sent at the same moment) is
+   * answered the same way once the other request has committed.
+   */
+  describe('client_request_id (T1c)', () => {
+    const recordedPurchase = {
+      id: 'purchase-1',
+      branch_id: 'branch-1',
+    };
+    const claimClash = () =>
+      new QueryFailedError('INSERT', [], {
+        code: '23505',
+        constraint: 'UQ_stock_purchases_client_request_id',
+      } as unknown as Error);
+    const conflictBody = async (promise: Promise<unknown>) => {
+      const err = (await promise.catch((e: unknown) => e)) as ConflictException;
+      expect(err).toBeInstanceOf(ConflictException);
+      return err.getResponse();
+    };
+
+    it('records a new purchase: created, one CREATE audit row written in the transaction, after the stock', async () => {
+      const result = await service.create(
+        purchaseOf([serialItem(HUB, 'SN-HUB-1'), cableItem]),
+        admin,
+        '10.0.0.7',
+      );
+
+      expect(result.created).toBe(true);
+      expect(result.purchase).toEqual(recordedPurchase);
+      const [[, claimed]] = mockManager.insert.mock.calls as [
+        unknown,
+        { id: string },
+      ][];
+      const id = claimed.id;
+      expect(mockRepository.findOne).toHaveBeenCalledWith(
+        expect.objectContaining({ where: { id } }),
+      );
+      expect(mockOuterManager.findOne).toHaveBeenCalledWith(StockPurchase, {
+        where: { client_request_id: REQUEST_ID },
+        select: { id: true, created_by_id: true },
+      });
+
+      expect(mockAuditSave).toHaveBeenCalledTimes(1);
+      expect(mockAuditSave).toHaveBeenCalledWith(
+        expect.objectContaining({
+          user_id: 'admin-1',
+          user_name: 'Shop Admin',
+          action: AuditAction.CREATE,
+          entity_type: 'StockPurchase',
+          entity_id: id,
+          ip_address: '10.0.0.7',
+          changes: {
+            total_amount: { old: null, new: '500.00' },
+            initial_payment: { old: null, new: null },
+          },
+        }),
+      );
+      // Through the transaction's manager, after the last stock change.
+      expect(mockManager.getRepository).toHaveBeenCalled();
+      const receives =
+        mockStockService.receivePurchase.mock.invocationCallOrder;
+      expect(mockAuditSave.mock.invocationCallOrder[0]).toBeGreaterThan(
+        receives[receives.length - 1],
+      );
+    });
+
+    it('records the initial payment amount in the CREATE audit row', async () => {
+      await service.create(
+        {
+          ...purchaseOf([cableItem]),
+          initial_payment: { amount: '150', method: 'CASH' } as never,
+        },
+        admin,
+      );
+
+      expect(mockAuditSave).toHaveBeenCalledWith(
+        expect.objectContaining({
+          changes: {
+            total_amount: { old: null, new: '400.00' },
+            initial_payment: { old: null, new: '150.00' },
+          },
+        }),
+      );
+    });
+
+    it("replays the same user's recorded purchase without a transaction, whatever the body", async () => {
+      mockOuterManager.findOne.mockResolvedValue({
+        id: 'purchase-1',
+        created_by_id: 'admin-1',
+      });
+      // Even a body that would now fail validation: a replay doesn't check it.
+      products[HUB].is_active = false;
+      try {
+        const result = await service.create(
+          purchaseOf([serialItem(HUB, 'SN-OTHER')]),
+          admin,
+        );
+
+        expect(result).toEqual({ created: false, purchase: recordedPurchase });
+        expect(mockRepository.findOne).toHaveBeenCalledWith(
+          expect.objectContaining({ where: { id: 'purchase-1' } }),
+        );
+      } finally {
+        products[HUB].is_active = true;
+      }
+      expect(mockDataSource.transaction).not.toHaveBeenCalled();
+      expect(mockManager.insert).not.toHaveBeenCalled();
+      expect(mockStockService.receivePurchase).not.toHaveBeenCalled();
+      expect(mockAuditSave).not.toHaveBeenCalled();
+    });
+
+    it("answers another user's request id with 409 CLIENT_REQUEST_ID_CONFLICT, revealing nothing", async () => {
+      mockOuterManager.findOne.mockResolvedValue({
+        id: 'purchase-1',
+        created_by_id: 'manager-2',
+      });
+
+      const body = await conflictBody(
+        service.create(purchaseOf([cableItem]), admin),
+      );
+
+      expect(body).toEqual({
+        message:
+          'This request id was already used for another purchase. ' +
+          'Start the purchase again.',
+        code: 'CLIENT_REQUEST_ID_CONFLICT',
+      });
+      expect(mockDataSource.transaction).not.toHaveBeenCalled();
+      expect(mockRepository.findOne).not.toHaveBeenCalled();
+      expect(mockAuditSave).not.toHaveBeenCalled();
+    });
+
+    it('answers a clash on the claim from the purchase the other request committed', async () => {
+      mockOuterManager.findOne
+        .mockResolvedValueOnce(null)
+        .mockResolvedValueOnce({ id: 'purchase-1', created_by_id: 'admin-1' });
+      mockManager.insert.mockRejectedValueOnce(claimClash());
+
+      const result = await service.create(purchaseOf([cableItem]), admin);
+
+      expect(result).toEqual({ created: false, purchase: recordedPurchase });
+      expect(mockOuterManager.findOne).toHaveBeenCalledTimes(2);
+      // The clash stops it at the claim: no lock, no stock, no audit row.
+      expect(advisoryCallOrders()).toEqual([]);
+      expect(ensureStockRows).not.toHaveBeenCalled();
+      expect(lockInventoryRows).not.toHaveBeenCalled();
+      expect(mockStockService.receivePurchase).not.toHaveBeenCalled();
+      expect(mockAuditSave).not.toHaveBeenCalled();
+    });
+
+    it("answers a clash with another user's committed purchase with 409", async () => {
+      mockOuterManager.findOne
+        .mockResolvedValueOnce(null)
+        .mockResolvedValueOnce({
+          id: 'purchase-1',
+          created_by_id: 'manager-2',
+        });
+      mockManager.insert.mockRejectedValueOnce(claimClash());
+
+      const body = await conflictBody(
+        service.create(purchaseOf([cableItem]), admin),
+      );
+
+      expect(body).toEqual(
+        expect.objectContaining({ code: 'CLIENT_REQUEST_ID_CONFLICT' }),
+      );
+      expect(mockRepository.findOne).not.toHaveBeenCalled();
+    });
+
+    it('rethrows any other unique violation unchanged, without a second lookup', async () => {
+      const unitClash = new QueryFailedError('INSERT', [], {
+        code: '23505',
+        constraint: 'UQ_stock_purchase_items_product',
+      } as unknown as Error);
+      mockManager.save.mockRejectedValueOnce(unitClash);
+
+      await expect(service.create(purchaseOf([cableItem]), admin)).rejects.toBe(
+        unitClash,
+      );
+      expect(mockOuterManager.findOne).toHaveBeenCalledTimes(1);
+      expect(mockAuditSave).not.toHaveBeenCalled();
+    });
+
+    it('rethrows the clash if no purchase is found for it', async () => {
+      const clash = claimClash();
+      mockManager.insert.mockRejectedValueOnce(clash);
+
+      await expect(service.create(purchaseOf([cableItem]), admin)).rejects.toBe(
+        clash,
+      );
+      expect(mockOuterManager.findOne).toHaveBeenCalledTimes(2);
+    });
   });
 });

@@ -6,6 +6,7 @@ import {
   ManyToOne,
   OneToMany,
   PrimaryGeneratedColumn,
+  Unique,
 } from 'typeorm';
 import { Branch } from '../../branches/entities/branch.entity';
 import { Supplier } from '../../suppliers/entities/supplier.entity';
@@ -13,7 +14,13 @@ import { User } from '../../users/entities/user.entity';
 import { StockPurchaseItem } from './stock-purchase-item.entity';
 import { StockPurchasePayment } from './stock-purchase-payment.entity';
 
+/**
+ * client_request_id is the stock purchase page's id for one submission
+ * (Phase 1 T1c): unique, so a resend finds the recorded purchase instead of
+ * receiving the stock again. NULL on purchases recorded before T1c.
+ */
 @Entity('stock_purchases')
+@Unique('UQ_stock_purchases_client_request_id', ['client_request_id'])
 export class StockPurchase {
   @PrimaryGeneratedColumn('uuid')
   id!: string;
@@ -58,6 +65,9 @@ export class StockPurchase {
 
   @Column({ type: 'text', nullable: true })
   notes!: string | null;
+
+  @Column({ type: 'uuid', name: 'client_request_id', nullable: true })
+  client_request_id!: string | null;
 
   @OneToMany(() => StockPurchaseItem, (item) => item.purchase)
   items!: StockPurchaseItem[];
