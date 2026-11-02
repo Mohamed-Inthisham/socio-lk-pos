@@ -7,7 +7,15 @@ import {
 } from '@nestjs/common';
 import { InjectDataSource, InjectRepository } from '@nestjs/typeorm';
 import { randomUUID } from 'crypto';
-import { DataSource, EntityManager, In, Repository } from 'typeorm';
+import {
+  DataSource,
+  EntityManager,
+  In,
+  QueryFailedError,
+  Repository,
+} from 'typeorm';
+import { AuditAction } from '../audit-log/enums/audit-action.enum';
+import { writeAuditEntry } from '../audit-log/utils/write-audit-entry';
 import { Branch } from '../branches/entities/branch.entity';
 import { Product } from '../products/entities/product.entity';
 import { TrackingMethod } from '../products/enums/tracking-method.enum';
@@ -45,6 +53,21 @@ const PURCHASE_RELATIONS = [
 ] as const;
 const MAX_QUANTITY = 1_000_000;
 const MAX_PURCHASE_TOTAL_CENTS = 99_999_999_999_999;
+const CLIENT_REQUEST_ID_KEY = 'UQ_stock_purchases_client_request_id';
+
+/** True only for a clash on the purchase page's client_request_id (T1c). */
+const isClientRequestIdClash = (err: unknown): boolean =>
+  err instanceof QueryFailedError &&
+  (err.driverError as { constraint?: string }).constraint ===
+    CLIENT_REQUEST_ID_KEY;
+
+/** The session user recording a purchase (AuthenticatedUser has these). */
+type PurchaseActor = {
+  id: string;
+  full_name: string;
+  role: UserRole;
+  branch_id: string | null;
+};
 
 const amountToCents = (value: string): number => {
   if (!/^\d{1,8}(\.\d{1,2})?$/.test(value)) {
@@ -104,238 +127,325 @@ export class StockPurchasesService {
     private readonly stockService: StockService,
   ) {}
 
+  /**
+   * POST /stock-purchases. client_request_id makes a resend safe (Phase 1
+   * T1c): a purchase already recorded with it is returned (created false,
+   * 200) when it is this user's, whatever the rest of the body, and is 409
+   * CLIENT_REQUEST_ID_CONFLICT otherwise.
+   *
+   * The purchase row, carrying the id, is the transaction's first write:
+   * after the checks that only read, before any lock. A resend sent while
+   * this one is still running waits on UQ_stock_purchases_client_request_id
+   * holding nothing, then gets the clash once this one commits (and is
+   * answered from the recorded purchase), or goes ahead if it rolls back.
+   */
   async create(
     dto: CreateStockPurchaseDto,
-    actor: { id: string; role: UserRole; branch_id: string | null },
-  ): Promise<StockPurchase> {
+    actor: PurchaseActor,
+    ip: string | null = null,
+  ): Promise<{ created: boolean; purchase: StockPurchase }> {
+    const recorded = await this.findRecorded(dto.client_request_id, actor);
+    if (recorded) return { created: false, purchase: recorded };
+
     const id = randomUUID();
     const purchaseNumber = `SP-${id.slice(0, 8).toUpperCase()}`;
-    await this.dataSource.transaction(async (manager) => {
-      await this.assertBranchAccess(actor, dto.branch_id);
-      const supplier = await manager.findOne(Supplier, {
-        where: { id: dto.supplier_id },
-      });
-      if (!supplier || !supplier.is_active) {
-        throw new BadRequestException('Select an active supplier.');
-      }
-      const branch = await manager.findOne(Branch, {
-        where: { id: dto.branch_id },
-      });
-      if (!branch || !branch.is_active) {
-        throw new BadRequestException('Select an active branch.');
-      }
+    try {
+      await this.dataSource.transaction((manager) =>
+        this.record(manager, id, purchaseNumber, dto, actor, ip),
+      );
+    } catch (err) {
+      if (!isClientRequestIdClash(err)) throw err;
+      // Sent at the same moment: the other request's purchase is committed.
+      const clash = await this.findRecorded(dto.client_request_id, actor);
+      if (!clash) throw err;
+      return { created: false, purchase: clash };
+    }
+    return { created: true, purchase: await this.findOne(id, actor) };
+  }
 
-      const productIds = dto.items.map((item) => item.product_id);
-      if (new Set(productIds).size !== productIds.length) {
-        throw new BadRequestException(
-          'Add each product once. Combine repeated products into one line.',
-        );
-      }
-
-      const products = new Map<string, Product>();
-      for (const item of dto.items) {
-        const product = await manager.findOne(Product, {
-          where: { id: item.product_id },
-          relations: ['category'],
-        });
-        if (!product || !product.is_active) {
-          throw new BadRequestException(
-            `Product ${item.product_id} was not found or is inactive.`,
-          );
-        }
-        if (item.quantity > MAX_QUANTITY) {
-          throw new BadRequestException('A purchase line quantity is too large.');
-        }
-        const pairs = unitIdentifierPairs(item);
-        const imeis = pairs.flatMap((pair) => pair.imei_number ? [pair.imei_number] : []);
-        const trackingMethod =
-          product.tracking_method ??
-          (product.is_serialized
-            ? TrackingMethod.IMEI
-            : TrackingMethod.QUANTITY);
-        if (trackingMethod === TrackingMethod.IMEI) {
-          if (imeis.length !== item.quantity || pairs.some((pair) => !pair.imei_number)) {
-            throw new BadRequestException(
-              `${product.name} needs one IMEI for each of its ${item.quantity} units.`,
-            );
-          }
-        } else if (trackingMethod === TrackingMethod.SERIAL_NUMBER) {
-          if (pairs.length > item.quantity) {
-            throw new BadRequestException(
-              `Identifiers for ${product.name} must not exceed the received quantity.`,
-            );
-          }
-        } else if (pairs.length) {
-          throw new BadRequestException(
-            `${product.name} is set to receive stock without per-unit identifiers.`,
-          );
-        }
-        if (item.unit_selling_price !== undefined) {
-          amountToCents(item.unit_selling_price);
-        }
-        amountToCents(item.unit_buying_price);
-        products.set(product.id, product);
-      }
-
-      this.assertUniqueIdentifiers(dto);
-      await this.assertSerialsNotPreviouslyReceived(manager, dto);
-      const allPairs = dto.items.flatMap((item) => unitIdentifierPairs(item));
-      const allImeis = allPairs.flatMap((pair) => pair.imei_number ? [pair.imei_number] : []);
-      const allSerials = allPairs.flatMap((pair) => pair.serial_number ? [pair.serial_number] : []);
-      const allCodes = [...new Set([...allImeis, ...allSerials])];
-      if (allCodes.length) {
-        const existing = await manager.findOne(ProductUnit, {
-          where: [
-            { imei: In(allCodes), status: In([...LIVE_UNIT_STATUSES]) },
-            { imei_number: In(allCodes), status: In([...LIVE_UNIT_STATUSES]) },
-            { serial_number: In(allCodes), status: In([...LIVE_UNIT_STATUSES]) },
-          ],
-        });
-        if (existing) {
-          throw new ConflictException({
-            message: 'An IMEI or serial number is already recorded on a live unit.',
-            imei: existing.imei_number,
-            serial_number: existing.serial_number,
-            existing_unit: {
-              id: existing.id,
-              product_id: existing.product_id,
-              status: existing.status,
-            },
-          });
-        }
-      }
-
-      // Create any missing stock rows, then lock them, both in the global
-      // lock order (P7-25), so two purchases listing the same products in
-      // a different order can't deadlock.
-      const stockTargets = dto.items.map((item) => ({
-        productId: item.product_id,
-        branchId: dto.branch_id,
-      }));
-      await ensureStockRows(manager, stockTargets);
-      await lockInventoryRows(manager, { stock: stockTargets });
-
-      const purchase = manager.create(StockPurchase, {
-        id,
-        purchase_number: purchaseNumber,
-        supplier_id: dto.supplier_id,
-        branch_id: dto.branch_id,
-        created_by_id: actor.id,
-        purchase_date:
-          dto.purchase_date ??
-          new Intl.DateTimeFormat('en-CA', {
-            timeZone: 'Asia/Colombo',
-            year: 'numeric',
-            month: '2-digit',
-            day: '2-digit',
-          }).format(new Date()),
-        supplier_invoice_number: dto.supplier_invoice_number?.trim() || null,
-        total_amount: '0.00',
-        notes: dto.notes?.trim() || null,
-      });
-      const savedPurchase = await manager.save(purchase);
-      let totalCents = 0;
-
-      for (const item of dto.items) {
-        const product = products.get(item.product_id)!;
-        const unitBuyingCents = amountToCents(item.unit_buying_price);
-        const lineTotalCents = unitBuyingCents * item.quantity;
-        totalCents += lineTotalCents;
-        if (
-          !Number.isSafeInteger(lineTotalCents) ||
-          !Number.isSafeInteger(totalCents) ||
-          totalCents > MAX_PURCHASE_TOTAL_CENTS
-        ) {
-          throw new BadRequestException('The purchase total is too large.');
-        }
-        const unitSellingPrice = item.unit_selling_price ?? product.selling_price;
-        const unitPairs = unitIdentifierPairs(item);
-        const line = manager.create(StockPurchaseItem, {
-          stock_purchase_id: savedPurchase.id,
-          product_id: product.id,
-          product_name_snapshot: product.name,
-          product_sku_snapshot: product.sku,
-          quantity: item.quantity,
-          unit_buying_price: centsToAmount(unitBuyingCents),
-          unit_selling_price:
-            item.unit_selling_price !== undefined
-              ? centsToAmount(amountToCents(item.unit_selling_price))
-              : null,
-          line_total: centsToAmount(lineTotalCents),
-          imei_numbers: unitPairs.flatMap((pair) => pair.imei_number ? [pair.imei_number] : []),
-          serial_numbers: unitPairs.flatMap((pair) => pair.serial_number ? [pair.serial_number] : []),
-        });
-        const savedLine = await manager.save(line);
-
-        // The units first: the ledger's PURCHASE rows reference them.
-        const unitIds: string[] = [];
-        for (const pair of unitPairs) {
-          const legacyIdentifier = pair.imei_number ?? pair.serial_number;
-          if (!legacyIdentifier) continue;
-          const unit = manager.create(ProductUnit, {
-            product_id: product.id,
-            branch_id: dto.branch_id,
-            imei: legacyIdentifier,
-            imei_number: pair.imei_number ?? null,
-            serial_number: pair.serial_number ?? null,
-            status: ProductUnitStatus.IN_STOCK,
-            buying_price: centsToAmount(unitBuyingCents),
-            selling_price: unitSellingPrice,
-            phone_purchase_id: null,
-          });
-          try {
-            unitIds.push((await manager.save(unit)).id);
-          } catch (error) {
-            const detail = error as { code?: string; constraint?: string };
-            if (
-              detail.code === '23505' &&
-              ['uq_product_units_imei_live', 'uq_product_units_imei_number_live', 'uq_product_units_serial_number_live'].includes(detail.constraint ?? '')
-            ) {
-              throw new ConflictException(
-                `Identifier ${legacyIdentifier} is already in stock.`,
-              );
-            }
-            throw error;
-          }
-        }
-
-        await this.stockService.receivePurchase(
-          manager,
-          product.id,
-          dto.branch_id,
-          item.quantity,
-          {
-            type: StockMovementType.PURCHASE,
-            referenceType: StockMovementReferenceType.STOCK_PURCHASE_ITEM,
-            referenceId: savedLine.id,
-            createdById: actor.id,
-            unitIds,
-          },
-        );
-
-        await manager.update(Product, product.id, {
-          buying_price: centsToAmount(unitBuyingCents),
-          ...(item.unit_selling_price !== undefined && {
-            selling_price: centsToAmount(amountToCents(item.unit_selling_price)),
-          }),
-        });
-      }
-
-      await manager.update(StockPurchase, savedPurchase.id, {
-        total_amount: centsToAmount(totalCents),
-      });
-      if (dto.initial_payment) {
-        await this.recordPayment(
-          manager,
-          savedPurchase.id,
-          dto.initial_payment,
-          actor.id,
-          totalCents,
-          0,
-        );
-      }
+  /**
+   * The purchase recorded with this client_request_id, if it was this
+   * user's; null when the id is new. Anyone else's is 409, and nothing
+   * about that purchase is revealed.
+   */
+  private async findRecorded(
+    clientRequestId: string,
+    actor: PurchaseActor,
+  ): Promise<StockPurchase | null> {
+    const existing = await this.dataSource.manager.findOne(StockPurchase, {
+      where: { client_request_id: clientRequestId },
+      select: { id: true, created_by_id: true },
     });
-    return this.findOne(id, actor);
+    if (!existing) return null;
+    if (existing.created_by_id !== actor.id) {
+      throw new ConflictException({
+        message:
+          'This request id was already used for another purchase. ' +
+          'Start the purchase again.',
+        code: 'CLIENT_REQUEST_ID_CONFLICT',
+      });
+    }
+    return this.findOne(existing.id, actor);
+  }
+
+  /** create's transaction: everything the purchase writes, or nothing. */
+  private async record(
+    manager: EntityManager,
+    id: string,
+    purchaseNumber: string,
+    dto: CreateStockPurchaseDto,
+    actor: PurchaseActor,
+    ip: string | null,
+  ): Promise<void> {
+    await this.assertBranchAccess(actor, dto.branch_id);
+    const supplier = await manager.findOne(Supplier, {
+      where: { id: dto.supplier_id },
+    });
+    if (!supplier || !supplier.is_active) {
+      throw new BadRequestException('Select an active supplier.');
+    }
+    const branch = await manager.findOne(Branch, {
+      where: { id: dto.branch_id },
+    });
+    if (!branch || !branch.is_active) {
+      throw new BadRequestException('Select an active branch.');
+    }
+
+    const productIds = dto.items.map((item) => item.product_id);
+    if (new Set(productIds).size !== productIds.length) {
+      throw new BadRequestException(
+        'Add each product once. Combine repeated products into one line.',
+      );
+    }
+
+    const products = new Map<string, Product>();
+    for (const item of dto.items) {
+      const product = await manager.findOne(Product, {
+        where: { id: item.product_id },
+        relations: ['category'],
+      });
+      if (!product || !product.is_active) {
+        throw new BadRequestException(
+          `Product ${item.product_id} was not found or is inactive.`,
+        );
+      }
+      if (item.quantity > MAX_QUANTITY) {
+        throw new BadRequestException('A purchase line quantity is too large.');
+      }
+      const pairs = unitIdentifierPairs(item);
+      const imeis = pairs.flatMap((pair) => pair.imei_number ? [pair.imei_number] : []);
+      const trackingMethod =
+        product.tracking_method ??
+        (product.is_serialized
+          ? TrackingMethod.IMEI
+          : TrackingMethod.QUANTITY);
+      if (trackingMethod === TrackingMethod.IMEI) {
+        if (imeis.length !== item.quantity || pairs.some((pair) => !pair.imei_number)) {
+          throw new BadRequestException(
+            `${product.name} needs one IMEI for each of its ${item.quantity} units.`,
+          );
+        }
+      } else if (trackingMethod === TrackingMethod.SERIAL_NUMBER) {
+        if (pairs.length > item.quantity) {
+          throw new BadRequestException(
+            `Identifiers for ${product.name} must not exceed the received quantity.`,
+          );
+        }
+      } else if (pairs.length) {
+        throw new BadRequestException(
+          `${product.name} is set to receive stock without per-unit identifiers.`,
+        );
+      }
+      if (item.unit_selling_price !== undefined) {
+        amountToCents(item.unit_selling_price);
+      }
+      amountToCents(item.unit_buying_price);
+      products.set(product.id, product);
+    }
+
+    this.assertUniqueIdentifiers(dto);
+
+    // The claim (T1c): the first write, before any lock. The total is 0
+    // until the lines are added.
+    await manager.insert(StockPurchase, {
+      id,
+      purchase_number: purchaseNumber,
+      supplier_id: dto.supplier_id,
+      branch_id: dto.branch_id,
+      created_by_id: actor.id,
+      purchase_date:
+        dto.purchase_date ??
+        new Intl.DateTimeFormat('en-CA', {
+          timeZone: 'Asia/Colombo',
+          year: 'numeric',
+          month: '2-digit',
+          day: '2-digit',
+        }).format(new Date()),
+      supplier_invoice_number: dto.supplier_invoice_number?.trim() || null,
+      total_amount: '0.00',
+      notes: dto.notes?.trim() || null,
+      client_request_id: dto.client_request_id,
+    });
+
+    await this.assertSerialsNotPreviouslyReceived(manager, dto);
+    const allPairs = dto.items.flatMap((item) => unitIdentifierPairs(item));
+    const allImeis = allPairs.flatMap((pair) => pair.imei_number ? [pair.imei_number] : []);
+    const allSerials = allPairs.flatMap((pair) => pair.serial_number ? [pair.serial_number] : []);
+    const allCodes = [...new Set([...allImeis, ...allSerials])];
+    if (allCodes.length) {
+      const existing = await manager.findOne(ProductUnit, {
+        where: [
+          { imei: In(allCodes), status: In([...LIVE_UNIT_STATUSES]) },
+          { imei_number: In(allCodes), status: In([...LIVE_UNIT_STATUSES]) },
+          { serial_number: In(allCodes), status: In([...LIVE_UNIT_STATUSES]) },
+        ],
+      });
+      if (existing) {
+        throw new ConflictException({
+          message: 'An IMEI or serial number is already recorded on a live unit.',
+          imei: existing.imei_number,
+          serial_number: existing.serial_number,
+          existing_unit: {
+            id: existing.id,
+            product_id: existing.product_id,
+            status: existing.status,
+          },
+        });
+      }
+    }
+
+    // Create any missing stock rows, then lock them, both in the global
+    // lock order (P7-25), so two purchases listing the same products in
+    // a different order can't deadlock.
+    const stockTargets = dto.items.map((item) => ({
+      productId: item.product_id,
+      branchId: dto.branch_id,
+    }));
+    await ensureStockRows(manager, stockTargets);
+    await lockInventoryRows(manager, { stock: stockTargets });
+
+    let totalCents = 0;
+
+    for (const item of dto.items) {
+      const product = products.get(item.product_id)!;
+      const unitBuyingCents = amountToCents(item.unit_buying_price);
+      const lineTotalCents = unitBuyingCents * item.quantity;
+      totalCents += lineTotalCents;
+      if (
+        !Number.isSafeInteger(lineTotalCents) ||
+        !Number.isSafeInteger(totalCents) ||
+        totalCents > MAX_PURCHASE_TOTAL_CENTS
+      ) {
+        throw new BadRequestException('The purchase total is too large.');
+      }
+      const unitSellingPrice = item.unit_selling_price ?? product.selling_price;
+      const unitPairs = unitIdentifierPairs(item);
+      const line = manager.create(StockPurchaseItem, {
+        stock_purchase_id: id,
+        product_id: product.id,
+        product_name_snapshot: product.name,
+        product_sku_snapshot: product.sku,
+        quantity: item.quantity,
+        unit_buying_price: centsToAmount(unitBuyingCents),
+        unit_selling_price:
+          item.unit_selling_price !== undefined
+            ? centsToAmount(amountToCents(item.unit_selling_price))
+            : null,
+        line_total: centsToAmount(lineTotalCents),
+        imei_numbers: unitPairs.flatMap((pair) => pair.imei_number ? [pair.imei_number] : []),
+        serial_numbers: unitPairs.flatMap((pair) => pair.serial_number ? [pair.serial_number] : []),
+      });
+      const savedLine = await manager.save(line);
+
+      // The units first: the ledger's PURCHASE rows reference them.
+      const unitIds: string[] = [];
+      for (const pair of unitPairs) {
+        const legacyIdentifier = pair.imei_number ?? pair.serial_number;
+        if (!legacyIdentifier) continue;
+        const unit = manager.create(ProductUnit, {
+          product_id: product.id,
+          branch_id: dto.branch_id,
+          imei: legacyIdentifier,
+          imei_number: pair.imei_number ?? null,
+          serial_number: pair.serial_number ?? null,
+          status: ProductUnitStatus.IN_STOCK,
+          buying_price: centsToAmount(unitBuyingCents),
+          selling_price: unitSellingPrice,
+          phone_purchase_id: null,
+        });
+        try {
+          unitIds.push((await manager.save(unit)).id);
+        } catch (error) {
+          const detail = error as { code?: string; constraint?: string };
+          if (
+            detail.code === '23505' &&
+            ['uq_product_units_imei_live', 'uq_product_units_imei_number_live', 'uq_product_units_serial_number_live'].includes(detail.constraint ?? '')
+          ) {
+            throw new ConflictException(
+              `Identifier ${legacyIdentifier} is already in stock.`,
+            );
+          }
+          throw error;
+        }
+      }
+
+      await this.stockService.receivePurchase(
+        manager,
+        product.id,
+        dto.branch_id,
+        item.quantity,
+        {
+          type: StockMovementType.PURCHASE,
+          referenceType: StockMovementReferenceType.STOCK_PURCHASE_ITEM,
+          referenceId: savedLine.id,
+          createdById: actor.id,
+          unitIds,
+        },
+      );
+
+      await manager.update(Product, product.id, {
+        buying_price: centsToAmount(unitBuyingCents),
+        ...(item.unit_selling_price !== undefined && {
+          selling_price: centsToAmount(amountToCents(item.unit_selling_price)),
+        }),
+      });
+    }
+
+    const total = centsToAmount(totalCents);
+    await manager.update(StockPurchase, id, { total_amount: total });
+    if (dto.initial_payment) {
+      await this.recordPayment(
+        manager,
+        id,
+        dto.initial_payment,
+        actor.id,
+        totalCents,
+        0,
+      );
+    }
+
+    // In the transaction, so a replay or a rollback writes none (T1c).
+    const lines = dto.items.length;
+    await writeAuditEntry(manager, {
+      actor,
+      action: AuditAction.CREATE,
+      entityType: 'StockPurchase',
+      entityId: id,
+      description:
+        `Stock purchase ${purchaseNumber} recorded: ${lines} ` +
+        `line${lines === 1 ? '' : 's'}, total LKR ${total}, by ` +
+        `${actor.full_name} (${actor.id}).`,
+      changes: {
+        total_amount: { old: null, new: total },
+        initial_payment: {
+          old: null,
+          new: dto.initial_payment
+            ? centsToAmount(paymentAmountToCents(dto.initial_payment.amount))
+            : null,
+        },
+      },
+      ip,
+    });
   }
 
   async addPayment(

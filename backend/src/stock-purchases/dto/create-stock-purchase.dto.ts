@@ -140,4 +140,14 @@ export class CreateStockPurchaseDto {
   @ValidateNested({ each: true })
   @Type(() => CreateStockPurchaseItemDto)
   items!: CreateStockPurchaseItemDto[];
+
+  @ApiProperty({
+    description:
+      "The purchase page's id for this submission (one per page visit, " +
+      'resent with every attempt, Phase 1 T1c): a resend from the same user ' +
+      'gets the recorded purchase back (200), whatever the rest of the body.',
+    format: 'uuid',
+  })
+  @IsUUID(undefined, { message: 'client_request_id must be a UUID' })
+  client_request_id!: string;
 }

@@ -8,7 +8,7 @@ Audit logs record who did what, to what, and when, across the app. They exist fo
 
 - **Only mutations**: CREATE, UPDATE, DELETE. Reads (GET) are not logged.
 - **Only routes explicitly marked** with `@Auditable(entityType, action)`. Routes without the decorator have zero overhead.
-- **Service-written rows:** this page predates them. Some actions are written by their service with `writeAuditEntry` (`audit-log/utils/write-audit-entry.ts`), inside the action's own transaction, instead of by the interceptor: for example `DAY_OPEN`, `DAY_CLOSE`, `VOID`, `RETURN`, `INSPECTION_PASSED`, the approval-PIN actions and `DRAFT_DISCARDED` (below). Their `action` goes beyond CREATE / UPDATE / DELETE, and their `changes` are whatever the service records, not the interceptor's diff.
+- **Service-written rows:** this page predates them. Some actions are written by their service with `writeAuditEntry` (`audit-log/utils/write-audit-entry.ts`), inside the action's own transaction, instead of by the interceptor: for example `DAY_OPEN`, `DAY_CLOSE`, `VOID`, `RETURN`, `INSPECTION_PASSED`, the approval-PIN actions, `DRAFT_DISCARDED` (below) and a stock purchase's `CREATE` (Phase 1 T1c: written once, in the purchase transaction, so a resent purchase answered 200 adds no row; its `changes` are `total_amount` and `initial_payment`). Their `action` goes beyond CREATE / UPDATE / DELETE, and their `changes` are whatever the service records, not the interceptor's diff.
 
 ## Schema (`audit_logs` table)
 

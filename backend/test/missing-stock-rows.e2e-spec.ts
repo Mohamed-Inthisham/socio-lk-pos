@@ -1,6 +1,7 @@
 import { INestApplication } from '@nestjs/common';
 import request from 'supertest';
 import * as bcrypt from 'bcrypt';
+import { randomUUID } from 'crypto';
 import { DataSource, QueryRunner } from 'typeorm';
 import { createTestApp, truncateAllTables } from './setup';
 import { AuthService } from '../src/auth/auth.service';
@@ -274,6 +275,7 @@ describe('Missing stock rows (e2e)', () => {
         .post('/api/v1/stock-purchases')
         .set('Cookie', ctx.cookies)
         .send({
+          client_request_id: randomUUID(),
           supplier_id: supplier.id,
           branch_id: ctx.branch.id,
           items: products.map((product, index) => ({

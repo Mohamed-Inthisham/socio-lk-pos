@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useDispatch, useSelector } from "react-redux";
 import { useLocation, useNavigate } from "react-router-dom";
 import { ArrowLeft, Plus, Trash2 } from "lucide-react";
@@ -11,6 +11,7 @@ import { listProducts } from "../../services/productsService";
 import { createStockPurchase } from "../../services/stockPurchasesService";
 import { fetchBranches, selectActiveBranches, selectBranchesInitialized } from "../../store/slices/branchesSlice";
 import { formatLKR } from "../../utils/money";
+import { newClientRequestId } from "../../utils/requestId";
 import SupplierFormDialog from "../Suppliers/SupplierFormDialog";
 import ProductCreate from "../ProductCreate";
 
@@ -73,6 +74,11 @@ export default function StockPurchaseCreate() {
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [pageError, setPageError] = useState("");
   const [fieldError, setFieldError] = useState("");
+  // One id per visit to this page (Phase 1 T1c), made at the first submit,
+  // sent with every attempt and never replaced while the page is open: a
+  // retry after an error or a lost response gets the purchase already
+  // recorded instead of a second one.
+  const requestIdRef = useRef(null);
 
   useEffect(() => {
     if (!branchesInitialized) dispatch(fetchBranches());
@@ -206,7 +212,9 @@ export default function StockPurchaseCreate() {
       setFieldError(validationMessage);
       return;
     }
+    requestIdRef.current ??= newClientRequestId();
     const payload = {
+      client_request_id: requestIdRef.current,
       supplier_id: supplierId,
       branch_id: branchId,
       purchase_date: purchaseDate,
@@ -247,8 +255,11 @@ export default function StockPurchaseCreate() {
     };
     setIsSubmitting(true);
     try {
-      const purchase = await createStockPurchase(payload);
-      navigate(`/stock-purchases/${purchase.id}`, { replace: true });
+      const { purchase, resent } = await createStockPurchase(payload);
+      navigate(`/stock-purchases/${purchase.id}`, {
+        replace: true,
+        ...(resent && { state: { alreadyRecorded: true } }),
+      });
     } catch (error) {
       setPageError(error.response?.data?.message || error.message || "Couldn't save this stock purchase.");
       window.scrollTo({ top: 0, behavior: "smooth" });

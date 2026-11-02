@@ -334,6 +334,7 @@ describe('Stock ledger wiring (e2e)', () => {
     }[],
   ) =>
     http('post', '/stock-purchases', ctx.cookies.manager, {
+      client_request_id: randomUUID(),
       supplier_id: ctx.supplier.id,
       branch_id: ctx.branch.id,
       items: items.map((item) => ({
