@@ -1,5 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
+import { useSelector } from "react-redux";
 import { AlertCircle, Barcode, Loader2, Plus, Printer, Search, X } from "lucide-react";
+import usePermissions from "../../hooks/usePermissions";
 import { listProducts } from "../../services/productsService";
 import { listAllProductUnits } from "../../services/productUnitsService";
 import { listBranches } from "../../services/branchesService";
@@ -46,6 +48,13 @@ const BarcodeLabels = () => {
   const [loading, setLoading] = useState(true);
   const [unitLoading, setUnitLoading] = useState(false);
   const [error, setError] = useState("");
+  // Admins pick any branch, or all of them; a manager's units come from
+  // their own branch only (Phase 2 P2-3: the backend refuses another one).
+  const { isAdmin } = usePermissions();
+  const user = useSelector((state) => state.auth.user);
+  const unitBranchId = isAdmin ? branchId : user?.branch_id ?? "";
+  const ownBranchName =
+    user?.branch?.name || branches.find((branch) => branch.id === user?.branch_id)?.name || "Your branch";
 
   useEffect(() => {
     let active = true;
@@ -72,12 +81,12 @@ const BarcodeLabels = () => {
       return () => { active = false; };
     }
     setUnitLoading(true);
-    listAllProductUnits({ status: "IN_STOCK", ...(branchId ? { branchId } : {}) })
+    listAllProductUnits({ status: "IN_STOCK", ...(unitBranchId ? { branchId: unitBranchId } : {}) })
       .then((rows) => active && setUnits(rows))
       .catch((err) => active && setError(err.response?.data?.message || "Couldn't load in stock item identifiers."))
       .finally(() => active && setUnitLoading(false));
     return () => { active = false; };
-  }, [source, branchId]);
+  }, [source, unitBranchId]);
 
   const filteredProducts = useMemo(() => {
     const needle = query.trim().toLowerCase();
@@ -189,7 +198,9 @@ const BarcodeLabels = () => {
             <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
               <label className="space-y-1 text-xs text-slate-400">Label size<select value={size} onChange={(event) => setSize(event.target.value)} className="h-10 w-full rounded-lg border border-slate-700 bg-slate-800 px-3 text-sm text-slate-100"><option value="50x25">50 × 25 mm</option><option value="40x20">40 × 20 mm</option><option value="30x20">30 × 20 mm</option></select></label>
               <label className="space-y-1 text-xs text-slate-400">Code source<select value={source} onChange={(event) => setSource(event.target.value)} className="h-10 w-full rounded-lg border border-slate-700 bg-slate-800 px-3 text-sm text-slate-100"><option value="PRODUCT">Product barcode (fallback SKU)</option><option value="UNIT_IMEI">IMEI (in stock units)</option><option value="UNIT_SERIAL">Serial number (in stock units)</option><option value="UNIT_BOTH">Both identifiers (two labels per unit)</option></select></label>
-              {source.startsWith("UNIT_") && <label className="space-y-1 text-xs text-slate-400">Branch<select value={branchId} onChange={(event) => setBranchId(event.target.value)} className="h-10 w-full rounded-lg border border-slate-700 bg-slate-800 px-3 text-sm text-slate-100"><option value="">All branches</option>{branches.map((branch) => <option key={branch.id} value={branch.id}>{branch.name}</option>)}</select></label>}
+              {source.startsWith("UNIT_") && (isAdmin
+                ? <label className="space-y-1 text-xs text-slate-400">Branch<select value={branchId} onChange={(event) => setBranchId(event.target.value)} className="h-10 w-full rounded-lg border border-slate-700 bg-slate-800 px-3 text-sm text-slate-100"><option value="">All branches</option>{branches.map((branch) => <option key={branch.id} value={branch.id}>{branch.name}</option>)}</select></label>
+                : <label className="space-y-1 text-xs text-slate-400">Branch<input value={ownBranchName} readOnly className="h-10 w-full cursor-not-allowed rounded-lg border border-slate-700 bg-slate-800 px-3 text-sm text-slate-100 opacity-60" /></label>)}
               <label className="space-y-1 text-xs text-slate-400">Symbology<select value="CODE128" disabled className="h-10 w-full rounded-lg border border-slate-700 bg-slate-800 px-3 text-sm text-slate-100"><option value="CODE128">CODE 128</option></select></label>
               <label className="space-y-1 text-xs text-slate-400">Price shown<select value={priceType} onChange={(event) => setPriceType(event.target.value)} className="h-10 w-full rounded-lg border border-slate-700 bg-slate-800 px-3 text-sm text-slate-100"><option value="selling_price">Selling price</option><option value="buying_price">Cost price</option><option value="none">No price</option></select></label>
             </div>

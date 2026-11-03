@@ -90,6 +90,10 @@ export class ProductUnitsService {
    * through browse.
    *
    * Sorted by created_at DESC (newest first).
+   *
+   * Branch scoping (Phase 2 P2-3) is resolved by the controller before
+   * this runs: query.branchId is then a manager's own branch, and an
+   * admin's choice (or none: every branch).
    */
   async findAll(
     query: ListProductUnitsQueryDto,
@@ -134,10 +138,22 @@ export class ProductUnitsService {
   /**
    * Get one ProductUnit by ID with all relations hydrated.
    * NotFound if the ID doesn't exist.
+   *
+   * scope.branchId (Phase 2 P2-3): only GET /product-units/:id passes it,
+   * for a manager: a unit at another branch is then not found, the same
+   * 404 as a missing id. A unit never changes branch, and its sales and
+   * phone purchase are at its branch, so the relations are scoped with
+   * it. passInspection's re-read passes no scope.
    */
-  async findOne(id: string): Promise<ProductUnit> {
+  async findOne(
+    id: string,
+    scope?: { branchId?: string },
+  ): Promise<ProductUnit> {
     const unit = await this.productUnitsRepository.findOne({
-      where: { id },
+      where: {
+        id,
+        ...(scope?.branchId !== undefined && { branch_id: scope.branchId }),
+      },
       relations: [...PRODUCT_UNIT_RELATIONS],
     });
     if (!unit) {

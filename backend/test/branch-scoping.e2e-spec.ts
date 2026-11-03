@@ -18,6 +18,9 @@ import { Product } from '../src/products/entities/product.entity';
 import { TrackingMethod } from '../src/products/enums/tracking-method.enum';
 import { WarrantyPeriod } from '../src/products/enums/warranty-period.enum';
 import { PhonePurchase } from '../src/phone-purchases/entities/phone-purchase.entity';
+import { ProductUnit } from '../src/product-units/entities/product-unit.entity';
+import { ProductUnitStatus } from '../src/product-units/enums/product-unit-status.enum';
+import { SaleLine } from '../src/sales/entities/sale-line.entity';
 
 type Response = request.Response;
 
@@ -30,7 +33,9 @@ type Response = request.Response;
  *
  * P2-1: the sales list, detail and daily summary, and customer purchase
  * history (the sales list by customerId). P2-2: the phone-purchase list
- * and detail; POST /phone-purchases keeps its own check.
+ * and detail; POST /phone-purchases keeps its own check. P2-3: the
+ * product-unit list and detail (with their sales and phone purchase) and
+ * the till's IMEI/serial lookup.
  *
  * Sessions come from AuthService.login: no HTTP logins.
  */
@@ -720,6 +725,466 @@ describe('Branch-scoped reads (e2e)', () => {
           message: 'You can only intake phones at your own branch',
         });
         expect(await dataSource.getRepository(PhonePurchase).count()).toBe(0);
+      });
+    });
+  });
+
+  // ---- Product units and the till lookup (P2-3) ----
+
+  describe('product units', () => {
+    const IMEI_A_IN_STOCK = '356938035641001';
+    const IMEI_A_SOLD = '356938035641002';
+    const IMEI_A_INSPECTION = '356938035641003';
+    const IMEI_B_IN_STOCK = '356938035642001';
+    const SERIAL_A_IN_STOCK = 'SN-HUB-A0001';
+
+    interface UnitCtx {
+      ctx: Ctx;
+      phone: Product;
+      hub: Product;
+      phonePurchaseA: PhonePurchase;
+      /** IN_STOCK, bought from the shared customer (phone purchase at A). */
+      unitA1: ProductUnit;
+      /** SOLD on saleA1. */
+      unitA2: ProductUnit;
+      /** INSPECTION. */
+      unitA3: ProductUnit;
+      /** A serial-tracked hub, IN_STOCK. */
+      unitA4: ProductUnit;
+      /** IN_STOCK at B. */
+      unitB1: ProductUnit;
+    }
+
+    async function seedModel(
+      name: string,
+      tracking: TrackingMethod,
+      suffix: string,
+    ): Promise<Product> {
+      const brand = await dataSource
+        .getRepository(Brand)
+        .save({ name: `UnitBrand ${suffix}`, is_active: true } as Brand);
+      const category = await dataSource
+        .getRepository(Category)
+        .save({ name: `UnitCategory ${suffix}`, is_active: true } as Category);
+      const products = dataSource.getRepository(Product);
+      return products.save(
+        products.create({
+          product_type: null,
+          name,
+          sku: `SKU-UNIT-${suffix}`,
+          barcode: `BC-UNIT-${suffix}`,
+          brand_id: brand.id,
+          category_id: category.id,
+          branch_id: null,
+          buying_price: '50000.00',
+          selling_price: '65000.00',
+          is_active: true,
+          is_serialized: true,
+          tracking_method: tracking,
+          default_warranty: WarrantyPeriod.MONTH_1,
+        }),
+      );
+    }
+
+    const seedUnit = (fields: Partial<ProductUnit>) => {
+      const units = dataSource.getRepository(ProductUnit);
+      return units.save(
+        units.create({
+          imei_number: null,
+          serial_number: null,
+          buying_price: '50000.00',
+          selling_price: '65000.00',
+          phone_purchase_id: null,
+          ...fields,
+        }),
+      );
+    };
+
+    async function unitSetup(): Promise<UnitCtx> {
+      const ctx = await setup();
+      const phone = await seedModel(
+        'iPhone 12 Used',
+        TrackingMethod.IMEI,
+        'PH',
+      );
+      const hub = await seedModel(
+        'UGREEN Hub',
+        TrackingMethod.SERIAL_NUMBER,
+        'HUB',
+      );
+      const phonePurchaseA = await dataSource.getRepository(PhonePurchase).save(
+        dataSource.getRepository(PhonePurchase).create({
+          customer_id: ctx.customer.id,
+          branch_id: ctx.branchA.id,
+          cashier_id: ctx.cashierA.id,
+          total_amount: '50000.00',
+          notes: null,
+        }),
+      );
+      const imeiUnit = (
+        branch: Branch,
+        imei: string,
+        status: ProductUnitStatus,
+        extra: Partial<ProductUnit> = {},
+      ) =>
+        seedUnit({
+          product_id: phone.id,
+          branch_id: branch.id,
+          imei,
+          imei_number: imei,
+          status,
+          ...extra,
+        });
+      const unitA1 = await imeiUnit(
+        ctx.branchA,
+        IMEI_A_IN_STOCK,
+        ProductUnitStatus.IN_STOCK,
+        { phone_purchase_id: phonePurchaseA.id },
+      );
+      const unitA2 = await imeiUnit(
+        ctx.branchA,
+        IMEI_A_SOLD,
+        ProductUnitStatus.SOLD,
+      );
+      const unitA3 = await imeiUnit(
+        ctx.branchA,
+        IMEI_A_INSPECTION,
+        ProductUnitStatus.INSPECTION,
+      );
+      const unitA4 = await seedUnit({
+        product_id: hub.id,
+        branch_id: ctx.branchA.id,
+        imei: SERIAL_A_IN_STOCK,
+        serial_number: SERIAL_A_IN_STOCK,
+        status: ProductUnitStatus.IN_STOCK,
+      });
+      const unitB1 = await imeiUnit(
+        ctx.branchB,
+        IMEI_B_IN_STOCK,
+        ProductUnitStatus.IN_STOCK,
+      );
+      // unitA2 was sold on saleA1 (branch A).
+      await dataSource.getRepository(SaleLine).save(
+        dataSource.getRepository(SaleLine).create({
+          sale_id: ctx.saleA1.id,
+          line_number: 1,
+          product_id: phone.id,
+          product_sku_snapshot: phone.sku,
+          product_name_snapshot: phone.name,
+          unit_price: '1000.00',
+          cost_price_snapshot: '500.00',
+          quantity: 1,
+          discount_amount: '0',
+          line_total: '1000.00',
+          imei_snapshot: IMEI_A_SOLD,
+          warranty: WarrantyPeriod.MONTH_1,
+          product_unit_id: unitA2.id,
+        }),
+      );
+      return {
+        ctx,
+        phone,
+        hub,
+        phonePurchaseA,
+        unitA1,
+        unitA2,
+        unitA3,
+        unitA4,
+        unitB1,
+      };
+    }
+
+    const unitsAtA = (u: UnitCtx) =>
+      sortedIds(u.unitA1, u.unitA2, u.unitA3, u.unitA4);
+
+    describe('GET /product-units', () => {
+      it('an admin lists every branch, or the branch asked for', async () => {
+        const u = await unitSetup();
+
+        const all = await get('/product-units', u.ctx.cookies.admin);
+        const onlyB = await get(
+          `/product-units?branchId=${u.ctx.branchB.id}`,
+          u.ctx.cookies.admin,
+        );
+
+        expectStatus(all, 200);
+        expect(ids(all)).toEqual(
+          sortedIds(u.unitA1, u.unitA2, u.unitA3, u.unitA4, u.unitB1),
+        );
+        expectStatus(onlyB, 200);
+        expect(ids(onlyB)).toEqual(sortedIds(u.unitB1));
+      });
+
+      it('a manager gets only their own branch, with branchId left out or their own', async () => {
+        const u = await unitSetup();
+
+        for (const path of [
+          '/product-units',
+          `/product-units?branchId=${u.ctx.branchA.id}`,
+        ]) {
+          const res = await get(path, u.ctx.cookies.managerA);
+          expectStatus(res, 200);
+          expect(ids(res)).toEqual(unitsAtA(u));
+          expect((res.body as { meta: { total: number } }).meta.total).toBe(4);
+        }
+      });
+
+      it('a manager asking for another branch gets 403 WRONG_BRANCH; a cashier still gets 403 by role', async () => {
+        const u = await unitSetup();
+
+        const manager = await get(
+          `/product-units?branchId=${u.ctx.branchB.id}`,
+          u.ctx.cookies.managerA,
+        );
+        const cashier = await get('/product-units', u.ctx.cookies.cashierA);
+
+        expectStatus(manager, 403);
+        expect(manager.body).toMatchObject(WRONG_BRANCH);
+        expectStatus(cashier, 403);
+      });
+
+      it('status, IMEI and product filters, and pagination, stay inside the branch', async () => {
+        const u = await unitSetup();
+        const manager = u.ctx.cookies.managerA;
+
+        const inStock = await get('/product-units?status=IN_STOCK', manager);
+        const byImei = await get(
+          `/product-units?imei=${IMEI_B_IN_STOCK}`,
+          manager,
+        );
+        const byProduct = await get(
+          `/product-units?productId=${u.phone.id}`,
+          manager,
+        );
+        const pageTwo = await get('/product-units?page=2&limit=3', manager);
+
+        expect(ids(inStock)).toEqual(sortedIds(u.unitA1, u.unitA4));
+        // Branch B's IMEI: found by the admin, not by a branch-A manager.
+        expect(ids(byImei)).toEqual([]);
+        expect(ids(byProduct)).toEqual(sortedIds(u.unitA1, u.unitA2, u.unitA3));
+        expectStatus(pageTwo, 200);
+        expect(pageTwo.body).toMatchObject({
+          data: [expect.objectContaining({ branch_id: u.ctx.branchA.id })],
+          meta: { total: 4, page: 2, limit: 3, totalPages: 2 },
+        });
+      });
+    });
+
+    describe('GET /product-units/:id', () => {
+      it('an admin opens a unit at any branch', async () => {
+        const u = await unitSetup();
+
+        for (const unit of [u.unitA1, u.unitB1]) {
+          const res = await get(
+            `/product-units/${unit.id}`,
+            u.ctx.cookies.admin,
+          );
+          expectStatus(res, 200);
+          expect(res.body).toMatchObject({
+            id: unit.id,
+            branch: expect.objectContaining({ id: unit.branch_id }),
+          });
+        }
+      });
+
+      it('a manager opens their own branch’s unit, with its sale and its seller', async () => {
+        const u = await unitSetup();
+
+        const sold = await get(
+          `/product-units/${u.unitA2.id}`,
+          u.ctx.cookies.managerA,
+        );
+        const bought = await get(
+          `/product-units/${u.unitA1.id}`,
+          u.ctx.cookies.managerA,
+        );
+
+        expectStatus(sold, 200);
+        expect(sold.body).toMatchObject({
+          id: u.unitA2.id,
+          sale_lines: [
+            expect.objectContaining({
+              sale: expect.objectContaining({
+                id: u.ctx.saleA1.id,
+                branch_id: u.ctx.branchA.id,
+              }),
+            }),
+          ],
+        });
+        expectStatus(bought, 200);
+        expect(bought.body).toMatchObject({
+          phone_purchase: expect.objectContaining({
+            id: u.phonePurchaseA.id,
+            branch_id: u.ctx.branchA.id,
+            customer: expect.objectContaining({ id: u.ctx.customer.id }),
+          }),
+        });
+      });
+
+      it('another branch’s unit is 404 for a manager, the same answer as a missing id, with nothing of it in the body', async () => {
+        const u = await unitSetup();
+
+        const otherBranch = await get(
+          `/product-units/${u.unitB1.id}`,
+          u.ctx.cookies.managerA,
+        );
+        const missing = await get(
+          `/product-units/${randomUUID()}`,
+          u.ctx.cookies.managerA,
+        );
+
+        expectStatus(otherBranch, 404);
+        expectStatus(missing, 404);
+        expect(otherBranch.body).toEqual(missing.body);
+        const text = JSON.stringify(otherBranch.body);
+        for (const detail of [u.unitB1.id, IMEI_B_IN_STOCK]) {
+          expect(text).not.toContain(detail);
+        }
+      });
+    });
+
+    describe('GET /product-units/sellable/by-identifier/:identifier (till lookup)', () => {
+      const lookup = (identifier: string, branch: Branch, cookies: string[]) =>
+        get(
+          `/product-units/sellable/by-identifier/${identifier}?branchId=${branch.id}`,
+          cookies,
+        );
+
+      it('a cashier and a manager find an in-stock IMEI and serial number at their own branch', async () => {
+        const u = await unitSetup();
+
+        for (const cookies of [
+          u.ctx.cookies.cashierA,
+          u.ctx.cookies.managerA,
+        ]) {
+          const phone = await lookup(IMEI_A_IN_STOCK, u.ctx.branchA, cookies);
+          const hub = await lookup(SERIAL_A_IN_STOCK, u.ctx.branchA, cookies);
+
+          expectStatus(phone, 200);
+          expect(phone.body).toMatchObject({
+            identifier: IMEI_A_IN_STOCK,
+            identifierType: TrackingMethod.IMEI,
+            unitId: u.unitA1.id,
+            product: expect.objectContaining({ id: u.phone.id }),
+          });
+          expectStatus(hub, 200);
+          expect(hub.body).toMatchObject({
+            identifier: SERIAL_A_IN_STOCK,
+            identifierType: TrackingMethod.SERIAL_NUMBER,
+            unitId: u.unitA4.id,
+          });
+        }
+      });
+
+      it('a unit at their branch that is not in stock keeps its 409', async () => {
+        const u = await unitSetup();
+
+        const res = await lookup(
+          IMEI_A_INSPECTION,
+          u.ctx.branchA,
+          u.ctx.cookies.cashierA,
+        );
+
+        expectStatus(res, 409);
+        expect(res.body).toMatchObject({
+          existing_unit: {
+            id: u.unitA3.id,
+            branch_id: u.ctx.branchA.id,
+            status: ProductUnitStatus.INSPECTION,
+          },
+        });
+      });
+
+      it('staff asking for another branch get 403 WRONG_BRANCH', async () => {
+        const u = await unitSetup();
+
+        for (const cookies of [
+          u.ctx.cookies.cashierA,
+          u.ctx.cookies.managerA,
+        ]) {
+          const res = await lookup(IMEI_B_IN_STOCK, u.ctx.branchB, cookies);
+          expectStatus(res, 403);
+          expect(res.body).toMatchObject(WRONG_BRANCH);
+        }
+      });
+
+      it('an identifier only branch B holds is 404 at branch A', async () => {
+        const u = await unitSetup();
+
+        const res = await lookup(
+          IMEI_B_IN_STOCK,
+          u.ctx.branchA,
+          u.ctx.cookies.cashierA,
+        );
+
+        expectStatus(res, 404);
+      });
+
+      it('an admin looks up any branch', async () => {
+        const u = await unitSetup();
+
+        const res = await lookup(
+          IMEI_B_IN_STOCK,
+          u.ctx.branchB,
+          u.ctx.cookies.admin,
+        );
+
+        expectStatus(res, 200);
+        expect(res.body).toMatchObject({
+          unitId: u.unitB1.id,
+          identifierType: TrackingMethod.IMEI,
+        });
+      });
+
+      it('branchId is still required and must be a UUID (400)', async () => {
+        const u = await unitSetup();
+
+        const missing = await get(
+          `/product-units/sellable/by-identifier/${IMEI_A_IN_STOCK}`,
+          u.ctx.cookies.cashierA,
+        );
+        const invalid = await get(
+          `/product-units/sellable/by-identifier/${IMEI_A_IN_STOCK}?branchId=not-a-uuid`,
+          u.ctx.cookies.cashierA,
+        );
+
+        expectStatus(missing, 400);
+        expectStatus(invalid, 400);
+      });
+
+      it('adding a branch-B unit to a branch-A sale is still refused', async () => {
+        const u = await unitSetup();
+        const sales = dataSource.getRepository(Sale);
+        const draft = await sales.save(
+          sales.create({
+            sale_type: SaleType.RETAIL,
+            status: SaleStatus.DRAFT,
+            branch_id: u.ctx.branchA.id,
+            cashier_id: u.ctx.cashierA.id,
+            subtotal: '0',
+            discount_total: '0',
+            tax_total: '0',
+            total: '0',
+            amount_paid: '0',
+            change_due: '0',
+          }),
+        );
+
+        const res = await send(
+          request(app.getHttpServer())
+            .post(`/api/v1/sales/${draft.id}/lines`)
+            .set('Cookie', u.ctx.cookies.cashierA)
+            .send({
+              product_id: u.phone.id,
+              quantity: 1,
+              imei_snapshot: IMEI_B_IN_STOCK,
+            }),
+        );
+
+        expectStatus(res, 400);
+        expect(JSON.stringify(res.body)).toContain(
+          'is not available at this branch',
+        );
       });
     });
   });
