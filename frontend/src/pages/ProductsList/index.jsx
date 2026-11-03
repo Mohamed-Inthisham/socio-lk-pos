@@ -69,7 +69,12 @@ const MAX_PAGE_SIZE = 200;
 const ProductsList = () => {
   const dispatch = useDispatch();
   const navigate = useNavigate();
-  const { can } = usePermissions();
+  // Admins filter stock by any branch, or see it combined across branches.
+  // Managers and cashiers have no branch picker: their stock request sends
+  // no branchId and the backend returns their own branch only (Phase 2
+  // P2-4). The products request never depends on that, so they keep the
+  // whole shared catalogue.
+  const { can, isAdmin } = usePermissions();
 
   // Filter state — structural filters trigger a refetch, search is client-side
   const [filters, setFilters] = useState({
@@ -117,7 +122,7 @@ const ProductsList = () => {
     // when the catalog is larger than this.
     Promise.all([
       listProducts({ ...nextFilters, limit: MAX_PAGE_SIZE }),
-      listStock(nextFilters.branchId ? { branchId: nextFilters.branchId } : {}),
+      listStock(isAdmin && nextFilters.branchId ? { branchId: nextFilters.branchId } : {}),
     ])
       .then(([{ data, meta }, rows]) => {
         // Ignore if a newer request has been fired since
@@ -494,13 +499,15 @@ const ProductsList = () => {
             options={categoryOptions}
             placeholder="All categories"
           />
-          <Select
-            name="branch"
-            value={filters.branchId}
-            onChange={handleFilterChange("branchId")}
-            options={branchOptions}
-            placeholder="All branches"
-          />
+          {isAdmin && (
+            <Select
+              name="branch"
+              value={filters.branchId}
+              onChange={handleFilterChange("branchId")}
+              options={branchOptions}
+              placeholder="All branches"
+            />
+          )}
           <Select
             name="stockStatus"
             value={stockStatusFilter}
@@ -508,7 +515,11 @@ const ProductsList = () => {
             options={stockStatusOptions}
           />
         </div>
-        <p className="text-xs text-slate-500 dark:text-slate-400">Stock shows the selected branch quantity, or the combined quantity across branches. Open a product to see each branch and adjust stock.</p>
+        <p className="text-xs text-slate-500 dark:text-slate-400">
+          {isAdmin
+            ? "Stock shows the selected branch quantity, or the combined quantity across branches. Open a product to see each branch and adjust stock."
+            : "Stock shows your branch's quantity"}
+        </p>
       </div>
 
       {/* Error banner */}

@@ -286,9 +286,9 @@ All endpoints are prefixed with `/api/v1` and require authentication via the `ac
 
 | Method | Path | Role | Purpose |
 |--------|------|------|---------|
-| GET | `/stock` | any | List stock rows (paginated, filterable by branch, low-stock only, etc.) with nested `{ product, branch }` |
-| GET | `/stock/by-product/:productId` | any | All stock rows for a given product across branches |
-| GET | `/stock/:id` | any | Get one stock row |
+| GET | `/stock` | any | List stock rows (filters: `productId`, `branchId`, `lowStockOnly`; not paginated) with nested `{ product, branch }`. `productId` and `branchId` must be UUIDs (400 otherwise). **Branch-scoped (Phase 2 P2-4):** admins see every branch, or the one in `branchId`; managers and cashiers see only their own branch (`branchId` left out or their own), and another `branchId` is 403 `{ code: 'WRONG_BRANCH' }` ([rbac.md](./rbac.md#branch-scoped-reads-phase-2)) |
+| GET | `/stock/by-product/:productId` | any | The stock rows for a product, one per branch. **Branch-scoped (P2-4):** admins get every branch; managers and cashiers only their own branch's row (an empty list when it has none) |
+| GET | `/stock/:id` | any | Get one stock row. **Branch-scoped (P2-4):** for a manager or cashier, a row at another branch is 404 `Stock row not found`, the same answer as a missing id |
 | POST | `/stock` | admin | Create a stock row (used when a product is added to a branch that didn't have it — e.g., after a new branch opens) |
 | PATCH | `/stock/:id` | admin | Adjust quantity / threshold |
 
@@ -308,7 +308,7 @@ No `DELETE` on stock — quantity 0 is the correct way to represent "not carryin
 
 Two follow-ups are tracked:
 
-- ✅ **Done for `GET /branches/:id`** (Phase 6.2 Path A) — manager/cashier reads of a single branch are now scoped to their own branch, 403 otherwise; see [rbac.md](./rbac.md#branch-scoping). List endpoints (`GET /branches`, `GET /products`, `GET /stock`, etc.) remain unscoped — deferred to multi-branch launch (R9).
+- ✅ **Done for `GET /branches/:id`** (Phase 6.2 Path A) — manager/cashier reads of a single branch are now scoped to their own branch, 403 otherwise; see [rbac.md](./rbac.md#branch-scoping). ✅ **Done for stock** (Phase 2 P2-4): `GET /stock`, `/stock/:id` and `/stock/by-product/:productId` are scoped to the user's branch for managers and cashiers. `GET /branches` and `GET /products` stay shared: the catalogue and branch list are the same for every branch.
 - Stock adjustments may be **delegated to managers** in a later phase; for R1, keeping mutation admin-only is the safer default.
 
 ## Migration Notes
@@ -350,7 +350,7 @@ Key testing decisions from Phase 6.1 (see [testing.md](./testing.md) for the gen
 
 ## Future Work
 
-- ✅ ~~User → Branch link~~ — **Done (Phase 6.2 Path A).** `branch_id` FK added to `User` (nullable, admin-exempt via `CHK_users_branch_role`), backfilled to Main Shop, exposed on `AuthenticatedUser` / `/auth/me` / `/auth/login`, and `GET /branches/:id` scoped to managers'/cashiers' own branch. See [auth.md](./auth.md), [rbac.md](./rbac.md#branch-scoping), and [database.md](./database.md). Multi-branch read scoping for **list** endpoints (Products, Stock, and the rest) stays deferred to R9.
+- ✅ ~~User → Branch link~~ — **Done (Phase 6.2 Path A).** `branch_id` FK added to `User` (nullable, admin-exempt via `CHK_users_branch_role`), backfilled to Main Shop, exposed on `AuthenticatedUser` / `/auth/me` / `/auth/login`, and `GET /branches/:id` scoped to managers'/cashiers' own branch. See [auth.md](./auth.md), [rbac.md](./rbac.md#branch-scoping), and [database.md](./database.md). Branch scoping for the branch-owned **list** endpoints is done in Phase 2 (stock in P2-4; see [rbac.md](./rbac.md#branch-scoped-reads-phase-2)); the product catalogue stays shared.
 - **Per-unit inventory (R2)** — introduce a `ProductUnit` entity for products where `is_serialized = true`, carrying individual IMEI, cost, purchase date, condition per unit. Especially important for used phones where per-unit cost varies.
 - **Concurrent-sale hardening** — R1 assumes single-cashier operation. When multiple terminals go live: row-level locking on stock deduction, tuned transaction isolation, collision-safe invoice numbering.
 - **Bulk barcode labels** — R1 will print one label at a time via `jsbarcode` + `window.print()`. Bulk label sheets (Avery-style templates) are deferred.

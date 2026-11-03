@@ -464,7 +464,8 @@ const ProductDetail = () => {
         </div>
       </div>
 
-      <Section title="Stock across branches">
+      {/* Staff get only their own branch's row (Phase 2 P2-4, enforced by the backend). */}
+      <Section title={isAdmin ? "Stock across branches" : "Stock at Your Branch"}>
         {stock.length === 0 ? (
           <div className="text-sm text-slate-500 dark:text-slate-400 text-center py-6">
             No stock rows for this product yet.

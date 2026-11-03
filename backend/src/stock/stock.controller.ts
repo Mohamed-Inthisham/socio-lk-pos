@@ -26,6 +26,7 @@ import { Auditable } from '../audit-log/decorators/auditable.decorator';
 import { AuditAction } from '../audit-log/enums/audit-action.enum';
 import { CurrentUser } from '../auth/decorators/current-user.decorator';
 import type { AuthenticatedUser } from '../auth/strategies/jwt.strategy';
+import { scopeBranch } from '../common/utils/branch-scope';
 
 @ApiTags('Stock')
 @ApiCookieAuth('access_token')
@@ -40,7 +41,11 @@ export class StockController {
     description:
       'Returns stock rows with nested product and branch data plus a ' +
       'computed low_stock_alert flag. All roles can read. Supports ' +
-      'filtering by product, branch, or low-stock alerts.',
+      'filtering by product, branch, or low-stock alerts.\n\n' +
+      'Branch scoping (Phase 2 P2-4): admins see every branch, or the one ' +
+      'given in branchId; managers and cashiers see only their own branch ' +
+      '(branchId left out or their own), and another branchId is ' +
+      '403 { code: WRONG_BRANCH }. productId and branchId must be UUIDs.',
   })
   @ApiQuery({
     name: 'productId',
@@ -54,7 +59,9 @@ export class StockController {
     required: false,
     type: String,
     format: 'uuid',
-    description: 'Filter to stock at a specific branch',
+    description:
+      'Filter to stock at a specific branch. Staff: their own branch when ' +
+      'left out; another branch is 403 WRONG_BRANCH',
   })
   @ApiQuery({
     name: 'lowStockOnly',
@@ -65,14 +72,29 @@ export class StockController {
       'stock tracking is enabled. Powers the dashboard low-stock widget.',
   })
   @ApiResponse({ status: 200, description: 'List of stock rows' })
+  @ApiResponse({
+    status: 400,
+    description: 'productId or branchId is not a UUID',
+  })
   @ApiResponse({ status: 401, description: 'Not authenticated' })
+  @ApiResponse({
+    status: 403,
+    description: '{ message, code: WRONG_BRANCH }: another branch, for staff',
+  })
   async findAll(
-    @Query('productId') productId?: string,
-    @Query('branchId') branchId?: string,
+    @CurrentUser() user: AuthenticatedUser,
+    @Query('productId', new ParseUUIDPipe({ optional: true }))
+    productId?: string,
+    @Query('branchId', new ParseUUIDPipe({ optional: true }))
+    branchId?: string,
     @Query('lowStockOnly', new ParseBoolPipe({ optional: true }))
     lowStockOnly?: boolean,
   ) {
-    return this.stockService.findAll({ productId, branchId, lowStockOnly });
+    return this.stockService.findAll({
+      productId,
+      branchId: scopeBranch(user, branchId),
+      lowStockOnly,
+    });
   }
 
   @Get('by-product/:productId')
@@ -80,9 +102,10 @@ export class StockController {
   @ApiOperation({
     summary: 'Get all stock rows for a product',
     description:
-      'Convenience endpoint — returns every branch that has stock for ' +
-      'the given product. In R1 there is one row per product; in R9 ' +
-      'multi-branch, one row per branch.',
+      'Convenience endpoint — returns the stock rows for the given ' +
+      'product, one per branch. Branch scoping (Phase 2 P2-4): admins get ' +
+      'every branch; managers and cashiers only their own branch (an ' +
+      'empty list when it has no row for the product).',
   })
   @ApiParam({
     name: 'productId',
@@ -94,8 +117,11 @@ export class StockController {
     description: 'List of stock rows for the product',
   })
   @ApiResponse({ status: 401, description: 'Not authenticated' })
-  async findByProduct(@Param('productId', ParseUUIDPipe) productId: string) {
-    return this.stockService.findByProduct(productId);
+  async findByProduct(
+    @Param('productId', ParseUUIDPipe) productId: string,
+    @CurrentUser() user: AuthenticatedUser,
+  ) {
+    return this.stockService.findByProduct(productId, scopeBranch(user));
   }
 
   @Get(':id')
@@ -104,9 +130,17 @@ export class StockController {
   @ApiParam({ name: 'id', description: 'Stock UUID', format: 'uuid' })
   @ApiResponse({ status: 200, description: 'Stock row found' })
   @ApiResponse({ status: 401, description: 'Not authenticated' })
-  @ApiResponse({ status: 404, description: 'Stock row not found' })
-  async findOne(@Param('id', ParseUUIDPipe) id: string) {
-    return this.stockService.findOne(id);
+  @ApiResponse({
+    status: 404,
+    description:
+      'Stock row not found; also, for staff, a row at another branch ' +
+      '(Phase 2 P2-4: the same answer, so its existence is not revealed)',
+  })
+  async findOne(
+    @Param('id', ParseUUIDPipe) id: string,
+    @CurrentUser() user: AuthenticatedUser,
+  ) {
+    return this.stockService.findOne(id, { branchId: scopeBranch(user) });
   }
 
   @Post()
