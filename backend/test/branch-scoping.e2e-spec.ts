@@ -12,6 +12,12 @@ import { Customer } from '../src/customers/entities/customer.entity';
 import { Sale } from '../src/sales/entities/sale.entity';
 import { SaleStatus } from '../src/sales/enums/sale-status.enum';
 import { SaleType } from '../src/sales/enums/sale-type.enum';
+import { Brand } from '../src/brands/entities/brand.entity';
+import { Category } from '../src/categories/entities/category.entity';
+import { Product } from '../src/products/entities/product.entity';
+import { TrackingMethod } from '../src/products/enums/tracking-method.enum';
+import { WarrantyPeriod } from '../src/products/enums/warranty-period.enum';
+import { PhonePurchase } from '../src/phone-purchases/entities/phone-purchase.entity';
 
 type Response = request.Response;
 
@@ -23,7 +29,8 @@ type Response = request.Response;
  * Writes keep their own codes (SALE_WRONG_BRANCH etc.).
  *
  * P2-1: the sales list, detail and daily summary, and customer purchase
- * history (the sales list by customerId).
+ * history (the sales list by customerId). P2-2: the phone-purchase list
+ * and detail; POST /phone-purchases keeps its own check.
  *
  * Sessions come from AuthService.login: no HTTP logins.
  */
@@ -50,6 +57,8 @@ describe('Branch-scoped reads (e2e)', () => {
     branchA: Branch;
     branchB: Branch;
     customer: Customer;
+    cashierA: User;
+    cashierB: User;
     cookies: {
       admin: string[];
       managerA: string[];
@@ -155,6 +164,8 @@ describe('Branch-scoped reads (e2e)', () => {
       branchA,
       branchB,
       customer,
+      cashierA,
+      cashierB,
       cookies: {
         admin: await sessionFor(admin),
         managerA: await sessionFor(managerA),
@@ -196,6 +207,13 @@ describe('Branch-scoped reads (e2e)', () => {
     (res.body as { data: { id: string }[] }).data.map((sale) => sale.id).sort();
 
   const sorted = (...sales: Sale[]) => sales.map((sale) => sale.id).sort();
+
+  /** A list's ids in the order the API returned them. */
+  const orderedIds = (res: Response) =>
+    (res.body as { data: { id: string }[] }).data.map((row) => row.id);
+
+  const sortedIds = (...rows: { id: string }[]) =>
+    rows.map((row) => row.id).sort();
 
   const WRONG_BRANCH = {
     message: 'You can only access data for your own branch.',
@@ -431,6 +449,278 @@ describe('Branch-scoped reads (e2e)', () => {
         const res = await get(`/customers/${ctx.customer.id}`, cookies);
         expectStatus(res, 200);
       }
+    });
+  });
+
+  // ---- Phone purchases (P2-2) ----
+
+  describe('phone purchases', () => {
+    interface PhoneCtx {
+      ctx: Ctx;
+      otherCustomer: Customer;
+      /** Oldest first: A1 (shared customer), A2 (other customer), B1 (shared customer). */
+      ppA1: PhonePurchase;
+      ppA2: PhonePurchase;
+      ppB1: PhonePurchase;
+    }
+
+    const seedPhonePurchase = (
+      branch: Branch,
+      cashier: User,
+      customer: Customer,
+      total: string,
+    ) => {
+      const repo = dataSource.getRepository(PhonePurchase);
+      return repo.save(
+        repo.create({
+          customer_id: customer.id,
+          branch_id: branch.id,
+          cashier_id: cashier.id,
+          total_amount: total,
+          notes: null,
+        }),
+      );
+    };
+
+    async function phoneSetup(): Promise<PhoneCtx> {
+      const ctx = await setup();
+      const otherCustomer = await dataSource.getRepository(Customer).save(
+        dataSource.getRepository(Customer).create({
+          name: 'Nimal Silva',
+          phone: '0779876543',
+          nic: '199100000002',
+          notes: null,
+        }),
+      );
+      // One at a time, so created_at gives them a fixed order.
+      const ppA1 = await seedPhonePurchase(
+        ctx.branchA,
+        ctx.cashierA,
+        ctx.customer,
+        '41000.00',
+      );
+      const ppA2 = await seedPhonePurchase(
+        ctx.branchA,
+        ctx.cashierA,
+        otherCustomer,
+        '42000.00',
+      );
+      const ppB1 = await seedPhonePurchase(
+        ctx.branchB,
+        ctx.cashierB,
+        ctx.customer,
+        '93000.00',
+      );
+      return { ctx, otherCustomer, ppA1, ppA2, ppB1 };
+    }
+
+    describe('GET /phone-purchases', () => {
+      it('an admin lists every branch, or the branch asked for', async () => {
+        const { ctx, ppA1, ppA2, ppB1 } = await phoneSetup();
+
+        const all = await get('/phone-purchases', ctx.cookies.admin);
+        const onlyB = await get(
+          `/phone-purchases?branchId=${ctx.branchB.id}`,
+          ctx.cookies.admin,
+        );
+
+        expectStatus(all, 200);
+        expect(ids(all)).toEqual(sortedIds(ppA1, ppA2, ppB1));
+        expectStatus(onlyB, 200);
+        expect(ids(onlyB)).toEqual(sortedIds(ppB1));
+      });
+
+      it('a manager and a cashier get only their own branch, newest first, with branchId left out or their own', async () => {
+        const { ctx, ppA1, ppA2, ppB1 } = await phoneSetup();
+
+        for (const cookies of [ctx.cookies.managerA, ctx.cookies.cashierA]) {
+          for (const path of [
+            '/phone-purchases',
+            `/phone-purchases?branchId=${ctx.branchA.id}`,
+          ]) {
+            const res = await get(path, cookies);
+            expectStatus(res, 200);
+            expect(orderedIds(res)).toEqual([ppA2.id, ppA1.id]);
+            expect((res.body as { meta: { total: number } }).meta.total).toBe(
+              2,
+            );
+          }
+        }
+        const b = await get('/phone-purchases', ctx.cookies.cashierB);
+        expect(ids(b)).toEqual(sortedIds(ppB1));
+      });
+
+      it('staff asking for another branch get 403 WRONG_BRANCH', async () => {
+        const { ctx } = await phoneSetup();
+
+        for (const cookies of [ctx.cookies.managerA, ctx.cookies.cashierA]) {
+          const res = await get(
+            `/phone-purchases?branchId=${ctx.branchB.id}`,
+            cookies,
+          );
+          expectStatus(res, 403);
+          expect(res.body).toMatchObject(WRONG_BRANCH);
+        }
+      });
+
+      it('the customer filter combines with the branch scope', async () => {
+        const { ctx, ppA1, ppB1 } = await phoneSetup();
+        const path = `/phone-purchases?customer_id=${ctx.customer.id}`;
+
+        const admin = await get(path, ctx.cookies.admin);
+        const manager = await get(path, ctx.cookies.managerA);
+        const cashier = await get(path, ctx.cookies.cashierA);
+
+        expect(ids(admin)).toEqual(sortedIds(ppA1, ppB1));
+        expect(ids(manager)).toEqual(sortedIds(ppA1));
+        expect(ids(cashier)).toEqual(sortedIds(ppA1));
+      });
+
+      it('pagination stays inside the branch, and meta.total counts only it', async () => {
+        const { ctx, ppA1 } = await phoneSetup();
+
+        const pageTwo = await get(
+          '/phone-purchases?page=2&limit=1',
+          ctx.cookies.cashierA,
+        );
+
+        expectStatus(pageTwo, 200);
+        expect(orderedIds(pageTwo)).toEqual([ppA1.id]);
+        expect(pageTwo.body).toMatchObject({
+          meta: { total: 2, page: 2, limit: 1, totalPages: 2 },
+        });
+      });
+    });
+
+    describe('GET /phone-purchases/:id', () => {
+      it('an admin opens a purchase at any branch', async () => {
+        const { ctx, ppA1, ppB1 } = await phoneSetup();
+
+        for (const purchase of [ppA1, ppB1]) {
+          const res = await get(
+            `/phone-purchases/${purchase.id}`,
+            ctx.cookies.admin,
+          );
+          expectStatus(res, 200);
+          expect(res.body).toMatchObject({
+            id: purchase.id,
+            branch: expect.objectContaining({ id: purchase.branch_id }),
+            customer: expect.objectContaining({ id: purchase.customer_id }),
+          });
+        }
+      });
+
+      it('staff open their own branch’s purchase', async () => {
+        const { ctx, ppA1 } = await phoneSetup();
+
+        for (const cookies of [ctx.cookies.managerA, ctx.cookies.cashierA]) {
+          const res = await get(`/phone-purchases/${ppA1.id}`, cookies);
+          expectStatus(res, 200);
+          expect((res.body as { id: string }).id).toBe(ppA1.id);
+        }
+      });
+
+      it('another branch’s purchase is 404 for staff, the same answer as a missing id, with nothing of it in the body', async () => {
+        const { ctx, ppB1 } = await phoneSetup();
+
+        for (const cookies of [ctx.cookies.managerA, ctx.cookies.cashierA]) {
+          const otherBranch = await get(`/phone-purchases/${ppB1.id}`, cookies);
+          const missing = await get(
+            `/phone-purchases/${randomUUID()}`,
+            cookies,
+          );
+
+          expectStatus(otherBranch, 404);
+          expectStatus(missing, 404);
+          expect(otherBranch.body).toEqual(missing.body);
+          const text = JSON.stringify(otherBranch.body);
+          for (const detail of [
+            ppB1.id,
+            ppB1.total_amount,
+            ctx.customer.id,
+            ctx.customer.nic!,
+          ]) {
+            expect(text).not.toContain(detail);
+          }
+        }
+      });
+    });
+
+    describe('POST /phone-purchases (unchanged)', () => {
+      async function seedPhoneModel(branch: Branch): Promise<Product> {
+        const brand = await dataSource
+          .getRepository(Brand)
+          .save({ name: 'ScopeBrand', is_active: true } as Brand);
+        const category = await dataSource
+          .getRepository(Category)
+          .save({ name: 'ScopeCategory', is_active: true } as Category);
+        const products = dataSource.getRepository(Product);
+        return products.save(
+          products.create({
+            product_type: null,
+            name: 'iPhone 13 Used',
+            sku: 'SKU-SCOPE-PHONE',
+            barcode: 'BC-SCOPE-PHONE',
+            brand_id: brand.id,
+            category_id: category.id,
+            branch_id: branch.id,
+            buying_price: '50000.00',
+            selling_price: '65000.00',
+            is_active: true,
+            is_serialized: true,
+            tracking_method: TrackingMethod.IMEI,
+            default_warranty: WarrantyPeriod.MONTH_1,
+          }),
+        );
+      }
+
+      const post = (path: string, cookies: string[], body: object) =>
+        send(
+          request(app.getHttpServer())
+            .post(`/api/v1${path}`)
+            .set('Cookie', cookies)
+            .send(body),
+        );
+
+      it('a cashier intaking at their own branch still succeeds (201)', async () => {
+        const ctx = await setup();
+        const phone = await seedPhoneModel(ctx.branchA);
+
+        const res = await post('/phone-purchases', ctx.cookies.cashierA, {
+          customer_id: ctx.customer.id,
+          branch_id: ctx.branchA.id,
+          product_id: phone.id,
+          imei: '356938035643810',
+          buying_price: 50000,
+        });
+
+        expectStatus(res, 201);
+        expect(res.body).toMatchObject({
+          branch_id: ctx.branchA.id,
+          customer: expect.objectContaining({ id: ctx.customer.id }),
+          product_units: [
+            expect.objectContaining({ imei_number: '356938035643810' }),
+          ],
+        });
+      });
+
+      it('a cashier intaking at another branch is still 403, with the same message', async () => {
+        const ctx = await setup();
+
+        const res = await post('/phone-purchases', ctx.cookies.cashierA, {
+          customer_id: ctx.customer.id,
+          branch_id: ctx.branchB.id,
+          product_id: randomUUID(),
+          imei: '356938035643828',
+          buying_price: 50000,
+        });
+
+        expectStatus(res, 403);
+        expect(res.body).toMatchObject({
+          message: 'You can only intake phones at your own branch',
+        });
+        expect(await dataSource.getRepository(PhonePurchase).count()).toBe(0);
+      });
     });
   });
 

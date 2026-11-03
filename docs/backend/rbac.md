@@ -102,17 +102,21 @@ This relies on the DB-level `CHK_users_branch_role` invariant (every non-admin u
 - **One record at another branch is 404**, the same answer as a missing id, so staff can't learn that it exists: the service looks it up with the staff member's branch in the same query.
 - **Writes keep their existing checks and codes** (`SALE_WRONG_BRANCH`, `VOID_WRONG_BRANCH`, `RETURN_WRONG_BRANCH`, `CASH_DAY_WRONG_BRANCH`, …): a write to another branch's record is still 403.
 
-| Endpoint (P2-1) | Admin | Manager / cashier |
+| Endpoint | Admin | Manager / cashier |
 |---|---|---|
 | `GET /sales` (including a customer's history, `customerId`) | every branch, or `branchId` | own branch; another `branchId` → 403 `WRONG_BRANCH` |
 | `GET /sales/:id` | any sale | own branch's sales; another branch's → 404 |
 | `GET /sales/daily-summary` | `branchId` required (400 without it) | own branch; another `branchId` → 403 `WRONG_BRANCH` |
+| `GET /phone-purchases` (P2-2; `customer_id` filter included) | every branch, or `branchId` | own branch; another `branchId` → 403 `WRONG_BRANCH` |
+| `GET /phone-purchases/:id` (P2-2) | any purchase | own branch's purchases; another branch's → 404 |
+
+The sales rows are P2-1. `POST /phone-purchases` keeps its own check (403 "You can only intake phones at your own branch").
 
 Customers themselves stay global: every role reads the customer record, but their purchase history follows the sales list's scoping.
 
 ### Where this is headed
 
-The other branch-owned reads are still unscoped and follow in later Phase 2 steps: phone purchases, product units and the sellable-IMEI lookup, and stock. Stock purchases, cash days, the inspection list and approvers were already scoped. Behaviour for a deactivated branch's staff is not yet enforced.
+The other branch-owned reads are still unscoped and follow in later Phase 2 steps: product units and the sellable-IMEI lookup (which also still show a traded-in phone's seller and purchase, through `phone_purchase` and `phone_purchase.customer`), and stock. Stock purchases, cash days, the inspection list and approvers were already scoped. Behaviour for a deactivated branch's staff is not yet enforced.
 
 ## Staff Personal Data in Responses
 
