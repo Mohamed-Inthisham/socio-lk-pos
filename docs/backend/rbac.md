@@ -124,7 +124,7 @@ Customers themselves stay global: every role reads the customer record, but thei
 
 ### Where this is headed
 
-Every branch-owned read is now scoped: sales, phone purchases, product units, the till's lookup and stock (Phase 2 P2-1 to P2-4), and stock purchases, cash days, the inspection list and approvers before them. The frontend follows the same rule for staff (no branch picker on ProductsList or BarcodeLabels; ProductDetail's stock section is "Stock at Your Branch"), but the backend is what enforces it. Behaviour for a deactivated branch's staff is not yet enforced.
+Every branch-owned read is now scoped: sales, phone purchases, product units, the till's lookup and stock (Phase 2 P2-1 to P2-4), and stock purchases, cash days, the inspection list and approvers before them. The frontend follows the same rule for staff (no branch picker on ProductsList or BarcodeLabels; ProductDetail's stock section is "Stock at Your Branch"), but the backend is what enforces it. Staff of a deactivated branch can't log in, use their sessions or refresh them (Phase 2 P2-5; see [auth.md](./auth.md#staff-of-a-deactivated-branch)).
 
 ## Staff Personal Data in Responses
 

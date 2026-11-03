@@ -45,7 +45,8 @@ describe('Logout HTTP (no database)', () => {
     full_name: 'Staff',
     role: UserRole.CASHIER,
     branch_id: 'branch-1',
-    branch: null,
+    // An active branch: a cashier needs one to sign in (Phase 2 P2-5).
+    branch: { id: 'branch-1', name: 'Main Shop', is_active: true },
     is_active: true,
     approval_pin_set_at: null,
     password_hash: '',

@@ -6,6 +6,7 @@ import { TypedConfigService } from '../../config/typed-config.service';
 import { UsersService } from '../../users/users.service';
 import { UserRole } from '../../users/enums/user-role.enum';
 import { Branch } from '../../branches/entities/branch.entity';
+import { branchAllowsSignIn } from '../branch-sign-in';
 
 export interface JwtPayload {
   sub: string; // user id
@@ -51,7 +52,10 @@ export class JwtStrategy extends PassportStrategy(Strategy, 'jwt') {
     // Fresh DB fetch on every request — the token is trust-but-verify.
     const user = await this.usersService.findById(payload.sub);
 
-    if (!user || !user.is_active) {
+    // The role and branch checked are the database's, never the token's:
+    // a manager or cashier whose branch is inactive is refused on every
+    // request, and let back in when it is reactivated (Phase 2 P2-5).
+    if (!user || !user.is_active || !branchAllowsSignIn(user)) {
       throw new UnauthorizedException();
     }
 

@@ -27,6 +27,7 @@ describe('UsersService', () => {
 
   const mockQueryBuilder = {
     addSelect: jest.fn().mockReturnThis(),
+    leftJoinAndSelect: jest.fn().mockReturnThis(),
     where: jest.fn().mockReturnThis(),
     getOne: jest.fn(),
   };
@@ -162,15 +163,27 @@ describe('UsersService', () => {
       const result = await service.findByEmail('nobody@t.com');
       expect(result).toBeNull();
     });
+
+    it('loads the branch in the same query, for the login branch check (Phase 2 P2-5)', async () => {
+      mockQueryBuilder.getOne.mockResolvedValue(null);
+      await service.findByEmail('a@b.com');
+      expect(mockUsersRepo.createQueryBuilder).toHaveBeenCalledTimes(1);
+      expect(mockQueryBuilder.leftJoinAndSelect).toHaveBeenCalledWith(
+        'user.branch',
+        'branch',
+      );
+    });
   });
 
   describe('findByIdForAuth', () => {
-    it('returns the user by id without opting password_hash in', async () => {
+    it('returns the user by id with its branch, without opting password_hash in', async () => {
       const user = { id: 'u1' } as User;
       mockUsersRepo.findOne.mockResolvedValue(user);
       const result = await service.findByIdForAuth('u1');
+      // The branch: refresh refuses staff whose branch is inactive (P2-5).
       expect(mockUsersRepo.findOne).toHaveBeenCalledWith({
         where: { id: 'u1' },
+        relations: { branch: true },
       });
       expect(result).toBe(user);
     });

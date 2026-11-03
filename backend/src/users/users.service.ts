@@ -162,22 +162,29 @@ export class UsersService {
    *
    * password_hash is `select: false` on the entity, so it has to be
    * opted back in explicitly here — this is the only read that needs it.
+   * The branch comes in the same query: login refuses staff whose branch
+   * is inactive (Phase 2 P2-5, branchAllowsSignIn).
    */
   async findByEmail(email: string): Promise<User | null> {
     return this.usersRepository
       .createQueryBuilder('user')
       .addSelect('user.password_hash')
+      .leftJoinAndSelect('user.branch', 'branch')
       .where('user.email = :email', { email: email.toLowerCase() })
       .getOne();
   }
 
   /**
-   * Find a user by id — no password_hash, no relations.
+   * Find a user by id — no password_hash; the branch only.
    * Used internally by AuthService for token generation flows
-   * (needs id, role, branch_id, is_active).
+   * (needs id, role, branch_id, is_active, and the branch: refresh refuses
+   * staff whose branch is inactive, Phase 2 P2-5).
    */
   async findByIdForAuth(id: string): Promise<User | null> {
-    return this.usersRepository.findOne({ where: { id } });
+    return this.usersRepository.findOne({
+      where: { id },
+      relations: { branch: true },
+    });
   }
 
   /**
