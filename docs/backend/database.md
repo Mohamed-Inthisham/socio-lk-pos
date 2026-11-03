@@ -106,15 +106,20 @@ The application's user accounts (admin, manager, cashier).
 | Column | Type | Notes |
 |--------|------|-------|
 | `id` | `uuid` | PK |
-| `email` | `varchar(255)` | Unique (indexed), lowercase-normalized |
+| `email` | `varchar(255)` | Unique (indexed), lowercase-normalized. **Staff personal data** (see below) |
 | `password_hash` | `varchar(255)` | bcrypt, work factor 12. **Never exposed via API.** |
 | `full_name` | `varchar(100)` | Display name |
+| `phone` | `varchar(20)` nullable | Contact number, normalized `0XXXXXXXXX` (Task 2.5). **Staff personal data** |
+| `nic` | `varchar(20)` nullable | NIC, trimmed and uppercased; unique among users that aren't deleted (`idx_users_nic_unique`). **Staff personal data** |
+| `address` | `text` nullable | Home address. **Staff personal data** |
 | `role` | `varchar(20)` | `'admin' \| 'manager' \| 'cashier'` (CHECK constraint) |
 | `is_active` | `boolean` | Default `true`. Inactive users cannot log in. |
 | `branch_id` | `uuid` nullable | FK → `branches.id`, `ON DELETE RESTRICT`. `NULL` only for admins (Phase 6.2). |
 | `created_at` | `timestamptz` | |
 | `updated_at` | `timestamptz` | |
 | `deleted_at` | `timestamptz` nullable | Soft delete |
+
+**Staff personal data (F3):** `email`, `phone`, `nic` and `address` are kept for user management, but the entity `@Exclude()`s them, so a user embedded in any other response (`sale.cashier`, `phone_purchase.cashier`, `stock_purchase.created_by`, …) never carries them. The admin-only `/users` endpoints still return them, through the plain objects `UsersService.toSafeUser` builds. See [rbac.md](./rbac.md#staff-personal-data-in-responses).
 
 **Constraints:**
 - `PK_users_id` — primary key on `id`

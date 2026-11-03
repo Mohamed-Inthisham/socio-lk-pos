@@ -1,6 +1,7 @@
 import { Test, TestingModule } from '@nestjs/testing';
 import { getDataSourceToken, getRepositoryToken } from '@nestjs/typeorm';
 import { IsNull, Not } from 'typeorm';
+import { instanceToPlain } from 'class-transformer';
 import {
   ConflictException,
   NotFoundException,
@@ -227,6 +228,47 @@ describe('UsersService', () => {
       mockUsersRepo.findOne.mockResolvedValue(null);
       const result = await service.findById('missing');
       expect(result).toBeNull();
+    });
+
+    it('keeps email, phone, nic and address for admin user management, through serialization too (F3)', async () => {
+      // A real entity, whose @Exclude() hides these four when it is
+      // embedded in a response; the plain object findById returns keeps
+      // them, and the global serializer leaves a plain object as it is.
+      mockUsersRepo.findOne.mockResolvedValue(
+        Object.assign(new User(), {
+          id: 'u1',
+          email: 'asha@shop.test',
+          full_name: 'Asha Perera',
+          phone: '0771234567',
+          nic: '199012345678',
+          address: '12 Galle Road, Colombo 03',
+          password_hash: 'secret',
+          approval_pin_hash: '$2b$04$pin',
+          approval_pin_failed_attempts: 1,
+          approval_pin_locked_until: null,
+          role: UserRole.MANAGER,
+        }),
+      );
+
+      const result = await service.findById('u1');
+      const serialized = instanceToPlain(result);
+
+      for (const body of [result, serialized]) {
+        expect(body).toMatchObject({
+          email: 'asha@shop.test',
+          phone: '0771234567',
+          nic: '199012345678',
+          address: '12 Galle Road, Colombo 03',
+        });
+        for (const secret of [
+          'password_hash',
+          'approval_pin_hash',
+          'approval_pin_failed_attempts',
+          'approval_pin_locked_until',
+        ]) {
+          expect(body).not.toHaveProperty(secret);
+        }
+      }
     });
   });
 
