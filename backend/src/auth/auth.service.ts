@@ -9,6 +9,7 @@ import { RefreshToken } from './entities/refresh-token.entity';
 import { UsersService } from '../users/users.service';
 import { TypedConfigService } from '../config/typed-config.service';
 import { TokensDto } from './dto/tokens.dto';
+import { branchAllowsSignIn } from './branch-sign-in';
 
 const DUMMY_HASH =
   '$2b$12$abcdefghijklmnopqrstuvwxyz0123456789ABCDEFGHIJKLMNOPQRSTUV.';
@@ -42,6 +43,9 @@ export class AuthService {
 
     if (!user || !passwordMatches) return null;
     if (!user.is_active) return null;
+    // A manager or cashier whose branch is inactive (Phase 2 P2-5): the
+    // same generic 401, so the login says nothing about the branch.
+    if (!branchAllowsSignIn(user)) return null;
 
     return user;
   }
@@ -158,8 +162,10 @@ export class AuthService {
       return refuse('Refresh token not recognized');
     }
 
+    // An inactive user, or a manager or cashier whose branch is inactive
+    // (Phase 2 P2-5): refused, and the claimed token stays revoked.
     const freshUser = await this.usersService.findByIdForAuth(userId);
-    if (!freshUser || !freshUser.is_active) {
+    if (!freshUser || !freshUser.is_active || !branchAllowsSignIn(freshUser)) {
       return refuse('User no longer active');
     }
 

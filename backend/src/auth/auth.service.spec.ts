@@ -1,3 +1,4 @@
+import { UnauthorizedException } from '@nestjs/common';
 import { Test, TestingModule } from '@nestjs/testing';
 import { getDataSourceToken, getRepositoryToken } from '@nestjs/typeorm';
 import { JwtService } from '@nestjs/jwt';
@@ -188,6 +189,71 @@ describe('AuthService', () => {
       );
 
       expect(result).toBeNull();
+    });
+
+    /**
+     * Phase 2 P2-5: a manager or cashier whose branch is inactive gets the
+     * same null (the generic 401) as a wrong password; admins have no
+     * branch and are unaffected. The branch comes with findByEmail's user.
+     */
+    describe('the branch (P2-5)', () => {
+      const staff = async (role: string, branch: unknown) =>
+        ({
+          id: 'user-1',
+          email: 'test@x.com',
+          password_hash: await bcryptHash('correct-password'),
+          is_active: true,
+          role,
+          branch_id: 'branch-1',
+          branch,
+        }) as any;
+
+      it.each(['manager', 'cashier'])(
+        'accepts a %s at an active branch',
+        async (role) => {
+          const user = await staff(role, { id: 'branch-1', is_active: true });
+          mockUsersService.findByEmail.mockResolvedValue(user);
+
+          await expect(
+            service.validateUser('test@x.com', 'correct-password'),
+          ).resolves.toBe(user);
+        },
+      );
+
+      it.each(['manager', 'cashier'])(
+        'refuses a %s at an inactive branch, with the correct password',
+        async (role) => {
+          mockUsersService.findByEmail.mockResolvedValue(
+            await staff(role, { id: 'branch-1', is_active: false }),
+          );
+
+          await expect(
+            service.validateUser('test@x.com', 'correct-password'),
+          ).resolves.toBeNull();
+        },
+      );
+
+      it('refuses a cashier with no branch', async () => {
+        mockUsersService.findByEmail.mockResolvedValue(
+          await staff('cashier', null),
+        );
+
+        await expect(
+          service.validateUser('test@x.com', 'correct-password'),
+        ).resolves.toBeNull();
+      });
+
+      it('accepts an admin without a branch', async () => {
+        const admin = {
+          ...(await staff('admin', null)),
+          branch_id: null,
+        };
+        mockUsersService.findByEmail.mockResolvedValue(admin);
+
+        await expect(
+          service.validateUser('test@x.com', 'correct-password'),
+        ).resolves.toBe(admin);
+      });
     });
   });
 
@@ -399,6 +465,48 @@ describe('AuthService', () => {
       expect(committed).toBe(true);
       expect(mockRefreshTokensRepo.save).not.toHaveBeenCalled();
       expect(mockRefreshTokensRepo.update).not.toHaveBeenCalled();
+    });
+
+    it.each(['manager', 'cashier'])(
+      'throws for a %s whose branch is inactive, committing the claim and issuing nothing (P2-5)',
+      async (role) => {
+        claimReturns([{ user_id: 'user-1' }]);
+        mockUsersService.findByIdForAuth.mockResolvedValueOnce({
+          ...fakeUser,
+          is_active: true,
+          role,
+          branch_id: 'branch-1',
+          branch: { id: 'branch-1', is_active: false },
+        });
+
+        await expect(
+          service.refresh(validRefreshToken, null, null),
+        ).rejects.toThrow(UnauthorizedException);
+        // The presented token stays claimed (revoked), and no pair is minted
+        expect(committed).toBe(true);
+        expect(mockJwtService.signAsync).not.toHaveBeenCalled();
+        expect(mockRefreshTokensRepo.save).not.toHaveBeenCalled();
+        // Not a reuse alarm: other sessions are left as they are
+        expect(mockRefreshTokensRepo.update).not.toHaveBeenCalled();
+      },
+    );
+
+    it('rotates as before for a cashier at an active branch (P2-5)', async () => {
+      claimReturns([{ user_id: 'user-1' }]);
+      mockUsersService.findByIdForAuth.mockResolvedValueOnce({
+        ...fakeUser,
+        is_active: true,
+        role: 'cashier',
+        branch_id: 'branch-1',
+        branch: { id: 'branch-1', is_active: true },
+      });
+
+      await expect(
+        service.refresh(validRefreshToken, null, null),
+      ).resolves.toEqual({
+        access_token: 'new-access-token',
+        refresh_token: 'new-refresh-token',
+      });
     });
 
     it('refuses a claimed row that belongs to a different user than the JWT', async () => {

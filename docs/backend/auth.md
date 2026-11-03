@@ -46,7 +46,7 @@ Every use of the refresh token:
    - no row → "Refresh token not recognized";
    - `revoked_at` set (whether or not it has also expired) → **reuse detected**: once the transaction has committed, revoke every unrevoked session of the JWT's user (`sub`), then reject;
    - otherwise the row is unrevoked, so it can only have failed the expiry condition → "Refresh token expired".
-4. If the row was claimed: rejects if its `user_id` differs from the JWT's `sub` ("Refresh token not recognized") or the user is missing or inactive ("User no longer active"). These refusals commit, so the claimed token stays revoked. Otherwise issues new access + refresh tokens and inserts the replacement session row **in the same transaction**. The claim and the replacement commit together: if the insert fails, the transaction rolls back, the old token is left unrevoked, and a retry with it is not mistaken for reuse.
+4. If the row was claimed: rejects if its `user_id` differs from the JWT's `sub` ("Refresh token not recognized") or the user is missing or inactive, or is a manager or cashier whose branch is inactive ("User no longer active"; see "Staff of a deactivated branch" below). These refusals commit, so the claimed token stays revoked. Otherwise issues new access + refresh tokens and inserts the replacement session row **in the same transaction**. The claim and the replacement commit together: if the insert fails, the transaction rolls back, the old token is left unrevoked, and a retry with it is not mistaken for reuse.
 
 ### Concurrent refreshes and logout
 
@@ -102,6 +102,16 @@ Every session row in `refresh_tokens` records:
 - `created_at` — login time
 
 This metadata supports future features (session management UI, "log out other devices") and enriches audit logs.
+
+### Staff of a deactivated branch
+
+Phase 2 P2-5. A manager or cashier whose branch is inactive (or who has no branch) can't authenticate. One rule, `branchAllowsSignIn` (`auth/branch-sign-in.ts`), is checked in three places, always on the user and branch just read from the database, never on the token's claims:
+
+- **Login** (`AuthService.validateUser`): the generic 401 "Invalid email or password". `UsersService.findByEmail` loads the branch in the same query.
+- **Every request** (`JwtStrategy.validate`): a plain 401, so an existing access token stops working on the next request. `findById` already loads the branch.
+- **Refresh** (`AuthService.refresh`): a plain 401 ("User no longer active"); no new tokens. The presented token was claimed first, so it stays revoked. `findByIdForAuth` loads the branch in the same query.
+
+Admins have no branch and are never limited by one. Deactivating a branch revokes no session: the live checks are enough. When the branch is reactivated, a still-valid access token and any refresh token that wasn't presented meanwhile work again; a refresh token presented while the branch was inactive is spent, so that user logs in again. No migration, no extra query.
 
 ### When a user's sessions are revoked
 
