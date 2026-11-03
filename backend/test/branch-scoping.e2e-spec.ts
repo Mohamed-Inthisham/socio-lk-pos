@@ -21,6 +21,7 @@ import { PhonePurchase } from '../src/phone-purchases/entities/phone-purchase.en
 import { ProductUnit } from '../src/product-units/entities/product-unit.entity';
 import { ProductUnitStatus } from '../src/product-units/enums/product-unit-status.enum';
 import { SaleLine } from '../src/sales/entities/sale-line.entity';
+import { Stock } from '../src/stock/entities/stock.entity';
 
 type Response = request.Response;
 
@@ -35,7 +36,8 @@ type Response = request.Response;
  * history (the sales list by customerId). P2-2: the phone-purchase list
  * and detail; POST /phone-purchases keeps its own check. P2-3: the
  * product-unit list and detail (with their sales and phone purchase) and
- * the till's IMEI/serial lookup.
+ * the till's IMEI/serial lookup. P2-4: the stock list, detail and
+ * per-product list.
  *
  * Sessions come from AuthService.login: no HTTP logins.
  */
@@ -1185,6 +1187,287 @@ describe('Branch-scoped reads (e2e)', () => {
         expect(JSON.stringify(res.body)).toContain(
           'is not available at this branch',
         );
+      });
+    });
+  });
+
+  // ---- Stock (P2-4) ----
+
+  describe('stock', () => {
+    interface StockCtx {
+      ctx: Ctx;
+      /** Stocked at both branches. */
+      cable: Product;
+      /** Stocked only at B. */
+      charger: Product;
+      /** cable at A: 3 of a minimum 10, so low. */
+      cableA: Stock;
+      /** cable at B: 40, minimum 5. */
+      cableB: Stock;
+      /** charger at B: 2 of a minimum 5, so low. */
+      chargerB: Stock;
+    }
+
+    async function seedStockProduct(name: string, suffix: string) {
+      const brand = await dataSource
+        .getRepository(Brand)
+        .save({ name: `StockBrand ${suffix}`, is_active: true } as Brand);
+      const category = await dataSource
+        .getRepository(Category)
+        .save({ name: `StockCategory ${suffix}`, is_active: true } as Category);
+      const products = dataSource.getRepository(Product);
+      return products.save(
+        products.create({
+          product_type: null,
+          name,
+          sku: `SKU-STOCK-${suffix}`,
+          barcode: `BC-STOCK-${suffix}`,
+          brand_id: brand.id,
+          category_id: category.id,
+          branch_id: null,
+          buying_price: '300.00',
+          selling_price: '500.00',
+          is_active: true,
+          is_serialized: false,
+          tracking_method: TrackingMethod.QUANTITY,
+          default_warranty: WarrantyPeriod.NO_WARRANTY,
+        }),
+      );
+    }
+
+    const seedStockRow = (
+      product: Product,
+      branch: Branch,
+      quantity: number,
+      minQuantity: number,
+    ) => {
+      const repo = dataSource.getRepository(Stock);
+      return repo.save(
+        repo.create({
+          product_id: product.id,
+          branch_id: branch.id,
+          quantity,
+          min_quantity: minQuantity,
+          manage_stock: true,
+        }),
+      );
+    };
+
+    async function stockSetup(): Promise<StockCtx> {
+      const ctx = await setup();
+      const cable = await seedStockProduct('UGREEN Cable', 'CABLE');
+      const charger = await seedStockProduct('UGREEN Charger', 'CHARGER');
+      return {
+        ctx,
+        cable,
+        charger,
+        cableA: await seedStockRow(cable, ctx.branchA, 3, 10),
+        cableB: await seedStockRow(cable, ctx.branchB, 40, 5),
+        chargerB: await seedStockRow(charger, ctx.branchB, 2, 5),
+      };
+    }
+
+    /** A plain array's ids, sorted (GET /stock is not paginated). */
+    const rowIds = (res: Response) =>
+      (res.body as { id: string }[]).map((row) => row.id).sort();
+
+    describe('GET /stock', () => {
+      it('an admin lists every branch, or the branch asked for', async () => {
+        const st = await stockSetup();
+
+        const all = await get('/stock', st.ctx.cookies.admin);
+        const onlyB = await get(
+          `/stock?branchId=${st.ctx.branchB.id}`,
+          st.ctx.cookies.admin,
+        );
+
+        expectStatus(all, 200);
+        expect(rowIds(all)).toEqual(
+          sortedIds(st.cableA, st.cableB, st.chargerB),
+        );
+        expectStatus(onlyB, 200);
+        expect(rowIds(onlyB)).toEqual(sortedIds(st.cableB, st.chargerB));
+      });
+
+      it('a manager and a cashier get only their own branch, with branchId left out or their own, relations and alert included', async () => {
+        const st = await stockSetup();
+
+        for (const cookies of [
+          st.ctx.cookies.managerA,
+          st.ctx.cookies.cashierA,
+        ]) {
+          for (const path of [
+            '/stock',
+            `/stock?branchId=${st.ctx.branchA.id}`,
+          ]) {
+            const res = await get(path, cookies);
+            expectStatus(res, 200);
+            expect(res.body).toEqual([
+              expect.objectContaining({
+                id: st.cableA.id,
+                quantity: 3,
+                min_quantity: 10,
+                low_stock_alert: true,
+                product: expect.objectContaining({ id: st.cable.id }),
+                branch: expect.objectContaining({ id: st.ctx.branchA.id }),
+              }),
+            ]);
+          }
+        }
+      });
+
+      it('staff asking for another branch get 403 WRONG_BRANCH', async () => {
+        const st = await stockSetup();
+
+        for (const cookies of [
+          st.ctx.cookies.managerA,
+          st.ctx.cookies.cashierA,
+        ]) {
+          const res = await get(
+            `/stock?branchId=${st.ctx.branchB.id}`,
+            cookies,
+          );
+          expectStatus(res, 403);
+          expect(res.body).toMatchObject(WRONG_BRANCH);
+        }
+      });
+
+      it('lowStockOnly stays inside the branch', async () => {
+        const st = await stockSetup();
+
+        const staff = await get(
+          '/stock?lowStockOnly=true',
+          st.ctx.cookies.cashierB,
+        );
+        const admin = await get(
+          '/stock?lowStockOnly=true',
+          st.ctx.cookies.admin,
+        );
+
+        expect(rowIds(staff)).toEqual(sortedIds(st.chargerB));
+        expect(rowIds(admin)).toEqual(sortedIds(st.cableA, st.chargerB));
+      });
+
+      it('the till’s own-branch stock lookup still works (productId and branchId)', async () => {
+        const st = await stockSetup();
+
+        const res = await get(
+          `/stock?productId=${st.cable.id}&branchId=${st.ctx.branchA.id}`,
+          st.ctx.cookies.cashierA,
+        );
+
+        expectStatus(res, 200);
+        expect(res.body).toEqual([
+          expect.objectContaining({
+            id: st.cableA.id,
+            quantity: 3,
+            manage_stock: true,
+          }),
+        ]);
+      });
+
+      it('productId and branchId must be UUIDs (400)', async () => {
+        const st = await stockSetup();
+
+        for (const query of ['productId=not-a-uuid', 'branchId=not-a-uuid']) {
+          for (const cookies of [
+            st.ctx.cookies.admin,
+            st.ctx.cookies.cashierA,
+          ]) {
+            const res = await get(`/stock?${query}`, cookies);
+            expectStatus(res, 400);
+          }
+        }
+      });
+    });
+
+    describe('GET /stock/:id', () => {
+      it('an admin opens a row at any branch', async () => {
+        const st = await stockSetup();
+
+        for (const row of [st.cableA, st.cableB]) {
+          const res = await get(`/stock/${row.id}`, st.ctx.cookies.admin);
+          expectStatus(res, 200);
+          expect(res.body).toMatchObject({
+            id: row.id,
+            branch: expect.objectContaining({ id: row.branch_id }),
+          });
+        }
+      });
+
+      it('staff open their own branch’s row', async () => {
+        const st = await stockSetup();
+
+        for (const cookies of [
+          st.ctx.cookies.managerA,
+          st.ctx.cookies.cashierA,
+        ]) {
+          const res = await get(`/stock/${st.cableA.id}`, cookies);
+          expectStatus(res, 200);
+          expect(res.body).toMatchObject({ id: st.cableA.id, quantity: 3 });
+        }
+      });
+
+      it('another branch’s row is 404 for staff, the same answer as a missing id, with nothing of it in the body', async () => {
+        const st = await stockSetup();
+
+        for (const cookies of [
+          st.ctx.cookies.managerA,
+          st.ctx.cookies.cashierA,
+        ]) {
+          const otherBranch = await get(`/stock/${st.cableB.id}`, cookies);
+          const missing = await get(`/stock/${randomUUID()}`, cookies);
+
+          expectStatus(otherBranch, 404);
+          expectStatus(missing, 404);
+          expect(otherBranch.body).toEqual(missing.body);
+          expect(JSON.stringify(otherBranch.body)).not.toContain(st.cableB.id);
+        }
+      });
+    });
+
+    describe('GET /stock/by-product/:productId', () => {
+      it('an admin gets every branch’s row for the product', async () => {
+        const st = await stockSetup();
+
+        const res = await get(
+          `/stock/by-product/${st.cable.id}`,
+          st.ctx.cookies.admin,
+        );
+
+        expectStatus(res, 200);
+        expect(rowIds(res)).toEqual(sortedIds(st.cableA, st.cableB));
+      });
+
+      it('staff get only their own branch’s row', async () => {
+        const st = await stockSetup();
+
+        for (const cookies of [
+          st.ctx.cookies.managerA,
+          st.ctx.cookies.cashierA,
+        ]) {
+          const res = await get(`/stock/by-product/${st.cable.id}`, cookies);
+          expectStatus(res, 200);
+          expect(res.body).toEqual([
+            expect.objectContaining({
+              id: st.cableA.id,
+              quantity: 3,
+              branch: expect.objectContaining({ id: st.ctx.branchA.id }),
+            }),
+          ]);
+        }
+      });
+
+      it('a product with no row at the staff member’s branch is an empty list', async () => {
+        const st = await stockSetup();
+
+        const res = await get(
+          `/stock/by-product/${st.charger.id}`,
+          st.ctx.cookies.cashierA,
+        );
+
+        expectStatus(res, 200);
+        expect(res.body).toEqual([]);
       });
     });
   });

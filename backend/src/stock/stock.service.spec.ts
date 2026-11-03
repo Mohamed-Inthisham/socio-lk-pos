@@ -124,6 +124,12 @@ describe('StockService', () => {
       );
 
       expect(result.quantity).toBe(10);
+      // The refetch is by id only, without a branch scope (Phase 2 P2-4).
+      const [, [refetched]] = mockRepo.findOne.mock.calls as [
+        unknown,
+        [{ where: object }],
+      ];
+      expect(refetched.where).toEqual({ id: expect.any(String) as unknown });
       expect(mockManager.create).toHaveBeenCalledWith(
         Stock,
         expect.objectContaining({
@@ -324,6 +330,76 @@ describe('StockService', () => {
         NotFoundException,
       );
     });
+
+    it('with a branch scope (GET /stock/:id for staff), looks the row up at that branch in the same query', async () => {
+      mockRepo.findOne.mockResolvedValue({
+        id: 's1',
+        quantity: 2,
+        min_quantity: 5,
+        manage_stock: true,
+      });
+
+      await service.findOne('s1', { branchId: 'b1' });
+
+      expect(mockRepo.findOne).toHaveBeenCalledTimes(1);
+      expect(mockRepo.findOne).toHaveBeenCalledWith(
+        expect.objectContaining({ where: { id: 's1', branch_id: 'b1' } }),
+      );
+    });
+
+    it('answers a row at another branch exactly as a missing one: 404 Stock row not found', async () => {
+      // The scoped query finds nothing for a row at another branch.
+      mockRepo.findOne.mockResolvedValue(null);
+      const otherBranch = await service
+        .findOne('s-other', { branchId: 'b1' })
+        .catch((e: unknown) => e);
+      const missing = await service.findOne('missing').catch((e: unknown) => e);
+
+      expect(otherBranch).toBeInstanceOf(NotFoundException);
+      expect((otherBranch as NotFoundException).getResponse()).toEqual(
+        (missing as NotFoundException).getResponse(),
+      );
+    });
+
+    it('with no scope or an admin’s empty one, looks the row up by id only', async () => {
+      mockRepo.findOne.mockResolvedValue({
+        id: 's1',
+        quantity: 2,
+        min_quantity: 0,
+        manage_stock: true,
+      });
+
+      await service.findOne('s1');
+      await service.findOne('s1', { branchId: undefined });
+
+      for (const [options] of mockRepo.findOne.mock.calls) {
+        expect((options as { where: object }).where).toEqual({ id: 's1' });
+      }
+    });
+  });
+
+  describe('findByProduct', () => {
+    it('lists every branch’s row when no branch is given (admins)', async () => {
+      mockRepo.find.mockResolvedValue([]);
+
+      await service.findByProduct('p1');
+
+      expect(mockRepo.find).toHaveBeenCalledWith(
+        expect.objectContaining({ where: { product_id: 'p1' } }),
+      );
+    });
+
+    it('lists only that branch’s row when a branch is given (staff, Phase 2 P2-4)', async () => {
+      mockRepo.find.mockResolvedValue([]);
+
+      await expect(service.findByProduct('p1', 'b1')).resolves.toEqual([]);
+
+      expect(mockRepo.find).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: { product_id: 'p1', branch_id: 'b1' },
+        }),
+      );
+    });
   });
 
   describe('update', () => {
@@ -362,6 +438,10 @@ describe('StockService', () => {
       const result = await service.update('s1', { quantity: 25 }, admin);
 
       expect(result.quantity).toBe(25);
+      // The refetch is by id only, without a branch scope (Phase 2 P2-4).
+      expect(mockRepo.findOne).toHaveBeenLastCalledWith(
+        expect.objectContaining({ where: { id: 's1' } }),
+      );
       expect(qb.setLock).toHaveBeenCalledWith('pessimistic_write');
       expect(mockManager.update).toHaveBeenCalledWith(Stock, 's1', {
         quantity: 25,

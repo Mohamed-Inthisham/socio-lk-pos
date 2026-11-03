@@ -112,6 +112,9 @@ This relies on the DB-level `CHK_users_branch_role` invariant (every non-admin u
 | `GET /product-units` (P2-3; managers only, cashiers are refused by role) | every branch, or `branchId` | own branch; another `branchId` → 403 `WRONG_BRANCH` |
 | `GET /product-units/:id` (P2-3; managers only) | any unit | own branch's units; another branch's → 404 |
 | `GET /product-units/sellable/by-identifier/:identifier` (P2-3, the till's IMEI/serial lookup; `branchId` required) | any branch | own branch only; another `branchId` → 403 `WRONG_BRANCH`. Statuses and answers unchanged: 200 in stock, 409 held but not sellable, 404 not at that branch |
+| `GET /stock` (P2-4; `productId` and `lowStockOnly` filters included; `productId` and `branchId` must be UUIDs, 400 otherwise) | every branch, or `branchId` | own branch; another `branchId` → 403 `WRONG_BRANCH` |
+| `GET /stock/:id` (P2-4) | any row | own branch's rows; another branch's → 404 |
+| `GET /stock/by-product/:productId` (P2-4) | every branch's row | own branch's row only (an empty list when it has none) |
 
 The sales rows are P2-1. `POST /phone-purchases` keeps its own check (403 "You can only intake phones at your own branch").
 
@@ -121,7 +124,7 @@ Customers themselves stay global: every role reads the customer record, but thei
 
 ### Where this is headed
 
-The other branch-owned reads are still unscoped and follow in later Phase 2 steps: stock. Stock purchases, cash days, the inspection list and approvers were already scoped. Behaviour for a deactivated branch's staff is not yet enforced.
+Every branch-owned read is now scoped: sales, phone purchases, product units, the till's lookup and stock (Phase 2 P2-1 to P2-4), and stock purchases, cash days, the inspection list and approvers before them. The frontend follows the same rule for staff (no branch picker on ProductsList or BarcodeLabels; ProductDetail's stock section is "Stock at Your Branch"), but the backend is what enforces it. Behaviour for a deactivated branch's staff is not yet enforced.
 
 ## Staff Personal Data in Responses
 

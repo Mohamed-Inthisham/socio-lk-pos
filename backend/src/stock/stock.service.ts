@@ -133,6 +133,10 @@ export class StockService {
   /**
    * List all stock rows with nested product and branch data.
    * Includes computed low_stock_alert flag on each row.
+   *
+   * Branch scoping (Phase 2 P2-4) is resolved by the controller before
+   * this runs: branchId is then a manager's or cashier's own branch, and
+   * an admin's choice (or none: every branch).
    */
   async findAll(options: {
     productId?: string;
@@ -159,10 +163,20 @@ export class StockService {
 
   /**
    * Get one stock row by id.
+   *
+   * scope.branchId (Phase 2 P2-4): only GET /stock/:id passes it, for a
+   * manager or cashier: a row at another branch is then not found, the
+   * same 404 as a missing id. create() and update() re-read without one.
    */
-  async findOne(id: string): Promise<StockWithAlert> {
+  async findOne(
+    id: string,
+    scope?: { branchId?: string },
+  ): Promise<StockWithAlert> {
     const stock = await this.stockRepository.findOne({
-      where: { id },
+      where: {
+        id,
+        ...(scope?.branchId !== undefined && { branch_id: scope.branchId }),
+      },
       relations: [...STOCK_RELATIONS],
     });
     if (!stock) {
@@ -172,11 +186,15 @@ export class StockService {
   }
 
   /**
-   * Get all stock rows for a given product (across all branches).
+   * Get all stock rows for a given product (across all branches, or at
+   * branchId only: a manager's or cashier's own branch, Phase 2 P2-4).
    * Convenience method — used by the product detail page.
    */
-  async findByProduct(productId: string): Promise<StockWithAlert[]> {
-    return this.findAll({ productId });
+  async findByProduct(
+    productId: string,
+    branchId?: string,
+  ): Promise<StockWithAlert[]> {
+    return this.findAll({ productId, branchId });
   }
 
   /**
