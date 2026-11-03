@@ -170,8 +170,8 @@ All endpoints are prefixed with `/api/v1` and require the `access_token` cookie.
 
 | Method | Path | Role | Purpose |
 |--------|------|------|---------|
-| GET | `/phone-purchases` | any | List (filters: `customer_id`, `branchId`) |
-| GET | `/phone-purchases/:id` | any | Get one with customer, branch, cashier, units |
+| GET | `/phone-purchases` | any | List (filters: `customer_id`, `branchId`). **Branch-scoped (Phase 2 P2-2):** admins see every branch, or the one in `branchId`; managers and cashiers see only their own branch (`branchId` left out or their own), and another `branchId` is 403 `{ code: 'WRONG_BRANCH' }` ([rbac.md](./rbac.md#branch-scoped-reads-phase-2)) |
+| GET | `/phone-purchases/:id` | any | Get one with customer, branch, cashier, units. **Branch-scoped (P2-2):** for a manager or cashier, a purchase at another branch is 404 `Phone purchase not found`, the same answer as a missing id |
 | POST | `/phone-purchases` | any | Atomic intake: PhonePurchase + IN_STOCK unit + stock increment (the customer needs an NIC) |
 
 ### Product units

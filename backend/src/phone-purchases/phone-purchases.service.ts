@@ -182,10 +182,9 @@ export class PhonePurchasesService {
    * Paginated list of PhonePurchases with optional customer/branch
    * filters. Sorted by created_at DESC (newest first).
    *
-   * Multi-branch list scoping ("only my branch") is deferred to R9,
-   * matching Sales precedent — cashiers can currently see all
-   * purchases. Frontend can pass branchId explicitly when the UX
-   * wants scoping.
+   * Branch scoping (Phase 2 P2-2) is resolved by the controller before
+   * this runs: query.branchId is then the caller's own branch for a
+   * manager or cashier, and an admin's choice (or none: every branch).
    */
   async findAll(
     query: ListPhonePurchasesQueryDto,
@@ -223,10 +222,20 @@ export class PhonePurchasesService {
    * Get one PhonePurchase by ID with all relations hydrated.
    * Transaction-independent — uses the injected repository, matches
    * SalesService.findOne pattern.
+   *
+   * scope.branchId (Phase 2 P2-2): only GET /phone-purchases/:id passes
+   * it, for a manager or cashier: a purchase at another branch is then not
+   * found, the same 404 as a missing id. create() passes no scope.
    */
-  async findOne(id: string): Promise<PhonePurchase> {
+  async findOne(
+    id: string,
+    scope?: { branchId?: string },
+  ): Promise<PhonePurchase> {
     const purchase = await this.phonePurchasesRepository.findOne({
-      where: { id },
+      where: {
+        id,
+        ...(scope?.branchId !== undefined && { branch_id: scope.branchId }),
+      },
       relations: [...PHONE_PURCHASE_RELATIONS],
     });
     if (!purchase) {

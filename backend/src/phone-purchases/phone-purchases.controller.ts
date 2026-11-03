@@ -23,6 +23,7 @@ import { CurrentUser } from '../auth/decorators/current-user.decorator';
 import type { AuthenticatedUser } from '../auth/strategies/jwt.strategy';
 import { Auditable } from '../audit-log/decorators/auditable.decorator';
 import { AuditAction } from '../audit-log/enums/audit-action.enum';
+import { scopeBranch } from '../common/utils/branch-scope';
 
 @ApiTags('Phone Purchases')
 @ApiCookieAuth('access_token')
@@ -38,8 +39,10 @@ export class PhonePurchasesController {
       'All authenticated roles can list phone purchases. Filters: ' +
       'customer_id, branchId. Pagination: page (default 1), limit ' +
       '(default 50, max 200). Sorted by created_at DESC. ' +
-      'Note: multi-branch scoping ("only my branch") is deferred to ' +
-      'R9, matching Sales precedent; for now all roles see all purchases.',
+      'Branch scoping (Phase 2 P2-2): admins see every branch, or the ' +
+      'one given in branchId; managers and cashiers see only their own ' +
+      'branch (branchId left out or their own), and another branchId is ' +
+      '403 { code: WRONG_BRANCH }.',
   })
   @ApiResponse({
     status: 200,
@@ -50,8 +53,18 @@ export class PhonePurchasesController {
   })
   @ApiResponse({ status: 400, description: 'Invalid query parameter' })
   @ApiResponse({ status: 401, description: 'Not authenticated' })
-  async findAll(@Query() query: ListPhonePurchasesQueryDto) {
-    return this.phonePurchasesService.findAll(query);
+  @ApiResponse({
+    status: 403,
+    description: '{ message, code: WRONG_BRANCH }: another branch, for staff',
+  })
+  async findAll(
+    @Query() query: ListPhonePurchasesQueryDto,
+    @CurrentUser() user: AuthenticatedUser,
+  ) {
+    return this.phonePurchasesService.findAll({
+      ...query,
+      branchId: scopeBranch(user, query.branchId),
+    });
   }
 
   @Get(':id')
@@ -69,9 +82,20 @@ export class PhonePurchasesController {
   @ApiParam({ name: 'id', description: 'PhonePurchase UUID', format: 'uuid' })
   @ApiResponse({ status: 200, description: 'Phone purchase found' })
   @ApiResponse({ status: 401, description: 'Not authenticated' })
-  @ApiResponse({ status: 404, description: 'Phone purchase not found' })
-  async findOne(@Param('id', ParseUUIDPipe) id: string) {
-    return this.phonePurchasesService.findOne(id);
+  @ApiResponse({
+    status: 404,
+    description:
+      'Phone purchase not found; also, for staff, a purchase at another ' +
+      'branch (Phase 2 P2-2: the same answer, so its existence is not ' +
+      'revealed)',
+  })
+  async findOne(
+    @Param('id', ParseUUIDPipe) id: string,
+    @CurrentUser() user: AuthenticatedUser,
+  ) {
+    return this.phonePurchasesService.findOne(id, {
+      branchId: scopeBranch(user),
+    });
   }
 
   @Post()

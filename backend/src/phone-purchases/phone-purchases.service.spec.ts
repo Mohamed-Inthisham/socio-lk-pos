@@ -845,6 +845,46 @@ describe('PhonePurchasesService', () => {
         NotFoundException,
       );
     });
+
+    it('with a branch scope (GET /phone-purchases/:id for staff), looks the purchase up at that branch in the same query', async () => {
+      mockRepo.findOne.mockResolvedValue({ id: 'p-1', branch_id: 'branch-a' });
+
+      await service.findOne('p-1', { branchId: 'branch-a' });
+
+      expect(mockRepo.findOne).toHaveBeenCalledTimes(1);
+      expect(mockRepo.findOne).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: { id: 'p-1', branch_id: 'branch-a' },
+        }),
+      );
+    });
+
+    it('answers a purchase at another branch exactly as a missing one: 404 Phone purchase not found', async () => {
+      // The scoped query finds nothing for a purchase at another branch.
+      mockRepo.findOne.mockResolvedValue(null);
+      const otherBranch = await service
+        .findOne('p-other', { branchId: 'branch-a' })
+        .catch((e: unknown) => e);
+      const missing = await service
+        .findOne('p-missing')
+        .catch((e: unknown) => e);
+
+      expect(otherBranch).toBeInstanceOf(NotFoundException);
+      expect((otherBranch as NotFoundException).getResponse()).toEqual(
+        (missing as NotFoundException).getResponse(),
+      );
+    });
+
+    it('with no scope or an admin’s empty one, looks the purchase up by id only (create()’s re-read)', async () => {
+      mockRepo.findOne.mockResolvedValue({ id: 'p-1' });
+
+      await service.findOne('p-1');
+      await service.findOne('p-1', { branchId: undefined });
+
+      for (const [options] of mockRepo.findOne.mock.calls) {
+        expect((options as { where: object }).where).toEqual({ id: 'p-1' });
+      }
+    });
   });
 
   // ---- Validation helper edge cases ----

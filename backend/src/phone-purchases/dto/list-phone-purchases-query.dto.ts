@@ -9,9 +9,10 @@ import { PaginationQueryDto } from '../../common/dto/pagination-query.dto';
  * and combine with AND semantics — passing customer_id AND branchId
  * returns purchases matching both.
  *
- * Multi-branch list scoping ("only my branch") is deferred to R9,
- * matching the Sales precedent. Cashiers currently see all purchases;
- * frontend can pass branchId explicitly when the UX wants scoping.
+ * Branch scoping (Phase 2 P2-2): admins see every branch, or the one in
+ * branchId; managers and cashiers see only their own branch, and a
+ * branchId for another branch is 403 WRONG_BRANCH.
+ * PhonePurchasesController resolves branchId before the service runs.
  */
 export class ListPhonePurchasesQueryDto extends PaginationQueryDto {
   @ApiPropertyOptional({
