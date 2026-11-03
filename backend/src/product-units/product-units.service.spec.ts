@@ -229,6 +229,50 @@ describe('ProductUnitsService', () => {
         NotFoundException,
       );
     });
+
+    it('with a branch scope (GET /product-units/:id for a manager), looks the unit up at that branch in the same query, keeping its relations', async () => {
+      mockRepo.findOne.mockResolvedValue({ id: 'u-1', branch_id: 'b-1' });
+
+      await service.findOne('u-1', { branchId: 'b-1' });
+
+      expect(mockRepo.findOne).toHaveBeenCalledTimes(1);
+      expect(mockRepo.findOne).toHaveBeenCalledWith({
+        where: { id: 'u-1', branch_id: 'b-1' },
+        relations: expect.arrayContaining([
+          'phone_purchase',
+          'phone_purchase.customer',
+          'sale_lines',
+          'sale_lines.sale',
+        ]),
+      });
+    });
+
+    it('answers a unit at another branch exactly as a missing one: 404 Product unit not found', async () => {
+      // The scoped query finds nothing for a unit at another branch.
+      mockRepo.findOne.mockResolvedValue(null);
+      const otherBranch = await service
+        .findOne('u-other', { branchId: 'b-1' })
+        .catch((e: unknown) => e);
+      const missing = await service
+        .findOne('u-missing')
+        .catch((e: unknown) => e);
+
+      expect(otherBranch).toBeInstanceOf(NotFoundException);
+      expect((otherBranch as NotFoundException).getResponse()).toEqual(
+        (missing as NotFoundException).getResponse(),
+      );
+    });
+
+    it('with no scope or an admin’s empty one, looks the unit up by id only', async () => {
+      mockRepo.findOne.mockResolvedValue({ id: 'u-1' });
+
+      await service.findOne('u-1');
+      await service.findOne('u-1', { branchId: undefined });
+
+      for (const [options] of mockRepo.findOne.mock.calls) {
+        expect((options as { where: object }).where).toEqual({ id: 'u-1' });
+      }
+    });
   });
 
   // ---- markSoldForSale ----
@@ -1027,6 +1071,14 @@ describe('ProductUnitsService', () => {
         });
 
       const result = await service.passInspection('u-1', manager1, '1.2.3.4');
+
+      // The re-read after the pass is unscoped (Phase 2 P2-3): its own
+      // branch check already ran.
+      const [, [reRead]] = mockRepo.findOne.mock.calls as [
+        unknown,
+        [{ where: object }],
+      ];
+      expect(reRead.where).toEqual({ id: 'u-1' });
 
       expect(lockInventoryRows).toHaveBeenCalledWith(manager, {
         stock: [{ productId: 'p-1', branchId: 'b-1' }],

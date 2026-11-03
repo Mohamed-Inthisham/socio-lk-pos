@@ -22,8 +22,10 @@ const trimStringField = ({ value }: { value: unknown }): unknown => {
  *
  * Endpoint is ADMIN/MANAGER only per Q6 decision — cashiers interact
  * with ProductUnits implicitly via IMEI at ring-up (Slice E), not
- * through browse endpoints. Multi-branch list scoping deferred to R9
- * matching Sales precedent.
+ * through browse endpoints. Branch scoping (Phase 2 P2-3): admins see
+ * every branch, or the one in branchId; managers see only their own
+ * branch, and a branchId for another branch is 403 WRONG_BRANCH.
+ * ProductUnitsController resolves branchId before the service runs.
  */
 export class ListProductUnitsQueryDto extends PaginationQueryDto {
   @ApiPropertyOptional({

@@ -22,6 +22,7 @@ import { Roles } from '../auth/decorators/roles.decorator';
 import { UserRole } from '../users/enums/user-role.enum';
 import { CurrentUser } from '../auth/decorators/current-user.decorator';
 import type { AuthenticatedUser } from '../auth/strategies/jwt.strategy';
+import { scopeBranch } from '../common/utils/branch-scope';
 
 @ApiTags('Product Units')
 @ApiCookieAuth('access_token')
@@ -39,10 +40,10 @@ export class ProductUnitsController {
       'at ring-up in Slice E). Filters: productId, branchId, status, ' +
       'imei (exact match). Pagination: page (default 1), limit ' +
       '(default 50, max 200). Sorted by created_at DESC.\n\n' +
-      'Multi-branch scoping ("only my branch") deferred to R9, ' +
-      'matching Sales precedent — managers can currently see all ' +
-      'units. Frontend can pass branchId explicitly when the UX ' +
-      'wants scoping.',
+      'Branch scoping (Phase 2 P2-3): admins see every branch, or the ' +
+      'one given in branchId; managers see only their own branch ' +
+      '(branchId left out or their own), and another branchId is ' +
+      '403 { code: WRONG_BRANCH }.',
   })
   @ApiResponse({
     status: 200,
@@ -55,10 +56,18 @@ export class ProductUnitsController {
   @ApiResponse({ status: 401, description: 'Not authenticated' })
   @ApiResponse({
     status: 403,
-    description: 'Cashier attempted to browse product units',
+    description:
+      'Cashier attempted to browse product units, or { message, code: ' +
+      'WRONG_BRANCH } for a manager asking for another branch',
   })
-  async findAll(@Query() query: ListProductUnitsQueryDto) {
-    return this.productUnitsService.findAll(query);
+  async findAll(
+    @Query() query: ListProductUnitsQueryDto,
+    @CurrentUser() user: AuthenticatedUser,
+  ) {
+    return this.productUnitsService.findAll({
+      ...query,
+      branchId: scopeBranch(user, query.branchId),
+    });
   }
 
   @Get('sellable/by-identifier/:identifier')
@@ -67,16 +76,25 @@ export class ProductUnitsController {
     summary: 'Resolve an in-stock IMEI or serial number for POS scanning',
     description:
       'Returns the product and exact identifier only when the matching unit ' +
-      'is in stock at the supplied branch.',
+      'is in stock at the supplied branch. branchId is required; managers ' +
+      'and cashiers may only give their own branch (another is 403 ' +
+      '{ code: WRONG_BRANCH }, Phase 2 P2-3); admins any branch.',
   })
   @ApiParam({ name: 'identifier', description: 'Exact IMEI or serial number' })
+  @ApiResponse({
+    status: 403,
+    description: '{ message, code: WRONG_BRANCH }: another branch, for staff',
+  })
   async findSellableByIdentifier(
     @Param('identifier') identifier: string,
     @Query('branchId', ParseUUIDPipe) branchId: string,
+    @CurrentUser() user: AuthenticatedUser,
   ) {
+    // Required, so scopeBranch gives back this branch (or refuses staff).
+    const scoped = scopeBranch(user, branchId) ?? branchId;
     return this.productUnitsService.findSellableByIdentifier(
       identifier,
-      branchId,
+      scoped,
     );
   }
 
@@ -97,9 +115,20 @@ export class ProductUnitsController {
     status: 403,
     description: 'Cashier attempted to view a product unit',
   })
-  @ApiResponse({ status: 404, description: 'Product unit not found' })
-  async findOne(@Param('id', ParseUUIDPipe) id: string) {
-    return this.productUnitsService.findOne(id);
+  @ApiResponse({
+    status: 404,
+    description:
+      'Product unit not found; also, for a manager, a unit at another ' +
+      'branch (Phase 2 P2-3: the same answer, so its existence is not ' +
+      'revealed)',
+  })
+  async findOne(
+    @Param('id', ParseUUIDPipe) id: string,
+    @CurrentUser() user: AuthenticatedUser,
+  ) {
+    return this.productUnitsService.findOne(id, {
+      branchId: scopeBranch(user),
+    });
   }
 
   // Not @Auditable: passInspection writes the INSPECTION_PASSED row in

@@ -109,14 +109,19 @@ This relies on the DB-level `CHK_users_branch_role` invariant (every non-admin u
 | `GET /sales/daily-summary` | `branchId` required (400 without it) | own branch; another `branchId` → 403 `WRONG_BRANCH` |
 | `GET /phone-purchases` (P2-2; `customer_id` filter included) | every branch, or `branchId` | own branch; another `branchId` → 403 `WRONG_BRANCH` |
 | `GET /phone-purchases/:id` (P2-2) | any purchase | own branch's purchases; another branch's → 404 |
+| `GET /product-units` (P2-3; managers only, cashiers are refused by role) | every branch, or `branchId` | own branch; another `branchId` → 403 `WRONG_BRANCH` |
+| `GET /product-units/:id` (P2-3; managers only) | any unit | own branch's units; another branch's → 404 |
+| `GET /product-units/sellable/by-identifier/:identifier` (P2-3, the till's IMEI/serial lookup; `branchId` required) | any branch | own branch only; another `branchId` → 403 `WRONG_BRANCH`. Statuses and answers unchanged: 200 in stock, 409 held but not sellable, 404 not at that branch |
 
 The sales rows are P2-1. `POST /phone-purchases` keeps its own check (403 "You can only intake phones at your own branch").
+
+A product unit never changes branch, and the sales and phone purchase it is linked to are at its branch. So a unit's `sale_lines.sale` and `phone_purchase.customer` are kept in the product-unit responses: scoping the unit scopes them too. Adding a unit to a sale still checks its branch and status itself.
 
 Customers themselves stay global: every role reads the customer record, but their purchase history follows the sales list's scoping.
 
 ### Where this is headed
 
-The other branch-owned reads are still unscoped and follow in later Phase 2 steps: product units and the sellable-IMEI lookup (which also still show a traded-in phone's seller and purchase, through `phone_purchase` and `phone_purchase.customer`), and stock. Stock purchases, cash days, the inspection list and approvers were already scoped. Behaviour for a deactivated branch's staff is not yet enforced.
+The other branch-owned reads are still unscoped and follow in later Phase 2 steps: stock. Stock purchases, cash days, the inspection list and approvers were already scoped. Behaviour for a deactivated branch's staff is not yet enforced.
 
 ## Staff Personal Data in Responses
 
