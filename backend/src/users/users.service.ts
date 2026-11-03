@@ -77,6 +77,11 @@ export type SafeUser = Omit<User, SecretUserField>;
  * ClassSerializerInterceptor doesn't process, so the entity's @Exclude
  * doesn't apply to it: every field to hide is dropped here (Phase 6.4
  * P6-15 added the approval PIN's).
+ *
+ * That is deliberate for staff personal data (F3): the entity @Exclude()s
+ * email, phone, nic and address so embedded users never carry them, and
+ * this plain object keeps them for the admin-only /users endpoints, whose
+ * screens show and edit them. Keep returning a plain object here.
  */
 function toSafeUser(user: User): SafeUser {
   const {

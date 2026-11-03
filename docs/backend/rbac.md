@@ -114,6 +114,16 @@ Customers themselves stay global: every role reads the customer record, but thei
 
 The other branch-owned reads are still unscoped and follow in later Phase 2 steps: phone purchases, product units and the sellable-IMEI lookup, and stock. Stock purchases, cash days, the inspection list and approvers were already scoped. Behaviour for a deactivated branch's staff is not yet enforced.
 
+## Staff Personal Data in Responses
+
+A staff member's email, phone, NIC and home address (`users.email`, `phone`, `nic`, `address`) are personal data. They appear only where they're the point (F3):
+
+- **Operational responses never carry them.** A user embedded in a response (`sale.cashier`, `voider`, `void_requester`, `phone_purchase.cashier`, `stock_purchase.created_by`, `payments[].created_by`, …) comes through the global `ClassSerializerInterceptor`, and the `User` entity `@Exclude()`s the four fields, as it does the password and PIN fields. Operational screens only show `full_name`.
+- **Admin user management is the controlled exception.** The `/users` endpoints are admin-only (`@Roles(ADMIN)` on the controller) and answer with plain objects built by `UsersService.toSafeUser`, which the serializer leaves as they are: they keep the four fields for the Users screens and drop only the secrets.
+- **A user's own `/auth/login` and `/auth/me`** list explicit fields, including their own email, and never phone, NIC or address.
+
+A new endpoint that returns user relations gets this protection automatically as long as it returns entities. One that builds its own object from a user must leave these fields out, unless it's admin user management. `test/secret-exposure.e2e-spec.ts` checks every embedded user in the responses it covers.
+
 ## Design Choices
 
 ### Why global guards (opt-out) instead of per-route guards (opt-in)?

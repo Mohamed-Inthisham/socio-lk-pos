@@ -1,6 +1,7 @@
 import { INestApplication } from '@nestjs/common';
 import request, { Response } from 'supertest';
 import * as bcrypt from 'bcrypt';
+import { randomUUID } from 'crypto';
 import { DataSource } from 'typeorm';
 import { createTestApp, truncateAllTables } from './setup';
 import { openToday } from './cash-day.helper';
@@ -15,6 +16,9 @@ import { ProductType } from '../src/products/enums/product-type.enum';
 import { Stock } from '../src/stock/entities/stock.entity';
 import { Customer } from '../src/customers/entities/customer.entity';
 import { AuditLog } from '../src/audit-log/entities/audit-log.entity';
+import { Supplier } from '../src/suppliers/entities/supplier.entity';
+import { StockPurchasePaymentMethod } from '../src/stock-purchases/enums/stock-purchase-payment-method.enum';
+import { StockPurchasePaymentStatus } from '../src/stock-purchases/enums/stock-purchase-payment-status.enum';
 import { AuditAction } from '../src/audit-log/enums/audit-action.enum';
 import { PaymentMethod } from '../src/sales/enums/payment-method.enum';
 
@@ -23,6 +27,14 @@ import { PaymentMethod } from '../src/sales/enums/payment-method.enum';
  * token hash, directly or through a relation (sale.cashier,
  * phone_purchase.cashier, …). User.password_hash is `select: false` and
  * `@Exclude()`; RefreshToken.token_hash is `@Exclude()`.
+ *
+ * Staff personal data (F3): a user embedded in an operational response
+ * (sale.cashier, voider, void_requester, phone_purchase.cashier,
+ * stock_purchase.created_by, payments[].created_by) carries no email,
+ * phone, NIC or address. Only a user's own /auth responses and the
+ * admin-only /users endpoints may: those calls opt out explicitly, and
+ * /users is checked to still return all four. The staff below are seeded
+ * with all four, so the check can't pass because they're empty.
  *
  * One app, seeded once; the `it` blocks run in order and share state.
  */
@@ -80,13 +92,86 @@ describe('Secret exposure (e2e)', () => {
     return [];
   }
 
-  function expectNoSecrets(res: Response): void {
+  /** Staff personal data (F3): never on a user embedded in a response. */
+  const STAFF_PERSONAL_KEYS = ['email', 'phone', 'nic', 'address'];
+
+  /**
+   * Every path in `node` where a user-shaped object (a string full_name and
+   * role: a serialized User) carries staff personal data. Customers (name)
+   * and branches (name) aren't user-shaped, so their phone, NIC and address
+   * are left alone.
+   */
+  function staffPersonalDataPaths(node: unknown, path = '$'): string[] {
+    if (Array.isArray(node)) {
+      return node.flatMap((v, i) => staffPersonalDataPaths(v, `${path}[${i}]`));
+    }
+    if (node && typeof node === 'object') {
+      const record = node as Record<string, unknown>;
+      const userShaped =
+        typeof record.full_name === 'string' && typeof record.role === 'string';
+      return [
+        ...(userShaped
+          ? STAFF_PERSONAL_KEYS.filter((k) => k in record).map(
+              (k) => `${path}.${k}`,
+            )
+          : []),
+        ...Object.entries(record).flatMap(([k, v]) =>
+          staffPersonalDataPaths(v, `${path}.${k}`),
+        ),
+      ];
+    }
+    return [];
+  }
+
+  /** A serialized User: what the staff check looks for, so it can't pass vacuously. */
+  const embeddedUser = (id: string) =>
+    expect.objectContaining({
+      id,
+      full_name: expect.any(String),
+      role: expect.any(String),
+    }) as unknown;
+
+  /**
+   * No secret anywhere, and no staff personal data on any embedded user.
+   * ownOrAdminUserData: the user's own /auth responses and the admin-only
+   * /users endpoints, which do carry email (and /users phone, NIC,
+   * address); every other response is checked for them.
+   */
+  function expectNoSecrets(
+    res: Response,
+    { ownOrAdminUserData = false }: { ownOrAdminUserData?: boolean } = {},
+  ): void {
     expect(secretPaths(res.body)).toEqual([]);
+    if (!ownOrAdminUserData) {
+      expect(staffPersonalDataPaths(res.body)).toEqual([]);
+    }
     // Nor the PIN or the password as a value, anywhere in the body
     const text = JSON.stringify(res.body ?? {});
     expect(text).not.toContain(MANAGER_PIN);
     expect(text).not.toContain(PASSWORD);
   }
+
+  /** Each staff member's contact details (F3), distinct and non-empty. */
+  const CONTACT: Record<
+    UserRole,
+    { phone: string; nic: string; address: string }
+  > = {
+    [UserRole.ADMIN]: {
+      phone: '0711000001',
+      nic: '198511111111',
+      address: '1 Admin Lane, Colombo 07',
+    },
+    [UserRole.MANAGER]: {
+      phone: '0711000002',
+      nic: '198822222222',
+      address: '2 Manager Road, Kandy',
+    },
+    [UserRole.CASHIER]: {
+      phone: '0711000003',
+      nic: '199533333333',
+      address: '3 Cashier Street, Galle',
+    },
+  };
 
   async function seedUser(
     role: UserRole,
@@ -99,6 +184,7 @@ describe('Secret exposure (e2e)', () => {
         email,
         password_hash: await bcrypt.hash(PASSWORD, 4),
         full_name: `Test ${role}`,
+        ...CONTACT[role],
         role,
         is_active: true,
         branch_id: branchId,
@@ -208,7 +294,7 @@ describe('Secret exposure (e2e)', () => {
         .send({ email: cashier.email, password: PASSWORD })
         .expect(200);
       expect(res.body.user).toMatchObject({ id: cashier.id });
-      expectNoSecrets(res);
+      expectNoSecrets(res, { ownOrAdminUserData: true });
     });
 
     it('POST /auth/login with a wrong password is 401', async () => {
@@ -225,7 +311,7 @@ describe('Secret exposure (e2e)', () => {
         .set('Cookie', cashierCookies)
         .expect(200);
       expect(res.body.user).toMatchObject({ id: cashier.id });
-      expectNoSecrets(res);
+      expectNoSecrets(res, { ownOrAdminUserData: true });
     });
 
     it('POST /auth/refresh rotates tokens and returns no secrets', async () => {
@@ -261,7 +347,7 @@ describe('Secret exposure (e2e)', () => {
         .get('/api/v1/sales')
         .set('Cookie', cashierCookies)
         .expect(200);
-      expect(res.body.data[0].cashier).toMatchObject({ id: cashier.id });
+      expect(res.body.data[0].cashier).toEqual(embeddedUser(cashier.id));
       expectNoSecrets(res);
     });
 
@@ -270,7 +356,7 @@ describe('Secret exposure (e2e)', () => {
         .get(`/api/v1/sales/${saleId}`)
         .set('Cookie', cashierCookies)
         .expect(200);
-      expect(res.body.cashier).toMatchObject({ id: cashier.id });
+      expect(res.body.cashier).toEqual(embeddedUser(cashier.id));
       expectNoSecrets(res);
     });
 
@@ -374,7 +460,7 @@ describe('Secret exposure (e2e)', () => {
         .set('Cookie', managerCookies)
         .expect(200);
       expect(res.body.user).toMatchObject({ has_approval_pin: true });
-      expectNoSecrets(res);
+      expectNoSecrets(res, { ownOrAdminUserData: true });
     });
 
     it('GET /approvers (id and full_name only)', async () => {
@@ -784,14 +870,143 @@ describe('Secret exposure (e2e)', () => {
     });
   });
 
+  describe('stock purchases (created_by and payments[].created_by are loaded; F3)', () => {
+    let supplier: Supplier;
+    let purchaseId: string;
+    let chequeId: string;
+
+    const purchaseBody = () => ({
+      client_request_id: randomUUID(),
+      supplier_id: supplier.id,
+      branch_id: branch.id,
+      items: [
+        { product_id: product.id, quantity: 2, unit_buying_price: '80.00' },
+      ],
+      initial_payment: {
+        amount: '60.00',
+        method: StockPurchasePaymentMethod.CASH,
+        payment_date: '2026-11-02',
+      },
+    });
+
+    it('POST /stock-purchases', async () => {
+      supplier = await dataSource
+        .getRepository(Supplier)
+        .save({ name: 'Probe Supplier', is_active: true } as Supplier);
+      const res = await http()
+        .post('/api/v1/stock-purchases')
+        .set('Cookie', managerCookies)
+        .send(purchaseBody())
+        .expect(201);
+      purchaseId = res.body.id;
+      expect(res.body.created_by).toEqual(embeddedUser(manager.id));
+      expect(res.body.payments[0].created_by).toEqual(embeddedUser(manager.id));
+      expectNoSecrets(res);
+    });
+
+    it('GET /stock-purchases', async () => {
+      const res = await http()
+        .get('/api/v1/stock-purchases')
+        .set('Cookie', managerCookies)
+        .expect(200);
+      const purchase = (res.body as { id: string }[]).find(
+        (p) => p.id === purchaseId,
+      ) as Record<string, unknown>;
+      expect(purchase.created_by).toEqual(embeddedUser(manager.id));
+      expectNoSecrets(res);
+    });
+
+    it('GET /stock-purchases/:id', async () => {
+      const res = await http()
+        .get(`/api/v1/stock-purchases/${purchaseId}`)
+        .set('Cookie', adminCookies)
+        .expect(200);
+      expect(res.body.created_by).toEqual(embeddedUser(manager.id));
+      expectNoSecrets(res);
+    });
+
+    it('POST /stock-purchases/:id/payments (a cheque)', async () => {
+      const res = await http()
+        .post(`/api/v1/stock-purchases/${purchaseId}/payments`)
+        .set('Cookie', managerCookies)
+        .send({
+          amount: '50.00',
+          method: StockPurchasePaymentMethod.CHEQUE,
+          payment_date: '2026-11-02',
+          cheque_number: '000123',
+          cheque_date: '2026-11-10',
+          bank: 'Probe Bank',
+        })
+        .expect(201);
+      const cheque = (
+        res.body.payments as {
+          id: string;
+          method: StockPurchasePaymentMethod;
+        }[]
+      ).find((p) => p.method === StockPurchasePaymentMethod.CHEQUE);
+      expect(cheque).toBeDefined();
+      chequeId = cheque!.id;
+      expect(res.body.payments).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ created_by: embeddedUser(manager.id) }),
+        ]),
+      );
+      expectNoSecrets(res);
+    });
+
+    it('PATCH /stock-purchases/:id/payments/:paymentId/status', async () => {
+      const res = await http()
+        .patch(
+          `/api/v1/stock-purchases/${purchaseId}/payments/${chequeId}/status`,
+        )
+        .set('Cookie', managerCookies)
+        .send({ status: StockPurchasePaymentStatus.CLEARED })
+        .expect(200);
+      expect(res.body.created_by).toEqual(embeddedUser(manager.id));
+      expectNoSecrets(res);
+    });
+  });
+
   describe('users and audit log', () => {
-    it('GET /users/:id returns no secrets', async () => {
+    it('GET /users/:id returns no secrets, and keeps the contact details for admin user management (F3)', async () => {
       const res = await http()
         .get(`/api/v1/users/${cashier.id}`)
         .set('Cookie', adminCookies)
         .expect(200);
-      expect(res.body).toMatchObject({ id: cashier.id });
-      expectNoSecrets(res);
+      expect(res.body).toMatchObject({
+        id: cashier.id,
+        email: cashier.email,
+        ...CONTACT[UserRole.CASHIER],
+      });
+      expectNoSecrets(res, { ownOrAdminUserData: true });
+    });
+
+    it("GET /users keeps every user's contact details for admin user management (F3)", async () => {
+      const res = await http()
+        .get('/api/v1/users?limit=50')
+        .set('Cookie', adminCookies)
+        .expect(200);
+      const byId = new Map(
+        (res.body.data as { id: string }[]).map((u) => [u.id, u]),
+      );
+      for (const user of [admin, manager, cashier]) {
+        expect(byId.get(user.id)).toMatchObject({
+          email: user.email,
+          ...CONTACT[user.role],
+        });
+      }
+      expectNoSecrets(res, { ownOrAdminUserData: true });
+    });
+
+    it('GET /users is admin-only: a manager and a cashier get 403', async () => {
+      for (const cookies of [managerCookies, cashierCookies]) {
+        await pause(110);
+        const res = await http()
+          .get('/api/v1/users')
+          .set('Cookie', cookies)
+          .expect(403);
+        expectNoSecrets(res);
+      }
     });
 
     it('PATCH /users/:id returns no secrets, keeps the stored hash, and login still works', async () => {
@@ -806,7 +1021,7 @@ describe('Secret exposure (e2e)', () => {
         id: cashier.id,
         full_name: 'Cashier Renamed',
       });
-      expectNoSecrets(res);
+      expectNoSecrets(res, { ownOrAdminUserData: true });
 
       expect(await storedHash(cashier.id)).toBe(hashBefore);
       const cookies = await login(cashier.email);
@@ -846,7 +1061,7 @@ describe('Secret exposure (e2e)', () => {
         .set('Cookie', adminCookies)
         .expect(200);
       expect(res.body.approval_pin_set_at).toBeTruthy();
-      expectNoSecrets(res);
+      expectNoSecrets(res, { ownOrAdminUserData: true });
     });
 
     it('PATCH /users/:id of a PIN holder returns no secrets', async () => {
@@ -855,7 +1070,7 @@ describe('Secret exposure (e2e)', () => {
         .set('Cookie', adminCookies)
         .send({ full_name: 'Manager Renamed' })
         .expect(200);
-      expectNoSecrets(res);
+      expectNoSecrets(res, { ownOrAdminUserData: true });
     });
 
     it('DELETE /users/:id/approval-pin (admin) returns no body', async () => {

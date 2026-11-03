@@ -34,6 +34,13 @@ export class User {
   @PrimaryGeneratedColumn('uuid')
   id!: string;
 
+  // Staff personal data (F3): email, phone, nic and address are @Exclude()d,
+  // so a User embedded in an operational response (sale.cashier,
+  // phone_purchase.cashier, stock_purchase.created_by, …) never carries
+  // them. Admin user management still returns them: UsersService answers
+  // with plain objects (toSafeUser), which the global
+  // ClassSerializerInterceptor leaves as they are.
+  @Exclude()
   @Index('idx_users_email', { unique: true })
   @Column({ type: 'varchar', length: 255 })
   email!: string;
@@ -57,6 +64,8 @@ export class User {
   // (CreateUserDto) but nullable here: users created before them have
   // none. Once set they can be changed, never cleared.
   // Phone: normalized by normalizeSlPhone (0XXXXXXXXX).
+  // All three are @Exclude()d, like email (F3, above).
+  @Exclude()
   @Column({ type: 'varchar', length: 20, nullable: true })
   phone!: string | null;
 
@@ -64,9 +73,11 @@ export class User {
   // users that aren't deleted, by the partial index idx_users_nic_unique
   // (see AddUserContactDetails); not declared here, since @Index can't
   // carry its WHERE clause.
+  @Exclude()
   @Column({ type: 'varchar', length: 20, nullable: true })
   nic!: string | null;
 
+  @Exclude()
   @Column({ type: 'text', nullable: true })
   address!: string | null;
 
