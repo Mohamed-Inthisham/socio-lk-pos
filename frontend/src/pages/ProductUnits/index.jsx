@@ -6,6 +6,8 @@ import Button from "../../components/common/Button";
 import InputField from "../../components/common/InputField";
 import Select from "../../components/common/Select";
 import Table from "../../components/common/Table";
+import UnitStatusBadge from "../../components/inventory/UnitStatusBadge";
+import { UNIT_STATUS_OPTIONS } from "../../constants/unitStatus";
 import usePermissions from "../../hooks/usePermissions";
 import { listProductUnits } from "../../services/productUnitsService";
 import { selectActiveBranches } from "../../store/slices/branchesSlice";
@@ -32,35 +34,6 @@ import { unitIdentifiers } from "../../utils/unitIdentifiers";
 const PAGE_SIZE = 25;
 const panel = "rounded-xl border border-slate-200 bg-white dark:border-slate-800 dark:bg-slate-900";
 
-// RETURNED is a reversed trade-in, not a customer's return: that is INSPECTION.
-const STATUS_LOOK = {
-  IN_STOCK: {
-    label: "In stock",
-    className: "bg-emerald-50 text-emerald-700 dark:bg-emerald-900/40 dark:text-emerald-300",
-  },
-  SOLD: {
-    label: "Sold",
-    className: "bg-slate-200 text-slate-700 dark:bg-slate-700 dark:text-slate-200",
-  },
-  INSPECTION: {
-    label: "Inspection",
-    className: "bg-amber-100 text-amber-800 dark:bg-amber-900/40 dark:text-amber-300",
-  },
-  RETURNED: {
-    label: "Back with customer",
-    className: "bg-cyan-100 text-cyan-700 dark:bg-cyan-900/40 dark:text-cyan-300",
-  },
-  WRITTEN_OFF: {
-    label: "Written off",
-    className: "bg-red-100 text-red-700 dark:bg-red-900/50 dark:text-red-300",
-  },
-};
-
-const statusOptions = [
-  { value: "", label: "All statuses" },
-  ...Object.entries(STATUS_LOOK).map(([value, { label }]) => ({ value, label })),
-];
-
 const dateLabel = (iso) =>
   new Date(iso).toLocaleDateString("en-LK", {
     timeZone: "Asia/Colombo",
@@ -71,17 +44,6 @@ const dateLabel = (iso) =>
 
 const Identifier = ({ value }) =>
   value ? <span className="font-mono text-xs">{value}</span> : <span className="text-slate-400">—</span>;
-
-const StatusBadge = ({ status }) => {
-  const look = STATUS_LOOK[status];
-  return (
-    <span
-      className={`inline-flex items-center whitespace-nowrap rounded-full px-2.5 py-0.5 text-xs font-medium ${look?.className ?? STATUS_LOOK.SOLD.className}`}
-    >
-      {look?.label ?? status}
-    </span>
-  );
-};
 
 export default function ProductUnits() {
   const navigate = useNavigate();
@@ -146,7 +108,7 @@ export default function ProductUnits() {
     },
     { key: "imei", header: "IMEI", render: (row) => <Identifier value={unitIdentifiers(row, row.product?.tracking_method).imei} /> },
     { key: "serial", header: "Serial number", render: (row) => <Identifier value={unitIdentifiers(row, row.product?.tracking_method).serial} /> },
-    { key: "status", header: "Status", render: (row) => <StatusBadge status={row.status} /> },
+    { key: "status", header: "Status", render: (row) => <UnitStatusBadge status={row.status} /> },
     ...(isAdmin ? [{ key: "branch", header: "Branch", render: (row) => row.branch?.name || "—" }] : []),
     { key: "created_at", header: "Added", render: (row) => <span className="whitespace-nowrap">{dateLabel(row.created_at)}</span> },
   ], [isAdmin]);
@@ -189,7 +151,7 @@ export default function ProductUnits() {
               </div>
             </form>
             <div className="grid gap-3 sm:grid-cols-2 lg:w-96">
-              <Select name="status" value={filters.status} onChange={(event) => changeFilter("status", event.target.value)} options={statusOptions} placeholder="All statuses" />
+              <Select name="status" value={filters.status} onChange={(event) => changeFilter("status", event.target.value)} options={UNIT_STATUS_OPTIONS} placeholder="All statuses" />
               {isAdmin && <Select name="branch" value={filters.branchId} onChange={(event) => changeFilter("branchId", event.target.value)} options={branchOptions} placeholder="All branches" />}
             </div>
           </div>

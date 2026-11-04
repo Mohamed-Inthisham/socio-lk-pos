@@ -11,6 +11,8 @@ import {
   ShieldAlert,
 } from "lucide-react";
 import Button from "../../components/common/Button";
+import Section, { Field } from "../../components/common/DetailSection";
+import UnitStatusBadge from "../../components/inventory/UnitStatusBadge";
 import usePermissions from "../../hooks/usePermissions";
 import { PERMISSIONS } from "../../constants/rolePermissions";
 import { getProduct } from "../../services/productsService";
@@ -73,32 +75,6 @@ const formatDate = (iso) => {
 // ============================================
 // SUB-COMPONENTS
 // ============================================
-
-const Section = ({ title, children, className = "" }) => (
-  <div
-    className={`bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-xl p-5 ${className}`}
-  >
-    <h2 className="text-xs uppercase tracking-widest font-semibold text-slate-500 dark:text-slate-400 mb-4">
-      {title}
-    </h2>
-    {children}
-  </div>
-);
-
-const Field = ({ label, value, mono = false }) => (
-  <div className="flex flex-col sm:flex-row sm:justify-between sm:items-baseline gap-1 py-2 border-b border-slate-100 dark:border-slate-800 last:border-b-0">
-    <span className="text-xs uppercase tracking-wider text-slate-500 dark:text-slate-400 whitespace-nowrap">
-      {label}
-    </span>
-    <span
-      className={`text-sm text-slate-800 dark:text-slate-200 text-left sm:text-right ${
-        mono ? "font-mono" : ""
-      }`}
-    >
-      {value ?? "—"}
-    </span>
-  </div>
-);
 
 const Badge = ({ children, tone = "slate" }) => {
   const TONES = {
@@ -549,7 +525,7 @@ const ProductDetail = () => {
                         <td className="px-3 py-2 font-mono">{imei ?? "—"}</td>
                         <td className="px-3 py-2 font-mono">{serial ?? "—"}</td>
                         <td className="px-3 py-2">{unit.branch?.name || "—"}</td>
-                        <td className="px-3 py-2">{unit.status.replaceAll("_", " ")}</td>
+                        <td className="px-3 py-2"><UnitStatusBadge status={unit.status} /></td>
                         <td className="px-3 py-2">
                           {sale ? (
                             <button
