@@ -36,6 +36,7 @@ describe('ProductUnitsController: branch-scoped reads', () => {
     const service = {
       findAll: jest.fn().mockResolvedValue(page),
       findOne: jest.fn().mockResolvedValue({ id: 'u1' }),
+      findDetails: jest.fn().mockResolvedValue({ unit: { id: 'u1' } }),
       findSellableByIdentifier: jest.fn().mockResolvedValue(sellable),
     };
     return {
@@ -147,6 +148,53 @@ describe('ProductUnitsController: branch-scoped reads', () => {
       service.findOne.mockRejectedValue(notFound);
 
       await expect(controller.findOne('u1', manager)).rejects.toBe(notFound);
+    });
+  });
+
+  describe('GET /product-units/:id/details', () => {
+    it('allows admins and managers only (cashiers are refused by role)', () => {
+      expect(rolesOf('findDetails')).toEqual([
+        UserRole.ADMIN,
+        UserRole.MANAGER,
+      ]);
+    });
+
+    it('looks up an admin’s unit at any branch', async () => {
+      const { service, controller } = setup();
+
+      await controller.findDetails('u1', admin);
+
+      expect(service.findDetails).toHaveBeenCalledWith('u1', {
+        branchId: undefined,
+      });
+    });
+
+    it('looks up a manager’s unit at their own branch only', async () => {
+      const { service, controller } = setup();
+
+      await controller.findDetails('u1', manager);
+
+      expect(service.findDetails).toHaveBeenCalledWith('u1', {
+        branchId: 'branch-a',
+      });
+    });
+
+    it('passes the service’s 404 (another branch’s unit) through unchanged', async () => {
+      const { service, controller } = setup();
+      const notFound = new NotFoundException('Product unit not found');
+      service.findDetails.mockRejectedValue(notFound);
+
+      await expect(controller.findDetails('u1', manager)).rejects.toBe(
+        notFound,
+      );
+    });
+
+    it('never asks the service for GET /product-units/:id’s fuller answer', async () => {
+      const { service, controller } = setup();
+
+      await controller.findDetails('u1', admin);
+
+      expect(service.findOne).not.toHaveBeenCalled();
     });
   });
 

@@ -22,6 +22,7 @@ import {
   StockMovementType,
 } from '../stock/enums/stock-movement-type.enum';
 import { ReturnDisposition } from '../sales/enums/return-disposition.enum';
+import { SaleStatus } from '../sales/enums/sale-status.enum';
 import { UserRole } from '../users/enums/user-role.enum';
 import { AuditAction } from '../audit-log/enums/audit-action.enum';
 import {
@@ -60,6 +61,68 @@ export type VoidBlockReason =
 
 /** The later sale a void 409 points at: void it first. */
 type LaterSale = { id: string; sale_number: string };
+
+/** How the shop got a unit (INV-F2). UNKNOWN: no reliable record of it. */
+export type UnitAcquisitionType =
+  | 'STOCK_PURCHASE'
+  | 'PHONE_PURCHASE'
+  | 'TRADE_IN'
+  | 'UNKNOWN';
+
+/**
+ * GET /product-units/:id/details (INV-F2): one physical unit, for the
+ * Product Unit Details page. Built field by field from columns selected by
+ * name, so nothing else can reach it: no prices or amounts, no customer
+ * contact details, and no free text such as notes and return reasons (they
+ * could hold personal details). The serializer's cost rule doesn't apply to
+ * a plain object like this one.
+ */
+export interface ProductUnitDetails {
+  unit: {
+    id: string;
+    imei: string;
+    imei_number: string | null;
+    serial_number: string | null;
+    status: ProductUnitStatus;
+    created_at: Date;
+  };
+  product: {
+    id: string;
+    name: string;
+    sku: string;
+    tracking_method: TrackingMethod;
+  };
+  branch: { id: string; name: string };
+  acquisition: {
+    type: UnitAcquisitionType;
+    /** A stock purchase's date (YYYY-MM-DD), or when a phone was taken in. */
+    date: string | Date | null;
+    stock_purchase: { id: string; purchase_number: string } | null;
+    supplier_name: string | null;
+    /** The seller of a phone purchase or trade-in. */
+    customer_name: string | null;
+    /** The sale a trade-in was taken on. */
+    sale: { id: string; sale_number: string } | null;
+  };
+  /** COMPLETED and VOIDED sales of this unit, newest first; never drafts. */
+  sales: {
+    id: string;
+    sale_number: string;
+    status: SaleStatus;
+    completed_at: Date | null;
+    voided_at: Date | null;
+    customer_name: string | null;
+  }[];
+  /** Returns of this unit, newest first. */
+  returns: {
+    id: string;
+    return_number: string;
+    sale_id: string;
+    sale_number: string;
+    disposition: ReturnDisposition;
+    returned_at: Date;
+  }[];
+}
 
 /** 409 NOT_IN_INSPECTION unless the unit is waiting for a check (P7-7). */
 const assertInInspection = (unit: ProductUnit, identifierLabel = 'IMEI'): void => {
@@ -160,6 +223,226 @@ export class ProductUnitsService {
       throw new NotFoundException('Product unit not found');
     }
     return unit;
+  }
+
+  /**
+   * The unit's details page (INV-F2): see ProductUnitDetails. A separate
+   * read from findOne, whose response carries customer contact details and
+   * costs for its existing consumers.
+   *
+   * scope.branchId: a manager's own branch, so a unit at another branch is
+   * the same 404 as a missing id. A unit never changes branch, and its
+   * purchase, sales and returns are at its branch, so they need no scope of
+   * their own.
+   */
+  async findDetails(
+    id: string,
+    scope: { branchId?: string },
+  ): Promise<ProductUnitDetails> {
+    const rows: {
+      id: string;
+      imei: string;
+      imei_number: string | null;
+      serial_number: string | null;
+      status: ProductUnitStatus;
+      created_at: Date;
+      phone_purchase_id: string | null;
+      product_id: string;
+      product_name: string;
+      product_sku: string;
+      tracking_method: TrackingMethod;
+      branch_id: string;
+      branch_name: string;
+    }[] = await this.dataSource.query(
+      `SELECT u.id, u.imei, u.imei_number, u.serial_number, u.status,
+              u.created_at, u.phone_purchase_id,
+              p.id AS product_id, p.name AS product_name,
+              p.sku AS product_sku, p.tracking_method,
+              b.id AS branch_id, b.name AS branch_name
+         FROM product_units u
+         JOIN products p ON p.id = u.product_id
+         JOIN branches b ON b.id = u.branch_id
+        WHERE u.id = $1
+          AND ($2::uuid IS NULL OR u.branch_id = $2::uuid)`,
+      [id, scope.branchId ?? null],
+    );
+    const unit = rows[0];
+    if (!unit) {
+      throw new NotFoundException('Product unit not found');
+    }
+
+    return {
+      unit: {
+        id: unit.id,
+        imei: unit.imei,
+        imei_number: unit.imei_number,
+        serial_number: unit.serial_number,
+        status: unit.status,
+        created_at: unit.created_at,
+      },
+      product: {
+        id: unit.product_id,
+        name: unit.product_name,
+        sku: unit.product_sku,
+        tracking_method: unit.tracking_method,
+      },
+      branch: { id: unit.branch_id, name: unit.branch_name },
+      acquisition: await this.unitAcquisition(unit.id, unit.phone_purchase_id),
+      sales: await this.unitSales(unit.id),
+      returns: await this.unitReturns(unit.id),
+    };
+  }
+
+  /**
+   * How the unit came in. Its phone purchase is a foreign key: a TRADE_IN
+   * payment stamped with it means a trade-in, none an outright purchase. A
+   * void leaves the stamp, so a voided trade-in is still one.
+   *
+   * Otherwise only the ledger's PURCHASE row says which stock purchase line
+   * brought the unit in. A unit received before the ledger has none, and is
+   * UNKNOWN: the line's identifier lists aren't searched, because a
+   * bought-back IMEI can be on more than one purchase.
+   */
+  private async unitAcquisition(
+    unitId: string,
+    phonePurchaseId: string | null,
+  ): Promise<ProductUnitDetails['acquisition']> {
+    const none = {
+      date: null,
+      stock_purchase: null,
+      supplier_name: null,
+      customer_name: null,
+      sale: null,
+    };
+
+    if (phonePurchaseId) {
+      const rows: {
+        created_at: Date;
+        customer_name: string;
+        sale_id: string | null;
+        sale_number: string | null;
+      }[] = await this.dataSource.query(
+        `SELECT pp.created_at, c.name AS customer_name,
+                s.id AS sale_id, s.sale_number
+           FROM phone_purchases pp
+           JOIN customers c ON c.id = pp.customer_id
+           LEFT JOIN payments pay ON pay.trade_in_phone_purchase_id = pp.id
+           LEFT JOIN sales s ON s.id = pay.sale_id
+          WHERE pp.id = $1
+          LIMIT 1`,
+        [phonePurchaseId],
+      );
+      const purchase = rows[0];
+      if (!purchase) return { type: 'UNKNOWN', ...none };
+      return {
+        ...none,
+        type: purchase.sale_id ? 'TRADE_IN' : 'PHONE_PURCHASE',
+        date: purchase.created_at,
+        customer_name: purchase.customer_name,
+        sale:
+          purchase.sale_id && purchase.sale_number
+            ? { id: purchase.sale_id, sale_number: purchase.sale_number }
+            : null,
+      };
+    }
+
+    const rows: {
+      id: string;
+      purchase_number: string;
+      purchase_date: string;
+      supplier_name: string;
+    }[] = await this.dataSource.query(
+      `SELECT sp.id, sp.purchase_number, sp.purchase_date::text AS purchase_date,
+              sup.name AS supplier_name
+         FROM stock_movements m
+         JOIN stock_purchase_items item ON item.id = m.reference_id
+         JOIN stock_purchases sp ON sp.id = item.stock_purchase_id
+         JOIN suppliers sup ON sup.id = sp.supplier_id
+        WHERE m.product_unit_id = $1
+          AND m.movement_type = $2
+          AND m.reference_type = $3
+        LIMIT 1`,
+      [
+        unitId,
+        StockMovementType.PURCHASE,
+        StockMovementReferenceType.STOCK_PURCHASE_ITEM,
+      ],
+    );
+    const purchase = rows[0];
+    if (!purchase) return { type: 'UNKNOWN', ...none };
+    return {
+      ...none,
+      type: 'STOCK_PURCHASE',
+      date: purchase.purchase_date,
+      stock_purchase: {
+        id: purchase.id,
+        purchase_number: purchase.purchase_number,
+      },
+      supplier_name: purchase.supplier_name,
+    };
+  }
+
+  /** ProductUnitDetails.sales. A soft-deleted customer is still named. */
+  private async unitSales(
+    unitId: string,
+  ): Promise<ProductUnitDetails['sales']> {
+    const rows: {
+      id: string;
+      sale_number: string;
+      status: SaleStatus;
+      completed_at: Date | null;
+      voided_at: Date | null;
+      customer_name: string | null;
+    }[] = await this.dataSource.query(
+      `SELECT s.id, s.sale_number, s.status, s.completed_at, s.voided_at,
+              c.name AS customer_name
+         FROM sales s
+         LEFT JOIN customers c ON c.id = s.customer_id
+        WHERE s.status = ANY($2::text[])
+          AND EXISTS (SELECT 1 FROM sale_lines l
+                       WHERE l.sale_id = s.id AND l.product_unit_id = $1)
+        ORDER BY s.completed_at DESC, s.id DESC`,
+      [unitId, [SaleStatus.COMPLETED, SaleStatus.VOIDED]],
+    );
+    return rows.map((sale) => ({
+      id: sale.id,
+      sale_number: sale.sale_number,
+      status: sale.status,
+      completed_at: sale.completed_at,
+      voided_at: sale.voided_at,
+      customer_name: sale.customer_name,
+    }));
+  }
+
+  /** ProductUnitDetails.returns. */
+  private async unitReturns(
+    unitId: string,
+  ): Promise<ProductUnitDetails['returns']> {
+    const rows: {
+      id: string;
+      return_number: string;
+      sale_id: string;
+      sale_number: string;
+      disposition: ReturnDisposition;
+      returned_at: Date;
+    }[] = await this.dataSource.query(
+      `SELECT r.id, r.return_number, s.id AS sale_id, s.sale_number,
+              rl.disposition, r.created_at AS returned_at
+         FROM sale_return_lines rl
+         JOIN sale_returns r ON r.id = rl.sale_return_id
+         JOIN sales s ON s.id = r.sale_id
+        WHERE rl.product_unit_id = $1
+        ORDER BY r.created_at DESC, r.id DESC`,
+      [unitId],
+    );
+    return rows.map((ret) => ({
+      id: ret.id,
+      return_number: ret.return_number,
+      sale_id: ret.sale_id,
+      sale_number: ret.sale_number,
+      disposition: ret.disposition,
+      returned_at: ret.returned_at,
+    }));
   }
 
   /** Resolve a scanned unit identifier to its product for POS checkout. */

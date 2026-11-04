@@ -131,6 +131,46 @@ export class ProductUnitsController {
     });
   }
 
+  @Get(':id/details')
+  @Roles(UserRole.ADMIN, UserRole.MANAGER)
+  @ApiOperation({
+    summary: 'One unit for its details page (INV-F2)',
+    description:
+      'Admin/Manager only. The unit, its product and branch, how it was ' +
+      'acquired, its completed and voided sales and its returns, newest ' +
+      'first. Carries no prices or amounts, no customer contact details and ' +
+      'no free text: use this, not GET /product-units/:id, to display a ' +
+      'unit. acquisition.type is STOCK_PURCHASE, PHONE_PURCHASE, TRADE_IN or ' +
+      'UNKNOWN (no reliable record, as for a unit received before the stock ' +
+      'ledger; its other acquisition fields are null).',
+  })
+  @ApiParam({ name: 'id', description: 'ProductUnit UUID', format: 'uuid' })
+  @ApiResponse({
+    status: 200,
+    description:
+      '{ unit, product, branch, acquisition: { type, date, stock_purchase, ' +
+      'supplier_name, customer_name, sale }, sales: [{ id, sale_number, ' +
+      'status, completed_at, voided_at, customer_name }], returns: [{ id, ' +
+      'return_number, sale_id, sale_number, disposition, returned_at }] }',
+  })
+  @ApiResponse({ status: 400, description: 'Malformed id' })
+  @ApiResponse({ status: 401, description: 'Not authenticated' })
+  @ApiResponse({ status: 403, description: 'A cashier' })
+  @ApiResponse({
+    status: 404,
+    description:
+      'Product unit not found; also, for a manager, a unit at another ' +
+      'branch (the same answer, so its existence is not revealed)',
+  })
+  async findDetails(
+    @Param('id', ParseUUIDPipe) id: string,
+    @CurrentUser() user: AuthenticatedUser,
+  ) {
+    return this.productUnitsService.findDetails(id, {
+      branchId: scopeBranch(user),
+    });
+  }
+
   // Not @Auditable: passInspection writes the INSPECTION_PASSED row in
   // its own transaction.
   @Post(':id/inspection-pass')
