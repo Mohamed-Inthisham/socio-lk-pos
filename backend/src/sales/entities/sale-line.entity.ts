@@ -12,6 +12,7 @@ import {
 } from 'typeorm';
 import { Sale } from './sale.entity';
 import { Product } from '../../products/entities/product.entity';
+import { ExposeCost } from '../../common/utils/cost-visibility';
 import { Supplier } from '../../suppliers/entities/supplier.entity';
 import { ProductUnit } from '../../product-units/entities/product-unit.entity';
 import { DiscountType } from '../enums/discount-type.enum';
@@ -138,6 +139,7 @@ export class SaleLine {
     scale: 2,
     name: 'cost_price_snapshot',
   })
+  @ExposeCost()
   cost_price_snapshot!: string;
 
   // ---- Quantity + discount ----
