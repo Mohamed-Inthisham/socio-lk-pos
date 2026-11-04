@@ -130,10 +130,11 @@ const SaleDetail = ({ salesPath = "/pos/sales", requireOpenDay = false }) => {
   }, [id, requestKey]);
 
   // Back (and Esc) to where the sale was opened from: Phones to check passes
-  // its own path (P7-7); Recent sales passes its search and rows to restore.
+  // its own path (P7-7), a unit its path and state; Recent sales passes its
+  // search and rows to restore.
   const backToList = () => {
     if (from?.path) {
-      navigate(from.path);
+      navigate(from.path, { state: from.state });
       return;
     }
     navigate(`${salesPath}${from?.search ?? ""}`, {

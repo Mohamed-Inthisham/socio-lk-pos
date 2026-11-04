@@ -1,6 +1,6 @@
 import { vi } from "vitest";
 import api from "./api";
-import { listProductUnits, passInspection } from "./productUnitsService";
+import { getProductUnitDetails, listProductUnits, passInspection } from "./productUnitsService";
 import { notInInspectionError, productUnitEntity } from "../test/returnEntities";
 
 vi.mock("./api", () => ({
@@ -25,6 +25,14 @@ describe("productUnitsService", () => {
 
     await expect(listProductUnits(params)).resolves.toEqual(page);
     expect(api.get).toHaveBeenCalledWith("/product-units", { params });
+  });
+
+  it("reads one unit's details", async () => {
+    const details = { unit: { id: "unit-a15" }, sales: [], returns: [] };
+    api.get.mockResolvedValue({ status: 200, data: details });
+
+    await expect(getProductUnitDetails("unit-a15")).resolves.toEqual(details);
+    expect(api.get).toHaveBeenCalledWith("/product-units/unit-a15/details");
   });
 
   it("passes a phone's inspection and returns the unit, now in stock", async () => {

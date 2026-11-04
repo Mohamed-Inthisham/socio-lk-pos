@@ -1,7 +1,7 @@
 import { vi } from "vitest";
 import { screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { Route, Routes, useLocation } from "react-router-dom";
+import { Link, Route, Routes, useLocation, useNavigate } from "react-router-dom";
 import ProductUnits from ".";
 import App from "../../App";
 import api from "../../services/api";
@@ -55,19 +55,34 @@ const deferred = () => {
   return { promise, resolve };
 };
 
-const renderAs = (user) =>
+const renderAs = (user, route = "/inventory/units", branches = branchesState([mainShop, cityShop])) =>
   renderWithProviders(
-    <Routes>
-      <Route path="/inventory/units" element={<ProductUnits />} />
-      <Route path="/products/:id" element={<ProductPath />} />
-    </Routes>,
+    <>
+      <UrlProbe />
+      <Link to="/inventory/units">Sidebar link</Link>
+      <Routes>
+        <Route path="/inventory/units" element={<ProductUnits />} />
+        <Route path="/inventory/units/:id" element={<UnitPage />} />
+      </Routes>
+    </>,
     {
-      route: "/inventory/units",
-      preloadedState: { auth: authState(user), branches: branchesState([mainShop, cityShop]) },
+      route,
+      preloadedState: { auth: authState(user), branches },
     },
   );
 
-const ProductPath = () => <p>Opened {useLocation().pathname}</p>;
+const UnitPage = () => {
+  const location = useLocation();
+  const navigate = useNavigate();
+  return (
+    <>
+      <p>Opened {location.pathname}</p>
+      <p>From {location.state?.from?.search || "the plain list"}</p>
+      <button type="button" onClick={() => navigate(-1)}>Browser back</button>
+    </>
+  );
+};
+const UrlProbe = () => <p data-testid="url">{useLocation().search}</p>;
 
 const lastParams = () => productUnitsService.listProductUnits.mock.lastCall[0];
 const table = () => screen.getByRole("table", { name: "Product units" });
@@ -129,14 +144,41 @@ describe("ProductUnits: the list", () => {
     expect(within(row(IMEI)).getByText(label)).toBeInTheDocument();
   });
 
-  it("opens the unit's product on a row click", async () => {
+  it("opens the unit on a row click", async () => {
     const user = userEvent.setup();
     renderAs(managerUser);
 
     await screen.findAllByText(IMEI);
     await user.click(row(IMEI));
 
-    expect(await screen.findByText("Opened /products/p-phone")).toBeInTheDocument();
+    expect(await screen.findByText("Opened /inventory/units/unit-1")).toBeInTheDocument();
+    expect(screen.getByText("From the plain list")).toBeInTheDocument();
+  });
+
+  it("a row click carries the list's filters", async () => {
+    const user = userEvent.setup();
+    renderAs(managerUser, "/inventory/units?status=SOLD&page=2");
+
+    await screen.findAllByText(IMEI);
+    await user.click(row(IMEI));
+
+    expect(await screen.findByText("From ?status=SOLD&page=2")).toBeInTheDocument();
+  });
+
+  it("browser Back from a unit restores the filters and page", async () => {
+    const user = userEvent.setup();
+    productUnitsService.listProductUnits.mockResolvedValue(page([unit()], { total: 60, totalPages: 3 }));
+    renderAs(managerUser, `/inventory/units?q=${IMEI}&status=SOLD&page=2`);
+
+    await screen.findAllByText(IMEI);
+    await user.click(row(IMEI));
+    await screen.findByText("Opened /inventory/units/unit-1");
+    productUnitsService.listProductUnits.mockClear();
+    await user.click(screen.getByRole("button", { name: "Browser back" }));
+
+    await screen.findByText("Page 2 of 3");
+    expect(lastParams()).toEqual({ page: 2, limit: 25, imei: IMEI, status: "SOLD" });
+    expect(screen.getByLabelText("Search by identifier")).toHaveValue(IMEI);
   });
 
   it("shows no buying price and no customer details", async () => {
@@ -221,6 +263,128 @@ describe("ProductUnits: search and filters", () => {
     for (const [params] of productUnitsService.listProductUnits.mock.calls) {
       expect(params).not.toHaveProperty("branchId");
     }
+  });
+});
+
+describe("ProductUnits: the URL", () => {
+  const url = () => screen.getByTestId("url").textContent;
+
+  it("reads the search, status, branch and page from the URL", async () => {
+    renderAs(adminUser, `/inventory/units?q=${IMEI}&status=SOLD&branchId=${cityShop.id}&page=2`);
+
+    await screen.findAllByText(IMEI);
+    expect(lastParams()).toEqual({
+      page: 2,
+      limit: 25,
+      imei: IMEI,
+      status: "SOLD",
+      branchId: cityShop.id,
+    });
+    expect(screen.getByLabelText("Search by identifier")).toHaveValue(IMEI);
+    expect(screen.getByRole("button", { name: /Sold/ })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /City Shop/ })).toBeInTheDocument();
+  });
+
+  it("writes a filter to the URL and drops the page", async () => {
+    const user = userEvent.setup();
+    renderAs(managerUser, "/inventory/units?page=3");
+    await screen.findAllByText(IMEI);
+
+    await pickStatus(user, "Sold");
+
+    await waitFor(() => expect(url()).toBe("?status=SOLD"));
+  });
+
+  it("writes the search to the URL as q, and Clear removes it", async () => {
+    const user = userEvent.setup();
+    renderAs(managerUser);
+    await screen.findAllByText(IMEI);
+
+    await user.type(screen.getByLabelText("Search by identifier"), `${IMEI}{Enter}`);
+    await waitFor(() => expect(url()).toBe(`?q=${IMEI}`));
+
+    await user.click(screen.getByRole("button", { name: "Clear" }));
+    await waitFor(() => expect(url()).toBe(""));
+  });
+
+  it("writes the page to the URL, and leaves page 1 out", async () => {
+    const user = userEvent.setup();
+    productUnitsService.listProductUnits.mockResolvedValue(page([unit()], { total: 60, totalPages: 3 }));
+    renderAs(managerUser);
+    await screen.findAllByText(IMEI);
+
+    await user.click(screen.getByRole("button", { name: "Next" }));
+    await waitFor(() => expect(url()).toBe("?page=2"));
+    await screen.findByText("Page 2 of 3");
+
+    await user.click(screen.getByRole("button", { name: "Previous" }));
+    await waitFor(() => expect(url()).toBe(""));
+  });
+
+  it.each([
+    ["an unknown status", "status=LOST"],
+    ["a name every object has", "status=constructor"],
+    ["a page that isn't a number", "page=abc"],
+    ["a page of 0", "page=0"],
+    ["a negative page", "page=-2"],
+    ["a fractional page", "page=1.5"],
+  ])("falls back to the defaults for %s", async (_, query) => {
+    renderAs(managerUser, `/inventory/units?${query}`);
+
+    await screen.findAllByText(IMEI);
+    expect(lastParams()).toEqual({ page: 1, limit: 25 });
+  });
+
+  it("ignores a branch that isn't in the filter's list", async () => {
+    renderAs(adminUser, "/inventory/units?branchId=not-a-branch");
+
+    await screen.findAllByText(IMEI);
+    expect(lastParams()).toEqual({ page: 1, limit: 25 });
+  });
+
+  it("keeps the URL's branch while the branch list is still loading", async () => {
+    renderAs(
+      adminUser,
+      `/inventory/units?branchId=${cityShop.id}`,
+      branchesState([], { loading: true, initialized: false }),
+    );
+
+    await screen.findAllByText(IMEI);
+    expect(lastParams()).toEqual({ page: 1, limit: 25, branchId: cityShop.id });
+  });
+
+  it("keeps the URL's branch when the branch list failed to load, so the view doesn't widen", async () => {
+    renderAs(
+      adminUser,
+      `/inventory/units?branchId=${cityShop.id}`,
+      branchesState([], { error: "Failed to load branches", initialized: true }),
+    );
+
+    await screen.findAllByText(IMEI);
+    for (const [params] of productUnitsService.listProductUnits.mock.calls) {
+      expect(params.branchId).toBe(cityShop.id);
+    }
+  });
+
+  it("never sends a branch from the URL for a manager", async () => {
+    renderAs(managerUser, `/inventory/units?branchId=${cityShop.id}`);
+
+    await screen.findAllByText(IMEI);
+    for (const [params] of productUnitsService.listProductUnits.mock.calls) {
+      expect(params).not.toHaveProperty("branchId");
+    }
+  });
+
+  it("the search box follows the URL when the sidebar link clears it", async () => {
+    const user = userEvent.setup();
+    renderAs(managerUser, `/inventory/units?q=${IMEI}`);
+    await screen.findAllByText(IMEI);
+    expect(screen.getByLabelText("Search by identifier")).toHaveValue(IMEI);
+
+    await user.click(screen.getByRole("link", { name: "Sidebar link" }));
+
+    await waitFor(() => expect(screen.getByLabelText("Search by identifier")).toHaveValue(""));
+    expect(lastParams()).toEqual({ page: 1, limit: 25 });
   });
 });
 

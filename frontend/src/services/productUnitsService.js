@@ -24,6 +24,19 @@ export const listAllProductUnits = async (filters = {}) => {
  */
 
 /**
+ * One unit for its details page: the unit, product, branch, how it was
+ * acquired, its sales and returns. Admins, and managers at their own branch;
+ * another branch's unit is the same 404 as a missing one.
+ *
+ * @param {string} unitId - ProductUnit UUID
+ * @returns {Promise<Object>} { unit, product, branch, acquisition, sales, returns }
+ */
+export const getProductUnitDetails = async (unitId) => {
+  const response = await api.get(`/product-units/${unitId}/details`);
+  return response.data;
+};
+
+/**
  * Pass a returned phone after inspection (planning doc P7-7): INSPECTION
  * → IN_STOCK, stock +1, audited. Admins and managers, on their own
  * session, no PIN.

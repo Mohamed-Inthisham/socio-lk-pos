@@ -1,13 +1,13 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useSelector } from "react-redux";
-import { useNavigate } from "react-router-dom";
+import { useLocation, useNavigate, useSearchParams } from "react-router-dom";
 import { Search } from "lucide-react";
 import Button from "../../components/common/Button";
 import InputField from "../../components/common/InputField";
 import Select from "../../components/common/Select";
 import Table from "../../components/common/Table";
 import UnitStatusBadge from "../../components/inventory/UnitStatusBadge";
-import { UNIT_STATUS_OPTIONS } from "../../constants/unitStatus";
+import { UNIT_STATUS_LABELS, UNIT_STATUS_OPTIONS } from "../../constants/unitStatus";
 import usePermissions from "../../hooks/usePermissions";
 import { listProductUnits } from "../../services/productUnitsService";
 import { selectActiveBranches } from "../../store/slices/branchesSlice";
@@ -18,12 +18,16 @@ import { unitIdentifiers } from "../../utils/unitIdentifiers";
  *
  * Route: /inventory/units, admins and managers only (GET /product-units is
  * closed to cashiers). Every identified unit, newest first, across products.
- * Read-only: a row opens its product.
+ * Read-only: a row opens that unit.
  *
  * Admins filter by branch; a manager has no picker and sends no branchId,
  * and the backend returns their own branch only.
  *
- * SEARCH is the API's `imei` filter: an exact match on the legacy imei
+ * THE URL holds the filters and page (q, status, branchId, page), so Back
+ * from a unit restores the list. A value that isn't valid reads as the
+ * default; defaults stay out of the URL.
+ *
+ * SEARCH (q) is the API's `imei` filter: an exact match on the legacy imei
  * column, so it runs on Enter or the button, not per keystroke. A serial
  * number paired with an IMEI can't be found yet (FOLLOWUPS).
  *
@@ -47,11 +51,29 @@ const Identifier = ({ value }) =>
 
 export default function ProductUnits() {
   const navigate = useNavigate();
+  const location = useLocation();
   const { isAdmin } = usePermissions();
   const branches = useSelector(selectActiveBranches);
-  const [searchText, setSearchText] = useState("");
-  const [filters, setFilters] = useState({ imei: "", status: "", branchId: "" });
-  const [page, setPage] = useState(1);
+  const [searchParams, setSearchParams] = useSearchParams();
+
+  const q = (searchParams.get("q") ?? "").trim();
+  const statusParam = searchParams.get("status") ?? "";
+  const status = Object.hasOwn(UNIT_STATUS_LABELS, statusParam) ? statusParam : "";
+  const branchParam = searchParams.get("branchId") ?? "";
+  // No list (loading, or it failed): keep the URL's branch for the backend to
+  // judge, so the view never widens to every branch unasked.
+  const knownBranch = branches.length === 0 || branches.some((branch) => branch.id === branchParam);
+  const branchId = isAdmin && knownBranch ? branchParam : "";
+  const pageParam = Number(searchParams.get("page"));
+  const page = Number.isInteger(pageParam) && pageParam >= 1 ? pageParam : 1;
+
+  const [searchText, setSearchText] = useState(q);
+  // The box follows the URL (the sidebar link clears it without a remount).
+  const [syncedQ, setSyncedQ] = useState(q);
+  if (q !== syncedQ) {
+    setSyncedQ(q);
+    setSearchText(q);
+  }
   const [result, setResult] = useState({ status: "loading", rows: [], total: 0, pages: 1, error: "" });
   // The latest request, so a slow older answer can't overwrite a newer one.
   const requestIdRef = useRef(0);
@@ -62,9 +84,9 @@ export default function ProductUnits() {
     listProductUnits({
       page,
       limit: PAGE_SIZE,
-      ...(filters.imei && { imei: filters.imei }),
-      ...(filters.status && { status: filters.status }),
-      ...(isAdmin && filters.branchId && { branchId: filters.branchId }),
+      ...(q && { imei: q }),
+      ...(status && { status }),
+      ...(branchId && { branchId }),
     })
       .then(({ data, meta }) => {
         if (requestId !== requestIdRef.current) return;
@@ -74,24 +96,34 @@ export default function ProductUnits() {
         if (requestId !== requestIdRef.current) return;
         setResult((current) => ({ ...current, status: "error", error: "Couldn’t load product units. Try again." }));
       });
-  }, [filters, page, isAdmin]);
+  }, [q, status, branchId, page]);
 
   useEffect(() => {
     // eslint-disable-next-line react-hooks/set-state-in-effect
     load();
   }, [load]);
 
-  const changeFilter = (field, value) => {
-    setFilters((current) => ({ ...current, [field]: value }));
-    setPage(1);
-  };
+  const updateParams = (changes) =>
+    setSearchParams(
+      (prev) => {
+        const next = new URLSearchParams(prev);
+        for (const [key, value] of Object.entries(changes)) {
+          if (value) next.set(key, value);
+          else next.delete(key);
+        }
+        return next;
+      },
+      { replace: true },
+    );
+  const changeFilter = (field, value) => updateParams({ [field]: value, page: "" });
+  const goToPage = (next) => updateParams({ page: next > 1 ? String(next) : "" });
   const submitSearch = (event) => {
     event.preventDefault();
-    changeFilter("imei", searchText.trim());
+    changeFilter("q", searchText.trim());
   };
   const clearSearch = () => {
     setSearchText("");
-    changeFilter("imei", "");
+    changeFilter("q", "");
   };
 
   const columns = useMemo(() => [
@@ -113,7 +145,7 @@ export default function ProductUnits() {
     { key: "created_at", header: "Added", render: (row) => <span className="whitespace-nowrap">{dateLabel(row.created_at)}</span> },
   ], [isAdmin]);
 
-  const filtered = !!(filters.imei || filters.status || (isAdmin && filters.branchId));
+  const filtered = !!(q || status || branchId);
   const branchOptions = [
     { value: "", label: "All branches" },
     ...branches.map((branch) => ({ value: branch.id, label: branch.name })),
@@ -147,12 +179,12 @@ export default function ProductUnits() {
               </div>
               <div className="flex shrink-0 gap-2">
                 <Button type="submit" variant="accent" icon={Search} label="Search" />
-                {(searchText || filters.imei) && <Button variant="secondary" label="Clear" onClick={clearSearch} />}
+                {(searchText || q) && <Button variant="secondary" label="Clear" onClick={clearSearch} />}
               </div>
             </form>
             <div className="grid gap-3 sm:grid-cols-2 lg:w-96">
-              <Select name="status" value={filters.status} onChange={(event) => changeFilter("status", event.target.value)} options={UNIT_STATUS_OPTIONS} placeholder="All statuses" />
-              {isAdmin && <Select name="branch" value={filters.branchId} onChange={(event) => changeFilter("branchId", event.target.value)} options={branchOptions} placeholder="All branches" />}
+              <Select name="status" value={status} onChange={(event) => changeFilter("status", event.target.value)} options={UNIT_STATUS_OPTIONS} placeholder="All statuses" />
+              {isAdmin && <Select name="branch" value={branchId} onChange={(event) => changeFilter("branchId", event.target.value)} options={branchOptions} placeholder="All branches" />}
             </div>
           </div>
         </div>
@@ -163,16 +195,16 @@ export default function ProductUnits() {
             columns={columns}
             data={result.rows}
             loading={result.status === "loading"}
-            onRowClick={(row) => navigate(`/products/${row.product_id}`)}
+            onRowClick={(row) => navigate(`/inventory/units/${row.id}`, { state: { from: { search: location.search } } })}
             ariaLabel="Product units"
             emptyMessage={filtered ? "No units match these filters." : "No product units have been recorded yet."}
             dense
           />
         )}
         {result.pages > 1 && <nav aria-label="Product unit pages" className="flex items-center justify-center gap-3 border-t border-slate-200 p-3 dark:border-slate-800">
-          <Button size="sm" variant="secondary" label="Previous" disabled={page <= 1 || result.status === "loading"} onClick={() => setPage((current) => Math.max(1, current - 1))} />
+          <Button size="sm" variant="secondary" label="Previous" disabled={page <= 1 || result.status === "loading"} onClick={() => goToPage(Math.max(1, page - 1))} />
           <span className="text-sm tabular-nums text-slate-600 dark:text-slate-400">Page {page} of {result.pages}</span>
-          <Button size="sm" variant="secondary" label="Next" disabled={page >= result.pages || result.status === "loading"} onClick={() => setPage((current) => Math.min(result.pages, current + 1))} />
+          <Button size="sm" variant="secondary" label="Next" disabled={page >= result.pages || result.status === "loading"} onClick={() => goToPage(Math.min(result.pages, page + 1))} />
         </nav>}
       </section>
     </div>
