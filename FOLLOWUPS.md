@@ -116,7 +116,7 @@ Non-blocking issues and tech debt to address opportunistically. When you fix one
 
 - **Phase 6.7 settlement must subtract returned quantities.** `Supplier.getSalesCount` counts DISTINCT COMPLETED sales with a line from that supplier. After P7 a sale stays COMPLETED when an external-supplier line is returned (P7-1), and the item goes back to that shop outside the system (P7-8), so a fully returned line still counts and a settlement would overstate what is owed. The 6.7 settlement report must use `sale_lines.quantity - returned_quantity` (and decide whether a fully returned sale counts at all). _[Phase 6.4 P7 planning]_
 
-- **No IMEI inventory screen.** `GET /product-units` (admin/manager) has no frontend: nobody can search an IMEI, see a phone's history (one row per acquisition) or list the units in stock without Swagger. Not built yet. _[Phase 6.4 P4 recon]_
+- **Product units: paired serial search and stable paging (INV-B2).** The Product units page (`/inventory/units`) searches through `GET /product-units`'s `imei` filter, an exact match on the legacy `imei` column, so a serial number paired with an IMEI can't be found; search `imei`, `imei_number` and `serial_number`, as `findSellableByIdentifier` does. The list also sorts by `created_at` alone, and units from one purchase very likely share that timestamp, so a page boundary inside a purchase could repeat or skip a unit (worked out from the code, not tested); add `id` as a tiebreaker, as `GET /products` does. _[INV-F1]_
 
 - **No phone-purchase screen.** Buying a phone outright (`POST /phone-purchases`) has no frontend; it was deliberately left out of 6.4 (planning doc §10). The backend already requires the seller's NIC (#29). _[Phase 6.4 P4 recon, §10]_
 

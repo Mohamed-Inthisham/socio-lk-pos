@@ -16,6 +16,8 @@ import {
   Barcode,
   ShoppingCart,
   UserCog,
+  Boxes,
+  Smartphone,
 } from "lucide-react";
 import Tooltip from "../../common/Tooltip";
 import useLayoutStore from "../../../store/zustand/layoutStore";
@@ -127,6 +129,18 @@ const NAV_ITEMS = [
         to: "/categories",
         label: "Categories",
         icon: FolderTree,
+      },
+    ],
+  },
+  {
+    label: "Inventory",
+    icon: Boxes,
+    children: [
+      {
+        to: "/inventory/units",
+        label: "Product units",
+        icon: Smartphone,
+        roles: ["admin", "manager"],
       },
     ],
   },

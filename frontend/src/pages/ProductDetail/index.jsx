@@ -18,6 +18,7 @@ import { getStockByProduct } from "../../services/stockService";
 import { listAllProductUnits } from "../../services/productUnitsService";
 import { getProductPurchaseIdentifiers } from "../../services/stockPurchasesService";
 import { warrantyLabel } from "../../constants/warranty";
+import { unitIdentifiers } from "../../utils/unitIdentifiers";
 import DeactivateProductDialog from "../../components/products/DeactivateProductDialog";
 import AdjustStockDialog from "../../components/products/AdjustStockDialog";
 
@@ -538,14 +539,15 @@ const ProductDetail = () => {
                 </thead>
                 <tbody>
                   {productUnits.map((unit) => {
+                    const { imei, serial } = unitIdentifiers(unit, product.tracking_method);
                     const sale = (unit.sale_lines || [])
                       .map((line) => line.sale)
                       .filter((item) => item?.status === "COMPLETED" || item?.status === "VOIDED")
                       .sort((a, b) => new Date(b.completed_at) - new Date(a.completed_at))[0];
                     return (
                       <tr key={unit.id} className="border-t border-slate-200 dark:border-slate-700">
-                        <td className="px-3 py-2 font-mono">{unit.imei_number || (product.tracking_method === "IMEI" ? unit.imei : "—")}</td>
-                        <td className="px-3 py-2 font-mono">{unit.serial_number || (!unit.imei_number && product.tracking_method === "SERIAL_NUMBER" ? unit.imei : "—")}</td>
+                        <td className="px-3 py-2 font-mono">{imei ?? "—"}</td>
+                        <td className="px-3 py-2 font-mono">{serial ?? "—"}</td>
                         <td className="px-3 py-2">{unit.branch?.name || "—"}</td>
                         <td className="px-3 py-2">{unit.status.replaceAll("_", " ")}</td>
                         <td className="px-3 py-2">

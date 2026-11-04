@@ -28,6 +28,43 @@ describe("Sidebar Sales group", () => {
   });
 });
 
+describe("Sidebar Inventory group (INV-F1)", () => {
+  const renderAs = (role, route = "/") =>
+    renderWithProviders(<Sidebar />, {
+      route,
+      preloadedState: { auth: authState({ id: `user-${role}`, role }) },
+    });
+
+  it.each(["admin", "manager"])("offers Product units to a %s", async (role) => {
+    const user = userEvent.setup();
+    renderAs(role);
+
+    await user.click(screen.getByRole("button", { name: "Inventory" }));
+
+    expect(screen.getByRole("link", { name: "Product units" })).toHaveAttribute("href", "/inventory/units");
+  });
+
+  it("hides the Inventory group from a cashier", () => {
+    renderAs("cashier");
+
+    expect(screen.queryByRole("button", { name: "Inventory" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("link", { name: "Product units" })).not.toBeInTheDocument();
+  });
+
+  it("opens the group automatically on the page", () => {
+    renderAs("manager", "/inventory/units");
+
+    expect(screen.getByRole("button", { name: "Inventory" })).toHaveAttribute("aria-expanded", "true");
+  });
+
+  it("leaves Stock purchases and Barcode Labels where they are", () => {
+    renderAs("manager");
+
+    expect(screen.getByRole("link", { name: "Stock purchases" })).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "Barcode Labels" })).toBeInTheDocument();
+  });
+});
+
 describe("Sidebar Users item (Task 2.4)", () => {
   const renderAs = (role) =>
     renderWithProviders(<Sidebar />, { preloadedState: { auth: authState({ id: `user-${role}`, role }) } });

@@ -1,15 +1,30 @@
 import { vi } from "vitest";
 import api from "./api";
-import { passInspection } from "./productUnitsService";
+import { listProductUnits, passInspection } from "./productUnitsService";
 import { notInInspectionError, productUnitEntity } from "../test/returnEntities";
 
 vi.mock("./api", () => ({
-  default: { post: vi.fn() },
+  default: { get: vi.fn(), post: vi.fn() },
 }));
 
 describe("productUnitsService", () => {
   beforeEach(() => {
     vi.resetAllMocks();
+  });
+
+  it("lists units with the filters as query parameters", async () => {
+    const page = { data: [productUnitEntity()], meta: { total: 1, totalPages: 1 } };
+    api.get.mockResolvedValue({ status: 200, data: page });
+    const params = {
+      page: 2,
+      limit: 25,
+      imei: "356789012345671",
+      status: "IN_STOCK",
+      branchId: "branch-main",
+    };
+
+    await expect(listProductUnits(params)).resolves.toEqual(page);
+    expect(api.get).toHaveBeenCalledWith("/product-units", { params });
   });
 
   it("passes a phone's inspection and returns the unit, now in stock", async () => {

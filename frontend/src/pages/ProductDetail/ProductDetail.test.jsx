@@ -6,9 +6,13 @@ import { authState, branchesState, renderWithProviders } from "../../test/render
 import { adminUser, mainShop } from "../../test/fixtures";
 import * as productsService from "../../services/productsService";
 import * as stockService from "../../services/stockService";
+import * as productUnitsService from "../../services/productUnitsService";
+import * as stockPurchasesService from "../../services/stockPurchasesService";
 
 vi.mock("../../services/productsService");
 vi.mock("../../services/stockService");
+vi.mock("../../services/productUnitsService");
+vi.mock("../../services/stockPurchasesService");
 
 const product = (overrides = {}) => ({
   id: "p1",
@@ -43,6 +47,8 @@ const renderDetail = () =>
 beforeEach(() => {
   vi.resetAllMocks();
   stockService.getStockByProduct.mockResolvedValue([]);
+  productUnitsService.listAllProductUnits.mockResolvedValue([]);
+  stockPurchasesService.getProductPurchaseIdentifiers.mockResolvedValue([]);
 });
 
 describe("ProductDetail — default warranty (P5-18)", () => {
