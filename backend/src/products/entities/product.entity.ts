@@ -18,6 +18,7 @@ import { WarrantyPeriod } from '../enums/warranty-period.enum';
 import { Brand } from '../../brands/entities/brand.entity';
 import { Category } from '../../categories/entities/category.entity';
 import { Branch } from '../../branches/entities/branch.entity';
+import { ExposeCost } from '../../common/utils/cost-visibility';
 
 @Entity('products')
 @Check(
@@ -100,6 +101,7 @@ export class Product {
   @Column({ type: 'text', nullable: true })
   description!: string | null;
 
+  @ExposeCost()
   @Column({ type: 'decimal', precision: 10, scale: 2, name: 'buying_price', nullable: true })
   buying_price!: string | null;
 

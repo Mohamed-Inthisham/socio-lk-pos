@@ -15,6 +15,7 @@ import { Branch } from '../../branches/entities/branch.entity';
 import { ProductUnitStatus } from '../enums/product-unit-status.enum';
 import { PhonePurchase } from '../../phone-purchases/entities/phone-purchase.entity';
 import { SaleLine } from '../../sales/entities/sale-line.entity';
+import { ExposeCost } from '../../common/utils/cost-visibility';
 
 @Entity('product_units')
 // Named as in the migrations, so generated migrations see no drift.
@@ -83,6 +84,7 @@ export class ProductUnit {
   })
   status!: ProductUnitStatus;
 
+  @ExposeCost()
   @Column({ type: 'numeric', precision: 12, scale: 2 })
   buying_price!: string;
 

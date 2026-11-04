@@ -49,6 +49,8 @@ export const PERMISSIONS = {
   // ===== INVENTORY =====
   VIEW_INVENTORY: "view_inventory",
   ADJUST_STOCK: "adjust_stock",
+  // Buying and cost prices (INV-F3); the backend leaves them out for cashiers
+  VIEW_COST: "view_cost",
 
   // ===== SALES / POS =====
   VIEW_SALES: "view_sales",
@@ -101,6 +103,7 @@ export const ROLE_PERMISSIONS = {
     // Inventory - Full control
     PERMISSIONS.VIEW_INVENTORY,
     PERMISSIONS.ADJUST_STOCK,
+    PERMISSIONS.VIEW_COST,
 
     // Sales - Full control
     PERMISSIONS.VIEW_SALES,
@@ -139,6 +142,7 @@ export const ROLE_PERMISSIONS = {
 
     // Inventory - View only in R1 (backend enforces admin-only mutations)
     PERMISSIONS.VIEW_INVENTORY,
+    PERMISSIONS.VIEW_COST,
 
     // Sales - Most actions
     PERMISSIONS.VIEW_SALES,

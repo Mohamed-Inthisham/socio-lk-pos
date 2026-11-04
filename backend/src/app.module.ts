@@ -1,4 +1,4 @@
-import { ClassSerializerInterceptor, Module } from '@nestjs/common';
+import { Module } from '@nestjs/common';
 import { ConfigModule } from '@nestjs/config';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { ThrottlerGuard, ThrottlerModule } from '@nestjs/throttler';
@@ -13,6 +13,7 @@ import { buildThrottlerOptions } from './config/throttle';
 import { UsersModule } from './users/users.module';
 import { AuthModule } from './auth/auth.module';
 import { AuditLogModule } from './audit-log/audit-log.module';
+import { RoleAwareSerializerInterceptor } from './common/interceptors/role-aware-serializer.interceptor';
 import { BranchesModule } from './branches/branches.module';
 import { BrandsModule } from './brands/brands.module';
 import { CategoriesModule } from './categories/categories.module';
@@ -77,11 +78,12 @@ import { StockPurchasesModule } from './stock-purchases/stock-purchases.module';
       useClass: ThrottlerGuard,
     },
     // Honours @Exclude() on entities (User.password_hash,
-    // RefreshToken.token_hash) for every response. Registered here rather
-    // than in main.ts so e2e apps built from AppModule get it too.
+    // RefreshToken.token_hash) for every response, and keeps cost prices
+    // from cashiers (INV-F3). Registered here rather than in main.ts so
+    // e2e apps built from AppModule get it too.
     {
       provide: APP_INTERCEPTOR,
-      useClass: ClassSerializerInterceptor,
+      useClass: RoleAwareSerializerInterceptor,
     },
   ],
 })

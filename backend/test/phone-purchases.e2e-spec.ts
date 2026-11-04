@@ -197,9 +197,10 @@ describe('Phone Purchases (e2e)', () => {
         customer_id: customer.id,
         branch_id: branch.id,
         cashier_id: cashier.id,
-        total_amount: '80000.00',
         notes: 'Screen scratch top-right',
       });
+      // A cashier's response carries no cost (INV-F3); the DB check below does.
+      expect(response.body).not.toHaveProperty('total_amount');
       expect(response.body.customer).toMatchObject({ id: customer.id });
       expect(response.body.branch).toMatchObject({ id: branch.id });
       expect(response.body.cashier).toMatchObject({ id: cashier.id });
@@ -209,9 +210,9 @@ describe('Phone Purchases (e2e)', () => {
         branch_id: branch.id,
         imei,
         status: ProductUnitStatus.IN_STOCK,
-        buying_price: '80000.00',
         selling_price: '100000.00',
       });
+      expect(response.body.product_units[0]).not.toHaveProperty('buying_price');
 
       // Verify DB state directly — the important part
       const purchaseInDb = await dataSource

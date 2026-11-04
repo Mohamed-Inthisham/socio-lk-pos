@@ -38,6 +38,7 @@ import { CurrentUser } from '../auth/decorators/current-user.decorator';
 import type { AuthenticatedUser } from '../auth/strategies/jwt.strategy';
 import { Auditable } from '../audit-log/decorators/auditable.decorator';
 import { scopeBranch } from '../common/utils/branch-scope';
+import { canViewCost } from '../common/utils/cost-visibility';
 import { AuditAction } from '../audit-log/enums/audit-action.enum';
 
 @ApiTags('Sales')
@@ -93,7 +94,8 @@ export class SalesController {
     description:
       'One branch (Phase 2 P2-1): staff get their own branch (branchId left ' +
       'out or their own; another is 403 { code: WRONG_BRANCH }); admins must ' +
-      'give branchId (400 without it).',
+      'give branchId (400 without it). cost_of_sales is for admins and ' +
+      'managers only: a cashier gets the rest without it (INV-F3).',
   })
   @ApiResponse({
     status: 400,
@@ -111,7 +113,14 @@ export class SalesController {
     if (!branchId) {
       throw new BadRequestException('branchId is required.');
     }
-    return this.salesService.dailySummary({ ...query, branchId });
+    const summary = await this.salesService.dailySummary({
+      ...query,
+      branchId,
+    });
+    if (canViewCost(user)) return summary;
+    // A plain object: the serializer's cost rule can't reach it.
+    const { cost_of_sales: _costOfSales, ...withoutCost } = summary;
+    return withoutCost;
   }
 
   @Get(':id')

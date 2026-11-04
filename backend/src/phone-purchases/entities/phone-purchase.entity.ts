@@ -13,6 +13,7 @@ import { Customer } from '../../customers/entities/customer.entity';
 import { Branch } from '../../branches/entities/branch.entity';
 import { User } from '../../users/entities/user.entity';
 import { ProductUnit } from '../../product-units/entities/product-unit.entity';
+import { ExposeCost } from '../../common/utils/cost-visibility';
 
 @Entity('phone_purchases')
 @Check(`"total_amount" >= 0`)
@@ -41,6 +42,8 @@ export class PhonePurchase {
   @JoinColumn({ name: 'cashier_id' })
   cashier?: User;
 
+  // What the shop paid for the phone: its cost (INV-F3).
+  @ExposeCost()
   @Column({ type: 'numeric', precision: 12, scale: 2 })
   total_amount!: string;
 

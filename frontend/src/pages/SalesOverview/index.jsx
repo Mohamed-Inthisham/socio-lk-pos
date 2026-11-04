@@ -2,7 +2,9 @@ import { useEffect, useMemo, useState } from "react";
 import { Link, useSearchParams } from "react-router-dom";
 import { ArrowRight, Banknote, CalendarDays, CircleDollarSign, PackageCheck, ReceiptText } from "lucide-react";
 import Select from "../../components/common/Select";
+import usePermissions from "../../hooks/usePermissions";
 import useTerminalBranch from "../../hooks/useTerminalBranch";
+import { PERMISSIONS } from "../../constants/rolePermissions";
 import { getDailySalesSummary } from "../../services/salesService";
 import { colomboToday, formatColomboDayLabel, shiftColomboDay } from "../../utils/colomboDay";
 import { formatLKR } from "../../utils/money";
@@ -57,7 +59,7 @@ const tiles = [
   { key: "sales_count", title: "Sales count", caption: "Completed sales", icon: ReceiptText, format: (v) => Number(v).toLocaleString() },
   { key: "sales_amount", title: "Sales amount", caption: "Completed sale totals", icon: CircleDollarSign, format: formatLKR },
   { key: "quantity_count", title: "Items sold", caption: "Total item quantity", icon: PackageCheck, format: (v) => Number(v).toLocaleString() },
-  { key: "cost_of_sales", title: "Cost of sales", caption: "Cost of sold items", icon: Banknote, format: formatLKR },
+  { key: "cost_of_sales", title: "Cost of sales", caption: "Cost of sold items", icon: Banknote, format: formatLKR, permission: PERMISSIONS.VIEW_COST },
   { key: "return_count", title: "Return sales count", caption: "Return transactions", icon: ReceiptText, format: (v) => Number(v).toLocaleString() },
   { key: "return_quantity", title: "Return sales quantity", caption: "Items returned", icon: PackageCheck, format: (v) => Number(v).toLocaleString() },
   { key: "voided_count", title: "Voided sales count", caption: "Sales voided", icon: ReceiptText, format: (v) => Number(v).toLocaleString() },
@@ -67,6 +69,7 @@ const pickerClass = "h-10 rounded-lg border border-slate-300 bg-white px-3 text-
 
 export default function SalesOverview() {
   const { branchId } = useTerminalBranch();
+  const { can } = usePermissions();
   const [searchParams, setSearchParams] = useSearchParams();
   const today = colomboToday();
   const periodParam = searchParams.get("period");
@@ -140,7 +143,7 @@ export default function SalesOverview() {
         <div role="alert" className="rounded-xl border border-red-300 bg-red-50 p-4 text-sm text-red-800 dark:border-red-900 dark:bg-red-950/30 dark:text-red-200">Couldn’t load the sales summary for this period. Refresh to try again.</div>
       ) : (
         <section aria-label="Sales summary" className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
-          {tiles.map(({ key, title, caption, icon: Icon, format }) => (
+          {tiles.filter(({ permission }) => !permission || can(permission)).map(({ key, title, caption, icon: Icon, format }) => (
             <article key={key} className="rounded-xl border border-slate-200 bg-white p-5 shadow-sm dark:border-slate-800 dark:bg-slate-900">
               <div className="flex items-center justify-between gap-3">
                 <span className="text-sm font-medium text-slate-600 dark:text-slate-300">{title}</span>

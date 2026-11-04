@@ -2,7 +2,8 @@ import { fireEvent, screen, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import SalesOverview, { rangeForPeriod } from ".";
 import * as salesService from "../../services/salesService";
-import { authState, renderWithProviders } from "../../test/renderWithProviders";
+import { authState, branchesState, renderWithProviders } from "../../test/renderWithProviders";
+import useActiveBranchStore from "../../store/zustand/activeBranchStore";
 import { BRANCH_ID } from "../../test/cashDayEntities";
 
 vi.mock("../../services/salesService", () => ({ getDailySalesSummary: vi.fn() }));
@@ -31,12 +32,41 @@ describe("SalesOverview", () => {
     expect(await screen.findByText("LKR 12,500.00")).toBeInTheDocument();
     expect(screen.getByText("Sales count").parentElement.parentElement).toHaveTextContent("4");
     expect(screen.getByText("Items sold").parentElement.parentElement).toHaveTextContent("7");
-    expect(screen.getByText("LKR 9,000.00")).toBeInTheDocument();
     expect(screen.getByText("Return sales count").parentElement.parentElement).toHaveTextContent("2");
     expect(screen.getByText("Return sales quantity").parentElement.parentElement).toHaveTextContent("3");
     expect(screen.getByText("Voided sales count").parentElement.parentElement).toHaveTextContent("1");
     expect(screen.getByRole("link", { name: /See all sales/ })).toHaveAttribute("href", "/sales/history");
     expect(salesService.getDailySalesSummary).toHaveBeenCalledWith(expect.objectContaining({ branchId: BRANCH_ID }));
+  });
+
+  it.each([
+    ["admin", null],
+    ["manager", BRANCH_ID],
+  ])("shows a %s the cost of sales", async (role, branchId) => {
+    // An admin works on the branch picked in the header.
+    useActiveBranchStore.setState({ activeBranchId: BRANCH_ID });
+    renderWithProviders(<SalesOverview />, {
+      preloadedState: {
+        auth: authState({ id: `${role}-1`, role, branch_id: branchId }),
+        branches: branchesState([{ id: BRANCH_ID, name: "Main Shop", is_active: true }]),
+      },
+      route: "/sales",
+    });
+
+    expect(await screen.findByText("LKR 9,000.00")).toBeInTheDocument();
+    expect(screen.getByText("Cost of sales")).toBeInTheDocument();
+  });
+
+  it("shows a cashier no cost of sales, and the sales amount", async () => {
+    // As the backend answers a cashier: no cost_of_sales.
+    salesService.getDailySalesSummary.mockResolvedValue({
+      ...(await salesService.getDailySalesSummary()),
+      cost_of_sales: undefined,
+    });
+    renderWithProviders(<SalesOverview />, { preloadedState, route: "/sales" });
+
+    expect(await screen.findByText("LKR 12,500.00")).toBeInTheDocument();
+    expect(screen.queryByText("Cost of sales")).not.toBeInTheDocument();
   });
 
   it("calculates the requested presets using Colombo calendar dates", () => {

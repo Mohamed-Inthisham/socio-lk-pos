@@ -188,6 +188,34 @@ describe('SalesController: branch-scoped reads', () => {
       },
     );
 
+    it.each([
+      ['an admin', { ...dates, branchId: 'branch-a' }, admin],
+      ['a manager', dates, manager],
+    ])('gives %s the cost of sales (INV-F3)', async (_, query, user) => {
+      const { service, controller } = setup();
+      service.dailySummary.mockResolvedValue({
+        sales_count: 1,
+        cost_of_sales: '80.00',
+      });
+
+      await expect(controller.dailySummary(query, user)).resolves.toEqual({
+        sales_count: 1,
+        cost_of_sales: '80.00',
+      });
+    });
+
+    it('leaves the cost of sales out for a cashier (INV-F3)', async () => {
+      const { service, controller } = setup();
+      service.dailySummary.mockResolvedValue({
+        sales_count: 1,
+        cost_of_sales: '80.00',
+      });
+
+      await expect(controller.dailySummary(dates, cashier)).resolves.toEqual({
+        sales_count: 1,
+      });
+    });
+
     it('refuses staff another branch with 403 WRONG_BRANCH', async () => {
       const { service, controller } = setup();
 

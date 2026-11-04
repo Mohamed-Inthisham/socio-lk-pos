@@ -165,8 +165,18 @@ The frontend RBAC (from the Redux phases) follows the same three roles. Two impo
 - **Visible-but-disabled** — unauthorized buttons stay visible with a tooltip explaining why (better UX than making them vanish inconsistently)
 - **Hide sensitive fields** — cost prices, profit margins, etc. are stripped from responses before the frontend even sees them; RBAC on the backend is the authoritative gate, not just a UI decoration
 
+## Cost Prices
+
+Buying and cost prices are for admins and managers (INV-F3). A cashier's response carries none, directly or through a relation.
+
+- Entity fields marked `@ExposeCost()` (`common/utils/cost-visibility.ts`) are left out of every response unless `RoleAwareSerializerInterceptor`, the global serializer, adds the cost group for the session user. A new endpoint, or a request without a user, stays hidden. Today: `Product.buying_price`, `ProductUnit.buying_price`, `SaleLine.cost_price_snapshot`, `PhonePurchase.total_amount`.
+- The rule only reaches entities. A plain object built from raw SQL must check `canViewCost` itself, as `GET /sales/daily-summary` does for `cost_of_sales`.
+- Services still read these fields: nothing changes inside the backend.
+- A trade-in's value (`Payment.trade_in_buying_price`) stays visible: it equals the payment's `amount`, a tender the cashier enters and the sale's totals need. So a cashier can still read what the shop gave for a traded-in phone on that sale.
+
+`cost-visibility.e2e-spec.ts` checks the routes open to cashiers, for all three roles. Add a route there when it starts carrying cost.
+
 ## Future Work
 
 - **Permission-level RBAC** — if roles become insufficient (custom franchise-specific permissions), migrate to a permission-based system. Straightforward path forward: introduce a `permissions` table and a `role_permissions` join, then swap `@Roles()` for `@RequirePermissions()`.
-- **Response filtering by role** — automatic removal of sensitive fields from response DTOs based on role. Currently manual per-endpoint; interceptor-based approach is possible if patterns emerge.
 - **Audit log integration** — every 403 should be logged (Phase 5.8) as a security-relevant event.

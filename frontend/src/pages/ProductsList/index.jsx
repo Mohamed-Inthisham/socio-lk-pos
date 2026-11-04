@@ -327,12 +327,16 @@ const ProductsList = () => {
       header: "Brand",
       render: renderBrand,
     },
-    {
-      key: "cost",
-      header: "Cost",
-      align: "right",
-      render: renderCost,
-    },
+    ...(can(PERMISSIONS.VIEW_COST)
+      ? [
+          {
+            key: "cost",
+            header: "Cost",
+            align: "right",
+            render: renderCost,
+          },
+        ]
+      : []),
     {
       key: "sellingPrice",
       header: "Selling",

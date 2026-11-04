@@ -20,6 +20,7 @@ const product = (id, name) => ({
   brand: { id: "b1", name: "UGREEN" },
   category: { id: "c1", name: "Cables" },
   branch: null,
+  buying_price: "320.00",
   selling_price: "500.00",
   is_active: true,
 });
@@ -51,6 +52,43 @@ const card = (label) =>
     .getAllByText(label)
     .map((el) => el.nextElementSibling)
     .find((figure) => figure?.classList.contains("text-2xl"));
+
+/** Buying prices (INV-F3): admins and managers only; selling prices for all. */
+describe("ProductsList: cost column", () => {
+  beforeEach(() => {
+    vi.resetAllMocks();
+    stockService.listStock.mockResolvedValue([]);
+  });
+
+  it.each([
+    ["admin", adminUser],
+    ["manager", managerUser],
+  ])("a %s sees the Cost and Selling columns", async (_, user) => {
+    productsService.listProducts.mockResolvedValue({ data: [cable], meta: { total: 1 } });
+    renderAs(user);
+
+    await screen.findAllByText("UGREEN Cable");
+    expect(screen.getAllByText("Cost").length).toBeGreaterThan(0);
+    expect(screen.getAllByText(/320\.00/).length).toBeGreaterThan(0);
+    expect(screen.getAllByText("Selling").length).toBeGreaterThan(0);
+    expect(screen.getAllByText(/500\.00/).length).toBeGreaterThan(0);
+  });
+
+  it("a cashier has no Cost column, and keeps the selling price", async () => {
+    // As the backend answers a cashier: no buying_price.
+    productsService.listProducts.mockResolvedValue({
+      data: [{ ...cable, buying_price: undefined }],
+      meta: { total: 1 },
+    });
+    renderAs(cashierUser);
+
+    await screen.findAllByText("UGREEN Cable");
+    expect(screen.queryByText("Cost")).not.toBeInTheDocument();
+    expect(screen.queryByText("Not set")).not.toBeInTheDocument();
+    expect(screen.getAllByText("Selling").length).toBeGreaterThan(0);
+    expect(screen.getAllByText(/500\.00/).length).toBeGreaterThan(0);
+  });
+});
 
 /**
  * Stock on the products list (Phase 2 P2-4): admins keep the branch
