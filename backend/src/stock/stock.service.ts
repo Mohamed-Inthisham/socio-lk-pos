@@ -11,6 +11,17 @@ import { EntityManager, Repository } from 'typeorm';
 import { Stock } from './entities/stock.entity';
 import { CreateStockDto } from './dto/create-stock.dto';
 import { UpdateStockDto } from './dto/update-stock.dto';
+import { StockOverviewQueryDto } from './dto/stock-overview-query.dto';
+import {
+  OVERVIEW_BRANCHES_SQL,
+  OVERVIEW_PAGE_SQL,
+  OVERVIEW_SUMMARY_SQL,
+  StockOverviewBranchRecord,
+  StockOverviewProductRecord,
+  StockOverviewResponse,
+  StockOverviewSummaryRecord,
+  toStockOverview,
+} from './stock-overview';
 import { ProductsService } from '../products/products.service';
 import { BranchesService } from '../branches/branches.service';
 import { ProductUnitStatus } from '../product-units/enums/product-unit-status.enum';
@@ -159,6 +170,57 @@ export class StockService {
       return withAlerts.filter((r) => r.low_stock_alert && r.manage_stock);
     }
     return withAlerts;
+  }
+
+  /**
+   * GET /stock/overview (INV-F4): one row per product with its stock in the
+   * scope, the cards, and the page's metadata. See stock-overview.ts.
+   *
+   * Branch scoping is resolved by the controller before this runs, as for
+   * findAll. A branch that doesn't exist is 404: with no stock rows to find,
+   * it would otherwise show every product as out of stock.
+   *
+   * One read-only REPEATABLE READ transaction, so a sale completing
+   * meanwhile can't make the rows disagree with the cards or the page count.
+   */
+  async getOverview(
+    query: StockOverviewQueryDto,
+  ): Promise<StockOverviewResponse> {
+    const page = query.page ?? 1;
+    const limit = query.limit ?? 50;
+    const offset = (page - 1) * limit;
+    const branchId = query.branchId ?? null;
+    const status = query.stockStatus ?? null;
+    const pattern = query.search
+      ? `%${query.search.replace(/[\\%_]/g, '\\$&')}%`
+      : null;
+
+    if (query.branchId) await this.branchesService.findOne(query.branchId);
+
+    const scope = [branchId, query.includeInactive ?? false, pattern, status];
+    return this.stockRepository.manager.transaction(
+      'REPEATABLE READ',
+      async (manager) => {
+        await manager.query('SET TRANSACTION READ ONLY');
+        const [summary]: StockOverviewSummaryRecord[] = await manager.query(
+          OVERVIEW_SUMMARY_SQL,
+          scope,
+        );
+        // Past the last row there is nothing to read, and a huge page's
+        // offset wouldn't fit the query's int.
+        const products: StockOverviewProductRecord[] =
+          offset < summary.matching
+            ? await manager.query(OVERVIEW_PAGE_SQL, [...scope, limit, offset])
+            : [];
+        const branches: StockOverviewBranchRecord[] = products.length
+          ? await manager.query(OVERVIEW_BRANCHES_SQL, [
+              products.map((product) => product.id),
+              branchId,
+            ])
+          : [];
+        return toStockOverview(summary, products, branches, page, limit);
+      },
+    );
   }
 
   /**

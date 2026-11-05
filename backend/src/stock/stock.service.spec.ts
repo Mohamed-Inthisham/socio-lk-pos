@@ -7,8 +7,15 @@ import {
 } from '@nestjs/common';
 import { StockService } from './stock.service';
 import { Stock } from './entities/stock.entity';
+import {
+  OVERVIEW_BRANCHES_SQL,
+  OVERVIEW_PAGE_SQL,
+  OVERVIEW_SUMMARY_SQL,
+} from './stock-overview';
+import { StockStatus } from './enums/stock-status.enum';
 import { ProductsService } from '../products/products.service';
 import { BranchesService } from '../branches/branches.service';
+import { TrackingMethod } from '../products/enums/tracking-method.enum';
 import { ProductUnitStatus } from '../product-units/enums/product-unit-status.enum';
 import {
   StockMovementReferenceType,
@@ -304,6 +311,342 @@ describe('StockService', () => {
       expect(mockRepo.find).toHaveBeenCalledWith(
         expect.objectContaining({ where: { product_id: 'p1' } }),
       );
+    });
+  });
+
+  describe('getOverview', () => {
+    const summaryRecord = {
+      total_products: 2,
+      in_stock: 0,
+      low_stock: 1,
+      out_of_stock: 0,
+      not_tracked: 1,
+      total_quantity: 3,
+      matching: 2,
+    };
+    const productRecord = {
+      id: 'p1',
+      name: 'iPhone',
+      sku: 'SKU-000001',
+      tracking_method: TrackingMethod.IMEI,
+      is_active: true,
+      selling_price: '125000.00',
+      brand_id: 'br1',
+      brand_name: 'Apple',
+      category_id: 'c1',
+      category_name: 'Phones',
+      quantity: 3,
+      min_quantity: 5,
+      in_stock_units: 3,
+      inspection_units: 1,
+      stock_status: StockStatus.LOW_STOCK,
+    };
+    const branchRecord = {
+      product_id: 'p1',
+      id: 'b1',
+      name: 'Main Shop',
+      is_active: false,
+      quantity: 3,
+      min_quantity: 5,
+      manage_stock: true,
+      stock_status: StockStatus.LOW_STOCK,
+    };
+
+    const answer = (
+      products: unknown[] = [productRecord],
+      branches: unknown[] = [branchRecord],
+      summary: unknown = summaryRecord,
+    ) => {
+      (
+        mockRepo as unknown as { manager: { transaction: jest.Mock } }
+      ).manager.transaction.mockImplementationOnce(
+        (_level: string, cb: (m: typeof mockManager) => unknown) =>
+          cb(mockManager),
+      );
+      mockManager.query.mockImplementation((sql: string) =>
+        Promise.resolve(
+          sql === OVERVIEW_SUMMARY_SQL
+            ? [summary]
+            : sql === OVERVIEW_PAGE_SQL
+              ? products
+              : sql === OVERVIEW_BRANCHES_SQL
+                ? branches
+                : [],
+        ),
+      );
+    };
+    const paramsOf = (sql: string) =>
+      (mockManager.query.mock.calls as [string, unknown[]][]).find(
+        ([text]) => text === sql,
+      )?.[1];
+
+    it('reads in one read-only REPEATABLE READ transaction', async () => {
+      answer();
+
+      await service.getOverview({});
+
+      const { transaction } = (
+        mockRepo as unknown as { manager: { transaction: jest.Mock } }
+      ).manager;
+      expect(transaction).toHaveBeenCalledWith(
+        'REPEATABLE READ',
+        expect.any(Function),
+      );
+      expect(mockManager.query).toHaveBeenNthCalledWith(
+        1,
+        'SET TRANSACTION READ ONLY',
+      );
+    });
+
+    it('sends no branch, active products and no filters by default', async () => {
+      answer();
+
+      await service.getOverview({});
+
+      expect(paramsOf(OVERVIEW_SUMMARY_SQL)).toEqual([null, false, null, null]);
+      expect(paramsOf(OVERVIEW_PAGE_SQL)).toEqual([
+        null,
+        false,
+        null,
+        null,
+        50,
+        0,
+      ]);
+      expect(mockBranchesService.findOne).not.toHaveBeenCalled();
+    });
+
+    it('passes the scope and filters to all three queries, and the offset to the page', async () => {
+      answer(undefined, undefined, { ...summaryRecord, matching: 60 });
+
+      await service.getOverview({
+        branchId: 'b1',
+        includeInactive: true,
+        stockStatus: StockStatus.LOW_STOCK,
+        search: 'iphone',
+        page: 3,
+        limit: 25,
+      });
+
+      const scope = ['b1', true, '%iphone%', StockStatus.LOW_STOCK];
+      expect(paramsOf(OVERVIEW_SUMMARY_SQL)).toEqual(scope);
+      expect(paramsOf(OVERVIEW_PAGE_SQL)).toEqual([...scope, 25, 50]);
+      expect(paramsOf(OVERVIEW_BRANCHES_SQL)).toEqual([['p1'], 'b1']);
+    });
+
+    it('makes % and _ in the search match themselves', async () => {
+      answer();
+
+      await service.getOverview({ search: '50%_a\\b' });
+
+      expect(paramsOf(OVERVIEW_PAGE_SQL)?.[2]).toBe('%50\\%\\_a\\\\b%');
+    });
+
+    it('lets a failed query reach the transaction, which rolls back', async () => {
+      answer();
+      const failure = new Error('query failed');
+      mockManager.query.mockImplementation((sql: string) =>
+        sql === OVERVIEW_PAGE_SQL
+          ? Promise.reject(failure)
+          : Promise.resolve([summaryRecord]),
+      );
+
+      await expect(service.getOverview({})).rejects.toBe(failure);
+    });
+
+    it('answers 404 for a branch that does not exist, without querying stock', async () => {
+      mockBranchesService.findOne.mockRejectedValueOnce(
+        new NotFoundException('Branch not found'),
+      );
+
+      await expect(service.getOverview({ branchId: 'nope' })).rejects.toThrow(
+        NotFoundException,
+      );
+      expect(mockManager.query).not.toHaveBeenCalled();
+    });
+
+    it('builds a product row with its branches, the cards and the metadata', async () => {
+      answer();
+
+      const result = await service.getOverview({ page: 1, limit: 1 });
+
+      expect(result).toEqual({
+        data: [
+          {
+            id: 'p1',
+            name: 'iPhone',
+            sku: 'SKU-000001',
+            tracking_method: TrackingMethod.IMEI,
+            is_active: true,
+            selling_price: '125000.00',
+            brand: { id: 'br1', name: 'Apple' },
+            category: { id: 'c1', name: 'Phones' },
+            stock_status: StockStatus.LOW_STOCK,
+            quantity: 3,
+            min_quantity: 5,
+            units: { in_stock: 3, inspection: 1 },
+            branches: [
+              {
+                id: 'b1',
+                name: 'Main Shop',
+                is_active: false,
+                quantity: 3,
+                min_quantity: 5,
+                manage_stock: true,
+                stock_status: StockStatus.LOW_STOCK,
+              },
+            ],
+          },
+        ],
+        summary: {
+          total_products: 2,
+          in_stock: 0,
+          low_stock: 1,
+          out_of_stock: 0,
+          not_tracked: 1,
+          total_quantity: 3,
+        },
+        meta: {
+          total: 2,
+          page: 1,
+          limit: 1,
+          totalPages: 2,
+          hasNext: true,
+          hasPrev: false,
+        },
+      });
+    });
+
+    it('gives a QUANTITY product null units, and no branches without a stock row', async () => {
+      answer(
+        [{ ...productRecord, tracking_method: TrackingMethod.QUANTITY }],
+        [],
+      );
+
+      const { data } = await service.getOverview({});
+
+      expect(data[0].units).toBeNull();
+      expect(data[0].branches).toEqual([]);
+    });
+
+    it('gives a NOT_TRACKED product and an untracked branch row a null quantity', async () => {
+      answer(
+        [
+          {
+            ...productRecord,
+            quantity: 0,
+            stock_status: StockStatus.NOT_TRACKED,
+          },
+        ],
+        [
+          {
+            ...branchRecord,
+            quantity: 7,
+            manage_stock: false,
+            stock_status: StockStatus.NOT_TRACKED,
+          },
+        ],
+      );
+
+      const { data } = await service.getOverview({});
+
+      expect(data[0].quantity).toBeNull();
+      expect(data[0].branches[0].quantity).toBeNull();
+    });
+
+    it('answers a page beyond the int range without running the page query', async () => {
+      answer();
+
+      const result = await service.getOverview({
+        page: 100_000_000,
+        limit: 50,
+      });
+
+      expect(paramsOf(OVERVIEW_PAGE_SQL)).toBeUndefined();
+      expect(paramsOf(OVERVIEW_BRANCHES_SQL)).toBeUndefined();
+      expect(result.data).toEqual([]);
+      expect(result.summary).toEqual({
+        total_products: 2,
+        in_stock: 0,
+        low_stock: 1,
+        out_of_stock: 0,
+        not_tracked: 1,
+        total_quantity: 3,
+      });
+      expect(result.meta).toEqual({
+        total: 2,
+        page: 100_000_000,
+        limit: 50,
+        totalPages: 1,
+        hasNext: false,
+        hasPrev: true,
+      });
+    });
+
+    it('runs the page query for the last row, and not one past it', async () => {
+      answer();
+      await service.getOverview({ page: 2, limit: 1 });
+      expect(paramsOf(OVERVIEW_PAGE_SQL)).toEqual([
+        null,
+        false,
+        null,
+        null,
+        1,
+        1,
+      ]);
+
+      mockManager.query.mockClear();
+      answer();
+      await service.getOverview({ page: 3, limit: 1 });
+      expect(paramsOf(OVERVIEW_PAGE_SQL)).toBeUndefined();
+    });
+
+    it('skips the branch query on an empty page, and keeps the cards', async () => {
+      answer([]);
+
+      const result = await service.getOverview({ page: 9 });
+
+      expect(paramsOf(OVERVIEW_BRANCHES_SQL)).toBeUndefined();
+      expect(result.data).toEqual([]);
+      expect(result.summary.total_products).toBe(2);
+    });
+
+    it('leaves extra columns out of the response', async () => {
+      answer(
+        [{ ...productRecord, buying_price: '90000.00' }],
+        [{ ...branchRecord, buying_price: '90000.00' }],
+      );
+
+      const result = await service.getOverview({});
+
+      expect(JSON.stringify(result)).not.toContain('buying_price');
+    });
+
+    describe('SQL', () => {
+      const allSql = [
+        OVERVIEW_SUMMARY_SQL,
+        OVERVIEW_PAGE_SQL,
+        OVERVIEW_BRANCHES_SQL,
+      ];
+
+      it('never reads a buying or cost price', () => {
+        for (const sql of allSql) {
+          expect(sql).not.toMatch(/buying|cost|trade_in|payment/i);
+          expect(sql).not.toMatch(/SELECT\s+\*|\bp\.\*/i);
+        }
+      });
+
+      it('keeps the branch inside the aggregates and hides soft-deleted products', () => {
+        expect(OVERVIEW_PAGE_SQL).toContain('LEFT JOIN stock_scope');
+        expect(OVERVIEW_PAGE_SQL).toContain('LEFT JOIN unit_scope');
+        expect(OVERVIEW_PAGE_SQL).toContain('p.deleted_at IS NULL');
+        expect(OVERVIEW_PAGE_SQL).not.toMatch(/\bJOIN (stock|product_units)\b/);
+      });
+
+      it('orders by name, then id, before the limit', () => {
+        expect(OVERVIEW_PAGE_SQL).toMatch(
+          /ORDER BY name ASC, id ASC\s+LIMIT \$5::int OFFSET \$6::int/,
+        );
+      });
     });
   });
 
