@@ -1,5 +1,5 @@
 import { vi } from "vitest";
-import { screen, waitFor } from "@testing-library/react";
+import { screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import ProductsList from "./index";
 import * as productsService from "../../services/productsService";
@@ -46,12 +46,11 @@ const renderAs = (user) =>
     },
   });
 
-/** A summary card's figure, by its label (the label followed by the figure). */
-const card = (label) =>
-  screen
-    .getAllByText(label)
-    .map((el) => el.nextElementSibling)
-    .find((figure) => figure?.classList.contains("text-2xl"));
+/** A product's Stocks cell: the one before Status, the row's last. */
+const stockCell = (name) => {
+  const row = within(screen.getByRole("table")).getByText(name).closest("tr");
+  return within(row).getAllByRole("cell").at(-2);
+};
 
 /** Buying prices (INV-F3): admins and managers only; selling prices for all. */
 describe("ProductsList: cost column", () => {
@@ -115,7 +114,7 @@ describe("ProductsList: branch and stock", () => {
     expect((await screen.findAllByText("UGREEN Cable")).length).toBeGreaterThan(0);
     expect(screen.getByRole("button", { name: /All branches/ })).toBeInTheDocument();
     expect(stockService.listStock).toHaveBeenCalledWith({});
-    expect(card("Stock units")).toHaveTextContent("10");
+    expect(stockCell("UGREEN Cable")).toHaveTextContent(/^10$/);
     expect(
       screen.getByText(/Stock shows the selected branch quantity, or the combined quantity across branches/),
     ).toBeInTheDocument();
@@ -142,7 +141,7 @@ describe("ProductsList: branch and stock", () => {
     ["manager", managerUser],
     ["cashier", cashierUser],
   ])(
-    "a %s has no branch picker, sends no branchId, keeps the whole catalogue and sees their branch's totals",
+    "a %s has no branch picker, sends no branchId, keeps the whole catalogue and sees their branch's stock",
     async (_, user) => {
       // The backend returns only their own branch's rows.
       stockService.listStock.mockResolvedValue([
@@ -161,12 +160,59 @@ describe("ProductsList: branch and stock", () => {
       const [productFilters] = productsService.listProducts.mock.calls[0];
       expect(productFilters.branchId ?? "").toBe("");
 
-      expect(card("Total products")).toHaveTextContent("2");
-      expect(card("Stock units")).toHaveTextContent("3");
-      expect(card("Low stock products")).toHaveTextContent("1");
-      expect(card("Out of stock")).toHaveTextContent("1");
+      expect(stockCell("UGREEN Cable")).toHaveTextContent(/^3$/);
+      expect(stockCell("UGREEN Charger")).toHaveTextContent(/^0$/);
       expect(screen.getByText("Stock shows your branch's quantity")).toBeInTheDocument();
       expect(screen.queryByText(/combined quantity across branches/)).not.toBeInTheDocument();
     },
   );
+});
+
+/**
+ * The catalogue shows a plain stock number. Statuses, totals and per-branch
+ * figures belong to Inventory Overview.
+ */
+describe("ProductsList: a catalogue, not a stock page", () => {
+  beforeEach(() => {
+    vi.resetAllMocks();
+    productsService.listProducts.mockResolvedValue({
+      data: [cable, charger],
+      meta: { total: 2 },
+    });
+  });
+
+  it("has no stock cards, status filter or status wording", async () => {
+    stockService.listStock.mockResolvedValue([
+      stockRow(cable.id, mainShop, 3, 5),
+      stockRow(charger.id, mainShop, 0, 2),
+    ]);
+    renderAs(adminUser);
+
+    await screen.findAllByText("UGREEN Cable");
+    for (const text of ["Total products", "Stock units", "Low stock products", "Low stock", "Out of stock", "In stock", "Not tracked"]) {
+      expect(screen.queryByText(text)).not.toBeInTheDocument();
+    }
+    expect(screen.queryByRole("button", { name: /All stock statuses/ })).not.toBeInTheDocument();
+  });
+
+  it("shows 0 for a product with no stock row", async () => {
+    stockService.listStock.mockResolvedValue([]);
+    renderAs(adminUser);
+
+    await screen.findAllByText("UGREEN Cable");
+    expect(stockCell("UGREEN Cable")).toHaveTextContent(/^0$/);
+  });
+
+  it("shows a dash, not a zero, for an untracked product, and counts tracked rows only", async () => {
+    stockService.listStock.mockResolvedValue([
+      { ...stockRow(cable.id, mainShop, 9, 0), manage_stock: false },
+      stockRow(charger.id, mainShop, 4, 0),
+      { ...stockRow(charger.id, cityShop, 50, 0), manage_stock: false },
+    ]);
+    renderAs(adminUser);
+
+    await screen.findAllByText("UGREEN Cable");
+    expect(stockCell("UGREEN Cable")).toHaveTextContent(/^—$/);
+    expect(stockCell("UGREEN Charger")).toHaveTextContent(/^4$/);
+  });
 });
