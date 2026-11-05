@@ -20,6 +20,7 @@ import {
 import { StockService } from './stock.service';
 import { CreateStockDto } from './dto/create-stock.dto';
 import { UpdateStockDto } from './dto/update-stock.dto';
+import { StockOverviewQueryDto } from './dto/stock-overview-query.dto';
 import { Roles } from '../auth/decorators/roles.decorator';
 import { UserRole } from '../users/enums/user-role.enum';
 import { Auditable } from '../audit-log/decorators/auditable.decorator';
@@ -94,6 +95,58 @@ export class StockController {
       productId,
       branchId: scopeBranch(user, branchId),
       lowStockOnly,
+    });
+  }
+
+  // Before :id, which would otherwise take "overview" for an id.
+  @Get('overview')
+  @Roles(UserRole.ADMIN, UserRole.MANAGER)
+  @ApiOperation({
+    summary: 'Inventory overview: one row per product (paginated)',
+    description:
+      'Admin/Manager only (INV-F4). Every product, active ones by default, ' +
+      'with or without a stock row (no row is quantity 0), sorted by name, ' +
+      'then id. Carries the selling price only, never a buying or cost ' +
+      'price.\n\n' +
+      'stock_status: NOT_TRACKED when the scope has stock rows and none is ' +
+      'tracked; otherwise quantity and min_quantity are the sums of the ' +
+      'tracked rows, and it is OUT_OF_STOCK at 0, LOW_STOCK at or below ' +
+      'min_quantity, or IN_STOCK. quantity is null when NOT_TRACKED; units ' +
+      'is null for a QUANTITY product. branches holds each stock row in the ' +
+      'scope, so a shortage at one branch stays visible.\n\n' +
+      'summary follows branchId, includeInactive and search, and is the same ' +
+      'on every page; meta also follows stockStatus.\n\n' +
+      'Branch scoping: admins see every branch, inactive ones included, or ' +
+      'the one given in branchId; managers only their own (branchId left ' +
+      'out or their own), and another branchId is 403 { code: WRONG_BRANCH }.',
+  })
+  @ApiResponse({
+    status: 200,
+    description:
+      '{ data: [{ id, name, sku, tracking_method, is_active, selling_price, ' +
+      'brand: { id, name }, category: { id, name }, stock_status, quantity, ' +
+      'min_quantity, units: { in_stock, inspection }, branches: [{ id, name, ' +
+      'is_active, quantity, min_quantity, manage_stock, stock_status }] }], ' +
+      'summary: { total_products, in_stock, low_stock, out_of_stock, ' +
+      'not_tracked, total_quantity }, meta: { total, page, limit, ' +
+      'totalPages, hasNext, hasPrev } }',
+  })
+  @ApiResponse({ status: 400, description: 'Invalid query parameter' })
+  @ApiResponse({ status: 401, description: 'Not authenticated' })
+  @ApiResponse({
+    status: 403,
+    description:
+      'A cashier, or { message, code: WRONG_BRANCH } for a manager asking ' +
+      'for another branch',
+  })
+  @ApiResponse({ status: 404, description: 'No branch with that branchId' })
+  async overview(
+    @Query() query: StockOverviewQueryDto,
+    @CurrentUser() user: AuthenticatedUser,
+  ) {
+    return this.stockService.getOverview({
+      ...query,
+      branchId: scopeBranch(user, query.branchId),
     });
   }
 

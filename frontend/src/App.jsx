@@ -25,6 +25,9 @@ import SalesOverview from "./pages/SalesOverview";
 import Customers from "./pages/Customers";
 import CustomerDetail from "./pages/CustomerDetail";
 import Suppliers from "./pages/Suppliers";
+import InventoryOverview from "./pages/InventoryOverview";
+import ProductUnits from "./pages/ProductUnits";
+import ProductUnitDetail from "./pages/ProductUnitDetail";
 import Users from "./pages/Users";
 import StockPurchases from "./pages/StockPurchases";
 import StockPurchaseCreate from "./pages/StockPurchaseCreate";
@@ -185,6 +188,30 @@ function App() {
           element={
             <RoleProtectedRoute allowedRoles={["admin", "manager"]}>
               <StockPurchaseDetail />
+            </RoleProtectedRoute>
+          }
+        />
+        <Route
+          path="/inventory"
+          element={
+            <RoleProtectedRoute allowedRoles={["admin", "manager"]}>
+              <InventoryOverview />
+            </RoleProtectedRoute>
+          }
+        />
+        <Route
+          path="/inventory/units"
+          element={
+            <RoleProtectedRoute allowedRoles={["admin", "manager"]}>
+              <ProductUnits />
+            </RoleProtectedRoute>
+          }
+        />
+        <Route
+          path="/inventory/units/:id"
+          element={
+            <RoleProtectedRoute allowedRoles={["admin", "manager"]}>
+              <ProductUnitDetail />
             </RoleProtectedRoute>
           }
         />

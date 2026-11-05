@@ -36,6 +36,29 @@ export const listStock = async (filters = {}) => {
 };
 
 /**
+ * The inventory overview (GET /stock/overview): one row per product with its
+ * stock, plus summary figures. Admins and managers only. Carries the selling
+ * price only, never a buying or cost price.
+ *
+ * Empty values are left out (the backend refuses an empty branchId or
+ * stockStatus); false stays, so includeInactive=false is sent.
+ *
+ * @param {Object} [params] - { page?, limit?, branchId?, includeInactive?,
+ *   stockStatus?, search? }; an unknown param is a 400
+ * @returns {Promise<{data: Array, summary: Object, meta: Object}>}
+ */
+export const getStockOverview = async (params = {}) => {
+  const query = Object.fromEntries(
+    Object.entries(params).filter(
+      ([, v]) => v !== undefined && v !== null && v !== "",
+    ),
+  );
+
+  const response = await api.get("/stock/overview", { params: query });
+  return response.data;
+};
+
+/**
  * Get a single stock row by ID.
  *
  * @param {string} id - Stock UUID

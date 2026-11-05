@@ -18,6 +18,7 @@ import {
 } from '@nestjs/swagger';
 import { ProductUnitsService } from './product-units.service';
 import { ListProductUnitsQueryDto } from './dto/list-product-units-query.dto';
+import { SearchProductUnitsQueryDto } from './dto/search-product-units-query.dto';
 import { Roles } from '../auth/decorators/roles.decorator';
 import { UserRole } from '../users/enums/user-role.enum';
 import { CurrentUser } from '../auth/decorators/current-user.decorator';
@@ -65,6 +66,52 @@ export class ProductUnitsController {
     @CurrentUser() user: AuthenticatedUser,
   ) {
     return this.productUnitsService.findAll({
+      ...query,
+      branchId: scopeBranch(user, query.branchId),
+    });
+  }
+
+  // Before :id, which would otherwise take "search" for an id.
+  @Get('search')
+  @Roles(UserRole.ADMIN, UserRole.MANAGER)
+  @ApiOperation({
+    summary: 'Search product units (paginated)',
+    description:
+      'Admin/Manager only (INV-F3). Partial, case-insensitive match of q on ' +
+      'the IMEI, the legacy imei column, the serial number, and the ' +
+      'product’s SKU and name; % and _ match themselves. Every status: each ' +
+      'record of a bought-back phone is returned on its own, and there is no ' +
+      'status filter. Sorted by created_at DESC, id DESC. Pagination: page ' +
+      '(default 1), limit (default 50, max 200).\n\n' +
+      'Carries no customer, sale or price: use this, not GET /product-units, ' +
+      'to answer a search.\n\n' +
+      'Branch scoping: admins search every branch, or the one given in ' +
+      'branchId; managers only their own (branchId left out or their own), ' +
+      'and another branchId is 403 { code: WRONG_BRANCH }.',
+  })
+  @ApiResponse({
+    status: 200,
+    description:
+      '{ data: [{ id, product_id, imei, imei_number, serial_number, status, ' +
+      'created_at, product: { name, sku, tracking_method }, branch: { name } ' +
+      '}], meta: { total, page, limit, totalPages, hasNext, hasPrev } }',
+  })
+  @ApiResponse({
+    status: 400,
+    description: 'q missing, under 2 or over 100 characters, or a bad param',
+  })
+  @ApiResponse({ status: 401, description: 'Not authenticated' })
+  @ApiResponse({
+    status: 403,
+    description:
+      'A cashier, or { message, code: WRONG_BRANCH } for a manager asking ' +
+      'for another branch',
+  })
+  async search(
+    @Query() query: SearchProductUnitsQueryDto,
+    @CurrentUser() user: AuthenticatedUser,
+  ) {
+    return this.productUnitsService.search({
       ...query,
       branchId: scopeBranch(user, query.branchId),
     });
@@ -127,6 +174,46 @@ export class ProductUnitsController {
     @CurrentUser() user: AuthenticatedUser,
   ) {
     return this.productUnitsService.findOne(id, {
+      branchId: scopeBranch(user),
+    });
+  }
+
+  @Get(':id/details')
+  @Roles(UserRole.ADMIN, UserRole.MANAGER)
+  @ApiOperation({
+    summary: 'One unit for its details page (INV-F2)',
+    description:
+      'Admin/Manager only. The unit, its product and branch, how it was ' +
+      'acquired, its completed and voided sales and its returns, newest ' +
+      'first. Carries no prices or amounts, no customer contact details and ' +
+      'no free text: use this, not GET /product-units/:id, to display a ' +
+      'unit. acquisition.type is STOCK_PURCHASE, PHONE_PURCHASE, TRADE_IN or ' +
+      'UNKNOWN (no reliable record, as for a unit received before the stock ' +
+      'ledger; its other acquisition fields are null).',
+  })
+  @ApiParam({ name: 'id', description: 'ProductUnit UUID', format: 'uuid' })
+  @ApiResponse({
+    status: 200,
+    description:
+      '{ unit, product, branch, acquisition: { type, date, stock_purchase, ' +
+      'supplier_name, customer_name, sale }, sales: [{ id, sale_number, ' +
+      'status, completed_at, voided_at, customer_name }], returns: [{ id, ' +
+      'return_number, sale_id, sale_number, disposition, returned_at }] }',
+  })
+  @ApiResponse({ status: 400, description: 'Malformed id' })
+  @ApiResponse({ status: 401, description: 'Not authenticated' })
+  @ApiResponse({ status: 403, description: 'A cashier' })
+  @ApiResponse({
+    status: 404,
+    description:
+      'Product unit not found; also, for a manager, a unit at another ' +
+      'branch (the same answer, so its existence is not revealed)',
+  })
+  async findDetails(
+    @Param('id', ParseUUIDPipe) id: string,
+    @CurrentUser() user: AuthenticatedUser,
+  ) {
+    return this.productUnitsService.findDetails(id, {
       branchId: scopeBranch(user),
     });
   }

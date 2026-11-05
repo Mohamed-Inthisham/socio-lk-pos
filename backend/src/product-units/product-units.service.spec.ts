@@ -4,7 +4,7 @@ import { ConflictException, NotFoundException } from '@nestjs/common';
 import { ProductUnitsService } from './product-units.service';
 import { ProductUnit } from './entities/product-unit.entity';
 import { ProductUnitStatus } from './enums/product-unit-status.enum';
-import { QueryFailedError } from 'typeorm';
+import { Brackets, QueryFailedError } from 'typeorm';
 import { StockService } from '../stock/stock.service';
 import { lockInventoryRows } from '../stock/lock-inventory-rows';
 import {
@@ -25,9 +25,14 @@ describe('ProductUnitsService', () => {
     leftJoinAndSelect: jest.fn().mockReturnThis(),
     andWhere: jest.fn().mockReturnThis(),
     orderBy: jest.fn().mockReturnThis(),
+    addOrderBy: jest.fn().mockReturnThis(),
     skip: jest.fn().mockReturnThis(),
     take: jest.fn().mockReturnThis(),
     getManyAndCount: jest.fn(),
+    select: jest.fn().mockReturnThis(),
+    addSelect: jest.fn().mockReturnThis(),
+    innerJoin: jest.fn().mockReturnThis(),
+    where: jest.fn().mockReturnThis(),
   };
 
   const mockRepo = {
@@ -37,7 +42,7 @@ describe('ProductUnitsService', () => {
 
   // passInspection (Phase 6.4 P7-7) opens a transaction, adds stock and
   // writes an audit row through the transaction's manager.
-  const mockDataSource = { transaction: jest.fn() };
+  const mockDataSource = { transaction: jest.fn(), query: jest.fn() };
   const mockStockService = { incrementForReversal: jest.fn() };
   const mockAuditRepo = { save: jest.fn() };
 
@@ -46,8 +51,13 @@ describe('ProductUnitsService', () => {
     mockQueryBuilder.leftJoinAndSelect.mockReturnThis();
     mockQueryBuilder.andWhere.mockReturnThis();
     mockQueryBuilder.orderBy.mockReturnThis();
+    mockQueryBuilder.addOrderBy.mockReturnThis();
     mockQueryBuilder.skip.mockReturnThis();
     mockQueryBuilder.take.mockReturnThis();
+    mockQueryBuilder.select.mockReturnThis();
+    mockQueryBuilder.addSelect.mockReturnThis();
+    mockQueryBuilder.innerJoin.mockReturnThis();
+    mockQueryBuilder.where.mockReturnThis();
     mockRepo.createQueryBuilder.mockReturnValue(mockQueryBuilder);
 
     const module: TestingModule = await Test.createTestingModule({
@@ -82,6 +92,10 @@ describe('ProductUnitsService', () => {
       expect(mockQueryBuilder.take).toHaveBeenCalledWith(50);
       expect(mockQueryBuilder.orderBy).toHaveBeenCalledWith(
         'unit.created_at',
+        'DESC',
+      );
+      expect(mockQueryBuilder.addOrderBy).toHaveBeenCalledWith(
+        'unit.id',
         'DESC',
       );
       expect(result).toEqual({
@@ -276,6 +290,728 @@ describe('ProductUnitsService', () => {
   });
 
   // ---- markSoldForSale ----
+
+  describe('search', () => {
+    const CREATED_AT = new Date('2026-10-01T04:00:00.000Z');
+    /** What must never leave this endpoint, even if the query loaded it. */
+    const SENSITIVE = {
+      buying_price: '80000.00',
+      selling_price: '100000.00',
+      phone_purchase_id: 'pp-1',
+      phone_purchase: {
+        total_amount: '80000.00',
+        notes: 'Call 0771234567',
+        customer: {
+          name: 'Kamal',
+          phone: '0771234567',
+          nic: '199300000001',
+          email: 'kamal@example.com',
+          address: '1 Galle Road',
+        },
+      },
+      sale_lines: [{ cost_price_snapshot: '80000.00' }],
+    };
+    const unit = (overrides = {}) => ({
+      id: 'u-1',
+      product_id: 'p-1',
+      branch_id: 'b-1',
+      imei: '356938035643809',
+      imei_number: '356938035643809',
+      serial_number: 'SN-1',
+      status: ProductUnitStatus.SOLD,
+      created_at: CREATED_AT,
+      updated_at: CREATED_AT,
+      product: {
+        id: 'p-1',
+        name: 'Galaxy A15',
+        sku: 'SKU-000007',
+        tracking_method: 'IMEI',
+        buying_price: '70000.00',
+        selling_price: '90000.00',
+      },
+      branch: { id: 'b-1', name: 'Main Shop', phone: '0112345678' },
+      ...overrides,
+    });
+
+    /** The conditions inside the search's Brackets, as they were added. */
+    const matchConditions = (): {
+      kind: 'where' | 'orWhere';
+      sql: string;
+      params: { pattern: string };
+    }[] => {
+      const added: {
+        kind: 'where' | 'orWhere';
+        sql: string;
+        params: { pattern: string };
+      }[] = [];
+      const collect =
+        (kind: 'where' | 'orWhere') =>
+        (sql: string, params: { pattern: string }) => {
+          added.push({ kind, sql, params });
+          return builder;
+        };
+      const builder = { where: collect('where'), orWhere: collect('orWhere') };
+      const [brackets] = mockQueryBuilder.where.mock.calls[0] as [Brackets];
+      brackets.whereFactory(builder as never);
+      return added;
+    };
+
+    beforeEach(() => {
+      mockQueryBuilder.getManyAndCount.mockResolvedValue([[], 0]);
+    });
+
+    it.each([
+      ['the IMEI', 'unit.imei_number'],
+      ['the legacy imei column', 'unit.imei'],
+      ['the serial number', 'unit.serial_number'],
+      ['the SKU', 'product.sku'],
+      ['the product name', 'product.name'],
+    ])('matches part of %s, in any case', async (_, column) => {
+      await service.search({ q: 'gAlAx' });
+
+      expect(matchConditions()).toContainEqual(
+        expect.objectContaining({
+          sql: `${column} ILIKE :pattern`,
+          params: { pattern: '%gAlAx%' },
+        }),
+      );
+    });
+
+    it('searches exactly those five columns', async () => {
+      await service.search({ q: 'gal' });
+
+      expect(matchConditions().map((condition) => condition.sql)).toEqual([
+        'unit.imei_number ILIKE :pattern',
+        'unit.imei ILIKE :pattern',
+        'unit.serial_number ILIKE :pattern',
+        'product.sku ILIKE :pattern',
+        'product.name ILIKE :pattern',
+      ]);
+    });
+
+    it('groups the OR inside Brackets, and adds no OR outside them', async () => {
+      await service.search({ q: 'gal', branchId: 'b-1' });
+
+      expect(mockQueryBuilder.where).toHaveBeenCalledTimes(1);
+      expect(mockQueryBuilder.where.mock.calls[0][0]).toBeInstanceOf(Brackets);
+      expect(matchConditions().map((condition) => condition.kind)).toEqual([
+        'where',
+        'orWhere',
+        'orWhere',
+        'orWhere',
+        'orWhere',
+      ]);
+      expect(mockQueryBuilder).not.toHaveProperty('orWhere');
+    });
+
+    it.each([
+      ['a percent sign', '50%', '%50\\%%'],
+      ['an underscore', 'a_b', '%a\\_b%'],
+      ['a backslash', 'a\\b', '%a\\\\b%'],
+      ['all three', '%_\\', '%\\%\\_\\\\%'],
+    ])('escapes %s so it matches itself', async (_, q, pattern) => {
+      await service.search({ q });
+
+      expect(matchConditions()[0].params).toEqual({ pattern });
+    });
+
+    it('adds the branch as a separate AND', async () => {
+      await service.search({ q: 'gal', branchId: 'b-1' });
+
+      expect(mockQueryBuilder.andWhere).toHaveBeenCalledWith(
+        'unit.branch_id = :branchId',
+        { branchId: 'b-1' },
+      );
+    });
+
+    it('adds no branch for an admin searching every branch', async () => {
+      await service.search({ q: 'gal' });
+
+      expect(mockQueryBuilder.andWhere).not.toHaveBeenCalled();
+    });
+
+    it('applies no status filter, even if one reached it', async () => {
+      await service.search({
+        q: 'gal',
+        status: ProductUnitStatus.SOLD,
+      } as never);
+
+      expect(mockQueryBuilder.andWhere).not.toHaveBeenCalled();
+      for (const { sql } of matchConditions()) {
+        expect(sql).not.toContain('status');
+      }
+    });
+
+    it('sorts by created_at DESC, then id DESC', async () => {
+      await service.search({ q: 'gal' });
+
+      expect(mockQueryBuilder.orderBy).toHaveBeenCalledWith(
+        'unit.created_at',
+        'DESC',
+      );
+      expect(mockQueryBuilder.addOrderBy).toHaveBeenCalledWith(
+        'unit.id',
+        'DESC',
+      );
+    });
+
+    it('joins only the product and branch', async () => {
+      await service.search({ q: 'gal' });
+
+      expect(mockQueryBuilder.innerJoin.mock.calls).toEqual([
+        ['unit.product', 'product'],
+        ['unit.branch', 'branch'],
+      ]);
+      expect(mockQueryBuilder.leftJoinAndSelect).not.toHaveBeenCalled();
+    });
+
+    it('selects no price, customer or note column', async () => {
+      await service.search({ q: 'gal' });
+
+      const selected = [
+        ...(mockQueryBuilder.select.mock.calls[0][0] as string[]),
+        ...mockQueryBuilder.addSelect.mock.calls.flatMap(
+          ([columns]) => columns as string[],
+        ),
+      ];
+      expect(selected).toEqual([
+        'unit.id',
+        'unit.product_id',
+        'unit.imei',
+        'unit.imei_number',
+        'unit.serial_number',
+        'unit.status',
+        'unit.created_at',
+        'product.id',
+        'product.name',
+        'product.sku',
+        'product.tracking_method',
+        'branch.id',
+        'branch.name',
+      ]);
+    });
+
+    it('maps each unit to the permitted fields', async () => {
+      mockQueryBuilder.getManyAndCount.mockResolvedValue([[unit()], 1]);
+
+      const { data } = await service.search({ q: 'gal' });
+
+      expect(data).toEqual([
+        {
+          id: 'u-1',
+          product_id: 'p-1',
+          imei: '356938035643809',
+          imei_number: '356938035643809',
+          serial_number: 'SN-1',
+          status: ProductUnitStatus.SOLD,
+          created_at: CREATED_AT,
+          product: {
+            name: 'Galaxy A15',
+            sku: 'SKU-000007',
+            tracking_method: 'IMEI',
+          },
+          branch: { name: 'Main Shop' },
+        },
+      ]);
+    });
+
+    it('drops anything else, even if the query had loaded it', async () => {
+      mockQueryBuilder.getManyAndCount.mockResolvedValue([
+        [unit(SENSITIVE)],
+        1,
+      ]);
+
+      const result = await service.search({ q: 'gal' });
+
+      const text = JSON.stringify(result);
+      for (const value of [
+        'buying_price',
+        'selling_price',
+        'phone_purchase',
+        'customer',
+        'sale_lines',
+        'cost_price_snapshot',
+        'updated_at',
+        '0771234567',
+        '199300000001',
+        'kamal@example.com',
+        '1 Galle Road',
+        '80000.00',
+        '70000.00',
+        '0112345678',
+      ]) {
+        expect(text).not.toContain(value);
+      }
+    });
+
+    it('returns each record of a bought-back IMEI on its own', async () => {
+      mockQueryBuilder.getManyAndCount.mockResolvedValue([
+        [unit({ id: 'u-new' }), unit({ id: 'u-old' })],
+        2,
+      ]);
+
+      const { data } = await service.search({ q: '3569' });
+
+      expect(data.map((row) => row.id)).toEqual(['u-new', 'u-old']);
+    });
+
+    it('pages, with the metadata', async () => {
+      mockQueryBuilder.getManyAndCount.mockResolvedValue([[unit()], 60]);
+
+      const { meta } = await service.search({ q: 'gal', page: 2, limit: 25 });
+
+      expect(mockQueryBuilder.skip).toHaveBeenCalledWith(25);
+      expect(mockQueryBuilder.take).toHaveBeenCalledWith(25);
+      expect(meta).toEqual({
+        total: 60,
+        page: 2,
+        limit: 25,
+        totalPages: 3,
+        hasNext: true,
+        hasPrev: true,
+      });
+    });
+
+    it('defaults to the list’s page and limit', async () => {
+      await service.search({ q: 'gal' });
+
+      expect(mockQueryBuilder.skip).toHaveBeenCalledWith(0);
+      expect(mockQueryBuilder.take).toHaveBeenCalledWith(50);
+    });
+  });
+
+  describe('findDetails', () => {
+    const IMEI = '356938035643809';
+    const CREATED_AT = new Date('2026-10-01T04:00:00.000Z');
+    const unitRow = {
+      id: 'u-1',
+      imei: IMEI,
+      imei_number: IMEI,
+      serial_number: 'SN-1',
+      status: ProductUnitStatus.SOLD,
+      created_at: CREATED_AT,
+      phone_purchase_id: null as string | null,
+      product_id: 'p-1',
+      product_name: 'Galaxy A15',
+      product_sku: 'SKU-000007',
+      tracking_method: 'IMEI',
+      branch_id: 'b-1',
+      branch_name: 'Main Shop',
+    };
+    /** What must never leave this endpoint, even if a query returned it. */
+    const SENSITIVE = {
+      buying_price: '80000.00',
+      selling_price: '100000.00',
+      cost_price_snapshot: '80000.00',
+      unit_buying_price: '80000.00',
+      trade_in_buying_price: '80000.00',
+      total_amount: '80000.00',
+      amount: '80000.00',
+      phone: '0771234567',
+      nic: '199300000001',
+      email: 'kamal@example.com',
+      address: '1 Galle Road',
+      notes: 'Call 0771234567',
+      reason: 'Screen cracked',
+      override_reason: 'Manager said ok',
+    };
+
+    /** Answer each query by the table it reads, in place of the database. */
+    const answer = (tables: {
+      unit?: object[];
+      phonePurchase?: object[];
+      ledger?: object[];
+      sales?: object[];
+      returns?: object[];
+    }) => {
+      mockDataSource.query.mockImplementation((sql: string) => {
+        if (sql.includes('FROM product_units')) {
+          return Promise.resolve(tables.unit ?? [unitRow]);
+        }
+        if (sql.includes('FROM phone_purchases')) {
+          return Promise.resolve(tables.phonePurchase ?? []);
+        }
+        if (sql.includes('FROM stock_movements')) {
+          return Promise.resolve(tables.ledger ?? []);
+        }
+        if (sql.includes('FROM sale_return_lines')) {
+          return Promise.resolve(tables.returns ?? []);
+        }
+        if (sql.includes('FROM sales')) {
+          return Promise.resolve(tables.sales ?? []);
+        }
+        return Promise.reject(new Error(`Unexpected query: ${sql}`));
+      });
+    };
+    const sqlFor = (table: string): [string, unknown[]] =>
+      mockDataSource.query.mock.calls.find(([sql]) =>
+        (sql as string).includes(`FROM ${table}`),
+      ) as [string, unknown[]];
+
+    const allKeys = (node: unknown): string[] => {
+      if (Array.isArray(node)) return node.flatMap(allKeys);
+      if (node instanceof Date || node === null) return [];
+      if (typeof node === 'object') {
+        return Object.entries(node).flatMap(([k, v]) => [k, ...allKeys(v)]);
+      }
+      return [];
+    };
+
+    it('maps the unit, product and branch', async () => {
+      answer({});
+
+      const result = await service.findDetails('u-1', {});
+
+      expect(result.unit).toEqual({
+        id: 'u-1',
+        imei: IMEI,
+        imei_number: IMEI,
+        serial_number: 'SN-1',
+        status: ProductUnitStatus.SOLD,
+        created_at: CREATED_AT,
+      });
+      expect(result.product).toEqual({
+        id: 'p-1',
+        name: 'Galaxy A15',
+        sku: 'SKU-000007',
+        tracking_method: 'IMEI',
+      });
+      expect(result.branch).toEqual({ id: 'b-1', name: 'Main Shop' });
+    });
+
+    it('throws NotFoundException for a missing unit, and reads nothing else', async () => {
+      answer({ unit: [] });
+
+      await expect(service.findDetails('u-missing', {})).rejects.toThrow(
+        NotFoundException,
+      );
+      expect(mockDataSource.query).toHaveBeenCalledTimes(1);
+    });
+
+    it('scopes the unit to a manager’s branch: another branch’s unit is the same 404', async () => {
+      answer({ unit: [] });
+
+      await expect(
+        service.findDetails('u-1', { branchId: 'b-2' }),
+      ).rejects.toThrow(new NotFoundException('Product unit not found'));
+      const [sql, params] = sqlFor('product_units');
+      expect(sql).toContain('u.branch_id = $2::uuid');
+      expect(params).toEqual(['u-1', 'b-2']);
+    });
+
+    it('passes no branch for an admin', async () => {
+      answer({});
+
+      await service.findDetails('u-1', { branchId: undefined });
+
+      expect(sqlFor('product_units')[1]).toEqual(['u-1', null]);
+    });
+
+    it('a stock purchase comes from the ledger’s PURCHASE row', async () => {
+      answer({
+        ledger: [
+          {
+            id: 'sp-1',
+            purchase_number: 'SP-1A2B3C4D',
+            purchase_date: '2026-10-27',
+            supplier_name: 'Ranjith Mobiles',
+          },
+        ],
+      });
+
+      const { acquisition } = await service.findDetails('u-1', {});
+
+      expect(acquisition).toEqual({
+        type: 'STOCK_PURCHASE',
+        date: '2026-10-27',
+        stock_purchase: { id: 'sp-1', purchase_number: 'SP-1A2B3C4D' },
+        supplier_name: 'Ranjith Mobiles',
+        customer_name: null,
+        sale: null,
+      });
+      expect(sqlFor('stock_movements')[1]).toEqual([
+        'u-1',
+        StockMovementType.PURCHASE,
+        StockMovementReferenceType.STOCK_PURCHASE_ITEM,
+      ]);
+    });
+
+    it('a phone purchase with no trade-in payment is PHONE_PURCHASE', async () => {
+      answer({
+        unit: [{ ...unitRow, phone_purchase_id: 'pp-1' }],
+        phonePurchase: [
+          {
+            created_at: CREATED_AT,
+            customer_name: 'Kamal',
+            sale_id: null,
+            sale_number: null,
+          },
+        ],
+      });
+
+      const { acquisition } = await service.findDetails('u-1', {});
+
+      expect(acquisition).toEqual({
+        type: 'PHONE_PURCHASE',
+        date: CREATED_AT,
+        stock_purchase: null,
+        supplier_name: null,
+        customer_name: 'Kamal',
+        sale: null,
+      });
+      expect(sqlFor('phone_purchases')[1]).toEqual(['pp-1']);
+    });
+
+    it('a phone purchase stamped on a payment is TRADE_IN, with its sale', async () => {
+      answer({
+        unit: [{ ...unitRow, phone_purchase_id: 'pp-1' }],
+        phonePurchase: [
+          {
+            created_at: CREATED_AT,
+            customer_name: 'Kamal',
+            sale_id: 's-1',
+            sale_number: 'INV-20261021-0007',
+          },
+        ],
+      });
+
+      const { acquisition } = await service.findDetails('u-1', {});
+
+      expect(acquisition).toEqual({
+        type: 'TRADE_IN',
+        date: CREATED_AT,
+        stock_purchase: null,
+        supplier_name: null,
+        customer_name: 'Kamal',
+        sale: { id: 's-1', sale_number: 'INV-20261021-0007' },
+      });
+    });
+
+    it('a phone purchase never reads the ledger', async () => {
+      answer({
+        unit: [{ ...unitRow, phone_purchase_id: 'pp-1' }],
+        phonePurchase: [
+          {
+            created_at: CREATED_AT,
+            customer_name: 'Kamal',
+            sale_id: null,
+            sale_number: null,
+          },
+        ],
+      });
+
+      await service.findDetails('u-1', {});
+
+      expect(sqlFor('stock_movements')).toBeUndefined();
+    });
+
+    it('a unit with no ledger row is UNKNOWN, and every other field is null', async () => {
+      answer({ ledger: [] });
+
+      const { acquisition } = await service.findDetails('u-1', {});
+
+      expect(acquisition).toEqual({
+        type: 'UNKNOWN',
+        date: null,
+        stock_purchase: null,
+        supplier_name: null,
+        customer_name: null,
+        sale: null,
+      });
+    });
+
+    it('never guesses from the purchase lines’ identifier lists', async () => {
+      answer({ ledger: [] });
+
+      await service.findDetails('u-1', {});
+
+      for (const [sql] of mockDataSource.query.mock.calls) {
+        expect(sql).not.toMatch(/imei_numbers|serial_numbers/);
+      }
+    });
+
+    it('asks for COMPLETED and VOIDED sales only, newest first', async () => {
+      answer({});
+
+      await service.findDetails('u-1', {});
+
+      const [sql, params] = sqlFor('sales');
+      expect(params).toEqual(['u-1', ['COMPLETED', 'VOIDED']]);
+      expect(sql).toContain('ORDER BY s.completed_at DESC');
+    });
+
+    it('maps sales, and a sale with no customer has a null customer_name', async () => {
+      const completedAt = new Date('2026-10-20T04:00:00.000Z');
+      const voidedAt = new Date('2026-10-21T04:00:00.000Z');
+      answer({
+        sales: [
+          {
+            id: 's-2',
+            sale_number: 'INV-2',
+            status: 'COMPLETED',
+            completed_at: completedAt,
+            voided_at: null,
+            customer_name: null,
+          },
+          {
+            id: 's-1',
+            sale_number: 'INV-1',
+            status: 'VOIDED',
+            completed_at: completedAt,
+            voided_at: voidedAt,
+            customer_name: 'Nimal',
+          },
+        ],
+      });
+
+      const { sales } = await service.findDetails('u-1', {});
+
+      expect(sales).toEqual([
+        {
+          id: 's-2',
+          sale_number: 'INV-2',
+          status: 'COMPLETED',
+          completed_at: completedAt,
+          voided_at: null,
+          customer_name: null,
+        },
+        {
+          id: 's-1',
+          sale_number: 'INV-1',
+          status: 'VOIDED',
+          completed_at: completedAt,
+          voided_at: voidedAt,
+          customer_name: 'Nimal',
+        },
+      ]);
+    });
+
+    it('maps returns, newest first', async () => {
+      const returnedAt = new Date('2026-10-22T04:00:00.000Z');
+      answer({
+        returns: [
+          {
+            id: 'r-1',
+            return_number: 'RET-20261022-0001',
+            sale_id: 's-1',
+            sale_number: 'INV-1',
+            disposition: 'INSPECTION',
+            returned_at: returnedAt,
+          },
+        ],
+      });
+
+      const { returns } = await service.findDetails('u-1', {});
+
+      expect(returns).toEqual([
+        {
+          id: 'r-1',
+          return_number: 'RET-20261022-0001',
+          sale_id: 's-1',
+          sale_number: 'INV-1',
+          disposition: 'INSPECTION',
+          returned_at: returnedAt,
+        },
+      ]);
+      expect(sqlFor('sale_return_lines')[0]).toContain(
+        'ORDER BY r.created_at DESC',
+      );
+    });
+
+    it('selects no sensitive column in any query', async () => {
+      answer({
+        unit: [{ ...unitRow, phone_purchase_id: 'pp-1' }],
+        phonePurchase: [
+          {
+            created_at: CREATED_AT,
+            customer_name: 'Kamal',
+            sale_id: null,
+            sale_number: null,
+          },
+        ],
+      });
+      await service.findDetails('u-1', {});
+      answer({});
+      await service.findDetails('u-1', {});
+
+      expect(mockDataSource.query.mock.calls.length).toBeGreaterThanOrEqual(8);
+      for (const [sql] of mockDataSource.query.mock.calls) {
+        const selected = (sql as string).split(/\bFROM\b/)[0];
+        expect(selected).not.toContain('*');
+        for (const column of Object.keys(SENSITIVE)) {
+          expect(selected).not.toMatch(new RegExp(`\\b${column}\\b`));
+        }
+      }
+    });
+
+    it('drops anything a query returned beyond the mapped fields', async () => {
+      answer({
+        unit: [{ ...unitRow, phone_purchase_id: 'pp-1', ...SENSITIVE }],
+        phonePurchase: [
+          {
+            created_at: CREATED_AT,
+            customer_name: 'Kamal',
+            sale_id: 's-1',
+            sale_number: 'INV-1',
+            ...SENSITIVE,
+          },
+        ],
+        sales: [
+          {
+            id: 's-1',
+            sale_number: 'INV-1',
+            status: 'COMPLETED',
+            completed_at: CREATED_AT,
+            voided_at: null,
+            customer_name: 'Kamal',
+            ...SENSITIVE,
+          },
+        ],
+        returns: [
+          {
+            id: 'r-1',
+            return_number: 'RET-1',
+            sale_id: 's-1',
+            sale_number: 'INV-1',
+            disposition: 'INSPECTION',
+            returned_at: CREATED_AT,
+            ...SENSITIVE,
+          },
+        ],
+      });
+
+      const result = await service.findDetails('u-1', {});
+
+      const keys = allKeys(result);
+      for (const forbidden of Object.keys(SENSITIVE)) {
+        expect(keys).not.toContain(forbidden);
+      }
+      expect(JSON.stringify(result)).not.toContain('0771234567');
+      expect(JSON.stringify(result)).not.toContain('199300000001');
+      expect(JSON.stringify(result)).not.toContain('80000.00');
+    });
+
+    it('drops a stock purchase’s extra fields too', async () => {
+      answer({
+        ledger: [
+          {
+            id: 'sp-1',
+            purchase_number: 'SP-1',
+            purchase_date: '2026-10-27',
+            supplier_name: 'Ranjith Mobiles',
+            ...SENSITIVE,
+          },
+        ],
+      });
+
+      const result = await service.findDetails('u-1', {});
+
+      const keys = allKeys(result);
+      for (const forbidden of Object.keys(SENSITIVE)) {
+        expect(keys).not.toContain(forbidden);
+      }
+    });
+  });
 
   describe('markSoldForSale', () => {
     let mockReadQb: {

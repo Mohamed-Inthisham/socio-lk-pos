@@ -494,6 +494,39 @@ describe("SaleDetail: a sale with returns (P7-11, P7-18)", () => {
   });
 });
 
+describe("SaleDetail: opened from a product unit", () => {
+  const UnitPage = () => {
+    const location = useLocation();
+    return <p>{`unit page ${location.pathname} ${JSON.stringify(location.state)}`}</p>;
+  };
+
+  it("Back returns to the unit with the state it was opened with", async () => {
+    const user = userEvent.setup();
+    salesService.getSale.mockResolvedValue(saleEntity());
+    const unitState = { from: { search: "?status=SOLD&page=2" } };
+    renderWithProviders(
+      <Routes>
+        <Route path="/inventory/units/:id" element={<UnitPage />} />
+        <Route path="/sales/history/:id" element={<SaleDetail salesPath="/sales/history" />} />
+      </Routes>,
+      {
+        route: {
+          pathname: "/sales/history/sale-7",
+          state: { from: { path: "/inventory/units/unit-1", label: "Product unit", state: unitState } },
+        },
+        preloadedState: { auth: authState(cashierUser), branches: branchesState([mainShop]) },
+      },
+    );
+
+    await heading();
+    await user.click(screen.getByRole("button", { name: "Product unit" }));
+
+    expect(
+      await screen.findByText(`unit page /inventory/units/unit-1 ${JSON.stringify(unitState)}`),
+    ).toBeInTheDocument();
+  });
+});
+
 describe("SaleDetail: opened from Phones to check (P7-7)", () => {
   const fromInspection = {
     pathname: "/pos/sales/sale-7",

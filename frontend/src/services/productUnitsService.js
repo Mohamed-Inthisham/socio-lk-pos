@@ -5,6 +5,20 @@ export const listProductUnits = async (params = {}) => {
   return response.data;
 };
 
+/**
+ * Search units by part of an IMEI, serial number, SKU or product name, across
+ * every status (GET /product-units/search). Rows hold only what the Product
+ * Units table shows: no customer, sale or price.
+ *
+ * @param {Object} params - { q (2-100 characters), branchId?, page?, limit? };
+ *   sending a status is a 400
+ * @returns {Promise<{data: Array, meta: Object}>}
+ */
+export const searchProductUnits = async (params) => {
+  const response = await api.get("/product-units/search", { params });
+  return response.data;
+};
+
 export const listAllProductUnits = async (filters = {}) => {
   const firstPage = await listProductUnits({ ...filters, page: 1, limit: 200 });
   if (firstPage.meta.totalPages <= 1) return firstPage.data;
@@ -22,6 +36,19 @@ export const listAllProductUnits = async (filters = {}) => {
  * Individual phones (IMEI-tracked units). Contract:
  * docs/backend/used-phones.md, docs/backend/returns.md.
  */
+
+/**
+ * One unit for its details page: the unit, product, branch, how it was
+ * acquired, its sales and returns. Admins, and managers at their own branch;
+ * another branch's unit is the same 404 as a missing one.
+ *
+ * @param {string} unitId - ProductUnit UUID
+ * @returns {Promise<Object>} { unit, product, branch, acquisition, sales, returns }
+ */
+export const getProductUnitDetails = async (unitId) => {
+  const response = await api.get(`/product-units/${unitId}/details`);
+  return response.data;
+};
 
 /**
  * Pass a returned phone after inspection (planning doc P7-7): INSPECTION

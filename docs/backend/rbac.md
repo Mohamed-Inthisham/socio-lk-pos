@@ -113,6 +113,7 @@ This relies on the DB-level `CHK_users_branch_role` invariant (every non-admin u
 | `GET /product-units/:id` (P2-3; managers only) | any unit | own branch's units; another branch's → 404 |
 | `GET /product-units/sellable/by-identifier/:identifier` (P2-3, the till's IMEI/serial lookup; `branchId` required) | any branch | own branch only; another `branchId` → 403 `WRONG_BRANCH`. Statuses and answers unchanged: 200 in stock, 409 held but not sellable, 404 not at that branch |
 | `GET /stock` (P2-4; `productId` and `lowStockOnly` filters included; `productId` and `branchId` must be UUIDs, 400 otherwise) | every branch, or `branchId` | own branch; another `branchId` → 403 `WRONG_BRANCH` |
+| `GET /stock/overview` (INV-F4; managers only, cashiers are refused by role) | every branch, inactive ones included, or `branchId` (one that doesn't exist → 404) | own branch; another `branchId` → 403 `WRONG_BRANCH` |
 | `GET /stock/:id` (P2-4) | any row | own branch's rows; another branch's → 404 |
 | `GET /stock/by-product/:productId` (P2-4) | every branch's row | own branch's row only (an empty list when it has none) |
 
@@ -170,7 +171,7 @@ The frontend RBAC (from the Redux phases) follows the same three roles. Two impo
 Buying and cost prices are for admins and managers (INV-F3). A cashier's response carries none, directly or through a relation.
 
 - Entity fields marked `@ExposeCost()` (`common/utils/cost-visibility.ts`) are left out of every response unless `RoleAwareSerializerInterceptor`, the global serializer, adds the cost group for the session user. A new endpoint, or a request without a user, stays hidden. Today: `Product.buying_price`, `ProductUnit.buying_price`, `SaleLine.cost_price_snapshot`, `PhonePurchase.total_amount`.
-- The rule only reaches entities. A plain object built from raw SQL must check `canViewCost` itself, as `GET /sales/daily-summary` does for `cost_of_sales`.
+- The rule only reaches entities. A plain object built from raw SQL must check `canViewCost` itself, as `GET /sales/daily-summary` does for `cost_of_sales`. `GET /stock/overview` is also plain objects from raw SQL, and reads no cost at all, for any role.
 - Services still read these fields: nothing changes inside the backend.
 - A trade-in's value (`Payment.trade_in_buying_price`) stays visible: it equals the payment's `amount`, a tender the cashier enters and the sale's totals need. So a cashier can still read what the shop gave for a traded-in phone on that sale.
 

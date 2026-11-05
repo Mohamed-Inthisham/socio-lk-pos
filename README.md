@@ -97,7 +97,7 @@ npm run dev
 - [ ] Dashboard layout
 - [ ] Product management module *(backend ✅ Phase 6.1 — frontend pending)*
 - [ ] POS checkout flow
-- [ ] Inventory tracking *(backend ✅ Phase 6.1 — frontend pending)*
+- [ ] Inventory tracking *(backend ✅ Phase 6.1 — frontend: Inventory Overview and Product Units ✅, stock intake pending)*
 - [ ] Reports & analytics
 - [x] Backend API (NestJS)
 - [x] PostgreSQL integration

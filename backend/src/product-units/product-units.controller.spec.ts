@@ -35,7 +35,9 @@ describe('ProductUnitsController: branch-scoped reads', () => {
   const setup = () => {
     const service = {
       findAll: jest.fn().mockResolvedValue(page),
+      search: jest.fn().mockResolvedValue(page),
       findOne: jest.fn().mockResolvedValue({ id: 'u1' }),
+      findDetails: jest.fn().mockResolvedValue({ unit: { id: 'u1' } }),
       findSellableByIdentifier: jest.fn().mockResolvedValue(sellable),
     };
     return {
@@ -116,6 +118,77 @@ describe('ProductUnitsController: branch-scoped reads', () => {
     });
   });
 
+  describe('GET /product-units/search', () => {
+    const query = { q: '3569' };
+
+    it('allows admins and managers only (cashiers are refused by role)', () => {
+      expect(rolesOf('search')).toEqual([UserRole.ADMIN, UserRole.MANAGER]);
+    });
+
+    it('is declared before :id, which would take "search" for an id', () => {
+      const handlers = Object.getOwnPropertyNames(
+        ProductUnitsController.prototype,
+      );
+
+      expect(handlers.indexOf('search')).toBeLessThan(
+        handlers.indexOf('findOne'),
+      );
+    });
+
+    it('searches every branch for an admin who names none', async () => {
+      const { service, controller } = setup();
+
+      await expect(controller.search(query, admin)).resolves.toBe(page);
+
+      expect(service.search).toHaveBeenCalledWith({
+        ...query,
+        branchId: undefined,
+      });
+    });
+
+    it('searches the branch an admin names', async () => {
+      const { service, controller } = setup();
+
+      await controller.search({ ...query, branchId: 'branch-b' }, admin);
+
+      expect(service.search).toHaveBeenCalledWith({
+        ...query,
+        branchId: 'branch-b',
+      });
+    });
+
+    it('searches a manager’s own branch, with or without branchId', async () => {
+      const { service, controller } = setup();
+
+      await controller.search(query, manager);
+      await controller.search({ ...query, branchId: 'branch-a' }, manager);
+
+      for (const call of [1, 2]) {
+        expect(service.search).toHaveBeenNthCalledWith(call, {
+          ...query,
+          branchId: 'branch-a',
+        });
+      }
+    });
+
+    it('refuses a manager another branch with 403 WRONG_BRANCH, and never searches', async () => {
+      const { service, controller } = setup();
+
+      await expect(
+        controller.search({ ...query, branchId: 'branch-b' }, manager),
+      ).rejects.toEqual(wrongBranch);
+      expect(service.search).not.toHaveBeenCalled();
+    });
+
+    it('never uses the list, whose answer carries customers and costs', async () => {
+      const { service, controller } = setup();
+
+      await controller.search(query, admin);
+
+      expect(service.findAll).not.toHaveBeenCalled();
+    });
+  });
+
   describe('GET /product-units/:id', () => {
     it('still allows admins and managers only', () => {
       expect(rolesOf('findOne')).toEqual([UserRole.ADMIN, UserRole.MANAGER]);
@@ -147,6 +220,53 @@ describe('ProductUnitsController: branch-scoped reads', () => {
       service.findOne.mockRejectedValue(notFound);
 
       await expect(controller.findOne('u1', manager)).rejects.toBe(notFound);
+    });
+  });
+
+  describe('GET /product-units/:id/details', () => {
+    it('allows admins and managers only (cashiers are refused by role)', () => {
+      expect(rolesOf('findDetails')).toEqual([
+        UserRole.ADMIN,
+        UserRole.MANAGER,
+      ]);
+    });
+
+    it('looks up an admin’s unit at any branch', async () => {
+      const { service, controller } = setup();
+
+      await controller.findDetails('u1', admin);
+
+      expect(service.findDetails).toHaveBeenCalledWith('u1', {
+        branchId: undefined,
+      });
+    });
+
+    it('looks up a manager’s unit at their own branch only', async () => {
+      const { service, controller } = setup();
+
+      await controller.findDetails('u1', manager);
+
+      expect(service.findDetails).toHaveBeenCalledWith('u1', {
+        branchId: 'branch-a',
+      });
+    });
+
+    it('passes the service’s 404 (another branch’s unit) through unchanged', async () => {
+      const { service, controller } = setup();
+      const notFound = new NotFoundException('Product unit not found');
+      service.findDetails.mockRejectedValue(notFound);
+
+      await expect(controller.findDetails('u1', manager)).rejects.toBe(
+        notFound,
+      );
+    });
+
+    it('never asks the service for GET /product-units/:id’s fuller answer', async () => {
+      const { service, controller } = setup();
+
+      await controller.findDetails('u1', admin);
+
+      expect(service.findOne).not.toHaveBeenCalled();
     });
   });
 

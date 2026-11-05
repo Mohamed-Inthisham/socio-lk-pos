@@ -16,6 +16,8 @@ import {
   Barcode,
   ShoppingCart,
   UserCog,
+  Boxes,
+  Smartphone,
 } from "lucide-react";
 import Tooltip from "../../common/Tooltip";
 import useLayoutStore from "../../../store/zustand/layoutStore";
@@ -127,6 +129,24 @@ const NAV_ITEMS = [
         to: "/categories",
         label: "Categories",
         icon: FolderTree,
+      },
+    ],
+  },
+  {
+    label: "Inventory",
+    icon: Boxes,
+    children: [
+      {
+        to: "/inventory",
+        label: "Inventory overview",
+        icon: Boxes,
+        roles: ["admin", "manager"],
+      },
+      {
+        to: "/inventory/units",
+        label: "Product units",
+        icon: Smartphone,
+        roles: ["admin", "manager"],
       },
     ],
   },
@@ -291,7 +311,7 @@ const NavItem = ({ item, collapsed, onNavigate, nested = false }) => {
       to={item.to}
       onClick={onNavigate}
       className={linkClass}
-      end={item.to === "/dashboard" || item.to === "/products"}
+      end={item.to === "/dashboard" || item.to === "/products" || item.to === "/inventory"}
     >
       {linkContent}
     </NavLink>

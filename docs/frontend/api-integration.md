@@ -84,6 +84,27 @@ Possible outcomes:
 
 This is why users appear to stay logged in for days — the refresh token (7 days) silently reissues access tokens (15 min) in the background.
 
+## Inventory Overview page
+
+`/inventory` (`frontend/src/pages/InventoryOverview`) shows one row per product from `getStockOverview` in `stockService.js`, which calls `GET /stock/overview`. The endpoint's rules are in [products.md](../backend/products.md#inventory-overview).
+
+**Navigation.** Admins and managers reach it from the sidebar's Inventory group, as "Inventory overview", above "Product units" (`/inventory/units`, and `/inventory/units/:id` for one unit). A cashier sees no Inventory group, and `RoleProtectedRoute` sends them to the dashboard if they open the URL. A product's name opens its details page, `/products/:id`. The page is read-only and shows the selling price only, never a buying or cost price.
+
+**The URL holds the state:** `search`, `stockStatus`, `branchId`, `includeInactive` and `page`.
+
+- Reloading or sharing a URL restores the view. A value that isn't valid reads as the default.
+- Defaults stay out of the URL, and Clear filters removes all of them. A filter change goes back to the first page.
+- A page past the end moves to the last page.
+- `getStockOverview` leaves out empty values, since the backend refuses an empty `branchId` or `stockStatus`. It keeps `false`, so `includeInactive=false` is sent even though the URL doesn't hold it.
+
+**Filters.** The search runs 300 ms after typing stops, or at once on Enter, and needs 2 characters. Include inactive products adds deactivated products, tagged Inactive.
+
+**Branches.** An admin sees All branches, or picks one from a list that includes inactive branches, marked "(inactive)". That list comes from `listBranches({ includeInactive: true })`, because the app's shared list holds active branches only. A `branchId` in the URL waits for this list before the overview is requested: if it isn't on the list it leaves the URL and is never sent, and All branches loads. If the list fails the branch can't be checked, so it is sent and the backend judges it. A manager has no picker, sends no `branchId`, and any `branchId` in the URL is ignored.
+
+**Figures.** The heading's count is `meta.total`, and the cards are the backend's `summary`, so they cover every page and the cards don't change with the status filter. Nothing is counted from the rows on screen. Before the first answer the heading has no count and the cards show a dash; after a failed load they go blank again, since the last figures would describe other filters.
+
+**Rows.** A `NOT_TRACKED` product shows a dash for its quantity, and a `QUANTITY` product a dash for its identified units: neither is a zero. For admins, the Branches button opens each branch's stock, and `N low or out` beside it flags a shortage the combined status can hide.
+
 ## Environment variables
 
 - **`VITE_API_BASE_URL`** — backend base URL (dev: `http://localhost:3000/api/v1`; prod: your deployed backend URL)

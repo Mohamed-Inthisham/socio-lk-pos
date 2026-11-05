@@ -287,6 +287,7 @@ All endpoints are prefixed with `/api/v1` and require authentication via the `ac
 | Method | Path | Role | Purpose |
 |--------|------|------|---------|
 | GET | `/stock` | any | List stock rows (filters: `productId`, `branchId`, `lowStockOnly`; not paginated) with nested `{ product, branch }`. `productId` and `branchId` must be UUIDs (400 otherwise). **Branch-scoped (Phase 2 P2-4):** admins see every branch, or the one in `branchId`; managers and cashiers see only their own branch (`branchId` left out or their own), and another `branchId` is 403 `{ code: 'WRONG_BRANCH' }` ([rbac.md](./rbac.md#branch-scoped-reads-phase-2)) |
+| GET | `/stock/overview` | admin, manager | One row per product with its stock, summary figures and metadata (paginated). **Branch-scoped:** admins see every branch, or the one in `branchId`; managers only their own, and another `branchId` is 403 `{ code: 'WRONG_BRANCH' }`. See [Inventory overview](#inventory-overview) |
 | GET | `/stock/by-product/:productId` | any | The stock rows for a product, one per branch. **Branch-scoped (P2-4):** admins get every branch; managers and cashiers only their own branch's row (an empty list when it has none) |
 | GET | `/stock/:id` | any | Get one stock row. **Branch-scoped (P2-4):** for a manager or cashier, a row at another branch is 404 `Stock row not found`, the same answer as a missing id |
 | POST | `/stock` | admin | Create a stock row (used when a product is added to a branch that didn't have it — e.g., after a new branch opens) |
@@ -294,11 +295,56 @@ All endpoints are prefixed with `/api/v1` and require authentication via the `ac
 
 No `DELETE` on stock — quantity 0 is the correct way to represent "not carrying this here anymore" while preserving history.
 
+### Inventory overview
+
+`GET /stock/overview` (INV-F4) is read-only and starts from `products`, so a product with no stock row is still listed. It adds no inventory source: quantities come from `stock`, unit counts from `product_units`. The page that uses it is described in [api-integration.md](../frontend/api-integration.md#inventory-overview-page).
+
+**Query parameters**, all optional and combined with AND; an unknown parameter is 400:
+
+| Parameter | Meaning |
+|-----------|---------|
+| `page`, `limit` | Default 1 and 50; `limit` at most 200 |
+| `branchId` | One branch, inactive ones included. Must be a UUID (400 otherwise); a branch that doesn't exist is 404 |
+| `includeInactive` | `true` adds deactivated products; active products only by default. `true` or `false`, anything else is 400 |
+| `stockStatus` | `IN_STOCK`, `LOW_STOCK`, `OUT_OF_STOCK` or `NOT_TRACKED` |
+| `search` | Part of a product's name, SKU or barcode, in any case. Trimmed; empty is ignored; 2–100 characters. `%`, `_` and `\` match themselves |
+
+Soft-deleted products never appear. Rows are ordered by name, then id, so pages don't repeat or skip a product.
+
+**Response:** `{ data, summary, meta }`.
+
+- Each `data` row: `id`, `name`, `sku`, `tracking_method`, `is_active`, `selling_price`, `brand` and `category` (`{ id, name }`), `stock_status`, `quantity`, `min_quantity`, `units`, `branches`.
+- `summary`: `total_products`, `in_stock`, `low_stock`, `out_of_stock`, `not_tracked`, `total_quantity`.
+- `meta`: `total`, `page`, `limit`, `totalPages`, `hasNext`, `hasPrev`.
+
+**Stock status**, worked out within the scope (one branch, or every branch):
+
+| Status | When |
+|--------|------|
+| `NOT_TRACKED` | The scope has at least one stock row, and none is tracked (`manage_stock = false`). `quantity` is null: never read it as zero |
+| `OUT_OF_STOCK` | Tracked quantity is 0, or the scope has no stock row at all |
+| `LOW_STOCK` | Tracked quantity is above 0 and at or below `min_quantity` |
+| `IN_STOCK` | Tracked quantity is above `min_quantity` |
+
+- `manage_stock` belongs to a stock row, so one product can be tracked at one branch and untracked at another. Across every branch, `quantity` and `min_quantity` are the sums of the **tracked** rows only: an untracked row's stored quantity doesn't move, so it never counts.
+- A missing stock row is quantity 0. With a branch selected, a product with no row there is `OUT_OF_STOCK`, even if it is untracked elsewhere: a sale at that branch is refused with a 409.
+- All Branches includes stock at inactive branches.
+- `units` is `{ in_stock, inspection }`, and null for a `QUANTITY` product, which has no units. It is a count of `product_units` in the scope and can differ from `quantity`: a serial product can hold stock with no serial number recorded, and a unit in `INSPECTION` isn't in stock.
+
+**`branches`** holds each stock row in the scope, ordered by branch name: `id`, `name`, `is_active`, `quantity`, `min_quantity`, `manage_stock`, `stock_status`. Each row has its own status, so a shortage at one branch stays visible when the product's combined status looks fine. An untracked row's `quantity` is null. A product with no stock row in the scope has an empty list.
+
+**`summary` and `meta`** are independent of the page. `summary` follows `branchId`, `includeInactive` and `search`, but not `stockStatus`: its four status counts always add up to `total_products`. `total_quantity` counts tracked rows only. `meta` follows every filter, `stockStatus` included. A page past the end has no rows, and the same `summary` and `meta`.
+
+**Queries:** stock and units are each reduced to one row per product before joining products, so a product's rows can't multiply each other, and the branch filter sits inside those aggregates so products without a row survive. The summary, the page and the branch breakdown run in one read-only `REPEATABLE READ` transaction, so they describe the same moment. The SQL is in `backend/src/stock/stock-overview.ts`.
+
+**Privacy:** the response has the selling price only, for every role. No query reads a buying price, a cost, a cost snapshot, a unit's prices, or a payment or trade-in amount. The response is built field by field, never from a `Product` entity.
+
 ## RBAC Matrix
 
 | Operation | Admin | Manager | Cashier |
 |-----------|:-----:|:-------:|:-------:|
 | Read (any product/brand/category/branch/stock) | ✅ | ✅ | ✅ |
+| Inventory overview (`GET /stock/overview`) | ✅ | ✅ (own branch) | ❌ |
 | Barcode lookup for POS | ✅ | ✅ | ✅ |
 | Create/update/deactivate products | ✅ | ❌ | ❌ |
 | Create/update/deactivate brands | ✅ | ❌ | ❌ |

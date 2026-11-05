@@ -2,6 +2,7 @@ import { BadRequestException, NotFoundException } from '@nestjs/common';
 import { ROUTE_ARGS_METADATA } from '@nestjs/common/constants';
 import { StockController } from './stock.controller';
 import { StockService } from './stock.service';
+import { ROLES_KEY } from '../auth/decorators/roles.decorator';
 import { UserRole } from '../users/enums/user-role.enum';
 import type { AuthenticatedUser } from '../auth/strategies/jwt.strategy';
 
@@ -36,6 +37,7 @@ describe('StockController: branch-scoped reads', () => {
       findAll: jest.fn().mockResolvedValue(rows),
       findOne: jest.fn().mockResolvedValue({ id: 's1' }),
       findByProduct: jest.fn().mockResolvedValue(rows),
+      getOverview: jest.fn().mockResolvedValue({ data: [] }),
     };
     return {
       service,
@@ -130,6 +132,67 @@ describe('StockController: branch-scoped reads', () => {
           pipe.transform('not-a-uuid', { type: 'query', data: name }),
         ).rejects.toThrow(BadRequestException);
       }
+    });
+  });
+
+  describe('GET /stock/overview', () => {
+    it('is open to admins and managers only', () => {
+      const handler = Object.getOwnPropertyDescriptor(
+        StockController.prototype,
+        'overview',
+      )!.value as object;
+
+      expect(Reflect.getMetadata(ROLES_KEY, handler)).toEqual([
+        UserRole.ADMIN,
+        UserRole.MANAGER,
+      ]);
+    });
+
+    it('is declared before :id, which would take "overview" for an id', () => {
+      const handlers = Object.getOwnPropertyNames(StockController.prototype);
+
+      expect(handlers.indexOf('overview')).toBeLessThan(
+        handlers.indexOf('findOne'),
+      );
+    });
+
+    it('gives an admin every branch, or the one asked for', async () => {
+      const { service, controller } = setup();
+
+      await controller.overview({ includeInactive: true }, admin);
+      await controller.overview({ branchId: 'branch-b' }, admin);
+
+      expect(service.getOverview).toHaveBeenNthCalledWith(1, {
+        includeInactive: true,
+        branchId: undefined,
+      });
+      expect(service.getOverview).toHaveBeenNthCalledWith(2, {
+        branchId: 'branch-b',
+      });
+    });
+
+    it('scopes a manager to their branch, left out or their own', async () => {
+      const { service, controller } = setup();
+
+      await controller.overview({ search: 'iphone' }, manager);
+      await controller.overview({ branchId: 'branch-a' }, manager);
+
+      expect(service.getOverview).toHaveBeenNthCalledWith(1, {
+        search: 'iphone',
+        branchId: 'branch-a',
+      });
+      expect(service.getOverview).toHaveBeenNthCalledWith(2, {
+        branchId: 'branch-a',
+      });
+    });
+
+    it('refuses a manager another branch with 403 WRONG_BRANCH, without querying', async () => {
+      const { service, controller } = setup();
+
+      await expect(
+        controller.overview({ branchId: 'branch-b' }, manager),
+      ).rejects.toEqual(wrongBranch);
+      expect(service.getOverview).not.toHaveBeenCalled();
     });
   });
 
