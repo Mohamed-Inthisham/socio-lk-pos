@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { useSelector } from "react-redux";
 import { useLocation, useNavigate, useSearchParams } from "react-router-dom";
 import { Search } from "lucide-react";
@@ -9,7 +9,7 @@ import Table from "../../components/common/Table";
 import UnitStatusBadge from "../../components/inventory/UnitStatusBadge";
 import { UNIT_STATUS_LABELS, UNIT_STATUS_OPTIONS } from "../../constants/unitStatus";
 import usePermissions from "../../hooks/usePermissions";
-import { listProductUnits } from "../../services/productUnitsService";
+import { listProductUnits, searchProductUnits } from "../../services/productUnitsService";
 import { selectActiveBranches } from "../../store/slices/branchesSlice";
 import { unitIdentifiers } from "../../utils/unitIdentifiers";
 
@@ -27,15 +27,19 @@ import { unitIdentifiers } from "../../utils/unitIdentifiers";
  * from a unit restores the list. A value that isn't valid reads as the
  * default; defaults stay out of the URL.
  *
- * SEARCH (q) is the API's `imei` filter: an exact match on the legacy imei
- * column, so it runs on Enter or the button, not per keystroke. A serial
- * number paired with an IMEI can't be found yet (FOLLOWUPS).
+ * SEARCH (q, 2+ characters) is GET /product-units/search: part of an IMEI,
+ * serial number, SKU or product name. It runs 300 ms after the typing stops,
+ * or at once on Enter, and fills this same table. It covers every status, so
+ * the status filter is off meanwhile; its value stays in the URL and applies
+ * again when the search ends.
  *
- * Buying prices and customer details are in the response but stay off this
- * list on purpose.
+ * Buying prices and customer details are in the list's response but stay off
+ * this page on purpose. The search's response doesn't carry them.
  */
 
 const PAGE_SIZE = 25;
+const DEBOUNCE_MS = 300;
+const MIN_QUERY = 2;
 const panel = "rounded-xl border border-slate-200 bg-white dark:border-slate-800 dark:bg-slate-900";
 
 const dateLabel = (iso) =>
@@ -67,13 +71,25 @@ export default function ProductUnits() {
   const pageParam = Number(searchParams.get("page"));
   const page = Number.isInteger(pageParam) && pageParam >= 1 ? pageParam : 1;
 
+  const query = q.length >= MIN_QUERY ? q : "";
+  const searching = !!query;
+  // A search covers every status; the filter's value waits in the URL.
+  const listStatus = searching ? "" : status;
+
   const [searchText, setSearchText] = useState(q);
-  // The box follows the URL (the sidebar link clears it without a remount).
-  const [syncedQ, setSyncedQ] = useState(q);
-  if (q !== syncedQ) {
-    setSyncedQ(q);
+  const debounceTimer = useRef(null);
+  // The q this page last wrote. Anything else came from outside, such as the
+  // sidebar link: only then does the box follow the URL, or it would rewrite
+  // what's being typed.
+  const committedQ = useRef(q);
+  useEffect(() => {
+    if (q === committedQ.current) return;
+    committedQ.current = q;
+    clearTimeout(debounceTimer.current);
     setSearchText(q);
-  }
+  }, [q]);
+  useEffect(() => () => clearTimeout(debounceTimer.current), []);
+
   const [result, setResult] = useState({ status: "loading", rows: [], total: 0, pages: 1, error: "" });
   // The latest request, so a slow older answer can't overwrite a newer one.
   const requestIdRef = useRef(0);
@@ -81,13 +97,11 @@ export default function ProductUnits() {
   const load = useCallback(() => {
     const requestId = ++requestIdRef.current;
     setResult((current) => ({ ...current, status: "loading", error: "" }));
-    listProductUnits({
-      page,
-      limit: PAGE_SIZE,
-      ...(q && { imei: q }),
-      ...(status && { status }),
-      ...(branchId && { branchId }),
-    })
+    const params = { page, limit: PAGE_SIZE, ...(branchId && { branchId }) };
+    const request = query
+      ? searchProductUnits({ ...params, q: query })
+      : listProductUnits({ ...params, ...(listStatus && { status: listStatus }) });
+    request
       .then(({ data, meta }) => {
         if (requestId !== requestIdRef.current) return;
         setResult({ status: "ready", rows: data, total: meta.total, pages: Math.max(1, meta.totalPages), error: "" });
@@ -96,34 +110,52 @@ export default function ProductUnits() {
         if (requestId !== requestIdRef.current) return;
         setResult((current) => ({ ...current, status: "error", error: "Couldn’t load product units. Try again." }));
       });
-  }, [q, status, branchId, page]);
+  }, [query, listStatus, branchId, page]);
 
   useEffect(() => {
     // eslint-disable-next-line react-hooks/set-state-in-effect
     load();
   }, [load]);
 
-  const updateParams = (changes) =>
-    setSearchParams(
-      (prev) => {
-        const next = new URLSearchParams(prev);
-        for (const [key, value] of Object.entries(changes)) {
-          if (value) next.set(key, value);
-          else next.delete(key);
-        }
-        return next;
-      },
-      { replace: true },
-    );
+  // Every write starts from the URL as it is now. setSearchParams' own prev is
+  // the render it came from, so a waiting search would overwrite a branch
+  // picked in the meantime.
+  const latestParams = useRef(searchParams);
+  useLayoutEffect(() => {
+    latestParams.current = searchParams;
+  }, [searchParams]);
+  const updateParams = (changes) => {
+    const next = new URLSearchParams(latestParams.current);
+    for (const [key, value] of Object.entries(changes)) {
+      if (value) next.set(key, value);
+      else next.delete(key);
+    }
+    latestParams.current = next;
+    setSearchParams(next, { replace: true });
+  };
   const changeFilter = (field, value) => updateParams({ [field]: value, page: "" });
   const goToPage = (next) => updateParams({ page: next > 1 ? String(next) : "" });
+  const commitSearch = (value) => {
+    const trimmed = value.trim();
+    const next = trimmed.length >= MIN_QUERY ? trimmed : "";
+    if (next === committedQ.current) return;
+    committedQ.current = next;
+    changeFilter("q", next);
+  };
+  const changeSearch = (value) => {
+    setSearchText(value);
+    clearTimeout(debounceTimer.current);
+    debounceTimer.current = setTimeout(() => commitSearch(value), DEBOUNCE_MS);
+  };
   const submitSearch = (event) => {
     event.preventDefault();
-    changeFilter("q", searchText.trim());
+    clearTimeout(debounceTimer.current);
+    commitSearch(searchText);
   };
   const clearSearch = () => {
+    clearTimeout(debounceTimer.current);
     setSearchText("");
-    changeFilter("q", "");
+    commitSearch("");
   };
 
   const columns = useMemo(() => [
@@ -145,7 +177,8 @@ export default function ProductUnits() {
     { key: "created_at", header: "Added", render: (row) => <span className="whitespace-nowrap">{dateLabel(row.created_at)}</span> },
   ], [isAdmin]);
 
-  const filtered = !!(q || status || branchId);
+  const pendingShort = searchText.trim().length > 0 && searchText.trim().length < MIN_QUERY;
+  const filtered = !!(status || branchId);
   const branchOptions = [
     { value: "", label: "All branches" },
     ...branches.map((branch) => ({ value: branch.id, label: branch.name })),
@@ -162,19 +195,19 @@ export default function ProductUnits() {
 
       <section className={`${panel} overflow-hidden`} aria-label="Product units">
         <div className="space-y-3 border-b border-slate-200 p-4 dark:border-slate-800">
-          <h2 className="font-semibold">All units <span className="ml-1 text-sm font-normal text-slate-500">({result.total})</span></h2>
+          <h2 className="font-semibold">{searching ? "Matching units" : "All units"} <span className="ml-1 text-sm font-normal text-slate-500">({result.total})</span></h2>
           <div className="grid gap-3 lg:grid-cols-[minmax(0,1fr)_auto] lg:items-start">
             <form role="search" onSubmit={submitSearch} className="flex flex-col gap-2 sm:flex-row sm:items-start">
               <div className="min-w-0 flex-1">
                 <InputField
-                  aria-label="Search by identifier"
+                  aria-label="Search product units"
                   name="unit-search"
                   type="search"
                   icon={Search}
-                  placeholder="Enter or scan an exact IMEI or serial number"
+                  placeholder="Search IMEI, serial number, SKU or product name"
                   value={searchText}
-                  onChange={(event) => setSearchText(event.target.value)}
-                  hint="Exact match on the unit’s main identifier: its IMEI, or its serial number if it has no IMEI. A serial number paired with an IMEI can’t be searched yet."
+                  onChange={(event) => changeSearch(event.target.value)}
+                  hint={pendingShort ? `Type at least ${MIN_QUERY} characters to search.` : "Finds part of an IMEI, serial number, SKU or product name, in any status."}
                 />
               </div>
               <div className="flex shrink-0 gap-2">
@@ -183,7 +216,7 @@ export default function ProductUnits() {
               </div>
             </form>
             <div className="grid gap-3 sm:grid-cols-2 lg:w-96">
-              <Select name="status" value={status} onChange={(event) => changeFilter("status", event.target.value)} options={UNIT_STATUS_OPTIONS} placeholder="All statuses" />
+              <Select name="status" value={status} onChange={(event) => changeFilter("status", event.target.value)} options={UNIT_STATUS_OPTIONS} placeholder="All statuses" disabled={searching} hint={searching ? "Not used while searching." : undefined} />
               {isAdmin && <Select name="branch" value={branchId} onChange={(event) => changeFilter("branchId", event.target.value)} options={branchOptions} placeholder="All branches" />}
             </div>
           </div>
@@ -197,7 +230,7 @@ export default function ProductUnits() {
             loading={result.status === "loading"}
             onRowClick={(row) => navigate(`/inventory/units/${row.id}`, { state: { from: { search: location.search } } })}
             ariaLabel="Product units"
-            emptyMessage={filtered ? "No units match these filters." : "No product units have been recorded yet."}
+            emptyMessage={searching ? `No units match “${query}”.` : filtered ? "No units match these filters." : "No product units have been recorded yet."}
             dense
           />
         )}

@@ -5,6 +5,20 @@ export const listProductUnits = async (params = {}) => {
   return response.data;
 };
 
+/**
+ * Search units by part of an IMEI, serial number, SKU or product name, across
+ * every status (GET /product-units/search). Rows hold only what the Product
+ * Units table shows: no customer, sale or price.
+ *
+ * @param {Object} params - { q (2-100 characters), branchId?, page?, limit? };
+ *   sending a status is a 400
+ * @returns {Promise<{data: Array, meta: Object}>}
+ */
+export const searchProductUnits = async (params) => {
+  const response = await api.get("/product-units/search", { params });
+  return response.data;
+};
+
 export const listAllProductUnits = async (filters = {}) => {
   const firstPage = await listProductUnits({ ...filters, page: 1, limit: 200 });
   if (firstPage.meta.totalPages <= 1) return firstPage.data;

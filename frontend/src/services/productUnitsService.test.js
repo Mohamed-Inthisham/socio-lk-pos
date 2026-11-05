@@ -1,6 +1,6 @@
 import { vi } from "vitest";
 import api from "./api";
-import { getProductUnitDetails, listProductUnits, passInspection } from "./productUnitsService";
+import { getProductUnitDetails, listProductUnits, passInspection, searchProductUnits } from "./productUnitsService";
 import { notInInspectionError, productUnitEntity } from "../test/returnEntities";
 
 vi.mock("./api", () => ({
@@ -25,6 +25,15 @@ describe("productUnitsService", () => {
 
     await expect(listProductUnits(params)).resolves.toEqual(page);
     expect(api.get).toHaveBeenCalledWith("/product-units", { params });
+  });
+
+  it("searches with q on the search endpoint", async () => {
+    const page = { data: [], meta: { total: 0, totalPages: 0 } };
+    api.get.mockResolvedValue({ status: 200, data: page });
+    const params = { q: "3567", branchId: "branch-main", page: 2, limit: 25 };
+
+    await expect(searchProductUnits(params)).resolves.toEqual(page);
+    expect(api.get).toHaveBeenCalledWith("/product-units/search", { params });
   });
 
   it("reads one unit's details", async () => {
