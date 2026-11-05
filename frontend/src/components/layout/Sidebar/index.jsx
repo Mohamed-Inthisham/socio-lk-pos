@@ -137,6 +137,12 @@ const NAV_ITEMS = [
     icon: Boxes,
     children: [
       {
+        to: "/inventory",
+        label: "Inventory overview",
+        icon: Boxes,
+        roles: ["admin", "manager"],
+      },
+      {
         to: "/inventory/units",
         label: "Product units",
         icon: Smartphone,
@@ -305,7 +311,7 @@ const NavItem = ({ item, collapsed, onNavigate, nested = false }) => {
       to={item.to}
       onClick={onNavigate}
       className={linkClass}
-      end={item.to === "/dashboard" || item.to === "/products"}
+      end={item.to === "/dashboard" || item.to === "/products" || item.to === "/inventory"}
     >
       {linkContent}
     </NavLink>

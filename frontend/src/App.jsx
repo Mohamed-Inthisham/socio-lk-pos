@@ -25,6 +25,7 @@ import SalesOverview from "./pages/SalesOverview";
 import Customers from "./pages/Customers";
 import CustomerDetail from "./pages/CustomerDetail";
 import Suppliers from "./pages/Suppliers";
+import InventoryOverview from "./pages/InventoryOverview";
 import ProductUnits from "./pages/ProductUnits";
 import ProductUnitDetail from "./pages/ProductUnitDetail";
 import Users from "./pages/Users";
@@ -187,6 +188,14 @@ function App() {
           element={
             <RoleProtectedRoute allowedRoles={["admin", "manager"]}>
               <StockPurchaseDetail />
+            </RoleProtectedRoute>
+          }
+        />
+        <Route
+          path="/inventory"
+          element={
+            <RoleProtectedRoute allowedRoles={["admin", "manager"]}>
+              <InventoryOverview />
             </RoleProtectedRoute>
           }
         />
