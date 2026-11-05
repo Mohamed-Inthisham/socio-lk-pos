@@ -4,7 +4,7 @@ import { ConflictException, NotFoundException } from '@nestjs/common';
 import { ProductUnitsService } from './product-units.service';
 import { ProductUnit } from './entities/product-unit.entity';
 import { ProductUnitStatus } from './enums/product-unit-status.enum';
-import { QueryFailedError } from 'typeorm';
+import { Brackets, QueryFailedError } from 'typeorm';
 import { StockService } from '../stock/stock.service';
 import { lockInventoryRows } from '../stock/lock-inventory-rows';
 import {
@@ -25,9 +25,14 @@ describe('ProductUnitsService', () => {
     leftJoinAndSelect: jest.fn().mockReturnThis(),
     andWhere: jest.fn().mockReturnThis(),
     orderBy: jest.fn().mockReturnThis(),
+    addOrderBy: jest.fn().mockReturnThis(),
     skip: jest.fn().mockReturnThis(),
     take: jest.fn().mockReturnThis(),
     getManyAndCount: jest.fn(),
+    select: jest.fn().mockReturnThis(),
+    addSelect: jest.fn().mockReturnThis(),
+    innerJoin: jest.fn().mockReturnThis(),
+    where: jest.fn().mockReturnThis(),
   };
 
   const mockRepo = {
@@ -46,8 +51,13 @@ describe('ProductUnitsService', () => {
     mockQueryBuilder.leftJoinAndSelect.mockReturnThis();
     mockQueryBuilder.andWhere.mockReturnThis();
     mockQueryBuilder.orderBy.mockReturnThis();
+    mockQueryBuilder.addOrderBy.mockReturnThis();
     mockQueryBuilder.skip.mockReturnThis();
     mockQueryBuilder.take.mockReturnThis();
+    mockQueryBuilder.select.mockReturnThis();
+    mockQueryBuilder.addSelect.mockReturnThis();
+    mockQueryBuilder.innerJoin.mockReturnThis();
+    mockQueryBuilder.where.mockReturnThis();
     mockRepo.createQueryBuilder.mockReturnValue(mockQueryBuilder);
 
     const module: TestingModule = await Test.createTestingModule({
@@ -82,6 +92,10 @@ describe('ProductUnitsService', () => {
       expect(mockQueryBuilder.take).toHaveBeenCalledWith(50);
       expect(mockQueryBuilder.orderBy).toHaveBeenCalledWith(
         'unit.created_at',
+        'DESC',
+      );
+      expect(mockQueryBuilder.addOrderBy).toHaveBeenCalledWith(
+        'unit.id',
         'DESC',
       );
       expect(result).toEqual({
@@ -276,6 +290,295 @@ describe('ProductUnitsService', () => {
   });
 
   // ---- markSoldForSale ----
+
+  describe('search', () => {
+    const CREATED_AT = new Date('2026-10-01T04:00:00.000Z');
+    /** What must never leave this endpoint, even if the query loaded it. */
+    const SENSITIVE = {
+      buying_price: '80000.00',
+      selling_price: '100000.00',
+      phone_purchase_id: 'pp-1',
+      phone_purchase: {
+        total_amount: '80000.00',
+        notes: 'Call 0771234567',
+        customer: {
+          name: 'Kamal',
+          phone: '0771234567',
+          nic: '199300000001',
+          email: 'kamal@example.com',
+          address: '1 Galle Road',
+        },
+      },
+      sale_lines: [{ cost_price_snapshot: '80000.00' }],
+    };
+    const unit = (overrides = {}) => ({
+      id: 'u-1',
+      product_id: 'p-1',
+      branch_id: 'b-1',
+      imei: '356938035643809',
+      imei_number: '356938035643809',
+      serial_number: 'SN-1',
+      status: ProductUnitStatus.SOLD,
+      created_at: CREATED_AT,
+      updated_at: CREATED_AT,
+      product: {
+        id: 'p-1',
+        name: 'Galaxy A15',
+        sku: 'SKU-000007',
+        tracking_method: 'IMEI',
+        buying_price: '70000.00',
+        selling_price: '90000.00',
+      },
+      branch: { id: 'b-1', name: 'Main Shop', phone: '0112345678' },
+      ...overrides,
+    });
+
+    /** The conditions inside the search's Brackets, as they were added. */
+    const matchConditions = (): {
+      kind: 'where' | 'orWhere';
+      sql: string;
+      params: { pattern: string };
+    }[] => {
+      const added: {
+        kind: 'where' | 'orWhere';
+        sql: string;
+        params: { pattern: string };
+      }[] = [];
+      const collect =
+        (kind: 'where' | 'orWhere') =>
+        (sql: string, params: { pattern: string }) => {
+          added.push({ kind, sql, params });
+          return builder;
+        };
+      const builder = { where: collect('where'), orWhere: collect('orWhere') };
+      const [brackets] = mockQueryBuilder.where.mock.calls[0] as [Brackets];
+      brackets.whereFactory(builder as never);
+      return added;
+    };
+
+    beforeEach(() => {
+      mockQueryBuilder.getManyAndCount.mockResolvedValue([[], 0]);
+    });
+
+    it.each([
+      ['the IMEI', 'unit.imei_number'],
+      ['the legacy imei column', 'unit.imei'],
+      ['the serial number', 'unit.serial_number'],
+      ['the SKU', 'product.sku'],
+      ['the product name', 'product.name'],
+    ])('matches part of %s, in any case', async (_, column) => {
+      await service.search({ q: 'gAlAx' });
+
+      expect(matchConditions()).toContainEqual(
+        expect.objectContaining({
+          sql: `${column} ILIKE :pattern`,
+          params: { pattern: '%gAlAx%' },
+        }),
+      );
+    });
+
+    it('searches exactly those five columns', async () => {
+      await service.search({ q: 'gal' });
+
+      expect(matchConditions().map((condition) => condition.sql)).toEqual([
+        'unit.imei_number ILIKE :pattern',
+        'unit.imei ILIKE :pattern',
+        'unit.serial_number ILIKE :pattern',
+        'product.sku ILIKE :pattern',
+        'product.name ILIKE :pattern',
+      ]);
+    });
+
+    it('groups the OR inside Brackets, and adds no OR outside them', async () => {
+      await service.search({ q: 'gal', branchId: 'b-1' });
+
+      expect(mockQueryBuilder.where).toHaveBeenCalledTimes(1);
+      expect(mockQueryBuilder.where.mock.calls[0][0]).toBeInstanceOf(Brackets);
+      expect(matchConditions().map((condition) => condition.kind)).toEqual([
+        'where',
+        'orWhere',
+        'orWhere',
+        'orWhere',
+        'orWhere',
+      ]);
+      expect(mockQueryBuilder).not.toHaveProperty('orWhere');
+    });
+
+    it.each([
+      ['a percent sign', '50%', '%50\\%%'],
+      ['an underscore', 'a_b', '%a\\_b%'],
+      ['a backslash', 'a\\b', '%a\\\\b%'],
+      ['all three', '%_\\', '%\\%\\_\\\\%'],
+    ])('escapes %s so it matches itself', async (_, q, pattern) => {
+      await service.search({ q });
+
+      expect(matchConditions()[0].params).toEqual({ pattern });
+    });
+
+    it('adds the branch as a separate AND', async () => {
+      await service.search({ q: 'gal', branchId: 'b-1' });
+
+      expect(mockQueryBuilder.andWhere).toHaveBeenCalledWith(
+        'unit.branch_id = :branchId',
+        { branchId: 'b-1' },
+      );
+    });
+
+    it('adds no branch for an admin searching every branch', async () => {
+      await service.search({ q: 'gal' });
+
+      expect(mockQueryBuilder.andWhere).not.toHaveBeenCalled();
+    });
+
+    it('applies no status filter, even if one reached it', async () => {
+      await service.search({
+        q: 'gal',
+        status: ProductUnitStatus.SOLD,
+      } as never);
+
+      expect(mockQueryBuilder.andWhere).not.toHaveBeenCalled();
+      for (const { sql } of matchConditions()) {
+        expect(sql).not.toContain('status');
+      }
+    });
+
+    it('sorts by created_at DESC, then id DESC', async () => {
+      await service.search({ q: 'gal' });
+
+      expect(mockQueryBuilder.orderBy).toHaveBeenCalledWith(
+        'unit.created_at',
+        'DESC',
+      );
+      expect(mockQueryBuilder.addOrderBy).toHaveBeenCalledWith(
+        'unit.id',
+        'DESC',
+      );
+    });
+
+    it('joins only the product and branch', async () => {
+      await service.search({ q: 'gal' });
+
+      expect(mockQueryBuilder.innerJoin.mock.calls).toEqual([
+        ['unit.product', 'product'],
+        ['unit.branch', 'branch'],
+      ]);
+      expect(mockQueryBuilder.leftJoinAndSelect).not.toHaveBeenCalled();
+    });
+
+    it('selects no price, customer or note column', async () => {
+      await service.search({ q: 'gal' });
+
+      const selected = [
+        ...(mockQueryBuilder.select.mock.calls[0][0] as string[]),
+        ...mockQueryBuilder.addSelect.mock.calls.flatMap(
+          ([columns]) => columns as string[],
+        ),
+      ];
+      expect(selected).toEqual([
+        'unit.id',
+        'unit.product_id',
+        'unit.imei',
+        'unit.imei_number',
+        'unit.serial_number',
+        'unit.status',
+        'unit.created_at',
+        'product.id',
+        'product.name',
+        'product.sku',
+        'product.tracking_method',
+        'branch.id',
+        'branch.name',
+      ]);
+    });
+
+    it('maps each unit to the permitted fields', async () => {
+      mockQueryBuilder.getManyAndCount.mockResolvedValue([[unit()], 1]);
+
+      const { data } = await service.search({ q: 'gal' });
+
+      expect(data).toEqual([
+        {
+          id: 'u-1',
+          product_id: 'p-1',
+          imei: '356938035643809',
+          imei_number: '356938035643809',
+          serial_number: 'SN-1',
+          status: ProductUnitStatus.SOLD,
+          created_at: CREATED_AT,
+          product: {
+            name: 'Galaxy A15',
+            sku: 'SKU-000007',
+            tracking_method: 'IMEI',
+          },
+          branch: { name: 'Main Shop' },
+        },
+      ]);
+    });
+
+    it('drops anything else, even if the query had loaded it', async () => {
+      mockQueryBuilder.getManyAndCount.mockResolvedValue([
+        [unit(SENSITIVE)],
+        1,
+      ]);
+
+      const result = await service.search({ q: 'gal' });
+
+      const text = JSON.stringify(result);
+      for (const value of [
+        'buying_price',
+        'selling_price',
+        'phone_purchase',
+        'customer',
+        'sale_lines',
+        'cost_price_snapshot',
+        'updated_at',
+        '0771234567',
+        '199300000001',
+        'kamal@example.com',
+        '1 Galle Road',
+        '80000.00',
+        '70000.00',
+        '0112345678',
+      ]) {
+        expect(text).not.toContain(value);
+      }
+    });
+
+    it('returns each record of a bought-back IMEI on its own', async () => {
+      mockQueryBuilder.getManyAndCount.mockResolvedValue([
+        [unit({ id: 'u-new' }), unit({ id: 'u-old' })],
+        2,
+      ]);
+
+      const { data } = await service.search({ q: '3569' });
+
+      expect(data.map((row) => row.id)).toEqual(['u-new', 'u-old']);
+    });
+
+    it('pages, with the metadata', async () => {
+      mockQueryBuilder.getManyAndCount.mockResolvedValue([[unit()], 60]);
+
+      const { meta } = await service.search({ q: 'gal', page: 2, limit: 25 });
+
+      expect(mockQueryBuilder.skip).toHaveBeenCalledWith(25);
+      expect(mockQueryBuilder.take).toHaveBeenCalledWith(25);
+      expect(meta).toEqual({
+        total: 60,
+        page: 2,
+        limit: 25,
+        totalPages: 3,
+        hasNext: true,
+        hasPrev: true,
+      });
+    });
+
+    it('defaults to the list’s page and limit', async () => {
+      await service.search({ q: 'gal' });
+
+      expect(mockQueryBuilder.skip).toHaveBeenCalledWith(0);
+      expect(mockQueryBuilder.take).toHaveBeenCalledWith(50);
+    });
+  });
 
   describe('findDetails', () => {
     const IMEI = '356938035643809';

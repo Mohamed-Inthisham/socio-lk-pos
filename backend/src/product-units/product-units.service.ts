@@ -5,11 +5,12 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import { InjectDataSource, InjectRepository } from '@nestjs/typeorm';
-import { DataSource, EntityManager, Repository } from 'typeorm';
+import { Brackets, DataSource, EntityManager, Repository } from 'typeorm';
 import { ProductUnitStatus } from './enums/product-unit-status.enum';
 import { ProductUnit } from './entities/product-unit.entity';
 import { TrackingMethod } from '../products/enums/tracking-method.enum';
 import { ListProductUnitsQueryDto } from './dto/list-product-units-query.dto';
+import { SearchProductUnitsQueryDto } from './dto/search-product-units-query.dto';
 import { isLiveImeiConflict } from './live-imei';
 import {
   paginate,
@@ -61,6 +62,23 @@ export type VoidBlockReason =
 
 /** The later sale a void 409 points at: void it first. */
 type LaterSale = { id: string; sale_number: string };
+
+/**
+ * One row of GET /product-units/search (INV-F3): what the Product Units table
+ * shows, and nothing else. Unlike GET /product-units it carries no customer,
+ * sale or price, so it is safe to answer every search with.
+ */
+export interface ProductUnitSearchRow {
+  id: string;
+  product_id: string;
+  imei: string;
+  imei_number: string | null;
+  serial_number: string | null;
+  status: ProductUnitStatus;
+  created_at: Date;
+  product: { name: string; sku: string; tracking_method: TrackingMethod };
+  branch: { name: string };
+}
 
 /** How the shop got a unit (INV-F2). UNKNOWN: no reliable record of it. */
 export type UnitAcquisitionType =
@@ -190,12 +208,95 @@ export class ProductUnitsService {
       qb.andWhere('unit.imei = :imei', { imei: query.imei });
     }
 
+    // id as a tiebreaker: units saved in one transaction share created_at,
+    // and pages must not repeat or skip them.
     qb.orderBy('unit.created_at', 'DESC')
+      .addOrderBy('unit.id', 'DESC')
       .skip((page - 1) * limit)
       .take(limit);
 
     const [data, total] = await qb.getManyAndCount();
     return paginate(data, total, page, limit);
+  }
+
+  /**
+   * GET /product-units/search (INV-F3): units whose IMEI, legacy imei column,
+   * serial number, or product's SKU or name contains query.q, in any case,
+   * newest first. Every status, so each record of a bought-back phone comes
+   * back on its own. % and _ in the text match themselves.
+   *
+   * Branch scoping is resolved by the controller, as for findAll. The OR
+   * stays inside its Brackets: outside them it would bypass the branch.
+   *
+   * Only the columns ProductUnitSearchRow needs are selected, and only
+   * many-to-one relations are joined, so a row is one unit.
+   */
+  async search(
+    query: SearchProductUnitsQueryDto,
+  ): Promise<PaginatedResponse<ProductUnitSearchRow>> {
+    const page = query.page ?? 1;
+    const limit = query.limit ?? 50;
+    const pattern = `%${query.q.replace(/[\\%_]/g, '\\$&')}%`;
+
+    const qb = this.productUnitsRepository
+      .createQueryBuilder('unit')
+      .select([
+        'unit.id',
+        'unit.product_id',
+        'unit.imei',
+        'unit.imei_number',
+        'unit.serial_number',
+        'unit.status',
+        'unit.created_at',
+      ])
+      .innerJoin('unit.product', 'product')
+      .addSelect([
+        'product.id',
+        'product.name',
+        'product.sku',
+        'product.tracking_method',
+      ])
+      .innerJoin('unit.branch', 'branch')
+      .addSelect(['branch.id', 'branch.name'])
+      .where(
+        new Brackets((match) => {
+          match
+            .where('unit.imei_number ILIKE :pattern', { pattern })
+            .orWhere('unit.imei ILIKE :pattern', { pattern })
+            .orWhere('unit.serial_number ILIKE :pattern', { pattern })
+            .orWhere('product.sku ILIKE :pattern', { pattern })
+            .orWhere('product.name ILIKE :pattern', { pattern });
+        }),
+      );
+
+    if (query.branchId) {
+      qb.andWhere('unit.branch_id = :branchId', { branchId: query.branchId });
+    }
+
+    qb.orderBy('unit.created_at', 'DESC')
+      .addOrderBy('unit.id', 'DESC')
+      .skip((page - 1) * limit)
+      .take(limit);
+
+    const [units, total] = await qb.getManyAndCount();
+    const rows = units.map(
+      (unit): ProductUnitSearchRow => ({
+        id: unit.id,
+        product_id: unit.product_id,
+        imei: unit.imei,
+        imei_number: unit.imei_number,
+        serial_number: unit.serial_number,
+        status: unit.status,
+        created_at: unit.created_at,
+        product: {
+          name: unit.product!.name,
+          sku: unit.product!.sku,
+          tracking_method: unit.product!.tracking_method,
+        },
+        branch: { name: unit.branch!.name },
+      }),
+    );
+    return paginate(rows, total, page, limit);
   }
 
   /**
