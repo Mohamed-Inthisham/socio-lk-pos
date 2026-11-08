@@ -78,8 +78,8 @@ export class ProductUnitsController {
     summary: 'Search product units (paginated)',
     description:
       'Admin/Manager only (INV-F3). Partial, case-insensitive match of q on ' +
-      'the IMEI, the legacy imei column, the serial number, and the ' +
-      'product’s SKU and name; % and _ match themselves. Every status: each ' +
+      'the IMEI, the legacy imei column, the serial number, the unit code, ' +
+      'and the product’s SKU and name; % and _ match themselves. Every status: each ' +
       'record of a bought-back phone is returned on its own, and there is no ' +
       'status filter. Sorted by created_at DESC, id DESC. Pagination: page ' +
       '(default 1), limit (default 50, max 200).\n\n' +
@@ -92,9 +92,9 @@ export class ProductUnitsController {
   @ApiResponse({
     status: 200,
     description:
-      '{ data: [{ id, product_id, imei, imei_number, serial_number, status, ' +
-      'created_at, product: { name, sku, tracking_method }, branch: { name } ' +
-      '}], meta: { total, page, limit, totalPages, hasNext, hasPrev } }',
+      '{ data: [{ id, product_id, imei, imei_number, serial_number, unit_code, ' +
+      'status, created_at, product: { name, sku, tracking_method }, branch: { ' +
+      'name } }], meta: { total, page, limit, totalPages, hasNext, hasPrev } }',
   })
   @ApiResponse({
     status: 400,
@@ -120,17 +120,36 @@ export class ProductUnitsController {
   @Get('sellable/by-identifier/:identifier')
   @Roles(UserRole.ADMIN, UserRole.MANAGER, UserRole.CASHIER)
   @ApiOperation({
-    summary: 'Resolve an in-stock IMEI or serial number for POS scanning',
+    summary:
+      'Resolve an in-stock unit code, IMEI or serial number for POS scanning',
     description:
-      'Returns the product and exact identifier only when the matching unit ' +
-      'is in stock at the supplied branch. branchId is required; managers ' +
-      'and cashiers may only give their own branch (another is 403 ' +
+      'Returns the product and the unit’s real IMEI or serial number only ' +
+      'when the matching unit is in stock at the supplied branch: a scanned ' +
+      'unit code is resolved here and never returned as the identifier. A ' +
+      'unit code (SLU and at least 8 digits, in any case) names one exact ' +
+      'unit, so a sold unit’s code is a 409 even if the same IMEI is back in ' +
+      'stock on a newer unit. branchId is required; managers and cashiers ' +
+      'may only give their own branch (another is 403 ' +
       '{ code: WRONG_BRANCH }, Phase 2 P2-3); admins any branch.',
   })
-  @ApiParam({ name: 'identifier', description: 'Exact IMEI or serial number' })
+  @ApiParam({
+    name: 'identifier',
+    description: 'Exact unit code, IMEI or serial number',
+  })
   @ApiResponse({
     status: 403,
     description: '{ message, code: WRONG_BRANCH }: another branch, for staff',
+  })
+  @ApiResponse({
+    status: 404,
+    description:
+      'Nothing matches at this branch. A unit code at another branch gets ' +
+      'the same answer as an unknown one, so its existence is not revealed',
+  })
+  @ApiResponse({
+    status: 409,
+    description:
+      '{ message, existing_unit }: the unit is at this branch but not IN_STOCK',
   })
   async findSellableByIdentifier(
     @Param('identifier') identifier: string,

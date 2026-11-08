@@ -559,4 +559,58 @@ describe('StockPurchasesService (inventory lock order)', () => {
       expect(mockOuterManager.findOne).toHaveBeenCalledTimes(2);
     });
   });
+
+  describe('unit codes', () => {
+    const expectRefused = async (
+      item: CreateStockPurchaseDto['items'][number],
+    ) => {
+      await expect(service.create(purchaseOf([item]), admin)).rejects.toThrow(
+        /is a unit code/,
+      );
+      expect(mockManager.insert).not.toHaveBeenCalled();
+      expect(ensureStockRows).not.toHaveBeenCalled();
+    };
+
+    it('refuses a unit code as a serial number, in any case, before the claim', async () => {
+      await expectRefused(serialItem(HUB, 'slu00000123'));
+    });
+
+    it('refuses a unit code as an IMEI', async () => {
+      await expectRefused({
+        ...serialItem(HUB, 'SN-1'),
+        unit_identifiers: [{ imei_number: 'SLU00000123' }],
+      });
+    });
+
+    it('refuses a unit code in the older identifier lists', async () => {
+      await expectRefused({
+        product_id: HUB,
+        quantity: 1,
+        unit_buying_price: '100.00',
+        serial_numbers: ['SLU00000123'],
+      });
+    });
+
+    it('accepts serial numbers that only resemble a code', async () => {
+      await service.create(
+        purchaseOf([
+          serialItem(HUB, 'SLU1234567'),
+          serialItem(POWER_BANK, 'SLU-00000123'),
+        ]),
+        admin,
+      );
+
+      expect(mockManager.insert).toHaveBeenCalled();
+    });
+
+    it('leaves the unit code out of the insert: the database generates it', async () => {
+      await service.create(purchaseOf([serialItem(HUB, 'SN-1')]), admin);
+
+      const unit = (mockManager.create.mock.calls as [unknown, object][]).find(
+        ([entity]) => entity === ProductUnit,
+      )?.[1];
+      expect(unit).toBeDefined();
+      expect(unit).not.toHaveProperty('unit_code');
+    });
+  });
 });

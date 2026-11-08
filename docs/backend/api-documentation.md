@@ -62,6 +62,33 @@ async findOne(@Param('id', ParseUUIDPipe) id: string) { ... }
 
 If the route uses a DTO, ensure every field on that DTO has `@ApiProperty` or `@ApiPropertyOptional`.
 
+## Unit Codes in Responses
+
+`unit_code` (such as `SLU00000123`) is part of a unit wherever a response carries one:
+
+- **Admins and managers:** `GET /product-units`, `GET /product-units/search`, `GET /product-units/:id`, `GET /product-units/:id/details` and `POST /product-units/:id/inspection-pass`.
+- **Admins, managers and cashiers:** `GET /phone-purchases`, `GET /phone-purchases/:id` and `POST /phone-purchases`, through each purchase's `product_units`. The code reveals no IMEI or serial number, and these responses already carry the IMEI.
+
+The till's `GET /product-units/sellable/by-identifier/:identifier` accepts a code but never returns one: its `identifier` is the unit's real IMEI or serial number, and `unitId` is the unit's id, which the till sends back as `product_unit_id` on `POST /sales/:saleId/lines`. Sale responses carry no code. The rules are in [used-phones.md](./used-phones.md#unit-codes).
+
+### `POST /product-units/:id/inspection-pass`
+
+Passes a returned phone after inspection: the unit goes from `INSPECTION` to `IN_STOCK`, and its stock goes up by 1.
+
+- **Access:** admins at any branch; managers for a unit at their own branch. Cashiers are refused by role.
+- **Request:** the unit's `id` in the path. There is no request body.
+- **Response (200):** the unit as `GET /product-units/:id` returns it:
+  - Unit fields: `id`, `product_id`, `branch_id`, `imei`, `imei_number`, `serial_number`, `unit_code`, `status` (now `IN_STOCK`), `buying_price`, `selling_price`, `phone_purchase_id`, `created_at` and `updated_at`.
+  - Relations: `product`, `branch`, `phone_purchase` (with its `customer`) and `sale_lines` (each with its `sale`).
+- **Errors:**
+  - 400: malformed `id`.
+  - 401: not authenticated.
+  - 403: a cashier, or `{ message, code: 'INSPECTION_WRONG_BRANCH' }` for a manager of another branch.
+  - 404: unknown unit.
+  - 409: `{ message, code: 'NOT_IN_INSPECTION', status }` when the unit isn't waiting for inspection.
+
+The transaction and audit details are in [used-phones.md](./used-phones.md).
+
 ## Deployment Note
 
 Swagger currently loads all NestJS controller metadata at boot; skipping it in production also gives a tiny startup-time win. The check is a simple `NODE_ENV !== 'production'` guard in `main.ts`.

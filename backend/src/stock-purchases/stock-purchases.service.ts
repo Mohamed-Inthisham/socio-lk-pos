@@ -22,6 +22,7 @@ import { TrackingMethod } from '../products/enums/tracking-method.enum';
 import { ProductUnit } from '../product-units/entities/product-unit.entity';
 import { ProductUnitStatus } from '../product-units/enums/product-unit-status.enum';
 import { LIVE_UNIT_STATUSES } from '../product-units/live-imei';
+import { assertNotUnitCode } from '../product-units/unit-code';
 import { Supplier } from '../suppliers/entities/supplier.entity';
 import { StockService } from '../stock/stock.service';
 import {
@@ -264,6 +265,7 @@ export class StockPurchasesService {
     }
 
     this.assertUniqueIdentifiers(dto);
+    this.assertNoUnitCodes(dto);
 
     // The claim (T1c): the first write, before any lock. The total is 0
     // until the lines are added.
@@ -657,6 +659,16 @@ export class StockPurchasesService {
       throw new BadRequestException(
         'An IMEI or serial number can only appear once in a stock purchase.',
       );
+    }
+  }
+
+  /** A unit code scanned into an IMEI or serial field is a mistake. */
+  private assertNoUnitCodes(dto: CreateStockPurchaseDto): void {
+    for (const item of dto.items) {
+      for (const pair of unitIdentifierPairs(item)) {
+        if (pair.imei_number) assertNotUnitCode(pair.imei_number);
+        if (pair.serial_number) assertNotUnitCode(pair.serial_number);
+      }
     }
   }
 

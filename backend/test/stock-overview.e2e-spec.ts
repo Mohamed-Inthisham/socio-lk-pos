@@ -266,13 +266,6 @@ describe('Stock overview (e2e)', () => {
     app = await createTestApp();
     dataSource = app.get(DataSource);
 
-    // truncateAllTables has no guard of its own, and without .env.test the
-    // app falls back to .env. Refuse before anything is written.
-    const [{ current_database: database }]: { current_database: string }[] =
-      await dataSource.query('SELECT current_database()');
-    if (database !== 'socio_lk_pos_test') {
-      throw new Error(`Refusing to truncate database "${database}".`);
-    }
     await truncateAllTables(app);
 
     const branches = dataSource.getRepository(Branch);

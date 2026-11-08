@@ -318,6 +318,7 @@ describe('ProductUnitsService', () => {
       imei: '356938035643809',
       imei_number: '356938035643809',
       serial_number: 'SN-1',
+      unit_code: 'SLU00000123',
       status: ProductUnitStatus.SOLD,
       created_at: CREATED_AT,
       updated_at: CREATED_AT,
@@ -364,6 +365,7 @@ describe('ProductUnitsService', () => {
       ['the IMEI', 'unit.imei_number'],
       ['the legacy imei column', 'unit.imei'],
       ['the serial number', 'unit.serial_number'],
+      ['the unit code', 'unit.unit_code'],
       ['the SKU', 'product.sku'],
       ['the product name', 'product.name'],
     ])('matches part of %s, in any case', async (_, column) => {
@@ -377,13 +379,14 @@ describe('ProductUnitsService', () => {
       );
     });
 
-    it('searches exactly those five columns', async () => {
+    it('searches exactly those six columns', async () => {
       await service.search({ q: 'gal' });
 
       expect(matchConditions().map((condition) => condition.sql)).toEqual([
         'unit.imei_number ILIKE :pattern',
         'unit.imei ILIKE :pattern',
         'unit.serial_number ILIKE :pattern',
+        'unit.unit_code ILIKE :pattern',
         'product.sku ILIKE :pattern',
         'product.name ILIKE :pattern',
       ]);
@@ -396,6 +399,7 @@ describe('ProductUnitsService', () => {
       expect(mockQueryBuilder.where.mock.calls[0][0]).toBeInstanceOf(Brackets);
       expect(matchConditions().map((condition) => condition.kind)).toEqual([
         'where',
+        'orWhere',
         'orWhere',
         'orWhere',
         'orWhere',
@@ -480,6 +484,7 @@ describe('ProductUnitsService', () => {
         'unit.imei',
         'unit.imei_number',
         'unit.serial_number',
+        'unit.unit_code',
         'unit.status',
         'unit.created_at',
         'product.id',
@@ -503,6 +508,7 @@ describe('ProductUnitsService', () => {
           imei: '356938035643809',
           imei_number: '356938035643809',
           serial_number: 'SN-1',
+          unit_code: 'SLU00000123',
           status: ProductUnitStatus.SOLD,
           created_at: CREATED_AT,
           product: {
@@ -588,6 +594,7 @@ describe('ProductUnitsService', () => {
       imei: IMEI,
       imei_number: IMEI,
       serial_number: 'SN-1',
+      unit_code: 'SLU00000123',
       status: ProductUnitStatus.SOLD,
       created_at: CREATED_AT,
       phone_purchase_id: null as string | null,
@@ -667,6 +674,7 @@ describe('ProductUnitsService', () => {
         imei: IMEI,
         imei_number: IMEI,
         serial_number: 'SN-1',
+        unit_code: 'SLU00000123',
         status: ProductUnitStatus.SOLD,
         created_at: CREATED_AT,
       });
@@ -1945,6 +1953,209 @@ describe('ProductUnitsService', () => {
       expect(manager.query).not.toHaveBeenCalled();
       expect(mockStockService.incrementForReversal).not.toHaveBeenCalled();
       expect(mockAuditRepo.save).not.toHaveBeenCalled();
+    });
+  });
+
+  // ---- findSellableByIdentifier ----
+
+  describe('findSellableByIdentifier', () => {
+    const IMEI = '356938035643809';
+    const SERIAL = 'SN-HUB-1';
+    const CODE = 'SLU00000123';
+    const BRANCH = 'b-1';
+
+    const lookup = {
+      innerJoinAndSelect: jest.fn(),
+      where: jest.fn(),
+      andWhere: jest.fn(),
+      orderBy: jest.fn(),
+      addOrderBy: jest.fn(),
+      getOne: jest.fn(),
+    };
+
+    const phone = (overrides = {}) => ({
+      id: 'u-1',
+      product_id: 'p-1',
+      branch_id: BRANCH,
+      imei: IMEI,
+      imei_number: IMEI,
+      serial_number: null as string | null,
+      unit_code: CODE,
+      status: ProductUnitStatus.IN_STOCK,
+      product: { id: 'p-1', tracking_method: 'IMEI' },
+      ...overrides,
+    });
+    const hub = (overrides = {}) =>
+      phone({
+        imei: SERIAL,
+        imei_number: null,
+        serial_number: SERIAL,
+        product: { id: 'p-2', tracking_method: 'SERIAL_NUMBER' },
+        ...overrides,
+      });
+
+    /** Every condition added to the lookups, in order. */
+    const conditions = () =>
+      (lookup.andWhere.mock.calls as [string][]).map(([sql]) => sql);
+    const IDENTIFIER_SQL =
+      '(unit.imei = :identifier OR unit.imei_number = :identifier OR unit.serial_number = :identifier)';
+
+    beforeEach(() => {
+      lookup.innerJoinAndSelect.mockReturnThis();
+      lookup.where.mockReturnThis();
+      lookup.andWhere.mockReturnThis();
+      lookup.orderBy.mockReturnThis();
+      lookup.addOrderBy.mockReturnThis();
+      mockRepo.createQueryBuilder.mockReturnValue(
+        lookup as unknown as typeof mockQueryBuilder,
+      );
+    });
+
+    it('resolves a unit code to the exact unit and its real IMEI', async () => {
+      lookup.getOne.mockResolvedValueOnce(phone());
+
+      const result = await service.findSellableByIdentifier(CODE, BRANCH);
+
+      expect(result).toMatchObject({
+        identifier: IMEI,
+        identifierType: 'IMEI',
+        unitId: 'u-1',
+      });
+      expect(lookup.andWhere).toHaveBeenCalledWith(
+        'unit.unit_code = :unitCode',
+        { unitCode: CODE },
+      );
+      expect(conditions()).not.toContain(IDENTIFIER_SQL);
+    });
+
+    it('resolves a unit code to the real serial number', async () => {
+      lookup.getOne.mockResolvedValueOnce(hub());
+
+      const result = await service.findSellableByIdentifier(CODE, BRANCH);
+
+      expect(result).toMatchObject({
+        identifier: SERIAL,
+        identifierType: 'SERIAL_NUMBER',
+      });
+    });
+
+    it('never returns the code', async () => {
+      lookup.getOne.mockResolvedValueOnce(phone());
+
+      const result = await service.findSellableByIdentifier(CODE, BRANCH);
+
+      expect(result.identifier).not.toBe(CODE);
+      expect(Object.keys(result).sort()).toEqual([
+        'identifier',
+        'identifierType',
+        'product',
+        'unitId',
+      ]);
+    });
+
+    it('reads a code in any case, and looks up its stored form', async () => {
+      lookup.getOne.mockResolvedValueOnce(phone());
+
+      await service.findSellableByIdentifier(' slu00000123 ', BRANCH);
+
+      expect(lookup.andWhere).toHaveBeenCalledWith(
+        'unit.unit_code = :unitCode',
+        { unitCode: CODE },
+      );
+    });
+
+    it('looks a code up at this branch only', async () => {
+      lookup.getOne.mockResolvedValueOnce(phone());
+
+      await service.findSellableByIdentifier(CODE, BRANCH);
+
+      expect(lookup.where).toHaveBeenCalledWith('unit.branch_id = :branchId', {
+        branchId: BRANCH,
+      });
+    });
+
+    it.each([
+      ProductUnitStatus.SOLD,
+      ProductUnitStatus.INSPECTION,
+      ProductUnitStatus.RETURNED,
+      ProductUnitStatus.WRITTEN_OFF,
+    ])(
+      'refuses the code of a %s unit, and does not go on to its IMEI',
+      async (status) => {
+        lookup.getOne.mockResolvedValueOnce(phone({ status }));
+
+        await expect(
+          service.findSellableByIdentifier(CODE, BRANCH),
+        ).rejects.toThrow(ConflictException);
+
+        expect(lookup.getOne).toHaveBeenCalledTimes(1);
+        expect(conditions()).not.toContain(IDENTIFIER_SQL);
+      },
+    );
+
+    it('answers an unknown code, or one at another branch, with one 404', async () => {
+      lookup.getOne.mockResolvedValue(null);
+
+      const miss = service.findSellableByIdentifier(CODE, BRANCH);
+
+      await expect(miss).rejects.toThrow(NotFoundException);
+      await expect(miss).rejects.toThrow(
+        'No item matches that unit code at this branch.',
+      );
+    });
+
+    it('goes on to the IMEI and serial lookup when no unit has that code', async () => {
+      const older = hub({
+        imei: CODE,
+        serial_number: CODE,
+        unit_code: 'SLU00000007',
+      });
+      lookup.getOne.mockResolvedValueOnce(null).mockResolvedValueOnce(older);
+
+      const result = await service.findSellableByIdentifier(CODE, BRANCH);
+
+      expect(lookup.andWhere).toHaveBeenCalledWith(IDENTIFIER_SQL, {
+        identifier: CODE,
+      });
+      expect(result).toMatchObject({
+        identifier: CODE,
+        identifierType: 'SERIAL_NUMBER',
+      });
+    });
+
+    it('finds an IMEI as before, with no code lookup', async () => {
+      lookup.getOne.mockResolvedValueOnce(phone());
+
+      const result = await service.findSellableByIdentifier(IMEI, BRANCH);
+
+      expect(lookup.getOne).toHaveBeenCalledTimes(1);
+      expect(conditions()).not.toContain('unit.unit_code = :unitCode');
+      expect(result).toMatchObject({
+        identifier: IMEI,
+        identifierType: 'IMEI',
+      });
+    });
+
+    it('finds a serial number as before, with no code lookup', async () => {
+      lookup.getOne.mockResolvedValueOnce(hub());
+
+      const result = await service.findSellableByIdentifier(SERIAL, BRANCH);
+
+      expect(lookup.getOne).toHaveBeenCalledTimes(1);
+      expect(result).toMatchObject({
+        identifier: SERIAL,
+        identifierType: 'SERIAL_NUMBER',
+      });
+    });
+
+    it('keeps the 404 wording for anything else', async () => {
+      lookup.getOne.mockResolvedValue(null);
+
+      await expect(
+        service.findSellableByIdentifier(IMEI, BRANCH),
+      ).rejects.toThrow(
+        'No available item matches that identifier at this branch',
+      );
     });
   });
 });

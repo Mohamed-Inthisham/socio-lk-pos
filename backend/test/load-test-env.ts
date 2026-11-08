@@ -1,9 +1,11 @@
-import * as dotenv from 'dotenv';
 import * as path from 'path';
+import { loadTestEnv } from '../src/config/test-database-guard';
 
 // Force NODE_ENV=test and load .env.test regardless of what shell set.
 process.env.NODE_ENV = 'test';
-dotenv.config({ path: path.resolve(__dirname, '../.env.test') });
+
+// Before any spec boots the app: the e2e reset truncates every table.
+loadTestEnv(path.resolve(__dirname, '../.env.test'));
 
 // e2e specs log in far more often than the production login limit allows
 // (sales alone ~155 times; each spec gets a fresh in-memory count). Raise

@@ -59,6 +59,12 @@ const isBarcodeLike = (value) =>
   /^\d{8,20}$/.test(value) || /^SLP-/i.test(value);
 const isUnitIdentifierLike = (value) =>
   /^[A-Z0-9][A-Z0-9._/-]{0,99}$/i.test(value);
+/**
+ * A unit code (backend product-units/unit-code.ts), in any case. Only the
+ * unit lookup reads it: never the name search, which would say "No products
+ * match" while the code is being typed.
+ */
+const isUnitCodeLike = (value) => /^SLU\d{8,}$/i.test(value);
 
 const ScanBar = ({ branchId, disabled = false, inputRef }) => {
   const dispatch = useDispatch();
@@ -81,7 +87,7 @@ const ScanBar = ({ branchId, disabled = false, inputRef }) => {
   const [imeiProduct, setImeiProduct] = useState(null);
 
   const query = value.trim();
-  const textMode = query.length >= MIN_SEARCH && !isBarcodeLike(query);
+  const textMode = query.length >= MIN_SEARCH && !isBarcodeLike(query) && !isUnitCodeLike(query);
   const resultsCurrent = resultsQuery === query;
   const showList = open && textMode && (resultsCurrent || scanState === "searching");
 
@@ -137,7 +143,7 @@ const ScanBar = ({ branchId, disabled = false, inputRef }) => {
     resetInput();
     dispatch(clearScan());
     const addUnit = () =>
-      dispatch(addLine({ product: unit.product, identifier: unit.identifier }));
+      dispatch(addLine({ product: unit.product, identifier: unit.identifier, unitId: unit.unitId }));
     if (!saleCompleteShowing()) return addUnit();
     return dispatch(startNextSale()).then((started) => {
       if (started) return addUnit();
@@ -157,6 +163,8 @@ const ScanBar = ({ branchId, disabled = false, inputRef }) => {
         if (scanUnitIdentifier.rejected.match(unitResult)) return;
       }
       if (!isBarcodeLike(barcode)) {
+        // A code the unit lookup didn't resolve is no product name.
+        if (isUnitCodeLike(barcode)) return;
         if (resultsCurrent && results[active]) addProduct(results[active]);
         else if (textMode) {
           setValue(barcode);

@@ -449,6 +449,40 @@ describe('PhonePurchasesService', () => {
       expect(mockStockService.incrementForReversal).not.toHaveBeenCalled();
     });
 
+    it('refuses a unit code as the IMEI, before any unit lookup or write', async () => {
+      setupHappyPathLookups();
+
+      await expect(
+        service.create(
+          { ...validCreateDto(), imei: 'slu00000123' },
+          'cashier-1',
+        ),
+      ).rejects.toThrow(/is a unit code/);
+      expect(mockManager.findOne).not.toHaveBeenCalledWith(
+        ProductUnit,
+        expect.anything(),
+      );
+      expect(mockManager.save).not.toHaveBeenCalled();
+      expect(lockInventoryRows).not.toHaveBeenCalled();
+    });
+
+    it('leaves the unit code out of the insert: the database generates it', async () => {
+      setupHappyPathLookups();
+      mockManager.create.mockImplementation((_entity, data) => data);
+      mockManager.save.mockImplementation((data) =>
+        Promise.resolve({ id: 'saved-1', ...data }),
+      );
+      mockRepo.findOne.mockResolvedValue({ id: 'saved-1' });
+
+      await service.create(validCreateDto(), 'cashier-1');
+
+      const unit = (mockManager.create.mock.calls as [unknown, object][]).find(
+        ([entity]) => entity === ProductUnit,
+      )?.[1];
+      expect(unit).toBeDefined();
+      expect(unit).not.toHaveProperty('unit_code');
+    });
+
     it('checks IMEI collisions against live units only (IN_STOCK, WRITTEN_OFF, INSPECTION)', async () => {
       setupHappyPathLookups();
       mockManager.create.mockImplementation((_e, data) => data);
@@ -644,6 +678,19 @@ describe('PhonePurchasesService', () => {
       buying_price: '60000.00',
       selling_price: null,
       notes: null,
+    });
+
+    it('refuses a unit code as the IMEI, before any write', async () => {
+      mockManager.findOne.mockResolvedValueOnce(validSerializedProduct());
+
+      await expect(
+        service.createForTradeIn(mockManager as unknown as EntityManager, {
+          ...tradeInInput(),
+          imei: 'SLU00000123',
+        }),
+      ).rejects.toThrow(BadRequestException);
+      expect(mockManager.save).not.toHaveBeenCalled();
+      expect(lockInventoryRows).not.toHaveBeenCalled();
     });
 
     it('locks the stock row after the IMEI pre-check and before any insert (P7-25)', async () => {

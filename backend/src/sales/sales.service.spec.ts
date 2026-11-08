@@ -1,6 +1,6 @@
 import { Test, TestingModule } from '@nestjs/testing';
 import { getRepositoryToken, getDataSourceToken } from '@nestjs/typeorm';
-import { Brackets, In, QueryFailedError } from 'typeorm';
+import { Brackets, In, Not, QueryFailedError } from 'typeorm';
 import {
   NotFoundException,
   BadRequestException,
@@ -21,6 +21,7 @@ import {
 import { SaleReturn } from './entities/sale-return.entity';
 import { PaymentMethod } from './enums/payment-method.enum';
 import { UpdatePaymentDto } from './dto/update-payment.dto';
+import { AddSaleLineDto } from './dto/add-sale-line.dto';
 import { Branch } from '../branches/entities/branch.entity';
 import { User } from '../users/entities/user.entity';
 import { ProductsService } from '../products/products.service';
@@ -136,6 +137,7 @@ describe('SalesService', () => {
     remove: jest.fn(),
     query: jest.fn(),
     count: jest.fn(),
+    exists: jest.fn(),
     getRepository: jest.fn(() => mockAuditRepo),
   };
 
@@ -3266,6 +3268,26 @@ describe('SalesService', () => {
         }),
       );
       expect(result.id).toBe('pay-trade-1');
+    });
+
+    it('refuses a unit code as the trade-in IMEI, before storing anything', async () => {
+      primeTradeInSale();
+      // Only the product is read before the refusal, so only it is queued.
+      mockManager.findOne.mockReset();
+      mockManager.findOne.mockResolvedValueOnce({
+        id: 'prod-trade',
+        branch_id: 'branch-1',
+        is_active: true,
+        tracking_method: TrackingMethod.IMEI,
+      });
+
+      await expect(
+        service.addPayment('sale-1', {
+          ...validTradeInDto(),
+          trade_in_imei: 'slu00000123',
+        }),
+      ).rejects.toThrow(/is a unit code/);
+      expect(mockManager.save).not.toHaveBeenCalled();
     });
 
     it('stores trade_in_selling_price and trade_in_notes as null when omitted', async () => {
@@ -7205,5 +7227,763 @@ describe('SalesService', () => {
         'cashier-1',
       ),
     ).resolves.toBeDefined();
+  });
+
+  // ---- Unit codes (the IMEI prompt takes a scanned label) ----
+
+  describe('addLine with a unit code', () => {
+    const IMEI = '354789102345678';
+    const SERIAL = 'SN-HUB-1';
+    const CODE = 'SLU00000123';
+
+    const seedUnit = (overrides = {}) => ({
+      id: 'unit-1',
+      imei: IMEI,
+      imei_number: IMEI,
+      serial_number: null as string | null,
+      unit_code: CODE,
+      status: ProductUnitStatus.IN_STOCK,
+      product_id: 'prod-1',
+      branch_id: 'branch-1',
+      selling_price: '260000.00',
+      buying_price: '210000.00',
+      ...overrides,
+    });
+
+    const primeSale = (tracking = TrackingMethod.IMEI) => {
+      mockQueryBuilder.getOne.mockResolvedValue(
+        seedDraftSale({ branch_id: 'branch-1' }),
+      );
+      mockQueryBuilder.getRawOne.mockResolvedValue({ max: '0' });
+      mockProductsService.findOne.mockResolvedValue(
+        seedProduct({
+          id: 'prod-1',
+          is_serialized: true,
+          branch_id: 'branch-1',
+          tracking_method: tracking,
+        }),
+      );
+      mockManager.create.mockImplementation((_e, data) => data);
+      mockManager.save.mockImplementation((e) => Promise.resolve(e));
+    };
+
+    const addByCode = (
+      code = CODE,
+      field: 'imei_snapshot' | 'identifier_snapshot' = 'imei_snapshot',
+    ) =>
+      service.addLine(
+        'sale-1',
+        { product_id: 'prod-1', quantity: 1, [field]: code },
+        'cashier-1',
+      );
+
+    it('stores the real IMEI on the line, never the code', async () => {
+      primeSale();
+      mockManager.findOne.mockResolvedValueOnce(seedUnit());
+
+      await addByCode();
+
+      expect(mockManager.findOne).toHaveBeenCalledWith(ProductUnit, {
+        where: { unit_code: CODE, branch_id: 'branch-1' },
+      });
+      expect(mockManager.create).toHaveBeenCalledWith(
+        SaleLine,
+        expect.objectContaining({
+          product_unit_id: 'unit-1',
+          imei_snapshot: IMEI,
+          identifier_type_snapshot: TrackingMethod.IMEI,
+          unit_price: '260000.00',
+          cost_price_snapshot: '210000.00',
+        }),
+      );
+    });
+
+    it('stores the real serial number on the line, never the code', async () => {
+      primeSale(TrackingMethod.SERIAL_NUMBER);
+      mockManager.findOne.mockResolvedValueOnce(
+        seedUnit({ imei: SERIAL, imei_number: null, serial_number: SERIAL }),
+      );
+
+      await addByCode(CODE, 'identifier_snapshot');
+
+      expect(mockManager.create).toHaveBeenCalledWith(
+        SaleLine,
+        expect.objectContaining({
+          imei_snapshot: SERIAL,
+          identifier_type_snapshot: TrackingMethod.SERIAL_NUMBER,
+        }),
+      );
+    });
+
+    it('reads the code in any case', async () => {
+      primeSale();
+      mockManager.findOne.mockResolvedValueOnce(seedUnit());
+
+      await addByCode('slu00000123');
+
+      expect(mockManager.findOne).toHaveBeenCalledWith(ProductUnit, {
+        where: { unit_code: CODE, branch_id: 'branch-1' },
+      });
+      expect(mockManager.create).toHaveBeenCalledWith(
+        SaleLine,
+        expect.objectContaining({ imei_snapshot: IMEI }),
+      );
+    });
+
+    it.each([
+      ProductUnitStatus.SOLD,
+      ProductUnitStatus.INSPECTION,
+      ProductUnitStatus.RETURNED,
+    ])(
+      'refuses the code of a %s unit, and does not go on to its IMEI',
+      async (status) => {
+        primeSale();
+        mockManager.findOne.mockResolvedValueOnce(seedUnit({ status }));
+
+        await expect(addByCode()).rejects.toThrow(ConflictException);
+
+        expect(mockManager.findOne).toHaveBeenCalledTimes(1);
+        expect(mockManager.create).not.toHaveBeenCalledWith(
+          SaleLine,
+          expect.anything(),
+        );
+      },
+    );
+
+    it('answers a code at another branch like an unknown one', async () => {
+      primeSale();
+      // The code lookup is scoped to the sale's branch, so it finds nothing.
+      mockManager.findOne.mockResolvedValue(null);
+
+      await expect(addByCode()).rejects.toThrow(
+        'No item matches that unit code at this branch.',
+      );
+    });
+
+    it('refuses the code of another product at this branch', async () => {
+      primeSale();
+      mockManager.findOne.mockResolvedValueOnce(
+        seedUnit({ product_id: 'prod-OTHER' }),
+      );
+
+      await expect(addByCode()).rejects.toThrow(/does not belong to product/);
+    });
+
+    it('goes on to the identifier lookup when no unit has that code', async () => {
+      primeSale(TrackingMethod.SERIAL_NUMBER);
+      mockManager.findOne.mockResolvedValueOnce(null).mockResolvedValueOnce(
+        seedUnit({
+          imei: CODE,
+          imei_number: null,
+          serial_number: CODE,
+          unit_code: 'SLU00000007',
+        }),
+      );
+
+      await addByCode(CODE, 'identifier_snapshot');
+
+      expect(mockManager.create).toHaveBeenCalledWith(
+        SaleLine,
+        expect.objectContaining({
+          product_unit_id: 'unit-1',
+          imei_snapshot: CODE,
+        }),
+      );
+    });
+
+    it('resolves an IMEI as before, with no code lookup', async () => {
+      primeSale();
+      mockManager.findOne.mockResolvedValueOnce(seedUnit());
+
+      await addByCode(IMEI);
+
+      expect(mockManager.findOne).toHaveBeenCalledTimes(1);
+      expect(mockManager.findOne).not.toHaveBeenCalledWith(ProductUnit, {
+        where: { unit_code: expect.anything(), branch_id: 'branch-1' },
+      });
+      expect(mockManager.create).toHaveBeenCalledWith(
+        SaleLine,
+        expect.objectContaining({ imei_snapshot: IMEI }),
+      );
+    });
+
+    it('refuses a code on an external line, before storing anything', async () => {
+      primeSale();
+      mockSuppliersService.findOne.mockResolvedValue(seedSupplier());
+
+      await expect(
+        service.addLine(
+          'sale-1',
+          {
+            product_id: 'prod-1',
+            quantity: 1,
+            external_supplier_id: 'supplier-1',
+            imei_snapshot: 'slu00000123',
+          },
+          'cashier-1',
+        ),
+      ).rejects.toThrow(/is a unit code/);
+      expect(mockManager.save).not.toHaveBeenCalled();
+    });
+
+    it('refuses a code when editing an external line', async () => {
+      mockQueryBuilder.getOne.mockResolvedValue(
+        seedDraftSale({ branch_id: 'branch-1' }),
+      );
+      mockManager.findOne.mockResolvedValue({
+        id: 'line-1',
+        sale_id: 'sale-1',
+        product_id: 'prod-1',
+        external_supplier_id: 'supplier-1',
+        product_unit_id: null,
+        quantity: 1,
+        unit_price: '250000.00',
+        discount_type: null,
+        discount_value: null,
+        imei_snapshot: '111222333444555',
+      });
+      mockProductsService.findOne.mockResolvedValue(
+        seedProduct({ is_serialized: true }),
+      );
+
+      await expect(
+        service.updateLine('sale-1', 'line-1', { imei_snapshot: CODE }),
+      ).rejects.toThrow(/is a unit code/);
+      expect(mockManager.save).not.toHaveBeenCalled();
+    });
+
+    it('accepts a real identifier with letters on an external line', async () => {
+      primeSale(TrackingMethod.SERIAL_NUMBER);
+      mockSuppliersService.findOne.mockResolvedValue(seedSupplier());
+      mockQueryBuilder.getOne
+        .mockResolvedValueOnce(seedDraftSale({ branch_id: 'branch-1' }))
+        .mockResolvedValueOnce(null);
+
+      await service.addLine(
+        'sale-1',
+        {
+          product_id: 'prod-1',
+          quantity: 1,
+          external_supplier_id: 'supplier-1',
+          identifier_snapshot: 'SLU1234567',
+        },
+        'cashier-1',
+      );
+
+      expect(mockManager.create).toHaveBeenCalledWith(
+        SaleLine,
+        expect.objectContaining({ imei_snapshot: 'SLU1234567' }),
+      );
+    });
+  });
+
+  // ---- The exact unit the till scanned ----
+
+  describe('addLine with product_unit_id', () => {
+    const IMEI = '354789102345678';
+    const SERIAL = 'SN-HUB-1';
+    const UNIT = '11111111-1111-4111-8111-111111111111';
+
+    const seedUnit = (overrides = {}) => ({
+      id: UNIT,
+      imei: IMEI,
+      imei_number: IMEI,
+      serial_number: null as string | null,
+      unit_code: 'SLU00000123',
+      status: ProductUnitStatus.IN_STOCK,
+      product_id: 'prod-1',
+      branch_id: 'branch-1',
+      selling_price: '260000.00',
+      buying_price: '210000.00',
+      ...overrides,
+    });
+
+    const primeSale = (tracking = TrackingMethod.IMEI) => {
+      mockManager.findOne.mockReset();
+      mockManager.create.mockReset();
+      mockManager.save.mockReset();
+      mockQueryBuilder.getOne.mockReset();
+      mockQueryBuilder.getOne.mockResolvedValue(
+        seedDraftSale({ branch_id: 'branch-1' }),
+      );
+      mockQueryBuilder.getRawOne.mockResolvedValue({ max: '0' });
+      mockProductsService.findOne.mockResolvedValue(
+        seedProduct({
+          id: 'prod-1',
+          is_serialized: tracking !== TrackingMethod.QUANTITY,
+          branch_id: 'branch-1',
+          tracking_method: tracking,
+        }),
+      );
+      mockManager.create.mockImplementation((_e, data) => data);
+      mockManager.save.mockImplementation((e) => Promise.resolve(e));
+    };
+
+    const add = (overrides = {}) =>
+      service.addLine(
+        'sale-1',
+        {
+          product_id: 'prod-1',
+          quantity: 1,
+          imei_snapshot: IMEI,
+          product_unit_id: UNIT,
+          ...overrides,
+        },
+        'cashier-1',
+      );
+
+    const expectNoLine = () =>
+      expect(mockManager.create).not.toHaveBeenCalledWith(
+        SaleLine,
+        expect.anything(),
+      );
+
+    it('pins that exact unit, read at the sale branch, with the real IMEI', async () => {
+      primeSale();
+      mockManager.findOne.mockResolvedValueOnce(seedUnit());
+
+      await add();
+
+      expect(mockManager.findOne).toHaveBeenCalledTimes(1);
+      expect(mockManager.findOne).toHaveBeenCalledWith(ProductUnit, {
+        where: { id: UNIT, branch_id: 'branch-1' },
+      });
+      expect(mockManager.create).toHaveBeenCalledWith(
+        SaleLine,
+        expect.objectContaining({
+          product_unit_id: UNIT,
+          imei_snapshot: IMEI,
+          identifier_type_snapshot: TrackingMethod.IMEI,
+          unit_price: '260000.00',
+          cost_price_snapshot: '210000.00',
+        }),
+      );
+    });
+
+    it('pins a serial-tracked unit, with the real serial number', async () => {
+      primeSale(TrackingMethod.SERIAL_NUMBER);
+      mockManager.findOne.mockResolvedValueOnce(
+        seedUnit({ imei: SERIAL, imei_number: null, serial_number: SERIAL }),
+      );
+
+      await add({ imei_snapshot: undefined, identifier_snapshot: SERIAL });
+
+      expect(mockManager.create).toHaveBeenCalledWith(
+        SaleLine,
+        expect.objectContaining({
+          product_unit_id: UNIT,
+          imei_snapshot: SERIAL,
+          identifier_type_snapshot: TrackingMethod.SERIAL_NUMBER,
+        }),
+      );
+    });
+
+    it('keeps the identifier scanned, when the unit has both', async () => {
+      primeSale();
+      mockManager.findOne.mockResolvedValueOnce(
+        seedUnit({ serial_number: SERIAL }),
+      );
+
+      await add({ imei_snapshot: SERIAL });
+
+      expect(mockManager.create).toHaveBeenCalledWith(
+        SaleLine,
+        expect.objectContaining({
+          imei_snapshot: SERIAL,
+          identifier_type_snapshot: TrackingMethod.SERIAL_NUMBER,
+        }),
+      );
+    });
+
+    it('a stale id is refused: a newer row of the same IMEI is never read', async () => {
+      primeSale();
+      const newer = seedUnit({ id: 'unit-newer' });
+      mockManager.findOne
+        .mockResolvedValueOnce(seedUnit({ status: ProductUnitStatus.SOLD }))
+        .mockResolvedValue(newer);
+
+      await expect(add()).rejects.toThrow(ConflictException);
+
+      expect(mockManager.findOne).toHaveBeenCalledTimes(1);
+      expectNoLine();
+    });
+
+    it.each([ProductUnitStatus.INSPECTION, ProductUnitStatus.RETURNED])(
+      'refuses a %s unit',
+      async (status) => {
+        primeSale();
+        mockManager.findOne.mockResolvedValueOnce(seedUnit({ status }));
+
+        await expect(add()).rejects.toThrow(ConflictException);
+        expectNoLine();
+      },
+    );
+
+    it('answers an unknown id or one at another branch the same way, with no fallback', async () => {
+      primeSale();
+      mockManager.findOne.mockResolvedValueOnce(null);
+      mockManager.findOne.mockResolvedValue(seedUnit({ id: 'unit-other' }));
+
+      await expect(add()).rejects.toThrow(
+        'That item is not available at this branch.',
+      );
+
+      expect(mockManager.findOne).toHaveBeenCalledTimes(1);
+      expectNoLine();
+    });
+
+    it('refuses a unit of another product', async () => {
+      primeSale();
+      mockManager.findOne.mockResolvedValueOnce(
+        seedUnit({ product_id: 'prod-OTHER' }),
+      );
+
+      await expect(add()).rejects.toThrow(/does not belong to product/);
+      expectNoLine();
+    });
+
+    it.each([
+      ['another identifier', '999888777666555'],
+      ['its unit code', 'SLU00000123'],
+    ])('refuses %s sent with the id', async (_, identifier) => {
+      primeSale();
+      mockManager.findOne.mockResolvedValueOnce(seedUnit());
+
+      await expect(add({ imei_snapshot: identifier })).rejects.toThrow(
+        /is not the identifier of that item/,
+      );
+      expectNoLine();
+    });
+
+    it('refuses an id without an identifier, so a serial line cannot lose it', async () => {
+      primeSale(TrackingMethod.SERIAL_NUMBER);
+
+      await expect(add({ imei_snapshot: undefined })).rejects.toThrow(
+        /needs an identifier/,
+      );
+      expect(mockManager.findOne).not.toHaveBeenCalled();
+      expectNoLine();
+    });
+
+    it('refuses an id on an external line', async () => {
+      primeSale();
+
+      await expect(add({ external_supplier_id: 'supplier-1' })).rejects.toThrow(
+        /needs an identifier/,
+      );
+      expect(mockSuppliersService.findOne).not.toHaveBeenCalled();
+    });
+
+    it('refuses an id on a quantity product', async () => {
+      primeSale(TrackingMethod.QUANTITY);
+
+      await expect(add()).rejects.toThrow(/needs an identifier/);
+    });
+
+    it('without an id, still resolves the identifier as before', async () => {
+      primeSale();
+      mockManager.findOne.mockResolvedValueOnce(seedUnit());
+
+      await add({ product_unit_id: undefined });
+
+      expect(mockManager.findOne).not.toHaveBeenCalledWith(ProductUnit, {
+        where: { id: UNIT, branch_id: 'branch-1' },
+      });
+      expect(mockManager.create).toHaveBeenCalledWith(
+        SaleLine,
+        expect.objectContaining({
+          product_unit_id: UNIT,
+          imei_snapshot: IMEI,
+        }),
+      );
+    });
+  });
+
+  // ---- One physical item per sale ----
+
+  describe('one physical item per sale', () => {
+    const IMEI = '354789102345678';
+    const SERIAL = 'SN-HUB-1';
+    const UNIT = '11111111-1111-4111-8111-111111111111';
+    const DUPLICATE = {
+      message: 'This item is already added to the current sale.',
+      code: 'ITEM_ALREADY_IN_SALE',
+      sale_line_id: 'line-first',
+    };
+
+    const seedUnit = (overrides = {}) => ({
+      id: UNIT,
+      imei: IMEI,
+      imei_number: IMEI,
+      serial_number: null as string | null,
+      unit_code: 'SLU00000123',
+      status: ProductUnitStatus.IN_STOCK,
+      product_id: 'prod-1',
+      branch_id: 'branch-1',
+      selling_price: '260000.00',
+      buying_price: '210000.00',
+      ...overrides,
+    });
+
+    const prime = (tracking = TrackingMethod.IMEI, isSerialized = true) => {
+      mockManager.findOne.mockReset();
+      mockManager.create.mockReset();
+      mockManager.save.mockReset();
+      mockManager.exists.mockReset();
+      mockManager.exists.mockResolvedValue(false);
+      mockQueryBuilder.getOne.mockReset();
+      mockQueryBuilder.getOne.mockResolvedValue(
+        seedDraftSale({ branch_id: 'branch-1' }),
+      );
+      mockQueryBuilder.getRawOne.mockResolvedValue({ max: '0' });
+      mockProductsService.findOne.mockResolvedValue(
+        seedProduct({
+          id: 'prod-1',
+          is_serialized: isSerialized,
+          branch_id: 'branch-1',
+          tracking_method: tracking,
+        }),
+      );
+      mockManager.create.mockImplementation((_e, data) => data);
+      mockManager.save.mockImplementation((e) => Promise.resolve(e));
+    };
+
+    /** The sale already has this item, on line-first. */
+    const alreadyInSale = () => {
+      mockManager.exists.mockResolvedValue(true);
+      mockManager.findOne.mockResolvedValueOnce({ id: 'line-first' });
+    };
+
+    const add = (dto: Partial<AddSaleLineDto>) =>
+      service.addLine(
+        'sale-1',
+        { product_id: 'prod-1', quantity: 1, ...dto },
+        'cashier-1',
+      );
+
+    const refusal = async (run: Promise<unknown>) => {
+      const err = await run.catch((e: unknown) => e);
+      expect(err).toBeInstanceOf(ConflictException);
+      return (err as ConflictException).getResponse();
+    };
+
+    const expectNothingWritten = () => {
+      expect(mockManager.create).not.toHaveBeenCalledWith(
+        SaleLine,
+        expect.anything(),
+      );
+      expect(mockManager.save).not.toHaveBeenCalled();
+      expect(mockManager.remove).not.toHaveBeenCalled();
+    };
+
+    describe('addLine', () => {
+      it('refuses the unit the sale already has, and leaves its line alone', async () => {
+        prime();
+        mockManager.findOne.mockResolvedValueOnce(seedUnit());
+        alreadyInSale();
+
+        expect(
+          await refusal(add({ imei_snapshot: IMEI, product_unit_id: UNIT })),
+        ).toEqual(DUPLICATE);
+        expect(mockManager.exists).toHaveBeenCalledWith(SaleLine, {
+          where: [
+            { sale_id: 'sale-1', product_unit_id: UNIT },
+            { sale_id: 'sale-1', imei_snapshot: IMEI },
+          ],
+        });
+        expectNothingWritten();
+      });
+
+      it('refuses the same IMEI typed again, without the unit id', async () => {
+        prime();
+        mockManager.findOne.mockResolvedValueOnce(seedUnit());
+        alreadyInSale();
+
+        expect(await refusal(add({ imei_snapshot: IMEI }))).toEqual(DUPLICATE);
+        expectNothingWritten();
+      });
+
+      it('refuses the same serial number again', async () => {
+        prime(TrackingMethod.SERIAL_NUMBER);
+        mockManager.findOne.mockResolvedValueOnce(
+          seedUnit({ imei: SERIAL, imei_number: null, serial_number: SERIAL }),
+        );
+        alreadyInSale();
+
+        expect(await refusal(add({ identifier_snapshot: SERIAL }))).toEqual(
+          DUPLICATE,
+        );
+        expect(mockManager.exists).toHaveBeenCalledWith(SaleLine, {
+          where: [
+            { sale_id: 'sale-1', product_unit_id: UNIT },
+            { sale_id: 'sale-1', imei_snapshot: SERIAL },
+          ],
+        });
+        expectNothingWritten();
+      });
+
+      it('refuses a unit code whose unit is already on the sale, matching its real IMEI', async () => {
+        prime();
+        mockManager.findOne.mockResolvedValueOnce(seedUnit());
+        alreadyInSale();
+
+        expect(await refusal(add({ imei_snapshot: 'slu00000123' }))).toEqual(
+          DUPLICATE,
+        );
+        expect(mockManager.exists).toHaveBeenCalledWith(SaleLine, {
+          where: [
+            { sale_id: 'sale-1', product_unit_id: UNIT },
+            { sale_id: 'sale-1', imei_snapshot: IMEI },
+          ],
+        });
+        expectNothingWritten();
+      });
+
+      it('allows another unit of the same product', async () => {
+        prime();
+        mockManager.findOne.mockResolvedValueOnce(
+          seedUnit({
+            id: 'unit-2',
+            imei: '490154203237518',
+            imei_number: '490154203237518',
+          }),
+        );
+
+        await add({
+          imei_snapshot: '490154203237518',
+          product_unit_id: 'unit-2',
+        });
+
+        expect(mockManager.exists).toHaveBeenCalledTimes(1);
+        expect(mockManager.create).toHaveBeenCalledWith(
+          SaleLine,
+          expect.objectContaining({
+            product_unit_id: 'unit-2',
+            imei_snapshot: '490154203237518',
+          }),
+        );
+      });
+
+      it('never checks a quantity line, so the same product can go on twice as before', async () => {
+        prime(TrackingMethod.QUANTITY, false);
+
+        await add({});
+
+        expect(mockManager.exists).not.toHaveBeenCalled();
+        expect(mockManager.create).toHaveBeenCalledWith(
+          SaleLine,
+          expect.objectContaining({
+            product_unit_id: null,
+            imei_snapshot: null,
+          }),
+        );
+      });
+
+      it('never checks a serial-tracked item added without a serial number', async () => {
+        prime(TrackingMethod.SERIAL_NUMBER);
+
+        await add({});
+
+        expect(mockManager.exists).not.toHaveBeenCalled();
+        expect(mockManager.create).toHaveBeenCalledWith(
+          SaleLine,
+          expect.anything(),
+        );
+      });
+
+      it('refuses an external line whose IMEI is already on the sale', async () => {
+        prime();
+        // getOne: the sale, then the in-stock collision check (none).
+        mockQueryBuilder.getOne
+          .mockReset()
+          .mockResolvedValueOnce(seedDraftSale({ branch_id: 'branch-1' }))
+          .mockResolvedValueOnce(null);
+        mockSuppliersService.findOne.mockResolvedValue(seedSupplier());
+        alreadyInSale();
+
+        expect(
+          await refusal(
+            add({ external_supplier_id: 'supplier-1', imei_snapshot: IMEI }),
+          ),
+        ).toEqual(DUPLICATE);
+        expect(mockManager.exists).toHaveBeenCalledWith(SaleLine, {
+          where: [{ sale_id: 'sale-1', imei_snapshot: IMEI }],
+        });
+        expectNothingWritten();
+      });
+    });
+
+    describe('updateLine', () => {
+      const externalLine = {
+        id: 'line-1',
+        sale_id: 'sale-1',
+        product_id: 'prod-1',
+        external_supplier_id: 'supplier-1',
+        product_unit_id: null,
+        quantity: 1,
+        unit_price: '250000.00',
+        discount_type: null,
+        discount_value: null,
+        imei_snapshot: '111222333444555',
+      };
+
+      it('keeps a unit line at quantity 1 even if the product is not flagged serialized', async () => {
+        prime(TrackingMethod.SERIAL_NUMBER, false);
+        mockManager.findOne.mockResolvedValueOnce({
+          ...externalLine,
+          external_supplier_id: null,
+          product_unit_id: UNIT,
+          imei_snapshot: SERIAL,
+        });
+
+        await expect(
+          service.updateLine('sale-1', 'line-1', { quantity: 2 }),
+        ).rejects.toThrow('quantity must be 1 on the line of a single item');
+        expect(mockManager.save).not.toHaveBeenCalled();
+      });
+
+      it('refuses an external edit to an IMEI another line of the sale has', async () => {
+        prime();
+        mockQueryBuilder.getOne
+          .mockReset()
+          .mockResolvedValueOnce(seedDraftSale({ branch_id: 'branch-1' }))
+          .mockResolvedValueOnce(null);
+        mockManager.findOne.mockResolvedValueOnce(externalLine);
+        alreadyInSale();
+
+        expect(
+          await refusal(
+            service.updateLine('sale-1', 'line-1', {
+              imei_snapshot: '999888777666555',
+            }),
+          ),
+        ).toEqual(DUPLICATE);
+        expect(mockManager.save).not.toHaveBeenCalled();
+      });
+
+      it('lets an external line keep its own IMEI: the line itself is left out', async () => {
+        prime();
+        mockQueryBuilder.getOne
+          .mockReset()
+          .mockResolvedValueOnce(seedDraftSale({ branch_id: 'branch-1' }))
+          .mockResolvedValueOnce(null);
+        mockManager.findOne.mockResolvedValueOnce(externalLine);
+
+        await service.updateLine('sale-1', 'line-1', {
+          imei_snapshot: '111222333444555',
+        });
+
+        expect(mockManager.exists).toHaveBeenCalledWith(SaleLine, {
+          where: [
+            {
+              sale_id: 'sale-1',
+              imei_snapshot: '111222333444555',
+              id: Not('line-1'),
+            },
+          ],
+        });
+        expect(mockManager.save).toHaveBeenCalled();
+      });
+    });
   });
 });

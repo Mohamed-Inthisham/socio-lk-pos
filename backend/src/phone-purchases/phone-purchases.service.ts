@@ -14,6 +14,7 @@ import {
   isLiveImeiConflict,
   LIVE_UNIT_STATUSES,
 } from '../product-units/live-imei';
+import { assertNotUnitCode } from '../product-units/unit-code';
 import { Customer } from '../customers/entities/customer.entity';
 import { Branch } from '../branches/entities/branch.entity';
 import { Product } from '../products/entities/product.entity';
@@ -521,6 +522,8 @@ export class PhonePurchasesService {
     imei: string,
     manager: EntityManager,
   ): Promise<void> {
+    assertNotUnitCode(imei);
+
     const existing = await manager.findOne(ProductUnit, {
       where: [
         { imei, status: In([...LIVE_UNIT_STATUSES]) },
