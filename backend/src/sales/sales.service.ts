@@ -10,7 +10,9 @@ import {
   Brackets,
   DataSource,
   EntityManager,
+  FindOptionsWhere,
   In,
+  Not,
   QueryFailedError,
   Repository,
 } from 'typeorm';
@@ -30,6 +32,13 @@ import {
 } from '../stock/enums/stock-movement-type.enum';
 import { ProductUnitsService } from '../product-units/product-units.service';
 import { LIVE_UNIT_STATUSES } from '../product-units/live-imei';
+import {
+  assertNotUnitCode,
+  parseUnitCode,
+  UNIT_CODE_NOT_FOUND,
+  UNIT_NOT_AT_BRANCH,
+  unitSaleIdentifier,
+} from '../product-units/unit-code';
 import {
   ensureStockRows,
   lockInventoryRows,
@@ -878,6 +887,17 @@ export class SalesService {
         );
       }
       const clientImei = dto.identifier_snapshot ?? dto.imei_snapshot ?? null;
+      if (
+        dto.product_unit_id &&
+        (clientImei === null ||
+          dto.external_supplier_id ||
+          product.tracking_method === TrackingMethod.QUANTITY)
+      ) {
+        throw new BadRequestException(
+          'product_unit_id needs an identifier, on an in-house line of a ' +
+            'tracked product.',
+        );
+      }
       let productUnitId: string | null = null;
       let imeiSnapshot: string | null = clientImei;
       let identifierTypeSnapshot =
@@ -948,6 +968,7 @@ export class SalesService {
           product,
           clientImei,
           TrackingMethod.IMEI,
+          dto.product_unit_id,
         );
         productUnitId = resolved.productUnitId;
         imeiSnapshot = resolved.imeiSnapshot;
@@ -967,6 +988,7 @@ export class SalesService {
             product,
             clientImei,
             TrackingMethod.SERIAL_NUMBER,
+            dto.product_unit_id,
           );
           productUnitId = resolved.productUnitId;
           imeiSnapshot = resolved.imeiSnapshot;
@@ -978,6 +1000,15 @@ export class SalesService {
         // IN_HOUSE_NON_SERIALIZED — no IMEI allowed.
         this.assertNoImeiOnNonSerializedLine(clientImei, product.name);
       }
+
+      // One physical item per sale. After resolution, so a unit's code,
+      // IMEI and serial number all name the same item.
+      await this.assertItemNotInSale(
+        manager,
+        saleId,
+        productUnitId,
+        imeiSnapshot,
+      );
 
       if (unitPrice === null) {
         throw new BadRequestException(
@@ -1141,6 +1172,13 @@ export class SalesService {
               dto.imei_snapshot,
               product.tracking_method,
             );
+            await this.assertItemNotInSale(
+              manager,
+              saleId,
+              null,
+              dto.imei_snapshot,
+              line.id,
+            );
           }
           // Nulling imei_snapshot on external serialized is nonsensical
           // (it's the only IMEI record for the line) but the DB CHECK
@@ -1179,6 +1217,18 @@ export class SalesService {
             );
           }
         }
+      }
+
+      // A line of one physical unit stays at 1 even when the guards above
+      // allowed it: is_serialized can disagree with tracking_method.
+      if (
+        line.product_unit_id &&
+        dto.quantity !== undefined &&
+        dto.quantity !== 1
+      ) {
+        throw new BadRequestException(
+          'quantity must be 1 on the line of a single item',
+        );
       }
 
       // Merge DTO onto current line state to get the "effective" values
@@ -2797,6 +2847,7 @@ export class SalesService {
         `Trade-in product ${productId} must use IMEI tracking.`,
       );
     }
+    assertNotUnitCode(imei);
 
     // IMEI availability (best-effort UX pre-check). Only units the shop
     // holds collide; SOLD / RETURNED history allows a buy-back.
@@ -2888,11 +2939,58 @@ export class SalesService {
    * Runs inside the caller's transaction, so the collision check and the
    * subsequent insert both see the same snapshot.
    */
+  /**
+   * 409 ITEM_ALREADY_IN_SALE when another line of this sale holds the same
+   * physical unit or the same IMEI / serial number. A unit in a draft is
+   * still IN_STOCK, so nothing else stops it being added twice. The sale
+   * row is locked by the caller, so two adds can't both pass.
+   *
+   * Only this sale: another draft may hold the same unit, and completion
+   * decides (Slice E Q5). Quantity lines carry neither value and are never
+   * checked. Matching is exact, as everywhere identifiers are compared.
+   * `exceptLineId` is the line being edited.
+   */
+  private async assertItemNotInSale(
+    manager: EntityManager,
+    saleId: string,
+    productUnitId: string | null,
+    identifier: string | null,
+    exceptLineId?: string,
+  ): Promise<void> {
+    const others = exceptLineId ? { id: Not(exceptLineId) } : {};
+    const where: FindOptionsWhere<SaleLine>[] = [];
+    if (productUnitId) {
+      where.push({
+        sale_id: saleId,
+        product_unit_id: productUnitId,
+        ...others,
+      });
+    }
+    if (identifier) {
+      where.push({ sale_id: saleId, imei_snapshot: identifier, ...others });
+    }
+    if (!where.length || !(await manager.exists(SaleLine, { where }))) return;
+
+    // Only a refusal reads the line, to name it.
+    const existing = await manager.findOne(SaleLine, {
+      where,
+      select: { id: true },
+    });
+    throw new ConflictException({
+      message: 'This item is already added to the current sale.',
+      code: 'ITEM_ALREADY_IN_SALE',
+      sale_line_id: existing?.id ?? null,
+    });
+  }
+
   private async assertExternalSerializedImeiNotInStock(
     manager: EntityManager,
     imei: string,
     identifierType: TrackingMethod = TrackingMethod.IMEI,
   ): Promise<void> {
+    // This line stores the value as typed: it must be a real identifier.
+    assertNotUnitCode(imei);
+
     const conflicting = await manager
       .createQueryBuilder(ProductUnit, 'unit')
       .where(
@@ -2953,6 +3051,20 @@ export class SalesService {
    * newest, so a sold-and-not-back phone still reports "status: SOLD".
    * Runs inside caller's transaction; no lock — the complete-time
    * markSoldForSale lock is the sole gate (Slice E Q5).
+   *
+   * A unit code (the IMEI prompt takes a scanned label) names one exact row
+   * at the sale's branch, whatever its status, so the checks below refuse a
+   * sold unit's code rather than reach a newer row of the same IMEI. The
+   * sale records the unit's real identifier, never the code. A code at
+   * another branch gets the same 400 as an unknown one; a code-shaped value
+   * matching no code goes on to the IMEI and serial lookup.
+   *
+   * `exactUnitId` is the unit the till's scan resolved. That row alone is
+   * used: it is read at the sale's branch, so an unknown id and one at
+   * another branch get the same 400; `identifier` must be one of its own; and
+   * the checks below then apply to it. Nothing re-resolves the identifier, so
+   * a unit sold since the scan is a 409 even if the same phone is back in
+   * stock on a newer row.
    */
   private async resolveInHouseSerializedLine(
     manager: EntityManager,
@@ -2960,6 +3072,7 @@ export class SalesService {
     product: Product,
     identifier: string,
     identifierType: TrackingMethod.IMEI | TrackingMethod.SERIAL_NUMBER,
+    exactUnitId?: string,
   ): Promise<{
     productUnitId: string;
     imeiSnapshot: string;
@@ -2967,12 +3080,40 @@ export class SalesService {
     unitPrice: string;
     costPrice: string;
   }> {
+    const exact = exactUnitId
+      ? await manager.findOne(ProductUnit, {
+          where: { id: exactUnitId, branch_id: saleBranchId },
+        })
+      : null;
+    if (exactUnitId) {
+      if (!exact) {
+        throw new BadRequestException(UNIT_NOT_AT_BRANCH);
+      }
+      if (
+        ![exact.imei, exact.imei_number, exact.serial_number].includes(
+          identifier,
+        )
+      ) {
+        throw new BadRequestException(
+          `'${identifier}' is not the identifier of that item.`,
+        );
+      }
+    }
+
+    const unitCode = exactUnitId ? null : parseUnitCode(identifier);
+    const coded = unitCode
+      ? await manager.findOne(ProductUnit, {
+          where: { unit_code: unitCode, branch_id: saleBranchId },
+        })
+      : null;
     const identifierWhere = [
       { imei: identifier },
       { imei_number: identifier },
       { serial_number: identifier },
     ];
     const unit =
+      exact ??
+      coded ??
       (await manager.findOne(ProductUnit, {
         where: identifierWhere.map((where) => ({
           ...where,
@@ -2984,11 +3125,19 @@ export class SalesService {
         order: { created_at: 'DESC' },
       }));
 
-    const identifierLabel = identifierType === TrackingMethod.IMEI ? 'IMEI' : 'Serial number';
+    const identifierLabel = coded
+      ? 'Unit code'
+      : identifierType === TrackingMethod.IMEI
+        ? 'IMEI'
+        : 'Serial number';
 
     // 1. Not found
     if (!unit) {
-      throw new BadRequestException(`${identifierLabel} '${identifier}' is not in stock`);
+      throw new BadRequestException(
+        unitCode
+          ? UNIT_CODE_NOT_FOUND
+          : `${identifierLabel} '${identifier}' is not in stock`,
+      );
     }
 
     // 2. Product mismatch — payload integrity
@@ -3027,13 +3176,17 @@ export class SalesService {
       );
     }
 
+    const saleIdentifier = coded
+      ? unitSaleIdentifier(coded, identifierType)
+      : identifier;
+
     return {
       productUnitId: unit.id,
-      imeiSnapshot: identifier,
+      imeiSnapshot: saleIdentifier,
       identifierType:
-        unit.imei_number === identifier
+        unit.imei_number === saleIdentifier
           ? TrackingMethod.IMEI
-          : unit.serial_number === identifier
+          : unit.serial_number === saleIdentifier
             ? TrackingMethod.SERIAL_NUMBER
             : identifierType,
       unitPrice,

@@ -128,6 +128,19 @@ export class AddSaleLineDto {
   identifier_snapshot?: string;
 
   @ApiPropertyOptional({
+    format: 'uuid',
+    description:
+      'The exact unit the till scanned (unitId from the sellable lookup), so ' +
+      'the line pins that row and never re-resolves the identifier. Sent ' +
+      "with the unit's real IMEI or serial number. The backend checks the " +
+      "unit is at the sale's branch, of this product, IN_STOCK, and has that " +
+      'identifier. In-house lines of tracked products only.',
+  })
+  @IsOptional()
+  @IsUUID()
+  product_unit_id?: string;
+
+  @ApiPropertyOptional({
     enum: WarrantyPeriod,
     example: WarrantyPeriod.MONTH_12,
     description:

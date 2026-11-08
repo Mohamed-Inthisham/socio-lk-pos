@@ -28,6 +28,7 @@ import { ExposeCost } from '../../common/utils/cost-visibility';
   'CHK_product_units_selling_price_nonneg',
   `"selling_price" IS NULL OR "selling_price" >= 0`,
 )
+@Check('CHK_product_units_unit_code', `"unit_code" ~ '^SLU[0-9]{8,}$'`)
 export class ProductUnit {
   @PrimaryGeneratedColumn('uuid')
   id!: string;
@@ -76,6 +77,18 @@ export class ProductUnit {
   @Index('idx_product_units_serial_number')
   @Column({ type: 'varchar', length: 100, nullable: true })
   serial_number!: string | null;
+
+  // The unit's barcode: permanent, unique across every row, sold ones
+  // included, and free of any IMEI or serial number. The database generates
+  // it, so intake leaves it out; update: false keeps it out of entity
+  // updates. See the AddProductUnitCodes migration.
+  @Index('uq_product_units_unit_code', { unique: true })
+  @Column({
+    type: 'text',
+    default: () => 'next_product_unit_code()',
+    update: false,
+  })
+  unit_code!: string;
 
   @Column({
     type: 'varchar',

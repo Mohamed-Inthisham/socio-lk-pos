@@ -324,3 +324,36 @@ Per-product, per-branch inventory quantities.
 **Auto-created on product create** at quantity 0 for the product's home branch.
 
 **Migration:** `CreateStockTable`
+
+### `product_units`
+
+One row per acquisition of an individually tracked item (IMEI or serial number). The full lifecycle is in [used-phones.md](./used-phones.md#productunit-lifecycle).
+
+**`AddProductUnitCodes` is written but has not been run on any database.** Apply it before deploying or running the backend that expects `unit_code`: there is no compatibility fallback for a database without the column.
+
+| Column | Type | Notes |
+|--------|------|-------|
+| `id` | `uuid` | PK |
+| `product_id` | `uuid` | FK → `products.id` |
+| `branch_id` | `uuid` | FK → `branches.id`; a unit never changes branch |
+| `imei` | `varchar(100)` | Legacy column: the unit's main identifier, an IMEI or a serial number |
+| `imei_number` | `varchar(100)` | The IMEI, when it has one |
+| `serial_number` | `varchar(100)` | The serial number, when it has one |
+| `unit_code` | `text` | Generated barcode code, such as `SLU00000123`; NOT NULL, permanent |
+| `status` | `varchar(20)` | `IN_STOCK`, `SOLD`, `RETURNED`, `WRITTEN_OFF` or `INSPECTION` |
+| `buying_price` | `numeric(12,2)` | |
+| `selling_price` | `numeric(12,2)` | Nullable: falls back to the product's price |
+| `phone_purchase_id` | `uuid` | Nullable FK → `phone_purchases.id` |
+| `created_at` | `timestamptz` | |
+| `updated_at` | `timestamptz` | |
+
+**`unit_code`:**
+- Default `next_product_unit_code()`: `SLU` and the next value of `product_unit_code_seq`, padded to at least 8 digits. A longer number is kept whole, never truncated. Inserts leave the column out.
+- `text`, not `varchar(n)`: a length limit would make Postgres wrap the default in a cast, and generated migrations would then see drift. `CHK_product_units_unit_code` (`"unit_code" ~ '^SLU[0-9]{8,}$'`) bounds the value instead.
+- `uq_product_units_unit_code` is a **full** unique index, unlike the live-only identifier indexes: a code belongs to one row for good, sold rows included.
+- The sequence is owned by the column, so `TRUNCATE ... RESTART IDENTITY` resets it, as the e2e reset does. Never truncate or renumber this table outside tests.
+- The entity sets `update: false`, which keeps the column out of TypeORM entity updates. Nothing in the database prevents a raw `UPDATE`, so don't write one.
+
+**Forward-only:** once labels are printed, don't revert `AddProductUnitCodes`. See [used-phones.md](./used-phones.md#migration-notes).
+
+**Migrations:** `CreateProductUnits`, `StoreBothUnitIdentifiers`, `AddProductUnitCodes` (among others; see used-phones.md)

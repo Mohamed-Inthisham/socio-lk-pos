@@ -6,6 +6,7 @@ import { NestExpressApplication } from '@nestjs/platform-express';
 import { AppModule } from '../src/app.module';
 import { TypedConfigService } from '../src/config/typed-config.service';
 import { applyTrustProxy } from '../src/config/trust-proxy';
+import { assertConnectedToTestDatabase } from './e2e-database-guard';
 
 /**
  * Boots the full NestJS app for e2e tests, mirroring the essential middleware
@@ -47,6 +48,10 @@ export async function createTestApp(): Promise<INestApplication> {
  * session sets socio.allow_ledger_truncate (CreateStockMovements
  * migration). The reset sets it with SET LOCAL, so it lasts only for this
  * one transaction on this one connection.
+ *
+ * Every spec's first write comes after this reset, so the check of the
+ * connected database inside it covers them all. It runs on the connection
+ * that truncates, before anything else in the transaction.
  */
 export async function truncateAllTables(app: INestApplication): Promise<void> {
   const dataSource = app.get(DataSource);
@@ -63,6 +68,7 @@ export async function truncateAllTables(app: INestApplication): Promise<void> {
   if (!tableNames) return;
 
   await dataSource.transaction(async (manager) => {
+    await assertConnectedToTestDatabase(manager);
     await manager.query(`SET LOCAL socio.allow_ledger_truncate = 'on'`);
     await manager.query(
       `TRUNCATE TABLE ${tableNames} RESTART IDENTITY CASCADE`,

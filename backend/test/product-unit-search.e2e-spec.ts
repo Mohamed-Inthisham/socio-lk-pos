@@ -59,6 +59,7 @@ describe('Product unit search (e2e)', () => {
     'product_id',
     'serial_number',
     'status',
+    'unit_code',
   ];
 
   const http = () => request(app.getHttpServer());

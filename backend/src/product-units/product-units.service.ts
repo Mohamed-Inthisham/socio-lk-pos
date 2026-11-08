@@ -13,6 +13,11 @@ import { ListProductUnitsQueryDto } from './dto/list-product-units-query.dto';
 import { SearchProductUnitsQueryDto } from './dto/search-product-units-query.dto';
 import { isLiveImeiConflict } from './live-imei';
 import {
+  parseUnitCode,
+  UNIT_CODE_NOT_FOUND,
+  unitSaleIdentifier,
+} from './unit-code';
+import {
   paginate,
   PaginatedResponse,
 } from '../common/dto/paginated-response.dto';
@@ -74,6 +79,7 @@ export interface ProductUnitSearchRow {
   imei: string;
   imei_number: string | null;
   serial_number: string | null;
+  unit_code: string;
   status: ProductUnitStatus;
   created_at: Date;
   product: { name: string; sku: string; tracking_method: TrackingMethod };
@@ -101,6 +107,7 @@ export interface ProductUnitDetails {
     imei: string;
     imei_number: string | null;
     serial_number: string | null;
+    unit_code: string;
     status: ProductUnitStatus;
     created_at: Date;
   };
@@ -221,9 +228,9 @@ export class ProductUnitsService {
 
   /**
    * GET /product-units/search (INV-F3): units whose IMEI, legacy imei column,
-   * serial number, or product's SKU or name contains query.q, in any case,
-   * newest first. Every status, so each record of a bought-back phone comes
-   * back on its own. % and _ in the text match themselves.
+   * serial number, unit code, or product's SKU or name contains query.q, in
+   * any case, newest first. Every status, so each record of a bought-back
+   * phone comes back on its own. % and _ in the text match themselves.
    *
    * Branch scoping is resolved by the controller, as for findAll. The OR
    * stays inside its Brackets: outside them it would bypass the branch.
@@ -246,6 +253,7 @@ export class ProductUnitsService {
         'unit.imei',
         'unit.imei_number',
         'unit.serial_number',
+        'unit.unit_code',
         'unit.status',
         'unit.created_at',
       ])
@@ -264,6 +272,7 @@ export class ProductUnitsService {
             .where('unit.imei_number ILIKE :pattern', { pattern })
             .orWhere('unit.imei ILIKE :pattern', { pattern })
             .orWhere('unit.serial_number ILIKE :pattern', { pattern })
+            .orWhere('unit.unit_code ILIKE :pattern', { pattern })
             .orWhere('product.sku ILIKE :pattern', { pattern })
             .orWhere('product.name ILIKE :pattern', { pattern });
         }),
@@ -286,6 +295,7 @@ export class ProductUnitsService {
         imei: unit.imei,
         imei_number: unit.imei_number,
         serial_number: unit.serial_number,
+        unit_code: unit.unit_code,
         status: unit.status,
         created_at: unit.created_at,
         product: {
@@ -345,6 +355,7 @@ export class ProductUnitsService {
       imei: string;
       imei_number: string | null;
       serial_number: string | null;
+      unit_code: string;
       status: ProductUnitStatus;
       created_at: Date;
       phone_purchase_id: string | null;
@@ -355,8 +366,8 @@ export class ProductUnitsService {
       branch_id: string;
       branch_name: string;
     }[] = await this.dataSource.query(
-      `SELECT u.id, u.imei, u.imei_number, u.serial_number, u.status,
-              u.created_at, u.phone_purchase_id,
+      `SELECT u.id, u.imei, u.imei_number, u.serial_number, u.unit_code,
+              u.status, u.created_at, u.phone_purchase_id,
               p.id AS product_id, p.name AS product_name,
               p.sku AS product_sku, p.tracking_method,
               b.id AS branch_id, b.name AS branch_name
@@ -378,6 +389,7 @@ export class ProductUnitsService {
         imei: unit.imei,
         imei_number: unit.imei_number,
         serial_number: unit.serial_number,
+        unit_code: unit.unit_code,
         status: unit.status,
         created_at: unit.created_at,
       },
@@ -546,27 +558,46 @@ export class ProductUnitsService {
     }));
   }
 
-  /** Resolve a scanned unit identifier to its product for POS checkout. */
+  /**
+   * Resolve a scanned unit code, IMEI or serial number to its product for
+   * POS checkout.
+   *
+   * A unit code names one exact row, whatever its status: a sold unit's code
+   * is the 409 below, and never reaches a newer row of the same IMEI. It is
+   * looked up at this branch only, so a code at another branch is the same
+   * 404 as an unknown one. A code-shaped value matching no code goes on to
+   * the IMEI and serial lookup: an older unit may have a serial like it.
+   *
+   * `identifier` in the result is always the unit's real identifier, which
+   * the till passes to addLine: never the scanned code.
+   */
   async findSellableByIdentifier(identifier: string, branchId: string) {
-    const unit = await this.productUnitsRepository
-      .createQueryBuilder('unit')
-      .innerJoinAndSelect('unit.product', 'product')
-      .where(
-        '(unit.imei = :identifier OR unit.imei_number = :identifier OR unit.serial_number = :identifier)',
-        { identifier: identifier.trim() },
-      )
-      .andWhere('unit.branch_id = :branchId', { branchId })
-      .andWhere('product.is_active = :active', { active: true })
-      .orderBy(
-        `CASE WHEN unit.status = '${ProductUnitStatus.IN_STOCK}' THEN 0 ELSE 1 END`,
-        'ASC',
-      )
-      .addOrderBy('unit.created_at', 'DESC')
-      .getOne();
+    const scanned = identifier.trim();
+    const unitCode = parseUnitCode(scanned);
+    const coded = unitCode
+      ? await this.sellableUnitQuery(branchId)
+          .andWhere('unit.unit_code = :unitCode', { unitCode })
+          .getOne()
+      : null;
+    const unit =
+      coded ??
+      (await this.sellableUnitQuery(branchId)
+        .andWhere(
+          '(unit.imei = :identifier OR unit.imei_number = :identifier OR unit.serial_number = :identifier)',
+          { identifier: scanned },
+        )
+        .orderBy(
+          `CASE WHEN unit.status = '${ProductUnitStatus.IN_STOCK}' THEN 0 ELSE 1 END`,
+          'ASC',
+        )
+        .addOrderBy('unit.created_at', 'DESC')
+        .getOne());
 
     if (!unit) {
       throw new NotFoundException(
-        'No available item matches that identifier at this branch',
+        unitCode
+          ? UNIT_CODE_NOT_FOUND
+          : 'No available item matches that identifier at this branch',
       );
     }
     if (unit.status !== ProductUnitStatus.IN_STOCK) {
@@ -580,17 +611,30 @@ export class ProductUnitsService {
         },
       });
     }
-    const identifierType = unit.imei_number === identifier.trim()
-      ? TrackingMethod.IMEI
-      : unit.serial_number === identifier.trim()
-        ? TrackingMethod.SERIAL_NUMBER
-        : unit.product?.tracking_method ?? TrackingMethod.IMEI;
+    const resolved = coded
+      ? unitSaleIdentifier(coded, coded.product!.tracking_method)
+      : scanned;
+    const identifierType =
+      unit.imei_number === resolved
+        ? TrackingMethod.IMEI
+        : unit.serial_number === resolved
+          ? TrackingMethod.SERIAL_NUMBER
+          : (unit.product?.tracking_method ?? TrackingMethod.IMEI);
     return {
       product: unit.product,
-      identifier: identifier.trim(),
+      identifier: resolved,
       identifierType,
       unitId: unit.id,
     };
+  }
+
+  /** Units of active products at this branch, with their product. */
+  private sellableUnitQuery(branchId: string) {
+    return this.productUnitsRepository
+      .createQueryBuilder('unit')
+      .innerJoinAndSelect('unit.product', 'product')
+      .where('unit.branch_id = :branchId', { branchId })
+      .andWhere('product.is_active = :active', { active: true });
   }
 
   /**

@@ -335,15 +335,17 @@ const saleMutation = (fallback, run, stockProductId) => async (arg, { dispatch, 
 
 /**
  * Add a product to the draft.
- * arg: { product, quantity = 1, imei? } — `product` is the catalog row
- * (from by-barcode or search); its name and price feed the pending row.
+ * arg: { product, quantity = 1, imei?, identifier?, unitId? } — `product` is
+ * the catalog row (from by-barcode or search); its name and price feed the
+ * pending row. `unitId` is the exact unit a scan resolved: the line pins it.
  */
 export const addLine = createAsyncThunk(
   "posTerminal/addLine",
-  saleMutation("Couldn't add the item", (saleId, { product, quantity = 1, imei, identifier }) =>
+  saleMutation("Couldn't add the item", (saleId, { product, quantity = 1, imei, identifier, unitId }) =>
     addSaleLine(saleId, {
       product_id: product.id,
       quantity,
+      ...(unitId && { product_unit_id: unitId }),
       ...((identifier ?? imei)
         ? product.tracking_method === "SERIAL_NUMBER"
           ? { identifier_snapshot: identifier ?? imei }
@@ -694,6 +696,9 @@ export const startNextSale = () => (dispatch, getState) => {
 // both labels; cashiers can't resolve IMEI → product yet).
 const IMEI_SHAPE = /^\d{15}$/;
 
+// The backend's unit code shape (product-units/unit-code.ts).
+const UNIT_CODE_SHAPE = /^SLU\d{8,}$/i;
+
 /** arg: { barcode } → resolves with the product */
 export const scanBarcode = createAsyncThunk(
   "posTerminal/scanBarcode",
@@ -714,7 +719,12 @@ export const scanBarcode = createAsyncThunk(
   },
 );
 
-/** Resolve a scanned IMEI/serial to the exact in-stock unit at this branch. */
+/**
+ * Resolve a scanned unit code, IMEI or serial to the exact in-stock unit at
+ * this branch. A miss on anything else goes on to the barcode and name
+ * lookups; a miss on a unit code says so, the same for an unknown code and
+ * one at another branch.
+ */
 export const scanUnitIdentifier = createAsyncThunk(
   "posTerminal/scanUnitIdentifier",
   async ({ identifier, branchId }, { rejectWithValue }) => {
@@ -723,7 +733,13 @@ export const scanUnitIdentifier = createAsyncThunk(
     try {
       return await getSellableUnitByIdentifier(identifier, branchId);
     } catch (error) {
-      if (error?.response?.status === 404) return null;
+      if (error?.response?.status === 404) {
+        if (!UNIT_CODE_SHAPE.test(identifier)) return null;
+        return rejectWithValue({
+          message: "No item matches that unit code at this branch.",
+          status: 404,
+        });
+      }
       return rejectWithValue(toError(error, "Unit identifier lookup failed"));
     }
   },

@@ -21,8 +21,22 @@ Tests were scoped to high-risk logic, not blanket coverage:
 
 - **DB name:** `socio_lk_pos_test`
 - **Same Postgres instance** as dev; only the database name differs.
-- Environment sourced from `.env.test` — loaded before every test run by `test/load-test-env.ts` (referenced from `test/jest-e2e.json` `setupFiles`).
+- Environment sourced from `.env.test`, which is required (see [Safety checks](#safety-checks)) — loaded before every test run by `test/load-test-env.ts` (referenced from `test/jest-e2e.json` `setupFiles`).
 - **`BCRYPT_ROUNDS=4`** in `.env.test` — brings hash time from ~250ms to ~4ms, making e2e tests roughly 60x faster without weakening any production behavior.
+
+### Safety checks
+
+The e2e reset wipes every table, so each of these must hold first. A failure stops the run, and the error names what is required, never the value found.
+
+1. **`.env.test` must load.** A missing or unreadable file stops the run, with no fallback to `.env`. `loadTestEnv` (`src/config/test-database-guard.ts`) does this from `test/load-test-env.ts`, a Jest `setupFiles` entry, so it runs before any spec or the app.
+2. **The effective environment must be the local test database.** `DB_NAME` must be exactly `socio_lk_pos_test`, and `DB_HOST` exactly `localhost`, `127.0.0.1` or `::1`. "Effective" includes the shell: dotenv never overrides a variable that is already set, so a shell value is the one checked. `DB_PORT` isn't checked: any port can be a local Postgres or a tunnel, so a fixed list would reject valid setups without proving the server is local.
+3. **The live connection must be the test database.** `truncateAllTables()` first runs `SELECT current_database()` on the connection it truncates with, and throws unless the answer is exactly `socio_lk_pos_test` (`test/e2e-database-guard.ts`). Every spec resets before its first write, so this one check covers them all.
+
+`DB_NAME` and `DB_HOST` can't come from `.env`: the guard has already required both by the time `ConfigModule` reads that file. Any other key missing from `.env.test`, such as `DB_PORT`, `DB_USERNAME` or `DB_PASSWORD`, can still come from the shell or from `.env`. A local port tunnelled to another server passes the host check, and the connection check too if that server has a database of that name.
+
+`npm run migration:run:test` follows the first two rules. With `NODE_ENV=test`, `src/database/data-source.ts` calls `loadTestEnv` as it loads, and the TypeORM CLI only connects after that. It doesn't read `.env`, so a key missing from `.env.test` and the shell fails validation. Commands without `NODE_ENV=test`, such as `migration:run`, are unchanged.
+
+**Status:** these checks have unit tests that use no database. They have not yet run in a real e2e run or migration.
 
 ## E2E Setup Helper (`test/setup.ts`)
 
@@ -33,7 +47,7 @@ Tests were scoped to high-risk logic, not blanket coverage:
 
 **Skipped:** helmet (adds only headers), CORS (in-process supertest), Swagger (dev-only). These are noise in tests.
 
-`truncateAllTables()` runs a single Postgres `TRUNCATE ... RESTART IDENTITY CASCADE` against `audit_logs`, `refresh_tokens`, `users`. Called from `beforeEach` in every e2e suite.
+`truncateAllTables()` checks the connected database (see [Safety checks](#safety-checks)), then runs a single Postgres `TRUNCATE ... RESTART IDENTITY CASCADE` in a transaction, on every entity table, found from TypeORM metadata so new entities are covered automatically. The `migrations` table is not an entity, so migration state survives. The transaction sets `socio.allow_ledger_truncate` with `SET LOCAL`, because the append-only stock ledger tables refuse `TRUNCATE` otherwise. Called from `beforeEach` or `beforeAll` in every e2e suite.
 
 ## Serial e2e execution
 
