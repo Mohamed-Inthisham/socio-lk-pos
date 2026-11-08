@@ -281,6 +281,21 @@ export class SalesController {
     status: 404,
     description: 'Sale, product, or supplier not found',
   })
+  @ApiResponse({
+    status: 409,
+    description:
+      'One of: (1) the item is already on this sale, as the same unit, IMEI ' +
+      "or serial number: { message: 'This item is already added to the " +
+      "current sale.', code: 'ITEM_ALREADY_IN_SALE', sale_line_id }. " +
+      '(2) The unit isn\'t IN_STOCK: { message: "<IMEI | Serial number | ' +
+      "Unit code> '<value>' is not available (status: <status>)\", " +
+      'existing_unit: { id, status, product_id, branch_id } }. (3) An ' +
+      "external line's IMEI or serial number is a live unit of this shop " +
+      '(IN_STOCK, WRITTEN_OFF or INSPECTION): { message: "<IMEI | Serial ' +
+      "number> '<value>' is currently in your stock (status: <status>). If " +
+      'you meant to sell your own inventory, remove external_supplier_id.", ' +
+      'existing_unit: { id, product_id, branch_id } }',
+  })
   async addLine(
     @Param('saleId', ParseUUIDPipe) saleId: string,
     @Body() dto: AddSaleLineDto,
@@ -318,6 +333,18 @@ export class SalesController {
   @ApiResponse({
     status: 404,
     description: 'Sale, line, or supplier not found',
+  })
+  @ApiResponse({
+    status: 409,
+    description:
+      "Editing an external line's imei_snapshot. One of: (1) the new value " +
+      'is a live unit of this shop (IN_STOCK, WRITTEN_OFF or INSPECTION): ' +
+      "{ message: \"<IMEI | Serial number> '<value>' is currently in your " +
+      'stock (status: <status>). If you meant to sell your own inventory, ' +
+      'remove external_supplier_id.", existing_unit: { id, product_id, ' +
+      'branch_id } }. (2) Another line of this sale already has it: ' +
+      "{ message: 'This item is already added to the current sale.', " +
+      "code: 'ITEM_ALREADY_IN_SALE', sale_line_id }",
   })
   async updateLine(
     @Param('saleId', ParseUUIDPipe) saleId: string,

@@ -92,7 +92,7 @@ IMEI X:  U1  new SKU   cost 85000  SOLD      ← sale A line
 
 Every ProductUnit row is to have a `unit_code`: `SLU` and at least eight digits, such as `SLU00000123`. It is a short, permanent identifier for a barcode, and it reveals no IMEI or serial number. Printing it on labels is a later stage; this section covers the code and scanning it.
 
-**Status:** the code and the `AddProductUnitCodes` migration are written, but the migration has not been run on any database and its e2e spec has never been executed. This section describes the intended behaviour, unverified against a real database.
+**Status:** `AddProductUnitCodes` is in source, and has been applied and checked on the two local databases, `socio_lk_pos_dev` and `socio_lk_pos_test`: every row got a valid, unique code, and IMEI and serial values were unchanged. It hasn't been verified on any other database; apply it there before running this backend (see below). The e2e spec (`product-unit-codes.e2e-spec.ts`) has not been executed.
 
 **Deployment order: apply the migration before deploying or running this backend.** There is no compatibility fallback for a database without `unit_code`. The backend still starts, then fails request by request: the till's lookup returns 500, which stops almost every POS scan, product barcodes included, along with unit reads, serialized sales, voids, returns and unit intake. The previous backend keeps working on a migrated database, because it leaves the column out and the default fills it.
 
@@ -141,6 +141,9 @@ Every ProductUnit row is to have a `unit_code`: `SLU` and at least eight digits,
 - **Mode changes are forbidden on update.** Remove and re-add the line instead.
 - **A unit code is accepted in place of the IMEI** on an in-house line and stored as the real identifier; on an external line it is refused (see [Unit codes](#unit-codes)).
 - **Multiple DRAFTs may hold the same IMEI.** The first to complete wins; later completes get 409 from `markSoldForSale` and roll back entirely.
+- **One physical item per sale.** Within a single sale, `addLine` refuses a second line for an item already on it: the same `product_unit_id`, or the same IMEI or serial number in `imei_snapshot`. It checks after resolving what was scanned, so a unit's code, IMEI and serial number all count as one item. The answer is 409 `{ message: 'This item is already added to the current sale.', code: 'ITEM_ALREADY_IN_SALE', sale_line_id }`, naming the line that already holds it; that line is left unchanged. Matching is exact. Lines with neither a unit nor an identifier (quantity products, a serial-tracked item added without a serial number) aren't checked. This is not a reservation: separate drafts may still hold the same unit, as above.
+- **An external line's IMEI can't be edited to one already on the sale.** `PATCH /sales/:saleId/lines/:lineId` gets the same 409 for an IMEI or serial number another line of the sale has; keeping the line's own value is allowed.
+- **A line pinned to a unit stays at quantity 1**, whatever the product's `is_serialized` flag says. On a product not flagged serialized, a quantity change on such a line is 400 `quantity must be 1 on the line of a single item`; serialized products keep their own quantity check.
 - **Lock order inside the per-line loop is Stock, then ProductUnit.**
 
 ### Trade-ins (Slice G)
@@ -209,7 +212,7 @@ All endpoints are prefixed with `/api/v1` and require the `access_token` cookie.
 | Endpoint | Change |
 |----------|--------|
 | `POST /sales`, `PATCH /sales/:id` | `customer_id` validated (Slice B) |
-| `POST /sales/:saleId/lines` | Serialized modes; 409 `existing_unit` on unavailable IMEI (Slice E) |
+| `POST /sales/:saleId/lines` | Serialized modes; 409 `existing_unit` on unavailable IMEI (Slice E); 409 `ITEM_ALREADY_IN_SALE` for an item already on the sale (unit codes) |
 | `PATCH /sales/:saleId/lines/:lineId` | Mode-aware frozen fields (Slice E) |
 | `POST /sales/:saleId/payments` | `TRADE_IN` method + `trade_in_*` fields; 409 on IMEI collision (Slice G) |
 | `PATCH /sales/:saleId/payments/:paymentId` | TRADE_IN frozen except `notes` (Slice G) |
@@ -235,7 +238,7 @@ Seven migrations, in dependency order, plus those added later:
 | 7 | `add-trade-in-columns-to-payments` | G | Six `trade_in_*` columns, two FKs, four CHKs, partial unique index; `TRADE_IN` added to `CHK_payments_method` |
 | 8 | `ProductUnitsImeiUniqueWhenLive` | buy-back | Replaces the global unique `idx_product_units_imei` with `uq_product_units_imei_live` (`WHERE status IN ('IN_STOCK', 'WRITTEN_OFF')`) plus a plain `idx_product_units_imei`. **`down` fails once any IMEI has more than one row** (a buy-back happened); those rows are history and must not be deleted to force a revert |
 | 9 | `AddProductUnitInspectionStatus` | Phase 6.4 P7 0a | Adds `INSPECTION` to `CHK_product_units_status` and to the `uq_product_units_imei_live` WHERE clause. **`down` refuses while any unit is INSPECTION** (returned phones waiting for a check) and changes nothing; pass or resolve them first. The entity now names all three `product_units` CHECKs as the migrations do |
-| 10 | `AddProductUnitCodes` | unit codes | **Written, not yet run.** `unit_code` (`text`, NOT NULL), the sequence `product_unit_code_seq` (owned by the column, so `TRUNCATE ... RESTART IDENTITY` resets it), `next_product_unit_code()` as its default, `CHK_product_units_unit_code`, and the full unique index `uq_product_units_unit_code`. Backfills every row in `created_at, id` order, then moves the sequence past them. **Apply it before deploying this backend, and it is forward-only once labels are printed:** see below |
+| 10 | `AddProductUnitCodes` | unit codes | **Applied and checked on the local dev and test databases; unverified elsewhere.** `unit_code` (`text`, NOT NULL), the sequence `product_unit_code_seq` (owned by the column, so `TRUNCATE ... RESTART IDENTITY` resets it), `next_product_unit_code()` as its default, `CHK_product_units_unit_code`, and the full unique index `uq_product_units_unit_code`. Backfills every row in `created_at, id` order, then moves the sequence past them. **Apply it before deploying this backend, and it is forward-only once labels are printed:** see below |
 
 **Apply `AddProductUnitCodes` before deploying or running the backend that expects it.** There is no compatibility fallback: see [Unit codes](#unit-codes).
 
