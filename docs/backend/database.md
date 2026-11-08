@@ -329,7 +329,7 @@ Per-product, per-branch inventory quantities.
 
 One row per acquisition of an individually tracked item (IMEI or serial number). The full lifecycle is in [used-phones.md](./used-phones.md#productunit-lifecycle).
 
-**`AddProductUnitCodes` is written but has not been run on any database.** Apply it before deploying or running the backend that expects `unit_code`: there is no compatibility fallback for a database without the column.
+**`AddProductUnitCodes` is in source, and has been applied and checked on the local `socio_lk_pos_dev` and `socio_lk_pos_test` databases.** Apply it to any other database before running the backend that expects `unit_code`: there is no compatibility fallback for a database without the column.
 
 | Column | Type | Notes |
 |--------|------|-------|

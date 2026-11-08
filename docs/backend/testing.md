@@ -36,7 +36,19 @@ The e2e reset wipes every table, so each of these must hold first. A failure sto
 
 `npm run migration:run:test` follows the first two rules. With `NODE_ENV=test`, `src/database/data-source.ts` calls `loadTestEnv` as it loads, and the TypeORM CLI only connects after that. It doesn't read `.env`, so a key missing from `.env.test` and the shell fails validation. Commands without `NODE_ENV=test`, such as `migration:run`, are unchanged.
 
-**Status:** these checks have unit tests that use no database. They have not yet run in a real e2e run or migration.
+**Status, as of 7 November 2026.** What each check has actually been proven by:
+
+| Check | Unit tests | Real wiring | e2e |
+|-------|-----------|-------------|-----|
+| `.env.test` must load | Yes, with real dotenv and a temporary file | Not tested: it would mean renaming the real file | Not run |
+| `DB_NAME` exactly `socio_lk_pos_test` | Yes | The real `test/load-test-env.ts` and `npm run migration:run:test` refused fake values | Not run |
+| Local `DB_HOST` | Yes | The same two refused fake hosts | Not run |
+| Test path in `data-source.ts` | Yes, with TypeORM and dotenv mocked | Refused fake values; `migration:run:test` then passed and migrated the real test database | Not applicable |
+| `current_database()` before truncating | Yes, with a stand-in connection | Not exercised against a real database | Not run |
+
+- **Unit tests** check the rules in isolation, with no database.
+- **Real wiring** means the actual file or command ran. For the refusals it ran with fake names and hosts and a dead port, so nothing could connect; no spec, app or reset ran.
+- **e2e** would mean a Jest e2e run reaching `truncateAllTables`. None has happened: `product-unit-codes.e2e-spec.ts` has never been executed, so the reset protection is unproven against a real database.
 
 ## E2E Setup Helper (`test/setup.ts`)
 
