@@ -113,19 +113,80 @@ export const clampWidth = (value, size) => {
   return clamp(round(number), MIN_WIDTH_MM, LABEL_MM[size].widthMm);
 };
 
+/** Whether an item is turned a quarter (standing upright). */
+export const isQuarterTurn = (item) => item.rotation % 180 !== 0;
+
 /**
- * A position kept on the label: the item's unrotated box stays inside it.
- * A turned item can still reach past the edge; the fit check flags that.
- * A move snaps to 0.5 mm; a stored position (`snap` false) is kept as is,
- * so nothing shifts on reload.
+ * Where an item's top-left may go along one axis so that what is seen,
+ * the turned box, stays on the label. An item turns about its centre, so
+ * its box (`boxMm` long on this axis) and what is seen (`seenMm`) share a
+ * centre. If what is seen is longer than the label, the centre may go
+ * anywhere on the label (the fit check flags it).
+ */
+const axisRange = (labelMm, boxMm, seenMm) => {
+  const half = seenMm / 2;
+  const [low, high] = seenMm <= labelMm ? [half, labelMm - half] : [0, labelMm];
+  return [low - boxMm / 2, high - boxMm / 2];
+};
+
+const clampAxis = (value, [low, high], snap) => {
+  // + 0 turns -0 into 0.
+  if (!snap) return clamp(value, low, high) + 0;
+  // Snap to 0.5 mm, inside the range when a 0.5 mm step fits in it.
+  const lowStep = Math.ceil(low / POSITION_STEP_MM - 1e-9) * POSITION_STEP_MM;
+  const highStep = Math.floor(high / POSITION_STEP_MM + 1e-9) * POSITION_STEP_MM;
+  return (lowStep <= highStep ? clamp(round(value), lowStep, highStep) : clamp(value, low, high)) + 0;
+};
+
+/**
+ * A position kept on the label, judged by what is seen: a turned item may
+ * go wherever its turned box fits, even with its unturned box past the
+ * edge. A move snaps to 0.5 mm; a stored position (`snap` false) is kept
+ * as is, so nothing shifts on reload.
  */
 export const clampPosition = (size, id, item, x, y, { snap = true } = {}) => {
   const { widthMm, heightMm } = LABEL_MM[size];
-  const place = (value) => (snap ? round(value) : value);
+  const boxW = item.widthMm;
+  const boxH = itemHeightMm(id, item);
+  const [seenW, seenH] = isQuarterTurn(item) ? [boxH, boxW] : [boxW, boxH];
   return {
-    x: clamp(place(x), 0, Math.max(0, widthMm - item.widthMm)),
-    y: clamp(place(y), 0, Math.max(0, heightMm - itemHeightMm(id, item))),
+    x: clampAxis(x, axisRange(widthMm, boxW, seenW), snap),
+    y: clampAxis(y, axisRange(heightMm, boxH, seenH), snap),
   };
+};
+
+/**
+ * The longest an item may be: the label's width, or, standing upright,
+ * the label's height. Leaves the 1.5 mm margin when that still allows 5 mm.
+ */
+export const maxWidthMm = (size, item) => {
+  const { widthMm, heightMm } = LABEL_MM[size];
+  return isQuarterTurn(item) ? Math.max(MIN_WIDTH_MM, heightMm - 2 * MARGIN_MM) : widthMm;
+};
+
+/**
+ * Turn an item a quarter, about its centre. Standing upright, a long item
+ * is shortened to the label's height, so it fits instead of crossing the
+ * whole label; it then stays where it was, kept on the label.
+ */
+export const rotateItem = (size, id, item) => {
+  const turned = { ...item, rotation: nextRotation(item.rotation) };
+  const longest = maxWidthMm(size, turned);
+  if (turned.widthMm > longest) {
+    const shorten = turned.widthMm - longest;
+    turned.widthMm = Math.floor(longest / POSITION_STEP_MM) * POSITION_STEP_MM;
+    turned.x = item.x + shorten / 2;
+  }
+  return { ...turned, ...clampPosition(size, id, turned, turned.x, turned.y) };
+};
+
+/**
+ * Apply a change to an item and keep it on the label: a wider, taller or
+ * larger item is moved back if it now reaches past the edge.
+ */
+export const resizeItem = (size, id, item, changes) => {
+  const next = { ...item, ...changes };
+  return { ...next, ...clampPosition(size, id, next, next.x, next.y, { snap: false }) };
 };
 
 /** The next quarter turn. */

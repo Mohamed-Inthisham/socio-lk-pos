@@ -10,7 +10,10 @@ import {
   itemPlacement,
   layoutFor,
   loadLayouts,
+  maxWidthMm,
   nextRotation,
+  resizeItem,
+  rotateItem,
   normalizeLayout,
   saveLayouts,
   textStyle,
@@ -69,6 +72,45 @@ describe("labelDesign", () => {
     expect(clampWidth(2, "30x20")).toBe(5);
     expect(clampWidth(80, "30x20")).toBe(30);
     expect(clampWidth("x", "30x20")).toBeNull();
+  });
+
+  it("shortens a long item turned upright to the label's height, and keeps its centre", () => {
+    const brand = defaultLayout("30x20", "PRODUCT").brand; // 27 mm wide
+    const turned = rotateItem("30x20", "brand", brand);
+
+    expect(turned.rotation).toBe(90);
+    expect(turned.widthMm).toBe(17); // 20 mm high label, less 1.5 mm each side
+    expect(turned.x + turned.widthMm / 2).toBeCloseTo(brand.x + brand.widthMm / 2, 0);
+    expect(rotateItem("30x20", "brand", turned).widthMm).toBe(17); // 180°: stays shortened
+  });
+
+  it("lets a turned item go anywhere it fits, judged by what is seen", () => {
+    const turned = rotateItem("30x20", "brand", defaultLayout("30x20", "PRODUCT").brand);
+    const h = itemHeightMm("brand", turned);
+
+    // Right to the left edge: its unturned box starts left of the label.
+    const left = clampPosition("30x20", "brand", turned, -50, 0);
+    expect(left.x + turned.widthMm / 2 - h / 2).toBeGreaterThanOrEqual(-0.01);
+    expect(left.x).toBeLessThan(0);
+    // And right to the right edge.
+    const right = clampPosition("30x20", "brand", turned, 99, 0);
+    expect(right.x + turned.widthMm / 2 + h / 2).toBeLessThanOrEqual(30.01);
+    expect(right.x + turned.widthMm / 2).toBeGreaterThan(28);
+    // Upright, it spans 17 mm of the 20 mm height: its centre moves between
+    // 8.5 and 11.5 mm (it turns about its centre).
+    expect(clampPosition("30x20", "brand", turned, 0, -50).y + h / 2).toBeCloseTo(8.5, 0);
+    expect(clampPosition("30x20", "brand", turned, 0, 99).y + h / 2).toBeCloseTo(11.5, 0);
+  });
+
+  it("caps an upright item's width at the label's height, and keeps a resized item on the label", () => {
+    const turned = { ...defaultLayout("50x25", "UNIT").price, rotation: 90 };
+    expect(maxWidthMm("50x25", turned)).toBe(22);
+    expect(maxWidthMm("50x25", { ...turned, rotation: 0 })).toBe(50);
+
+    const nearEdge = { ...defaultLayout("50x25", "UNIT").price, x: 30, widthMm: 15 };
+    const wider = resizeItem("50x25", "price", nearEdge, { widthMm: 30 });
+    expect(wider.widthMm).toBe(30);
+    expect(wider.x + wider.widthMm).toBeLessThanOrEqual(50);
   });
 
   it("turns a quarter at a time, back to 0", () => {

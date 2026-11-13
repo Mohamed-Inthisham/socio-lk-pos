@@ -33,7 +33,9 @@ import {
   clampWidth,
   itemPlacement,
   layoutFor,
-  nextRotation,
+  maxWidthMm,
+  resizeItem,
+  rotateItem,
   updateItem,
 } from "./labelDesign";
 import { ItemContent } from "./LabelFace";
@@ -121,6 +123,8 @@ const LabelDesigner = ({ size, layouts, onChange }) => {
 
   const setLayout = (next) => onChange({ ...layouts, [size]: { ...layouts[size], [kind]: next } });
   const change = (id, changes) => setLayout(updateItem(layout, id, changes));
+  // A size change that keeps the item on the label.
+  const resize = (id, changes) => setLayout(updateItem(layout, id, resizeItem(size, id, layout[id], changes)));
   const moveTo = (id, x, y) => change(id, clampPosition(size, id, layout[id], x, y));
   const resetLayout = () => {
     const rest = { ...layouts[size] };
@@ -218,14 +222,14 @@ const LabelDesigner = ({ size, layouts, onChange }) => {
               <span className={caption}>Selected</span>
               <span className="flex h-9 items-center rounded-lg bg-cyan-600/10 px-3 text-sm font-semibold text-cyan-700 dark:text-cyan-300">{info.label}</span>
             </div>
-            <Stepper name="X position" label="X" value={item.x} step={POSITION_STEP_MM} min={0} max={widthMm} unit="mm" clamp={(v) => (v === "" || !Number.isFinite(Number(v)) ? null : Number(v))} onChange={(x) => moveTo(current, x, item.y)} />
-            <Stepper name="Y position" label="Y" value={item.y} step={POSITION_STEP_MM} min={0} max={heightMm} unit="mm" clamp={(v) => (v === "" || !Number.isFinite(Number(v)) ? null : Number(v))} onChange={(y) => moveTo(current, item.x, y)} />
-            <Stepper name="Width" label="Width" value={item.widthMm} step={POSITION_STEP_MM} min={MIN_WIDTH_MM} max={widthMm} unit="mm" clamp={(v) => clampWidth(v, size)} onChange={(w) => change(current, { widthMm: w })} />
+            <Stepper name="X position" label="X" value={item.x} step={POSITION_STEP_MM} min={-item.widthMm} max={widthMm} unit="mm" clamp={(v) => (v === "" || !Number.isFinite(Number(v)) ? null : Number(v))} onChange={(x) => moveTo(current, x, item.y)} />
+            <Stepper name="Y position" label="Y" value={item.y} step={POSITION_STEP_MM} min={-item.widthMm} max={heightMm} unit="mm" clamp={(v) => (v === "" || !Number.isFinite(Number(v)) ? null : Number(v))} onChange={(y) => moveTo(current, item.x, y)} />
+            <Stepper name="Width" label="Width" value={item.widthMm} step={POSITION_STEP_MM} min={MIN_WIDTH_MM} max={maxWidthMm(size, item)} unit="mm" clamp={(v) => { const w = clampWidth(v, size); return w === null ? null : Math.min(w, maxWidthMm(size, item)); }} onChange={(w) => resize(current, { widthMm: w })} />
             {current === "barcode" ? (
-              <Stepper name="Height" label="Height" value={item.heightMm} step={POSITION_STEP_MM} min={MIN_BARCODE_MM} max={MAX_BARCODE_MM} unit="mm" clamp={clampBarcodeHeight} onChange={(h) => change(current, { heightMm: h })} />
+              <Stepper name="Height" label="Height" value={item.heightMm} step={POSITION_STEP_MM} min={MIN_BARCODE_MM} max={MAX_BARCODE_MM} unit="mm" clamp={clampBarcodeHeight} onChange={(h) => resize(current, { heightMm: h })} />
             ) : (
               <>
-                <Stepper name="Font size" label="Font size" value={item.sizePt} step={FONT_STEP_PT} min={MIN_FONT_PT} max={MAX_FONT_PT} unit="pt" clamp={clampFont} onChange={(sizePt) => change(current, { sizePt })} />
+                <Stepper name="Font size" label="Font size" value={item.sizePt} step={FONT_STEP_PT} min={MIN_FONT_PT} max={MAX_FONT_PT} unit="pt" clamp={clampFont} onChange={(sizePt) => resize(current, { sizePt })} />
                 <div className="flex flex-col gap-1">
                   <span className={caption}>Style</span>
                   <div className={group}>
@@ -245,7 +249,7 @@ const LabelDesigner = ({ size, layouts, onChange }) => {
             )}
             <div className="flex flex-col gap-1">
               <span className={caption}>Rotate</span>
-              <button type="button" aria-label={`Rotate (now ${item.rotation}°)`} onClick={() => change(current, { rotation: nextRotation(item.rotation) })} className={`${group} gap-1.5 px-3 text-sm text-slate-700 hover:bg-slate-100 dark:text-slate-200 dark:hover:bg-slate-700`}>
+              <button type="button" aria-label={`Rotate (now ${item.rotation}°)`} onClick={() => setLayout(updateItem(layout, current, rotateItem(size, current, item)))} className={`${group} gap-1.5 px-3 text-sm text-slate-700 hover:bg-slate-100 dark:text-slate-200 dark:hover:bg-slate-700`}>
                 <RotateCw size={15} /><span className="tabular-nums">{item.rotation}°</span>
               </button>
             </div>

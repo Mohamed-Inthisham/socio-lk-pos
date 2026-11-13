@@ -179,6 +179,24 @@ describe("BarcodeLabels: visual label designer", () => {
     expect(printedFor("PRODUCT").style).toMatchObject({ width: "50mm", height: "25mm" });
   });
 
+  it("turns a full-width item upright to fit, then lets it move anywhere it fits", async () => {
+    const user = userEvent.setup();
+    renderWithProviders(<BarcodeLabels />, { preloadedState: { auth: authState(admin) } });
+    await user.selectOptions(screen.getByLabelText("Label size"), "30x20");
+
+    await user.click(canvasItem("SOCIO.LK brand"));
+    expect(within(toolbar()).getByLabelText("Width")).toHaveValue(27);
+    await user.click(within(toolbar()).getByRole("button", { name: "Rotate (now 0°)" }));
+
+    expect(within(toolbar()).getByLabelText("Width")).toHaveValue(17);
+    expect(within(toolbar()).getByRole("button", { name: "Increase Width" })).toBeDisabled();
+    // Nudge it all the way right: well past the 3 mm an unturned 27 mm box allowed.
+    canvasItem("SOCIO.LK brand").focus();
+    for (let i = 0; i < 10; i += 1) await user.keyboard("{Shift>}{ArrowRight}{/Shift}");
+    const x = Number(within(toolbar()).getByLabelText("X position").value);
+    expect(x + 17 / 2).toBeGreaterThan(27); // its centre near the right edge
+  });
+
   it("sets the barcode's height and width", async () => {
     const { user } = await previewBoth();
     const start = defaultLayout("50x25", "PRODUCT").barcode;
