@@ -18,4 +18,5 @@ Reference docs for the SOCIO.LK POS backend (NestJS + PostgreSQL + TypeORM).
 - [Stock Movement Ledger](./stock-ledger.md) — Every stock and unit change recorded, opening balances, stale-adjustment 409, reconciliation and deployment (Phase 1 T1)
 - [Cash Days](./cash-days.md) — Daily opening and closing balance, expected cash, the day summary (Phase 6.4 P9)
 - [Used Phones Backend](./used-phones.md) — Customers, per-IMEI ProductUnits, phone purchase intake, serialized sale lines, trade-ins (Phase 6.3.5)
+- [Barcode Labels Backend](./barcode-labels.md) — Product and unit label search, print queue resolution, `unit_code` barcodes, no cost prices (Stage 2)
 - [Testing](./testing.md) — Test DB, unit and e2e patterns

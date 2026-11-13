@@ -68,6 +68,7 @@ If the route uses a DTO, ensure every field on that DTO has `@ApiProperty` or `@
 
 - **Admins and managers:** `GET /product-units`, `GET /product-units/search`, `GET /product-units/:id`, `GET /product-units/:id/details` and `POST /product-units/:id/inspection-pass`.
 - **Admins, managers and cashiers:** `GET /phone-purchases`, `GET /phone-purchases/:id` and `POST /phone-purchases`, through each purchase's `product_units`. The code reveals no IMEI or serial number, and these responses already carry the IMEI.
+- **Barcode labels (admins and managers):** `GET /barcode-labels/units` and `POST /barcode-labels/resolve` return `unit_code` as the value a unit label's barcode encodes, with the real IMEI or serial number as `identifier`, for readable text only. See [barcode-labels.md](./barcode-labels.md).
 
 The till's `GET /product-units/sellable/by-identifier/:identifier` accepts a code but never returns one: its `identifier` is the unit's real IMEI or serial number, and `unitId` is the unit's id, which the till sends back as `product_unit_id` on `POST /sales/:saleId/lines`. Sale responses carry no code. The rules are in [used-phones.md](./used-phones.md#unit-codes).
 

@@ -333,6 +333,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - 1️⃣ A sale line pinned to a physical unit stays at quantity 1, whatever the product's `is_serialized` flag says
 - 🔤 ScanBar: a typed SLU code no longer runs the product-name search or opens its "No products match" dropdown; Enter still resolves it through the unit lookup
 
+#### Barcode Labels Backend (Stage 2)
+- ⚠️ **Status:** backend only. The Barcode Labels page doesn't use these endpoints yet (Stage 3). `test/barcode-labels.e2e-spec.ts` has not been executed. No migration
+- 🏷️ `GET /barcode-labels/products`: active QUANTITY-tracked products for product-level labels, searchable by name, SKU or barcode (`%` and `_` literal), paginated
+- 📱 `GET /barcode-labels/units`: IN_STOCK units of active IMEI- or serial-tracked products, searchable by IMEI, serial number, unit code, SKU or name. `unit_code` is the barcode value; the real IMEI or serial number is `identifier`, with `identifier_type`; the price is the unit's, else the product's
+- 🧾 `POST /barcode-labels/resolve`: a mixed PRODUCT/UNIT print queue checked as a whole and returned in order, with `total_labels` (at most 500). One 400 `INVALID_LABEL_ITEMS` lists every item that can't be printed (duplicate, unknown, inactive, wrong tracking, not in stock, another branch); over 500 labels is 400 `LABEL_LIMIT_EXCEEDED`
+- 🔒 Admins and managers only; units are branch-scoped with `scopeBranch` (another branch is 403 `WRONG_BRANCH`, and another branch's unit is the same `UNIT_NOT_FOUND` as an unknown one)
+- 💸 No buying or cost price, customer, sale or sale line in any label response: rows are built field by field from named columns
+- 📖 Swagger under "Barcode Labels", with a `oneOf`/`kind` discriminator for the queue's rows; `docs/backend/barcode-labels.md`
+- 🧪 Unit specs for the service, controller access, request validation and the Swagger document (no database); an e2e spec for the three endpoints
+
 ### Changed
 - Migrated `LoginForm` from local state to Redux state management
 - Updated `App.jsx` with React Router setup and protected routes

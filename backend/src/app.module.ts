@@ -29,6 +29,7 @@ import { PhonePurchasesModule } from './phone-purchases/phone-purchases.module';
 import { ApprovalsModule } from './approvals/approvals.module';
 import { CashDaysModule } from './cash-days/cash-days.module';
 import { StockPurchasesModule } from './stock-purchases/stock-purchases.module';
+import { BarcodeLabelsModule } from './barcode-labels/barcode-labels.module';
 
 @Module({
   imports: [
@@ -69,6 +70,7 @@ import { StockPurchasesModule } from './stock-purchases/stock-purchases.module';
     ApprovalsModule,
     CashDaysModule,
     StockPurchasesModule,
+    BarcodeLabelsModule,
   ],
   controllers: [AppController],
   providers: [
