@@ -343,6 +343,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - 📖 Swagger under "Barcode Labels", with a `oneOf`/`kind` discriminator for the queue's rows; `docs/backend/barcode-labels.md`
 - 🧪 Unit specs for the service, controller access, request validation and the Swagger document (no database); an e2e spec for the three endpoints
 
+#### Barcode Labels Page (Stage 3)
+- ⚠️ **Status:** not yet checked on a label printer or with a scanner
+- 🔎 The page searches `GET /barcode-labels/products` and `GET /barcode-labels/units` on the server (2+ characters, 20 a page, Previous/Next) instead of loading the first 200 products and every in-stock unit
+- 🧺 One mixed queue in the order items were added: a product once, with Copies (1–500); each IMEI or serial unit as its own entry. Different units of one product can be queued together; nothing is queued twice. The total is shown against the 500-label limit
+- 👀 Preview labels resolves the whole queue (`POST /barcode-labels/resolve`); Print Labels prints only a preview matching the current queue. A refused queue shows the server's message and each bad item's reason, and nothing is drawn or printed
+- 🏷️ Unit labels encode `unit_code`, with the IMEI or serial number as text only; product labels still encode the product barcode. Every label shows SOCIO.LK
+- 💸 The "Cost price" option is gone: labels show the selling price only, drawn from the label fields the server returns
+
 ### Changed
 - Migrated `LoginForm` from local state to Redux state management
 - Updated `App.jsx` with React Router setup and protected routes

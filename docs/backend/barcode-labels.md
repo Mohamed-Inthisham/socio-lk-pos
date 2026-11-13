@@ -2,7 +2,7 @@
 
 Endpoints the Barcode Labels page uses to find what to label and turn a print queue into label rows. This is Stage 2 of the unit barcode labels work; Stage 1 added `product_units.unit_code` and POS scanning by unit code ([used-phones.md](./used-phones.md#unit-codes)).
 
-**Status:** the backend is complete. The Barcode Labels page (`frontend/src/pages/BarcodeLabels`) does not use these endpoints yet: that is Stage 3. Until then the page still builds labels in the browser from `GET /products` and `GET /product-units`. It encodes the raw IMEI or serial number and can print a cost price, which these endpoints never do. `test/barcode-labels.e2e-spec.ts` has not been executed yet.
+**Status:** the backend (Stage 2) and the Barcode Labels page (Stage 3, `frontend/src/pages/BarcodeLabels`, see [api-integration.md](../frontend/api-integration.md#barcode-labels-page)) both use these endpoints. `test/barcode-labels.e2e-spec.ts` has not been executed yet, and printed labels have not been checked on a label printer or with a scanner.
 
 Code: `backend/src/barcode-labels/`.
 
@@ -207,5 +207,4 @@ Under the **Barcode Labels** tag. The two search responses are `{ data, meta }` 
 
 ## Not in this stage
 
-- **The Barcode Labels page**, which is Stage 3: moving it to these endpoints, encoding `unit_code`, and removing its cost-price option.
 - **Product barcodes shaped like a unit code** (see `FOLLOWUPS.md`). A product's `barcode` accepts any text, and the till tries a unit-code lookup first, so a product barcode such as `SLU00000042` would not scan as that product.

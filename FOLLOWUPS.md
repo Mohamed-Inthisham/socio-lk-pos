@@ -190,7 +190,6 @@ Non-blocking issues and tech debt to address opportunistically. When you fix one
 
 ## Frontend
 
-- **The Barcode Labels page still builds labels in the browser.** **Stage 3 of barcode labels.** `frontend/src/pages/BarcodeLabels` loads the first 200 products and every in-stock unit, encodes the raw IMEI or serial number in unit barcodes rather than `unit_code`, and offers a "Cost price" option that prints the buying price on the label. Fix: move it to `GET /barcode-labels/products`, `GET /barcode-labels/units` and `POST /barcode-labels/resolve` (`docs/backend/barcode-labels.md`), which encode `unit_code` and carry no cost. _[Barcode labels Stage 2]_
 - **Sweep 6 unused `eslint-disable` directives.** _[Path B]_
 - **Login response DTO vs `/auth/me` response shape drift.** _[Path B]_
 - **`ProductsList` loads only the first 200 products.** `GET /products` is now paginated (`limit` ≤ 200). The admin list requests one max-size page and still filters in memory (name/SKU/barcode); the header says "first N of M products" when the catalog is bigger. Fix: add a pager (or "Load more") and switch the text box to the server-side `search` param. Server `search` matches name only, so SKU/barcode matching would need extending it. _[products text search]_

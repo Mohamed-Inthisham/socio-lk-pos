@@ -105,6 +105,20 @@ This is why users appear to stay logged in for days — the refresh token (7 day
 
 **Rows.** A `NOT_TRACKED` product shows a dash for its quantity, and a `QUANTITY` product a dash for its identified units: neither is a zero. For admins, the Branches button opens each branch's stock, and `N low or out` beside it flags a shortage the combined status can hide.
 
+## Barcode Labels page
+
+`/barcode-labels` (`frontend/src/pages/BarcodeLabels`) uses `barcodeLabelsService.js`: `searchProductLabels` (`GET /barcode-labels/products`), `searchUnitLabels` (`GET /barcode-labels/units`) and `resolveLabelQueue` (`POST /barcode-labels/resolve`). The endpoints' rules are in [barcode-labels.md](../backend/barcode-labels.md).
+
+**Access.** Admins and managers only: the sidebar entry and `RoleProtectedRoute` hide it from cashiers, and the server refuses them anyway. An admin picks any branch, or All branches, for individual items. A manager sees their own branch as a fixed field, and the server holds them to it whatever is sent.
+
+**Searching.** Two tabs, Products (quantity-tracked products) and Individual items (in-stock IMEI and serial-number units), each a server-side search. The search runs 300 ms after typing stops and needs 2 characters. Results come 20 to a page, with Previous and Next.
+
+**The queue** keeps entries in the order they were added. A product is queued once, and its Copies field (1–500) sets how many labels it prints. Each unit is one entry and one label, and different units of the same product are separate entries. The total is shown against the 500-label limit, and Preview is disabled above it.
+
+**Preview, then print.** Preview labels sends the whole queue to `resolveLabelQueue`. Only the rows it returns are drawn, and Print Labels prints only a preview that matches the current queue: any change to the queue asks for a new preview. If the server refuses the queue, its message is shown and each refused item's reason appears on that item. Nothing is drawn or printed until every item is valid.
+
+**Labels.** Every label shows SOCIO.LK, and optionally the name, the code text and the selling price. A product label encodes the product's `barcode`, as before. A unit label encodes its `unit_code` and prints the IMEI or serial number as text only. There is no cost-price option, and the label is drawn from the server's label fields only, which carry no cost.
+
 ## Environment variables
 
 - **`VITE_API_BASE_URL`** — backend base URL (dev: `http://localhost:3000/api/v1`; prod: your deployed backend URL)
