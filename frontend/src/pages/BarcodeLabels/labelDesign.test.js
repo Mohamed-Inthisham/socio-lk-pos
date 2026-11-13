@@ -1,101 +1,136 @@
 import {
-  DEFAULT_DESIGN,
-  LINE_IDS,
+  KIND_ITEMS,
+  LABEL_MM,
   clampBarcodeHeight,
   clampFont,
-  contentBox,
-  lineStyle,
-  loadDesign,
-  moveLine,
-  normalizeDesign,
-  saveDesign,
-  updateLine,
+  clampPosition,
+  clampWidth,
+  defaultLayout,
+  itemHeightMm,
+  itemPlacement,
+  layoutFor,
+  loadLayouts,
+  nextRotation,
+  normalizeLayout,
+  saveLayouts,
+  textStyle,
+  updateItem,
 } from "./labelDesign";
 
 describe("labelDesign", () => {
   beforeEach(() => localStorage.clear());
 
-  it("starts with the lines in the label's usual order and look", () => {
-    expect(DEFAULT_DESIGN.order).toEqual(["brand", "name", "barcode", "code", "identifier", "price"]);
-    expect(DEFAULT_DESIGN.rotation).toBe(0);
-    expect(DEFAULT_DESIGN.lines.price).toMatchObject({ sizePt: 8, bold: true, align: "center" });
+  it.each(Object.keys(LABEL_MM).flatMap((size) => ["PRODUCT", "UNIT"].map((kind) => [size, kind])))(
+    "lays out a %s %s label top to bottom, every item inside the label",
+    (size, kind) => {
+      const layout = defaultLayout(size, kind);
+      const { widthMm, heightMm } = LABEL_MM[size];
+      expect(Object.keys(layout)).toEqual(KIND_ITEMS[kind]);
+      let previousBottom = -Infinity;
+      for (const id of KIND_ITEMS[kind]) {
+        const item = layout[id];
+        expect(item.x).toBeGreaterThanOrEqual(0);
+        expect(item.x + item.widthMm).toBeLessThanOrEqual(widthMm);
+        expect(item.y).toBeGreaterThanOrEqual(previousBottom - 0.05);
+        previousBottom = item.y + itemHeightMm(id, item);
+        expect(previousBottom).toBeLessThanOrEqual(heightMm + 0.05);
+        expect(item.rotation).toBe(0);
+      }
+      expect(layout.barcode.heightMm).toBeGreaterThanOrEqual(5);
+    },
+  );
+
+  it("has no IMEI item on a product label", () => {
+    expect(defaultLayout("50x25", "PRODUCT").identifier).toBeUndefined();
+    expect(defaultLayout("50x25", "UNIT").identifier).toMatchObject({ show: true });
   });
 
-  it("moves a line up or down, and not past either end", () => {
-    const up = moveLine(DEFAULT_DESIGN, "price", -1);
-    expect(up.order.slice(-2)).toEqual(["price", "identifier"]);
-    expect(moveLine(DEFAULT_DESIGN, "brand", -1)).toBe(DEFAULT_DESIGN);
-    expect(moveLine(DEFAULT_DESIGN, "price", 1)).toBe(DEFAULT_DESIGN);
-    expect(DEFAULT_DESIGN.order).toEqual(LINE_IDS);
+  it("keeps the old look by default: centred text, bold brand, name and price", () => {
+    const layout = defaultLayout("50x25", "UNIT");
+    expect(layout.brand).toMatchObject({ sizePt: 6, bold: true, align: "center" });
+    expect(layout.name).toMatchObject({ sizePt: 7, bold: true });
+    expect(layout.price).toMatchObject({ sizePt: 8, bold: true });
+    expect(layout.identifier).toMatchObject({ sizePt: 6, bold: false, italic: false });
   });
 
-  it("changes one line without touching the others", () => {
-    const next = updateLine(DEFAULT_DESIGN, "name", { italic: true, sizePt: 9 });
-    expect(next.lines.name).toMatchObject({ italic: true, sizePt: 9, bold: true });
-    expect(next.lines.price).toBe(DEFAULT_DESIGN.lines.price);
+  it("keeps a moved item on the label, in 0.5 mm steps", () => {
+    const layout = defaultLayout("50x25", "PRODUCT");
+    expect(clampPosition("50x25", "price", layout.price, 3.26, 4.8)).toEqual({ x: 3, y: 5 });
+    expect(clampPosition("50x25", "price", { ...layout.price, widthMm: 20 }, 99, 99).x).toBe(30);
+    expect(clampPosition("50x25", "barcode", { ...layout.barcode, heightMm: 10 }, -5, 99)).toEqual({ x: 0, y: 15 });
   });
 
-  it.each([
-    ["7.3", 7.5],
-    [2, 4],
-    [40, 16],
-    ["abc", null],
-  ])("clamps a font size %p to %p", (value, expected) => {
-    expect(clampFont(value)).toBe(expected);
+  it("clamps sizes, widths and heights, and refuses unreadable input", () => {
+    expect(clampFont("7.3")).toBe(7.5);
+    expect(clampFont(40)).toBe(16);
+    expect(clampFont("")).toBeNull();
+    expect(clampBarcodeHeight(3)).toBe(5);
+    expect(clampBarcodeHeight(12.3)).toBe(12.5);
+    expect(clampWidth(2, "30x20")).toBe(5);
+    expect(clampWidth(80, "30x20")).toBe(30);
+    expect(clampWidth("x", "30x20")).toBeNull();
   });
 
-  it.each([
-    [3, 5],
-    [12.6, 13],
-    [99, 20],
-    ["", 5],
-  ])("clamps a barcode height %p to %p", (value, expected) => {
-    expect(clampBarcodeHeight(value)).toBe(expected);
+  it("turns a quarter at a time, back to 0", () => {
+    expect([0, 90, 180, 270].map(nextRotation)).toEqual([90, 180, 270, 0]);
   });
 
-  it("turns styles into CSS", () => {
-    expect(lineStyle({ sizePt: 9.5, bold: false, italic: true, align: "right" })).toEqual({
-      fontSize: "9.5pt",
+  it("places an item in mm, turned about its centre", () => {
+    expect(itemPlacement("price", { x: 2, y: 3.5, widthMm: 20, rotation: 90 })).toEqual({
+      left: "2mm",
+      top: "3.5mm",
+      width: "20mm",
+      transform: "rotate(90deg)",
+    });
+    expect(itemPlacement("barcode", { x: 0, y: 0, widthMm: 40, heightMm: 10, rotation: 0 })).toMatchObject({
+      height: "10mm",
+      transform: undefined,
+    });
+    expect(textStyle({ sizePt: 9, bold: false, italic: true, align: "right" })).toEqual({
+      fontSize: "9pt",
       fontWeight: 400,
       fontStyle: "italic",
       textAlign: "right",
     });
   });
 
-  it("swaps the content box for a quarter turn, inside a 1.5 mm margin", () => {
-    expect(contentBox(50, 25, 0)).toEqual({ widthMm: 47, heightMm: 22 });
-    expect(contentBox(50, 25, 180)).toEqual({ widthMm: 47, heightMm: 22 });
-    expect(contentBox(50, 25, 90)).toEqual({ widthMm: 22, heightMm: 47 });
-    expect(contentBox(30, 20, 270)).toEqual({ widthMm: 17, heightMm: 27 });
+  it("changes one item without touching the others", () => {
+    const layout = defaultLayout("50x25", "UNIT");
+    const next = updateItem(layout, "price", { italic: true });
+    expect(next.price.italic).toBe(true);
+    expect(next.name).toBe(layout.name);
   });
 
-  it("repairs a stored design: bad values fall back, required lines show", () => {
-    const repaired = normalizeDesign({
-      rotation: 45,
-      order: ["price", "brand"],
-      barcodeHeightMm: "tall",
-      lines: {
-        price: { show: false, sizePt: 30, bold: "yes", align: "justify" },
+  it("repairs a stored layout: bad values fall back, required items show, positions stay on the label", () => {
+    const repaired = normalizeLayout(
+      {
+        price: { x: 999, y: -4, widthMm: 20, sizePt: 50, bold: "yes", align: "justify", rotation: 45, show: false },
         identifier: { show: false },
         brand: { show: false },
+        barcode: { heightMm: "tall" },
       },
-    });
+      "50x25",
+      "UNIT",
+    );
+    const base = defaultLayout("50x25", "UNIT");
 
-    expect(repaired.rotation).toBe(0);
-    expect(repaired.order).toEqual(LINE_IDS);
-    expect(repaired.barcodeHeightMm).toBe(12);
-    expect(repaired.lines.price).toEqual({ show: false, sizePt: 16, bold: true, italic: false, align: "center" });
-    expect(repaired.lines.identifier.show).toBe(true);
-    expect(repaired.lines.brand.show).toBe(true);
-    expect(normalizeDesign(null)).toBe(DEFAULT_DESIGN);
+    expect(repaired.price).toMatchObject({ x: 30, y: 0, widthMm: 20, sizePt: 16, bold: true, align: "center", rotation: 0, show: false });
+    expect(repaired.identifier.show).toBe(true);
+    expect(repaired.brand.show).toBe(true);
+    expect(repaired.barcode.heightMm).toBe(base.barcode.heightMm);
+    expect(normalizeLayout(null, "50x25", "UNIT")).toEqual(base);
   });
 
-  it("remembers a design in this browser, and survives broken storage", () => {
-    const design = updateLine(moveLine(DEFAULT_DESIGN, "price", -1), "name", { italic: true });
-    saveDesign({ ...design, rotation: 90 });
-    expect(loadDesign()).toEqual({ ...design, rotation: 90 });
+  it("remembers edited layouts per size and kind, and survives broken storage", () => {
+    const edited = updateItem(defaultLayout("40x20", "UNIT"), "price", { italic: true, x: 2 });
+    saveLayouts({ "40x20": { UNIT: edited } });
 
-    localStorage.setItem("socio-lk-barcode-label-design-v1", "{not json");
-    expect(loadDesign()).toBe(DEFAULT_DESIGN);
+    const loaded = loadLayouts();
+    expect(loaded["40x20"].UNIT.price).toMatchObject({ italic: true, x: 2 });
+    expect(layoutFor(loaded, "40x20", "PRODUCT")).toEqual(defaultLayout("40x20", "PRODUCT"));
+    expect(layoutFor(loaded, "50x25", "UNIT")).toEqual(defaultLayout("50x25", "UNIT"));
+
+    localStorage.setItem("socio-lk-barcode-label-layouts-v2", "{not json");
+    expect(loadLayouts()).toEqual({});
   });
 });

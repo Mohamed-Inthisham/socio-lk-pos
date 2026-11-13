@@ -92,8 +92,8 @@ describe("labelQueue", () => {
     const labels = expandLabels([{ ...productRow, quantity: 2 }]);
 
     expect(labels).toEqual([
-      { key: "0-p-1-0", name: "USB-C Charger", code: "SLP-000001", identifier: null, price: "4500.00" },
-      { key: "0-p-1-1", name: "USB-C Charger", code: "SLP-000001", identifier: null, price: "4500.00" },
+      { key: "0-p-1-0", kind: "PRODUCT", name: "USB-C Charger", code: "SLP-000001", identifier: null, price: "4500.00" },
+      { key: "0-p-1-1", kind: "PRODUCT", name: "USB-C Charger", code: "SLP-000001", identifier: null, price: "4500.00" },
     ]);
   });
 
@@ -109,7 +109,7 @@ describe("labelQueue", () => {
 
   it("carries no cost field into a label, even if a row had one", () => {
     const [label] = expandLabels([{ ...productRow, quantity: 1, buying_price: "999.00" }]);
-    expect(Object.keys(label).sort()).toEqual(["code", "identifier", "key", "name", "price"]);
+    expect(Object.keys(label).sort()).toEqual(["code", "identifier", "key", "kind", "name", "price"]);
     expect(JSON.stringify(label)).not.toContain("999.00");
   });
 

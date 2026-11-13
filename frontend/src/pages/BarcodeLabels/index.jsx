@@ -28,7 +28,6 @@ import {
   searchProductLabels,
   searchUnitLabels,
 } from "../../services/barcodeLabelsService";
-import { code128Bars } from "../../utils/code128";
 import {
   MAX_COPIES,
   MAX_LABELS,
@@ -45,8 +44,10 @@ import {
   toResolveItems,
   unitEntry,
 } from "./labelQueue";
-import { CONTENT_INSET_MM, contentBox, lineStyle, loadDesign, saveDesign } from "./labelDesign";
-import LabelDesignPanel from "./LabelDesignPanel";
+import { loadLayouts, saveLayouts } from "./labelDesign";
+import { LabelFace } from "./LabelFace";
+import { LABEL_CSS, labelProblems, money } from "./labelRender";
+import LabelDesigner from "./LabelDesigner";
 
 const PAGE_SIZE = 10;
 const MIN_SEARCH = 2;
@@ -59,12 +60,6 @@ const LABEL_SIZES = {
   "30x20": { width: "30mm", height: "20mm", widthMm: 30, heightMm: 20 },
 };
 const ZOOM_LEVELS = [1, 1.5, 2];
-// The label's margin around its content box (labelDesign CONTENT_INSET_MM), in CSS px.
-const MARGIN_PX = (CONTENT_INSET_MM * 96) / 25.4;
-const money = (value) =>
-  value === null || value === undefined || value === ""
-    ? ""
-    : new Intl.NumberFormat("en-LK", { style: "currency", currency: "LKR", maximumFractionDigits: 2 }).format(Number(value));
 
 // Theme classes, as the other admin pages use them (light and dark).
 const panel = "rounded-xl border border-slate-200 bg-white shadow-sm dark:border-slate-800 dark:bg-slate-900";
@@ -73,59 +68,6 @@ const fieldClass =
 const mutedText = "text-slate-500 dark:text-slate-400";
 const subtleButton =
   "inline-flex items-center gap-1.5 rounded-lg border border-slate-300 px-3 py-1.5 text-sm font-medium text-slate-700 hover:bg-slate-100 disabled:cursor-not-allowed disabled:opacity-40 dark:border-slate-700 dark:text-slate-200 dark:hover:bg-slate-800";
-
-// preserveAspectRatio="none": the bars fill the line's width and chosen
-// height. Every bar scales by the same factor, so the code reads the same.
-const BarcodeSvg = ({ value, heightMm }) => {
-  const encoded = code128Bars(value);
-  if (!encoded) return <div className="text-xs text-red-600">Code cannot be printed</div>;
-  const quiet = 10;
-  return (
-    <svg viewBox={`0 0 ${encoded.width + quiet * 2} 48`} preserveAspectRatio="none" className="barcode-svg" style={{ height: `${heightMm}mm` }} role="img" aria-label={`Barcode ${value}`}>
-      <rect width="100%" height="100%" fill="white" />
-      {encoded.bars.map((bar, index) => (
-        <rect key={index} x={bar.x + quiet} y="0" width={bar.width} height="48" fill="black" />
-      ))}
-    </svg>
-  );
-};
-
-/** The text a label line holds, or null when it shows nothing. */
-const lineText = (id, label, design) => {
-  const line = design.lines[id];
-  if (id === "brand") return "SOCIO.LK";
-  if (id === "name") return line.show ? label.name : null;
-  if (id === "code") return line.show ? label.code : null;
-  if (id === "identifier") return label.identifier ? `${label.identifier.label} ${label.identifier.value}` : null;
-  if (id === "price") return line.show && label.price ? money(label.price) : null;
-  return null;
-};
-
-/**
- * One label at its printed size. The print sheet and the screen preview
- * both draw this; only the preview wraps it in a scaled frame. The lines
- * follow the design's order and styles, in a content box turned by its
- * rotation inside the same label.
- */
-const LabelFace = ({ label, size, design }) => {
-  const box = contentBox(LABEL_SIZES[size].widthMm, LABEL_SIZES[size].heightMm, design.rotation);
-  return (
-    <article className="barcode-label" style={{ width: LABEL_SIZES[size].width, height: LABEL_SIZES[size].height }}>
-      <div
-        className="barcode-content"
-        style={{ width: `${box.widthMm}mm`, height: `${box.heightMm}mm`, transform: `translate(-50%, -50%) rotate(${design.rotation}deg)` }}
-      >
-        {design.order.map((id) => {
-          if (id === "barcode") return <BarcodeSvg key={id} value={label.code} heightMm={design.barcodeHeightMm} />;
-          const text = lineText(id, label, design);
-          return text === null ? null : (
-            <div key={id} className={`barcode-line barcode-${id}`} style={lineStyle(design.lines[id])}>{text}</div>
-          );
-        })}
-      </div>
-    </article>
-  );
-};
 
 /**
  * One server-side, paginated, debounced search. A search shorter than 2
@@ -320,8 +262,10 @@ const BarcodeLabels = () => {
   const [size, setSize] = useState("50x25");
   const [zoom, setZoom] = useState(2);
   // The label design (order, text styles, rotation), remembered in this browser.
-  const [design, setDesign] = useState(loadDesign);
-  useEffect(() => saveDesign(design), [design]);
+  // Label layouts edited in the designer, per size and kind, remembered in
+  // this browser. Sizes and kinds never edited use the default layout.
+  const [layouts, setLayouts] = useState(loadLayouts);
+  useEffect(() => saveLayouts(layouts), [layouts]);
   // The last resolved queue: { rows, totalLabels, signature }.
   const [resolved, setResolved] = useState(null);
   const [resolving, setResolving] = useState(false);
@@ -368,28 +312,18 @@ const BarcodeLabels = () => {
   const labels = useMemo(() => (previewCurrent ? expandLabels(resolved.rows) : []), [previewCurrent, resolved]);
   const entries = useMemo(() => (previewCurrent ? previewEntries(resolved.rows) : []), [previewCurrent, resolved]);
 
-  // Labels whose lines don't fit the chosen size and design: measured on the
-  // preview's content box, before any transform (a transform changes no
-  // scroll or client size), so it holds rotated or not.
-  // - Too tall: a crowded box may spill into the label's 1.5 mm margin and
-  //   still print, as the labels always have; past the margin the label's
-  //   edge cuts it off. Centred lines overflow both ends equally, so the
-  //   bottom overflow (scrollHeight counts only that end) tells.
-  // - Too wide: a line cut short with "…" (an IMEI or a price loses digits).
-  //   A long name is shortened by design, so the name line isn't counted.
+  // Preview labels with an item past the label's edge or a text cut short
+  // (labelProblems: a long name is shortened by design and doesn't count).
   const [overflowing, setOverflowing] = useState(() => new Set());
   useLayoutEffect(() => {
     const keys = new Set();
     previewRef.current?.querySelectorAll("[data-entry-key]").forEach((item) => {
-      const content = item.querySelector(".barcode-content");
-      if (!content) return;
-      const tooTall = content.scrollHeight - content.clientHeight > MARGIN_PX + 1;
-      const cutShort = [...content.querySelectorAll(".barcode-line:not(.barcode-name)")].some((line) => line.scrollWidth > line.clientWidth + 1);
-      if (tooTall || cutShort) keys.add(item.dataset.entryKey);
+      const face = item.querySelector(".barcode-label");
+      if (face && labelProblems(face).size > 0) keys.add(item.dataset.entryKey);
     });
     // eslint-disable-next-line react-hooks/set-state-in-effect
     setOverflowing((current) => (current.size === keys.size && [...keys].every((key) => current.has(key)) ? current : keys));
-  }, [entries, size, design]);
+  }, [entries, size, layouts]);
   const previewState = !queue.length ? "empty" : previewCurrent ? "current" : resolved ? "stale" : "none";
 
   const add = (entry) => setQueue((current) => addEntry(current, entry));
@@ -621,23 +555,29 @@ const BarcodeLabels = () => {
         </section>
       </div>
 
+      <section className={`${panel} space-y-4 p-4 sm:p-5`} aria-labelledby="label-design-heading">
+        <StepHeading id="label-design-heading" step="3" title="Design labels">
+          <label className="flex items-center gap-2">
+            <span className="text-xs font-semibold uppercase tracking-wide text-slate-500 dark:text-slate-400">Label size</span>
+            <select value={size} onChange={(event) => setSize(event.target.value)} className={`${fieldClass} h-10 w-40`}>
+              <option value="50x25">50 × 25 mm</option>
+              <option value="40x20">40 × 20 mm</option>
+              <option value="30x20">30 × 20 mm</option>
+            </select>
+          </label>
+        </StepHeading>
+        <LabelDesigner size={size} layouts={layouts} onChange={setLayouts} />
+      </section>
+
       <section ref={previewRef} className={`${panel} scroll-mt-4`} aria-labelledby="label-preview-heading">
         <div className="space-y-4 border-b border-slate-200 p-5 dark:border-slate-800">
-          <StepHeading id="label-preview-heading" step="3" title="Preview and print">
+          <StepHeading id="label-preview-heading" step="4" title="Preview and print">
             <div className="flex items-center gap-3">
               <span className={`text-sm tabular-nums ${mutedText}`}>{labels.length} {labels.length === 1 ? "label" : "labels"} to print</span>
               <button type="button" onClick={printLabels} disabled={!previewCurrent || !labels.length} className="inline-flex h-10 items-center gap-2 rounded-lg bg-blue-700 px-4 font-semibold text-white hover:bg-blue-600 disabled:cursor-not-allowed disabled:opacity-50"><Printer size={17} />Print Labels</button>
             </div>
           </StepHeading>
           <div className="flex flex-wrap items-end gap-x-6 gap-y-3">
-            <label className="w-44">
-              <span className="mb-1 block text-xs font-semibold uppercase tracking-wide text-slate-500 dark:text-slate-400">Label size</span>
-              <select value={size} onChange={(event) => setSize(event.target.value)} className={`${fieldClass} h-10`}>
-                <option value="50x25">50 × 25 mm</option>
-                <option value="40x20">40 × 20 mm</option>
-                <option value="30x20">30 × 20 mm</option>
-              </select>
-            </label>
             <div role="group" aria-label="Preview zoom">
               <span aria-hidden="true" className="mb-1 block text-xs font-semibold uppercase tracking-wide text-slate-500 dark:text-slate-400">Zoom</span>
               <div className="flex h-10 overflow-hidden rounded-lg border border-slate-300 dark:border-slate-700">
@@ -654,8 +594,7 @@ const BarcodeLabels = () => {
           </p>
         </div>
 
-        <div className="grid items-start gap-5 bg-slate-100 p-4 sm:p-6 xl:grid-cols-[25rem_minmax(0,1fr)] dark:bg-slate-950/60">
-          <LabelDesignPanel design={design} onChange={setDesign} />
+        <div className="bg-slate-100 p-4 sm:p-6 dark:bg-slate-950/60">
           <div className="min-w-0">
           {entries.length === 0 ? (
             <p className={`py-12 text-center text-sm ${mutedText}`}>
@@ -666,7 +605,7 @@ const BarcodeLabels = () => {
             {overflowing.size > 0 && (
               <p role="status" className="mb-4 flex items-start gap-2 rounded-lg bg-amber-50 px-3 py-2 text-sm text-amber-800 ring-1 ring-amber-200 dark:bg-amber-500/10 dark:text-amber-300 dark:ring-amber-500/30">
                 <AlertTriangle size={16} className="mt-0.5 shrink-0" />
-                {overflowing.size} {overflowing.size === 1 ? "label doesn’t" : "labels don’t"} fit on {LABEL_SIZES[size].widthMm} × {LABEL_SIZES[size].heightMm} mm: some lines would be cut off. Use smaller text or a shorter barcode, hide Name or Code text, turn the label back to 0°, or choose a larger size.
+                {overflowing.size} {overflowing.size === 1 ? "label doesn’t" : "labels don’t"} fit on {LABEL_SIZES[size].widthMm} × {LABEL_SIZES[size].heightMm} mm: an item goes past the label’s edge, overlaps another, or is cut short. Adjust the layout in Design labels, or choose a larger size.
               </p>
             )}
             <ol className="space-y-4" aria-label="Label preview">
@@ -676,7 +615,7 @@ const BarcodeLabels = () => {
                   <div className="max-w-full shrink-0 overflow-x-auto p-1">
                     <div className="overflow-hidden rounded-sm shadow-md ring-1 ring-slate-300" style={{ width: `${LABEL_SIZES[size].widthMm * zoom}mm`, height: `${LABEL_SIZES[size].heightMm * zoom}mm` }}>
                       <div className="barcode-zoom" style={{ transform: `scale(${zoom})` }}>
-                        <LabelFace label={entry.label} size={size} design={design} />
+                        <LabelFace label={entry.label} size={size} layouts={layouts} />
                       </div>
                     </div>
                   </div>
@@ -711,18 +650,14 @@ const BarcodeLabels = () => {
       {createPortal(
         <div className="barcode-print-sheet" aria-hidden="true">
           <div className="barcode-grid">
-            {labels.map((label) => <LabelFace key={label.key} label={label} size={size} design={design} />)}
+            {labels.map((label) => <LabelFace key={label.key} label={label} size={size} layouts={layouts} />)}
           </div>
         </div>,
         printRoot,
       )}
 
       <style>{`
-        .barcode-label { box-sizing:border-box; position:relative; overflow:hidden; padding:2mm; background:#fff; color:#111827; }
-        .barcode-content { position:absolute; top:50%; left:50%; display:flex; flex-direction:column; justify-content:center; gap:1px; overflow:visible; transform-origin:center; }
-        .barcode-line { flex-shrink:0; width:100%; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font-family:Arial,sans-serif; line-height:1.1; letter-spacing:.2px; }
-        .barcode-brand { letter-spacing:.6px; line-height:1; }
-        .barcode-svg { display:block; width:100%; flex:0 1 auto; min-height:5mm; }
+        ${LABEL_CSS}
         .barcode-zoom { transform-origin:top left; width:max-content; }
         .barcode-print-sheet { display:none; }
         @media print {

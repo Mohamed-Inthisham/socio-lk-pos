@@ -111,7 +111,7 @@ This is why users appear to stay logged in for days — the refresh token (7 day
 
 **Access.** Admins and managers only: the sidebar entry and `RoleProtectedRoute` hide it from cashiers, and the server refuses them anyway. An admin picks any branch, or All branches, for individual items. A manager sees their own branch as a fixed field, and the server holds them to it whatever is sent.
 
-**Layout.** Three numbered steps: **1 Add labels** and **2 Print queue** side by side (stacked on narrow screens), then **3 Preview and print** across the full width. No panel scrolls on its own; the page scrolls.
+**Layout.** Four numbered steps: **1 Add labels** and **2 Print queue** side by side (stacked on narrow screens), then **3 Design labels** and **4 Preview and print** across the full width. No panel scrolls on its own; the page scrolls.
 
 **Searching.** Two tabs, Products (quantity-tracked products) and Individual items (in-stock IMEI and serial-number units), each a server-side search. Each tab shows how many of its entries are queued. The search runs 300 ms after typing stops and needs 2 characters, and the box has a clear button. Results come 10 to a page, with a result count and Previous and Next. A queued row's Add button turns into a disabled "Added".
 
@@ -125,15 +125,17 @@ This is why users appear to stay logged in for days — the refresh token (7 day
 
 **Labels.** Every label shows SOCIO.LK, and optionally the name, the code text and the selling price. A product label encodes the product's `barcode`, as before. A unit label encodes its `unit_code` and prints the IMEI or serial number as text only. There is no cost-price option, and the label is drawn from the server's label fields only, which carry no cost.
 
-**Label design** (beside the preview; `labelDesign.js`, `LabelDesignPanel.jsx`). For each line (SOCIO.LK brand, name, barcode, code text, IMEI or serial, selling price) you can:
+**Design labels** (`LabelDesigner.jsx`; layouts in `labelDesign.js`). A visual editor showing one label at 10 px per mm, with sample text:
 
-- move it up or down the label
-- for text lines: set the size (4–16 pt), bold, italic, and alignment (left, centre, right)
-- for the barcode: set its height (5–20 mm)
+- **Templates.** There are two: Product label and Unit label. A product label has no IMEI line. Each label size has its own layouts, because a 50 × 25 layout doesn't fit 30 × 20.
+- **Selecting.** Click an item on the label (SOCIO.LK brand, name, barcode, code text, IMEI or serial, selling price), or pick it from the Item chips. The chips also reach an item covered by another. The selected item is drawn in front.
+- **Moving.** Drag an item, use the arrow keys (0.5 mm, or 2 mm with Shift), or type its X and Y in mm. A move snaps to 0.5 mm and keeps the item's unrotated box on the label.
+- **Toolbar.** Every item has width and rotation (a quarter turn at a time, about its centre). Text items also have font size (4–16 pt), bold, italic and alignment; the barcode has a height (5–20 mm). Name, code text and price can be shown or hidden. The brand, barcode and IMEI or serial line always print.
+- **Saving.** Layouts are saved in `localStorage` per size and kind. Positions are kept as saved, and unreadable values fall back to the default. Reset layout restores the default for the current size and template. The default layout stacks the items as the labels always looked.
+- **Same drawing everywhere.** The designer, the preview and the printed sheet draw items with the same placement (`itemPlacement`, in mm from the label's top-left), so the layout prints as designed.
+- **Barcode.** It stretches to its box (`preserveAspectRatio="none"`). Every bar scales by the same factor, so the code reads the same.
 
-The whole content can be turned 0°, 90°, 180° or 270° inside the same label; a quarter turn swaps the content box's width and height. Name, code text and price can be hidden; the brand, barcode and IMEI or serial line can't. The design is saved in the browser's `localStorage` (an unreadable value falls back to the default), and Reset design restores the original look. The preview and the printed sheet draw the same `LabelFace`, so the design prints as previewed. The barcode stretches to the line's width and height (`preserveAspectRatio="none"`). Every bar scales by the same factor, so the code reads the same.
-
-**Fit warning.** A label is marked "Doesn't fit" when a line is cut off: past the 1.5 mm margin top or bottom, or shortened with "…" (an IMEI, code or price losing characters). A long name is shortened by design and isn't counted. The check measures the unrotated content box, so it holds at any rotation.
+**Fit warning** (`labelProblems` in `labelRender.js`). An item is flagged when it goes past the label's edge, overlaps another item (both are flagged), or is shortened with "…" (an IMEI, code or price losing characters). A long name is shortened by design and isn't counted. Boxes are measured as drawn, so turns count. The designer outlines such items in red and lists them; the preview marks the label "Doesn't fit".
 
 **Page layout.** The page's root is `position: relative`. Tailwind's `sr-only` is `position: absolute`, and the app layout has no positioned ancestor, so without it a hidden caption is placed against the document. One such caption in the preview made the whole window scroll after Preview, showing a black band under the app.
 

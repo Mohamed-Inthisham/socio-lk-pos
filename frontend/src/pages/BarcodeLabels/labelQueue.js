@@ -82,6 +82,7 @@ export const expandLabels = (rows) =>
     if (row.kind === "PRODUCT") {
       return Array.from({ length: row.quantity }, (_, copy) => ({
         key: `${rowIndex}-${row.product_id}-${copy}`,
+        kind: "PRODUCT",
         name: row.name,
         code: row.barcode,
         identifier: null,
@@ -91,6 +92,7 @@ export const expandLabels = (rows) =>
     return [
       {
         key: `${rowIndex}-${row.unit_id}`,
+        kind: "UNIT",
         name: row.name,
         code: row.unit_code,
         identifier: { label: identifierLabel(row.identifier_type), value: row.identifier },

@@ -361,9 +361,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - ⚠️ A label whose lines would be cut off at the chosen size is marked "Doesn't fit", with a notice
 
 #### Barcode Labels Page: label design
-- 🎨 A Label design panel beside the preview. Each line (brand, name, barcode, code text, IMEI or serial, price) can be moved up or down; text lines get size, bold, italic and left/centre/right alignment; the barcode gets a height. The whole content turns 0°, 90°, 180° or 270° inside the same label. Saved in the browser; Reset design restores the default. The printed labels use the same design
-- 🔒 The brand, barcode and IMEI or serial line can be styled but not hidden
-- ⚠️ The fit warning also flags a line shortened with "…" (an IMEI, code or price losing characters); a shortened name is expected and isn't flagged
+- 🎨 **Design labels**, a visual editor (step 3). One label is drawn large: click an item or pick it from the Item chips, then drag it, nudge it with the arrow keys, or type its X/Y in mm. A toolbar sets its width and rotation, and for text its font size, bold, italic and alignment, or the barcode's height. Product and unit labels have their own templates, and each label size its own layout. Layouts are saved in the browser, and Reset layout restores the default. The preview and the printed labels use the same layout
+- 🔒 The brand, barcode and IMEI or serial line can be styled and moved but not hidden
+- ⚠️ The fit check flags an item past the label's edge, two items overlapping, or a line shortened with "…" (an IMEI, code or price losing characters); a shortened name is expected and isn't flagged
 - 🐛 After Preview, a black band appeared under the app and the whole window scrolled: a screen-reader-only caption (`position: absolute`) was placed against the document. The page now contains it
 
 ### Changed

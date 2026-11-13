@@ -398,9 +398,8 @@ describe("BarcodeLabels", () => {
         expect(label.style.width).toBe("30mm");
         expect(label.style.height).toBe("20mm");
       }
-      expect(container.querySelector("style").textContent).toContain(
-        ".barcode-print-sheet .barcode-label { width:30mm !important; height:20mm !important;",
-      );
+      const css = [...container.querySelectorAll("style")].map((style) => style.textContent).join("\n");
+      expect(css).toContain(".barcode-print-sheet .barcode-label { width:30mm !important; height:20mm !important;");
     });
 
     it("zooms the screen preview without changing the printed size", async () => {
@@ -425,28 +424,28 @@ describe("BarcodeLabels", () => {
 
     it("warns, per label, when a label's lines don't fit the chosen size", async () => {
       const user = userEvent.setup();
-      // jsdom has no layout: say every unit label's content box overflows,
-      // nothing else does.
-      const isUnitFace = (el) =>
-        el.classList?.contains("barcode-content") && el.closest("[data-entry-key]")?.dataset.entryKey.includes("u-");
-      const scroll = vi.spyOn(HTMLElement.prototype, "scrollHeight", "get").mockImplementation(function () {
-        return isUnitFace(this) ? 120 : 0;
-      });
-      const client = vi.spyOn(HTMLElement.prototype, "clientHeight", "get").mockImplementation(function () {
-        return isUnitFace(this) ? 94 : 0;
+      // jsdom has no layout: say each unit label's price sits below the
+      // label's bottom edge, and everything else fits.
+      const inUnitRow = (el) => el.closest?.("[data-entry-key]")?.dataset.entryKey.includes("u-");
+      const rect = (top, bottom) => ({ left: 0, right: 100, top, bottom, width: 100, height: bottom - top });
+      // Other items get no size, so none of them overlaps another.
+      const spy = vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockImplementation(function () {
+        if (this.classList.contains("barcode-price") && inUnitRow(this)) return rect(90, 110);
+        if (this.classList.contains("barcode-label")) return rect(0, 94);
+        return rect(0, 0);
       });
       renderAs();
       await buildMixedQueue(user);
       await user.click(screen.getByRole("button", { name: /Preview labels/ }));
       await screen.findByText("4 labels to print");
 
-      expect(screen.getByText(/2 labels don’t fit on 50 × 25 mm: some lines would be cut off/)).toBeInTheDocument();
+      expect(screen.getByText(/1 label doesn’t fit on 50 × 25 mm: an item goes past the label’s edge/)).toBeInTheDocument();
       const rows = within(screen.getByRole("list", { name: "Label preview" })).getAllByRole("listitem");
       expect(within(rows[0]).queryByText("Doesn’t fit")).not.toBeInTheDocument();
       expect(within(rows[1]).getByText("Doesn’t fit")).toBeInTheDocument();
-      expect(within(rows[2]).getByText("Doesn’t fit")).toBeInTheDocument();
-      scroll.mockRestore();
-      client.mockRestore();
+      // The laptop has no price, so nothing of it goes past the edge.
+      expect(within(rows[2]).queryByText("Doesn’t fit")).not.toBeInTheDocument();
+      spy.mockRestore();
     });
 
     it("shows no fit warning when every label fits", async () => {
@@ -613,7 +612,10 @@ describe("BarcodeLabels", () => {
       expect(screen.queryByRole("option", { name: /cost|buying/i })).not.toBeInTheDocument();
       expect(screen.queryByRole("checkbox", { name: /cost|buying/i })).not.toBeInTheDocument();
       expect(screen.queryByLabelText("Price shown")).not.toBeInTheDocument();
-      expect(screen.getByLabelText("Selling price")).toBeChecked();
+      // The designer's price item is the selling price, and nothing else.
+      const canvas = screen.getByRole("article", { name: /label design/ });
+      expect(within(canvas).getByRole("button", { name: "Selling price" })).toBeInTheDocument();
+      expect(within(canvas).queryByRole("button", { name: /cost|buying/i })).not.toBeInTheDocument();
       expect(screen.getByText(/labels show the selling price, never a cost price/)).toBeInTheDocument();
     });
 
