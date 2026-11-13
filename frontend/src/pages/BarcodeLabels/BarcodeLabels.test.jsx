@@ -86,6 +86,7 @@ const resolvedFor = (items) => ({
 
 describe("BarcodeLabels", () => {
   beforeEach(() => {
+    localStorage.clear();
     vi.resetAllMocks();
     branchesService.listBranches.mockResolvedValue([branchA, branchB]);
     labelsService.searchProductLabels.mockResolvedValue(page([charger, cable]));
@@ -424,9 +425,10 @@ describe("BarcodeLabels", () => {
 
     it("warns, per label, when a label's lines don't fit the chosen size", async () => {
       const user = userEvent.setup();
-      // jsdom has no layout: say every unit label overflows, nothing else does.
+      // jsdom has no layout: say every unit label's content box overflows,
+      // nothing else does.
       const isUnitFace = (el) =>
-        el.classList?.contains("barcode-label") && el.closest("[data-entry-key]")?.dataset.entryKey.includes("u-");
+        el.classList?.contains("barcode-content") && el.closest("[data-entry-key]")?.dataset.entryKey.includes("u-");
       const scroll = vi.spyOn(HTMLElement.prototype, "scrollHeight", "get").mockImplementation(function () {
         return isUnitFace(this) ? 120 : 0;
       });
@@ -438,7 +440,7 @@ describe("BarcodeLabels", () => {
       await user.click(screen.getByRole("button", { name: /Preview labels/ }));
       await screen.findByText("4 labels to print");
 
-      expect(screen.getByText(/2 labels don’t fit on 50 × 25 mm: the last lines would be cut off/)).toBeInTheDocument();
+      expect(screen.getByText(/2 labels don’t fit on 50 × 25 mm: some lines would be cut off/)).toBeInTheDocument();
       const rows = within(screen.getByRole("list", { name: "Label preview" })).getAllByRole("listitem");
       expect(within(rows[0]).queryByText("Doesn’t fit")).not.toBeInTheDocument();
       expect(within(rows[1]).getByText("Doesn’t fit")).toBeInTheDocument();
@@ -456,6 +458,23 @@ describe("BarcodeLabels", () => {
 
       expect(screen.queryByText(/fit on 50 × 25 mm/)).not.toBeInTheDocument();
       expect(screen.queryByText("Doesn’t fit")).not.toBeInTheDocument();
+    });
+
+    it("keeps absolutely positioned helpers inside the page, so they can't stretch the window", async () => {
+      const user = userEvent.setup();
+      const { container } = renderAs();
+      await buildMixedQueue(user);
+      await user.click(screen.getByRole("button", { name: /Preview labels/ }));
+      await screen.findByText("4 labels to print");
+
+      // Tailwind's sr-only is position:absolute. Placed against the document
+      // instead of the scrolling <main>, the preview's hidden captions made
+      // the window scroll (a black band under the app after Preview).
+      const page = container.firstElementChild;
+      expect(page).toHaveClass("relative");
+      for (const helper of container.querySelectorAll(".sr-only")) {
+        expect(page.contains(helper)).toBe(true);
+      }
     });
 
     it("keeps the print root only while the page is open", () => {

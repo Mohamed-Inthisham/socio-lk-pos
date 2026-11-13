@@ -360,6 +360,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - 🖼️ The screen preview lists labels one below another at 100%, 150% or 200%, each with its label number, barcode value, IMEI or serial number and selling price; a product's copies are shown once. The zoom never changes the printed size
 - ⚠️ A label whose lines would be cut off at the chosen size is marked "Doesn't fit", with a notice
 
+#### Barcode Labels Page: label design
+- 🎨 A Label design panel beside the preview. Each line (brand, name, barcode, code text, IMEI or serial, price) can be moved up or down; text lines get size, bold, italic and left/centre/right alignment; the barcode gets a height. The whole content turns 0°, 90°, 180° or 270° inside the same label. Saved in the browser; Reset design restores the default. The printed labels use the same design
+- 🔒 The brand, barcode and IMEI or serial line can be styled but not hidden
+- ⚠️ The fit warning also flags a line shortened with "…" (an IMEI, code or price losing characters); a shortened name is expected and isn't flagged
+- 🐛 After Preview, a black band appeared under the app and the whole window scrolled: a screen-reader-only caption (`position: absolute`) was placed against the document. The page now contains it
+
 ### Changed
 - Migrated `LoginForm` from local state to Redux state management
 - Updated `App.jsx` with React Router setup and protected routes

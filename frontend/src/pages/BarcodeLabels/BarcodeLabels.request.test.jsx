@@ -46,6 +46,7 @@ const routeGet = (url) => {
 
 describe("BarcodeLabels: the requests sent", () => {
   beforeEach(() => {
+    localStorage.clear();
     vi.resetAllMocks();
     api.get.mockImplementation(routeGet);
     api.post.mockResolvedValue({

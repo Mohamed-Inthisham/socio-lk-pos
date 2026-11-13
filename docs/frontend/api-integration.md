@@ -125,6 +125,18 @@ This is why users appear to stay logged in for days — the refresh token (7 day
 
 **Labels.** Every label shows SOCIO.LK, and optionally the name, the code text and the selling price. A product label encodes the product's `barcode`, as before. A unit label encodes its `unit_code` and prints the IMEI or serial number as text only. There is no cost-price option, and the label is drawn from the server's label fields only, which carry no cost.
 
+**Label design** (beside the preview; `labelDesign.js`, `LabelDesignPanel.jsx`). For each line (SOCIO.LK brand, name, barcode, code text, IMEI or serial, selling price) you can:
+
+- move it up or down the label
+- for text lines: set the size (4–16 pt), bold, italic, and alignment (left, centre, right)
+- for the barcode: set its height (5–20 mm)
+
+The whole content can be turned 0°, 90°, 180° or 270° inside the same label; a quarter turn swaps the content box's width and height. Name, code text and price can be hidden; the brand, barcode and IMEI or serial line can't. The design is saved in the browser's `localStorage` (an unreadable value falls back to the default), and Reset design restores the original look. The preview and the printed sheet draw the same `LabelFace`, so the design prints as previewed. The barcode stretches to the line's width and height (`preserveAspectRatio="none"`). Every bar scales by the same factor, so the code reads the same.
+
+**Fit warning.** A label is marked "Doesn't fit" when a line is cut off: past the 1.5 mm margin top or bottom, or shortened with "…" (an IMEI, code or price losing characters). A long name is shortened by design and isn't counted. The check measures the unrotated content box, so it holds at any rotation.
+
+**Page layout.** The page's root is `position: relative`. Tailwind's `sr-only` is `position: absolute`, and the app layout has no positioned ancestor, so without it a hidden caption is placed against the document. One such caption in the preview made the whole window scroll after Preview, showing a black band under the app.
+
 ## Environment variables
 
 - **`VITE_API_BASE_URL`** — backend base URL (dev: `http://localhost:3000/api/v1`; prod: your deployed backend URL)
