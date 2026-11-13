@@ -5,6 +5,7 @@ import {
   countLabels,
   describeResolveError,
   expandLabels,
+  previewEntries,
   productEntry,
   queueSignature,
   toResolveItems,
@@ -110,6 +111,19 @@ describe("labelQueue", () => {
     const [label] = expandLabels([{ ...productRow, quantity: 1, buying_price: "999.00" }]);
     expect(Object.keys(label).sort()).toEqual(["code", "identifier", "key", "name", "price"]);
     expect(JSON.stringify(label)).not.toContain("999.00");
+  });
+
+  it("gives one preview entry per resolved row, numbering the sheet's labels", () => {
+    const entries = previewEntries([imeiRow, { ...productRow, quantity: 3 }, serialRow]);
+
+    expect(entries.map(({ kind, copies, first, last }) => ({ kind, copies, first, last }))).toEqual([
+      { kind: "UNIT", copies: 1, first: 1, last: 1 },
+      { kind: "PRODUCT", copies: 3, first: 2, last: 4 },
+      { kind: "UNIT", copies: 1, first: 5, last: 5 },
+    ]);
+    expect(entries[0].label.code).toBe("SLU00000001");
+    expect(entries[1].label.code).toBe("SLP-000001");
+    expect(entries[2].label.identifier).toEqual({ label: "S/N", value: "SN-ABC" });
   });
 
   describe("describeResolveError", () => {

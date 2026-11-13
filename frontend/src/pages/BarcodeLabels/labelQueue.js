@@ -99,6 +99,30 @@ export const expandLabels = (rows) =>
     ];
   });
 
+/**
+ * The screen preview's rows: one per resolved row, in order. A product's
+ * copies are identical, so it is shown once with its copy count (the print
+ * sheet still prints every copy, from expandLabels). `first` and `last` are
+ * the row's label numbers on the sheet, counting from 1.
+ */
+export const previewEntries = (rows) => {
+  let next = 1;
+  return rows.map((row, rowIndex) => {
+    const copies = row.kind === "PRODUCT" ? row.quantity : 1;
+    const [label] = expandLabels([row]);
+    const entry = {
+      key: `${rowIndex}-${row.kind === "PRODUCT" ? row.product_id : row.unit_id}`,
+      kind: row.kind,
+      label,
+      copies,
+      first: next,
+      last: next + copies - 1,
+    };
+    next += copies;
+    return entry;
+  });
+};
+
 const GENERIC_ERROR = "Couldn't prepare the labels. Try again.";
 
 /**

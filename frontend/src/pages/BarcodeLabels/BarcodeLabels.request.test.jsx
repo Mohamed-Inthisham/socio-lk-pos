@@ -63,13 +63,13 @@ describe("BarcodeLabels: the requests sent", () => {
     await user.type(screen.getByLabelText("Search products"), "  chg  ");
     await waitFor(() =>
       expect(api.get).toHaveBeenCalledWith("/barcode-labels/products", {
-        params: { search: "chg", page: 1, limit: 20 },
+        params: { search: "chg", page: 1, limit: 10 },
       }),
     );
     await user.click(screen.getByRole("tab", { name: "Individual items" }));
     await waitFor(() =>
       expect(api.get).toHaveBeenCalledWith("/barcode-labels/units", {
-        params: { branchId: branchA.id, page: 1, limit: 20 },
+        params: { branchId: branchA.id, page: 1, limit: 10 },
       }),
     );
 

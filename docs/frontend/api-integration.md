@@ -111,11 +111,17 @@ This is why users appear to stay logged in for days — the refresh token (7 day
 
 **Access.** Admins and managers only: the sidebar entry and `RoleProtectedRoute` hide it from cashiers, and the server refuses them anyway. An admin picks any branch, or All branches, for individual items. A manager sees their own branch as a fixed field, and the server holds them to it whatever is sent.
 
-**Searching.** Two tabs, Products (quantity-tracked products) and Individual items (in-stock IMEI and serial-number units), each a server-side search. The search runs 300 ms after typing stops and needs 2 characters. Results come 20 to a page, with Previous and Next.
+**Layout.** Three numbered steps: **1 Add labels** and **2 Print queue** side by side (stacked on narrow screens), then **3 Preview and print** across the full width. No panel scrolls on its own; the page scrolls.
 
-**The queue** keeps entries in the order they were added. A product is queued once, and its Copies field (1–500) sets how many labels it prints. Each unit is one entry and one label, and different units of the same product are separate entries. The total is shown against the 500-label limit, and Preview is disabled above it.
+**Searching.** Two tabs, Products (quantity-tracked products) and Individual items (in-stock IMEI and serial-number units), each a server-side search. Each tab shows how many of its entries are queued. The search runs 300 ms after typing stops and needs 2 characters, and the box has a clear button. Results come 10 to a page, with a result count and Previous and Next. A queued row's Add button turns into a disabled "Added".
 
-**Preview, then print.** Preview labels sends the whole queue to `resolveLabelQueue`. Only the rows it returns are drawn, and Print Labels prints only a preview that matches the current queue: any change to the queue asks for a new preview. If the server refuses the queue, its message is shown and each refused item's reason appears on that item. Nothing is drawn or printed until every item is valid.
+**The queue** keeps entries in the order they were added, each tagged Product or Unit. A product is queued once, and its copies (1–500) are set with − and + or typed. Each unit is one entry and one label, and different units of the same product are separate entries. The total is shown against the 500-label limit, and Preview is disabled above it. Under the queue, a notice says whether the preview is up to date or must be redone.
+
+**Preview, then print.** Preview labels sends the whole queue to `resolveLabelQueue` and scrolls to the preview. Only the rows it returns are drawn, and Print Labels prints only a preview that matches the current queue: any change to the queue asks for a new preview. If the server refuses the queue, its message is shown and each refused item's reason appears on that item. Nothing is drawn or printed until every item is valid.
+
+**The screen preview** lists the labels one below another at 100%, 150% or 200% (default), each beside its label number, kind, barcode value, IMEI or serial number and selling price. A product with several copies is shown once, as "Labels 3–5 of 9 · × 3 copies". The zoom is a CSS transform of a copy of the label: it never changes the printed size. A label whose lines are cut off at the chosen size is marked "Doesn't fit", with a notice above the list.
+
+**Printing.** The printed sheet is separate from the screen preview: every copy, at its exact size (50 × 25, 40 × 20 or 30 × 20 mm), rendered through a portal into `#barcode-label-print-root`, a `<body>` child that exists only while the page is open. `index.css` hides every other `<body>` child when printing (so a receipt prints alone), and exempts this one.
 
 **Labels.** Every label shows SOCIO.LK, and optionally the name, the code text and the selling price. A product label encodes the product's `barcode`, as before. A unit label encodes its `unit_code` and prints the IMEI or serial number as text only. There is no cost-price option, and the label is drawn from the server's label fields only, which carry no cost.
 

@@ -351,6 +351,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - 🏷️ Unit labels encode `unit_code`, with the IMEI or serial number as text only; product labels still encode the product barcode. Every label shows SOCIO.LK
 - 💸 The "Cost price" option is gone: labels show the selling price only, drawn from the label fields the server returns
 
+#### Barcode Labels Page: workflow and preview
+- 🐛 **Print Labels printed a blank page.** The receipt rule in `index.css` hides every `<body>` child but `#receipt-root` when printing, which included the app and its label sheet. The sheet now renders into its own `#barcode-label-print-root`, which that rule exempts; it exists only while the page is open, so receipts still print alone
+- 🐛 Unit labels with five lines squeezed the name into the barcode: text lines no longer shrink, only the barcode does (to its 5 mm minimum). Label sizes are unchanged
+- 🧭 Three numbered steps: Add labels and Print queue side by side, then Preview and print full width; no panel scrolls on its own; light and dark themes like the other admin pages
+- 🔍 Clearer search: tabs with queued counts, a clear button, result counts, 10 results a page, Add / Added states, prices and branch per row
+- 🧺 Queue entries tagged Product or Unit, copies with − and +, a delete button per entry, a quiet Clear all, the label total against 500, and a notice when the preview is out of date
+- 🖼️ The screen preview lists labels one below another at 100%, 150% or 200%, each with its label number, barcode value, IMEI or serial number and selling price; a product's copies are shown once. The zoom never changes the printed size
+- ⚠️ A label whose lines would be cut off at the chosen size is marked "Doesn't fit", with a notice
+
 ### Changed
 - Migrated `LoginForm` from local state to Redux state management
 - Updated `App.jsx` with React Router setup and protected routes
