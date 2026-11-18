@@ -28,7 +28,7 @@ import { ExposeCost } from '../../common/utils/cost-visibility';
   'CHK_product_units_selling_price_nonneg',
   `"selling_price" IS NULL OR "selling_price" >= 0`,
 )
-@Check('CHK_product_units_unit_code', `"unit_code" ~ '^SLU[0-9]{8,}$'`)
+@Check('CHK_product_units_unit_code', `"unit_code" ~ '^[0-9]{8}$'`)
 export class ProductUnit {
   @PrimaryGeneratedColumn('uuid')
   id!: string;

@@ -3,11 +3,10 @@ import { TrackingMethod } from '../products/enums/tracking-method.enum';
 import type { ProductUnit } from './entities/product-unit.entity';
 
 /**
- * Unit codes (product_units.unit_code): SLU and at least 8 digits, such as
- * SLU00000123. The database generates them (AddProductUnitCodes). A code
- * only identifies a unit: it is never stored as an IMEI or serial number.
+ * New unit codes are random eight-digit numbers. SLU-prefixed codes remain
+ * recognized for compatibility with old printed labels during rollout.
  */
-const UNIT_CODE_PATTERN = /^SLU[0-9]{8,}$/i;
+const UNIT_CODE_PATTERN = /^(?:5[5-9][0-9]{6}|[6-9][0-9]{7}|SLU[0-9]{8,})$/i;
 
 /** The answer for a code that isn't at this branch, known or not. */
 export const UNIT_CODE_NOT_FOUND =

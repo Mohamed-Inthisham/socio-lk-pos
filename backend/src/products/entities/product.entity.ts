@@ -66,7 +66,7 @@ export class Product {
   sku!: string;
 
   @Index('idx_products_barcode', { unique: true })
-  @Column({ type: 'varchar', length: 100 })
+  @Column({ type: 'varchar', length: 100, default: () => 'next_numeric_product_barcode()' })
   barcode!: string;
 
   @Column({

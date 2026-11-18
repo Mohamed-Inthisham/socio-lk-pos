@@ -48,7 +48,7 @@ export class ProductsService {
    *  - brand and category exist AND are active; branch is legacy/optional
    *  - if barcode provided, it must be unique
    *  - SKU is always auto-generated
-   *  - if barcode omitted, auto-generate an SLP-XXXXXX barcode
+   *  - if barcode omitted, the database generates a unique 8-digit barcode
    */
   async create(dto: CreateProductDto): Promise<Product> {
     await this.assertReferencedEntitiesActive(
@@ -82,8 +82,7 @@ export class ProductsService {
     }
 
     const sku = await this.countersService.next(CounterType.SKU);
-    const barcode =
-      dto.barcode ?? (await this.countersService.next(CounterType.BARCODE));
+    const barcode = dto.barcode;
 
     const product = this.productsRepository.create({
       product_type: dto.product_type ?? null,
@@ -91,7 +90,7 @@ export class ProductsService {
       tracking_method: tracking,
       name: dto.name,
       sku,
-      barcode,
+      ...(barcode !== undefined ? { barcode } : {}),
       barcode_type: dto.barcode_type,
       brand_id: dto.brand_id,
       category_id: dto.category_id,
@@ -178,14 +177,13 @@ export class ProductsService {
    * Returns nested relations so the cashier UI has everything it needs.
    */
   async findByBarcode(barcode: string): Promise<Product> {
-    const product = await this.productsRepository.findOne({
+    const relations = [...PRODUCT_RELATIONS];
+    const exact = await this.productsRepository.findOne({
       where: { barcode },
-      relations: [...PRODUCT_RELATIONS],
+      relations,
     });
-    if (!product) {
-      throw new NotFoundException(`No product found with barcode ${barcode}`);
-    }
-    return product;
+    if (exact) return exact;
+    throw new NotFoundException(`No product found with barcode ${barcode}`);
   }
 
   /**
@@ -379,6 +377,11 @@ export class ProductsService {
     barcode: string,
     excludeId?: string,
   ): Promise<void> {
+    if (/^(?:5[5-9]\d{6}|[6-9]\d{7})$/.test(barcode)) {
+      throw new BadRequestException(
+        'Eight-digit product barcodes must be below 55000000; the upper range is reserved for unit labels.',
+      );
+    }
     const existing = await this.productsRepository.findOne({
       where: excludeId ? { barcode, id: Not(excludeId) } : { barcode },
     });

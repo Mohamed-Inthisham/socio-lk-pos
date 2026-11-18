@@ -25,7 +25,7 @@ import {
  * The terminal's home position: one input that takes scanner input and
  * typed searches (planning doc §6, hybrid catalog loading §5).
  *
- * - Barcode mode — all digits (8–20) or an "SLP-" SKU barcode: Enter runs
+ * - Barcode mode — all digits (6–20) or an "SLP-" SKU barcode: Enter runs
  *   an exact GET /products/by-barcode lookup. A miss shows inline; a
  *   15-digit miss gets the "looks like an IMEI" hint (Q9).
  * - Text mode — anything else, 2+ chars: a 250 ms debounced
@@ -56,7 +56,7 @@ const MIN_SEARCH = 2;
 
 /** Scanner-shaped values skip the name search and go to by-barcode. */
 const isBarcodeLike = (value) =>
-  /^\d{8,20}$/.test(value) || /^SLP-/i.test(value);
+  /^\d{6,20}$/.test(value) || /^SLP-/i.test(value);
 const isUnitIdentifierLike = (value) =>
   /^[A-Z0-9][A-Z0-9._/-]{0,99}$/i.test(value);
 /**
@@ -64,7 +64,7 @@ const isUnitIdentifierLike = (value) =>
  * unit lookup reads it: never the name search, which would say "No products
  * match" while the code is being typed.
  */
-const isUnitCodeLike = (value) => /^SLU\d{8,}$/i.test(value);
+const isUnitCodeLike = (value) => /^(?:5[5-9]\d{6}|[6-9]\d{7}|SLU\d{8,})$/i.test(value);
 
 const ScanBar = ({ branchId, disabled = false, inputRef }) => {
   const dispatch = useDispatch();

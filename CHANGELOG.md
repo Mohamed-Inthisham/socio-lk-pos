@@ -333,6 +333,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - 1️⃣ A sale line pinned to a physical unit stays at quantity 1, whatever the product's `is_serialized` flag says
 - 🔤 ScanBar: a typed SLU code no longer runs the product-name search or opens its "No products match" dropdown; Enter still resolves it through the unit lookup
 
+#### Barcode Labels Backend (Stage 2)
+- ⚠️ **Status:** backend only. The Barcode Labels page doesn't use these endpoints yet (Stage 3). `test/barcode-labels.e2e-spec.ts` has not been executed. No migration
+- 🏷️ `GET /barcode-labels/products`: active QUANTITY-tracked products for product-level labels, searchable by name, SKU or barcode (`%` and `_` literal), paginated
+- 📱 `GET /barcode-labels/units`: IN_STOCK units of active IMEI- or serial-tracked products, searchable by IMEI, serial number, unit code, SKU or name. `unit_code` is the barcode value; the real IMEI or serial number is `identifier`, with `identifier_type`; the price is the unit's, else the product's
+- 🧾 `POST /barcode-labels/resolve`: a mixed PRODUCT/UNIT print queue checked as a whole and returned in order, with `total_labels` (at most 500). One 400 `INVALID_LABEL_ITEMS` lists every item that can't be printed (duplicate, unknown, inactive, wrong tracking, not in stock, another branch); over 500 labels is 400 `LABEL_LIMIT_EXCEEDED`
+- 🔒 Admins and managers only; units are branch-scoped with `scopeBranch` (another branch is 403 `WRONG_BRANCH`, and another branch's unit is the same `UNIT_NOT_FOUND` as an unknown one)
+- 💸 No buying or cost price, customer, sale or sale line in any label response: rows are built field by field from named columns
+- 📖 Swagger under "Barcode Labels", with a `oneOf`/`kind` discriminator for the queue's rows; `docs/backend/barcode-labels.md`
+- 🧪 Unit specs for the service, controller access, request validation and the Swagger document (no database); an e2e spec for the three endpoints
+
+#### Barcode Labels Page (Stage 3)
+- ⚠️ **Status:** not yet checked on a label printer or with a scanner
+- 🔎 The page searches `GET /barcode-labels/products` and `GET /barcode-labels/units` on the server (2+ characters, 20 a page, Previous/Next) instead of loading the first 200 products and every in-stock unit
+- 🧺 One mixed queue in the order items were added: a product once, with Copies (1–500); each IMEI or serial unit as its own entry. Different units of one product can be queued together; nothing is queued twice. The total is shown against the 500-label limit
+- 👀 Preview labels resolves the whole queue (`POST /barcode-labels/resolve`); Print Labels prints only a preview matching the current queue. A refused queue shows the server's message and each bad item's reason, and nothing is drawn or printed
+- 🏷️ Unit labels encode `unit_code`, with the IMEI or serial number as text only; product labels still encode the product barcode. Every label shows SOCIO.LK
+- 💸 The "Cost price" option is gone: labels show the selling price only, drawn from the label fields the server returns
+
+#### Barcode Labels Page: workflow and preview
+- 🐛 **Print Labels printed a blank page.** The receipt rule in `index.css` hides every `<body>` child but `#receipt-root` when printing, which included the app and its label sheet. The sheet now renders into its own `#barcode-label-print-root`, which that rule exempts; it exists only while the page is open, so receipts still print alone
+- 🐛 Unit labels with five lines squeezed the name into the barcode: text lines no longer shrink, only the barcode does (to its 5 mm minimum). Label sizes are unchanged
+- 🧭 Three numbered steps: Add labels and Print queue side by side, then Preview and print full width; no panel scrolls on its own; light and dark themes like the other admin pages
+- 🔍 Clearer search: tabs with queued counts, a clear button, result counts, 10 results a page, Add / Added states, prices and branch per row
+- 🧺 Queue entries tagged Product or Unit, copies with − and +, a delete button per entry, a quiet Clear all, the label total against 500, and a notice when the preview is out of date
+- 🖼️ The screen preview lists labels one below another at 100%, 150% or 200%, each with its label number, barcode value, IMEI or serial number and selling price; a product's copies are shown once. The zoom never changes the printed size
+- ⚠️ A label whose lines would be cut off at the chosen size is marked "Doesn't fit", with a notice
+
+#### Barcode Labels Page: label design
+- 🎨 **Design labels**, a visual editor (step 3). One label is drawn large: click an item or pick it from the Item chips, then drag it, nudge it with the arrow keys, or type its X/Y in mm. A toolbar sets its width and rotation, and for text its font size, bold, italic and alignment, or the barcode's height. Product and unit labels have their own templates, and each label size its own layout. Layouts are saved in the browser, and Reset layout restores the default. The preview and the printed labels use the same layout
+- 🔒 The brand, barcode and IMEI or serial line can be styled and moved but not hidden
+- ⚠️ The fit check flags an item past the label's edge, two items overlapping, or a line shortened with "…" (an IMEI, code or price losing characters); a shortened name is expected and isn't flagged
+- 🐛 After Preview, a black band appeared under the app and the whole window scrolled: a screen-reader-only caption (`position: absolute`) was placed against the document. The page now contains it
+
 ### Changed
 - Migrated `LoginForm` from local state to Redux state management
 - Updated `App.jsx` with React Router setup and protected routes

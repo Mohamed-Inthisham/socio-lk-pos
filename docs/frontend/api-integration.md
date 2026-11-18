@@ -105,6 +105,40 @@ This is why users appear to stay logged in for days — the refresh token (7 day
 
 **Rows.** A `NOT_TRACKED` product shows a dash for its quantity, and a `QUANTITY` product a dash for its identified units: neither is a zero. For admins, the Branches button opens each branch's stock, and `N low or out` beside it flags a shortage the combined status can hide.
 
+## Barcode Labels page
+
+`/barcode-labels` (`frontend/src/pages/BarcodeLabels`) uses `barcodeLabelsService.js`: `searchProductLabels` (`GET /barcode-labels/products`), `searchUnitLabels` (`GET /barcode-labels/units`) and `resolveLabelQueue` (`POST /barcode-labels/resolve`). The endpoints' rules are in [barcode-labels.md](../backend/barcode-labels.md).
+
+**Access.** Admins and managers only: the sidebar entry and `RoleProtectedRoute` hide it from cashiers, and the server refuses them anyway. An admin picks any branch, or All branches, for individual items. A manager sees their own branch as a fixed field, and the server holds them to it whatever is sent.
+
+**Layout.** Four numbered steps: **1 Add labels** and **2 Print queue** side by side (stacked on narrow screens), then **3 Design labels** and **4 Preview and print** across the full width. No panel scrolls on its own; the page scrolls.
+
+**Searching.** Two tabs, Products (quantity-tracked products) and Individual items (in-stock IMEI and serial-number units), each a server-side search. Each tab shows how many of its entries are queued. The search runs 300 ms after typing stops and needs 2 characters, and the box has a clear button. Results come 10 to a page, with a result count and Previous and Next. A queued row's Add button turns into a disabled "Added".
+
+**The queue** keeps entries in the order they were added, each tagged Product or Unit. A product is queued once, and its copies (1–500) are set with − and + or typed. Each unit is one entry and one label, and different units of the same product are separate entries. The total is shown against the 500-label limit, and Preview is disabled above it. Under the queue, a notice says whether the preview is up to date or must be redone.
+
+**Preview, then print.** Preview labels sends the whole queue to `resolveLabelQueue` and scrolls to the preview. Only the rows it returns are drawn, and Print Labels prints only a preview that matches the current queue: any change to the queue asks for a new preview. If the server refuses the queue, its message is shown and each refused item's reason appears on that item. Nothing is drawn or printed until every item is valid.
+
+**The screen preview** lists the labels one below another at 100%, 150% or 200% (default), each beside its label number, kind, barcode value, IMEI or serial number and selling price. A product with several copies is shown once, as "Labels 3–5 of 9 · × 3 copies". The zoom is a CSS transform of a copy of the label: it never changes the printed size. A label whose lines are cut off at the chosen size is marked "Doesn't fit", with a notice above the list.
+
+**Printing.** The printed sheet is separate from the screen preview: every copy, at its exact size (50 × 25, 40 × 20 or 30 × 20 mm), rendered through a portal into `#barcode-label-print-root`, a `<body>` child that exists only while the page is open. `index.css` hides every other `<body>` child when printing (so a receipt prints alone), and exempts this one.
+
+**Labels.** Every label shows SOCIO.LK, and optionally the name, the code text and the selling price. A product label encodes the product's `barcode`, as before. A unit label encodes its `unit_code` and prints the IMEI or serial number as text only. There is no cost-price option, and the label is drawn from the server's label fields only, which carry no cost.
+
+**Design labels** (`LabelDesigner.jsx`; layouts in `labelDesign.js`). A visual editor showing one label at 10 px per mm, with sample text:
+
+- **Templates.** There are two: Product label and Unit label. A product label has no IMEI line. Each label size has its own layouts, because a 50 × 25 layout doesn't fit 30 × 20.
+- **Selecting.** Click an item on the label (SOCIO.LK brand, name, barcode, code text, IMEI or serial, selling price), or pick it from the Item chips. The chips also reach an item covered by another. The selected item is drawn in front.
+- **Moving.** Drag an item, use the arrow keys (0.5 mm, or 2 mm with Shift), or type its X and Y in mm. A move snaps to 0.5 mm and keeps what is seen on the label. For a turned item that is its turned box, so an upright item can go right to the side edges (its X can then be negative).
+- **Toolbar.** Every item has width and rotation (a quarter turn at a time, about its centre). Turning an item upright shortens it to the label's height (less 1.5 mm each side), and its width can't go past that while upright. Changing a width, height or font size moves the item back onto the label if it now reaches past the edge. Text items also have font size (4–16 pt), bold, italic and alignment; the barcode has a height (5–20 mm). Name, code text and price can be shown or hidden. The brand, barcode and IMEI or serial line always print.
+- **Saving.** Layouts are saved in `localStorage` per size and kind. Positions are kept as saved, and unreadable values fall back to the default. Reset layout restores the default for the current size and template. The default layout stacks the items as the labels always looked.
+- **Same drawing everywhere.** The designer, the preview and the printed sheet draw items with the same placement (`itemPlacement`, in mm from the label's top-left), so the layout prints as designed.
+- **Barcode.** It stretches to its box (`preserveAspectRatio="none"`). Every bar scales by the same factor, so the code reads the same.
+
+**Fit warning** (`labelProblems` in `labelRender.js`). An item is flagged when it goes past the label's edge, overlaps another item (both are flagged), or is shortened with "…" (an IMEI, code or price losing characters). A long name is shortened by design and isn't counted. Boxes are measured as drawn, so turns count. The designer outlines such items in red and lists them; the preview marks the label "Doesn't fit".
+
+**Page layout.** The page's root is `position: relative`. Tailwind's `sr-only` is `position: absolute`, and the app layout has no positioned ancestor, so without it a hidden caption is placed against the document. One such caption in the preview made the whole window scroll after Preview, showing a black band under the app.
+
 ## Environment variables
 
 - **`VITE_API_BASE_URL`** — backend base URL (dev: `http://localhost:3000/api/v1`; prod: your deployed backend URL)

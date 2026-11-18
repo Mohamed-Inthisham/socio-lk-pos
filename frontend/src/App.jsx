@@ -129,7 +129,6 @@ function App() {
             </RoleProtectedRoute>
           }
         />
-
         {/*
           IMPORTANT: /products/new MUST be defined before /products/:id.
           Otherwise React Router matches "new" as a UUID param and renders
