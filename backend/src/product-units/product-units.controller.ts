@@ -126,7 +126,7 @@ export class ProductUnitsController {
       'Returns the product and the unit’s real IMEI or serial number only ' +
       'when the matching unit is in stock at the supplied branch: a scanned ' +
       'unit code is resolved here and never returned as the identifier. A ' +
-      'unit code (SLU and at least 8 digits, in any case) names one exact ' +
+      'unit code (an 8-digit number or a legacy SLU code) names one exact ' +
       'unit, so a sold unit’s code is a 409 even if the same IMEI is back in ' +
       'stock on a newer unit. branchId is required; managers and cashiers ' +
       'may only give their own branch (another is 403 ' +

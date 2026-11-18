@@ -11,15 +11,60 @@ const PATTERNS = [
   "114311","411113","411311","113141","114131","311141","411131","211412","211214","211232","2331112",
 ];
 
-/** Return black bar segments for a scannable Code 128-B SVG. */
+const digitRunLength = (value, start) => {
+  let end = start;
+  while (end < value.length && value.charCodeAt(end) >= 48 && value.charCodeAt(end) <= 57) end += 1;
+  return end - start;
+};
+
+/** Use Code Set C for useful even-length digit runs, while preserving text. */
+const encodeCodewords = (value) => {
+  let index = 0;
+  let set = digitRunLength(value, 0) >= 4 ? "C" : "B";
+  const codes = [set === "C" ? 105 : 104];
+
+  while (index < value.length) {
+    const runLength = digitRunLength(value, index);
+    if (set === "B") {
+      const pairedDigits = runLength - (runLength % 2);
+      const savesCodewords = runLength % 2 === 0 ? runLength >= 4 : runLength >= 7;
+      if (savesCodewords && pairedDigits >= 4) {
+        codes.push(99); // Code Set C
+        set = "C";
+        continue;
+      }
+      codes.push(value.charCodeAt(index) - 32);
+      index += 1;
+      continue;
+    }
+
+    if (runLength >= 2) {
+      const pairedDigits = runLength - (runLength % 2);
+      for (let offset = 0; offset < pairedDigits; offset += 2) {
+        codes.push(Number(value.slice(index + offset, index + offset + 2)));
+      }
+      index += pairedDigits;
+      continue;
+    }
+
+    codes.push(100); // Return to Code Set B.
+    set = "B";
+  }
+
+  return codes;
+};
+
+/** Return black bar segments for a scannable Code 128 SVG. */
 export const code128Bars = (input) => {
   const value = String(input ?? "");
   if (!value || [...value].some((char) => char.charCodeAt(0) < 32 || char.charCodeAt(0) > 126)) {
     return null;
   }
 
-  const codes = [104, ...[...value].map((char) => char.charCodeAt(0) - 32)];
-  const checksum = codes.reduce((sum, code, index) => sum + code * index, 0) % 103;
+  const codes = encodeCodewords(value);
+  // Code 128 includes the start code once, then weights each data/code-set
+  // value by its 1-based position after the start code.
+  const checksum = codes.reduce((sum, code, index) => sum + code * Math.max(index, 1), 0) % 103;
   codes.push(checksum, 106);
 
   let x = 0;

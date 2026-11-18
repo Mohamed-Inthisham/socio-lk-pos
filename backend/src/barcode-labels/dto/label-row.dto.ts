@@ -38,9 +38,9 @@ const UNIT_TRACKING_METHODS = [
 ];
 
 /**
- * A product-level label, for a QUANTITY-tracked product. The barcode encodes
- * the product's own barcode, so existing shelf labels and POS scanning by
- * barcode keep working.
+ * A product-level label, for a QUANTITY-tracked product. The response keeps
+ * the stored barcode. Generated labels encode the full numeric barcode,
+ * which the POS resolves directly to the product.
  */
 export class ProductLabelRowDto {
   @ApiProperty({ enum: [LabelKind.PRODUCT], example: LabelKind.PRODUCT })
@@ -62,8 +62,8 @@ export class ProductLabelRowDto {
   sku!: string;
 
   @ApiProperty({
-    example: 'SLP-000123',
-    description: 'The value the label barcode encodes',
+    example: '12345678',
+    description: 'Stored product barcode; generated product barcodes are eight digits',
   })
   barcode!: string;
 
@@ -107,7 +107,7 @@ export class UnitLabelRowDto {
   unit_id!: string;
 
   @ApiProperty({
-    example: 'SLU00000123',
+    example: '87654321',
     description: 'The value the label barcode encodes',
   })
   unit_code!: string;

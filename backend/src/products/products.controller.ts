@@ -71,7 +71,7 @@ export class ProductsController {
   })
   @ApiParam({
     name: 'barcode',
-    description: 'Exact barcode string (e.g. SLP-000001 or 194252056387)',
+    description: 'Exact barcode string (e.g. 12345678 or a manufacturer barcode)',
   })
   @ApiResponse({ status: 200, description: 'Product found' })
   @ApiResponse({ status: 401, description: 'Not authenticated' })
@@ -98,7 +98,7 @@ export class ProductsController {
     summary: 'Create a new product',
     description:
       'Admin-only. SKU is always auto-generated (SKU-XXXXXX). Barcode ' +
-      'is auto-generated (SLP-XXXXXX) if omitted, or accepted if provided. ' +
+      'is auto-generated as a random 8-digit number if omitted, or accepted if provided. ' +
       'Brand and category must be active. Branch stock is added separately.',
   })
   @ApiResponse({ status: 201, description: 'Product created' })

@@ -62,7 +62,7 @@ export class CreateProductDto {
   @ApiPropertyOptional({
     example: '194252056387',
     description:
-      'Manufacturer barcode. Optional — if omitted, an SLP-XXXXXX barcode ' +
+      'Manufacturer barcode. Optional — if omitted, a random 8-digit numeric barcode ' +
       'is auto-generated. If provided, must be unique across the catalog.',
     maxLength: 100,
   })

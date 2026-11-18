@@ -628,7 +628,7 @@ const BarcodeLabels = () => {
                     </div>
                     <dt className="sr-only">Name</dt>
                     <dd className="font-medium text-slate-900 dark:text-slate-100">{entry.label.name}</dd>
-                    <dt className={`text-xs ${mutedText}`}>Barcode value</dt>
+                    <dt className={`text-xs ${mutedText}`}>Scans as</dt>
                     <dd className="font-mono text-slate-800 dark:text-slate-200">{entry.label.code}</dd>
                     {entry.label.identifier && <>
                       <dt className={`text-xs ${mutedText}`}>{entry.label.identifier.label === "IMEI" ? "IMEI (text only)" : "Serial number (text only)"}</dt>
@@ -661,13 +661,17 @@ const BarcodeLabels = () => {
         .barcode-zoom { transform-origin:top left; width:max-content; }
         .barcode-print-sheet { display:none; }
         @media print {
-          @page { margin:5mm; }
+          /* One browser page must match one die-cut label. Otherwise the
+             printer's USER page length advances across sticker boundaries. */
+          @page { size:${LABEL_SIZES[size].width} ${LABEL_SIZES[size].height}; margin:0; }
           body * { visibility:hidden !important; }
           .barcode-print-sheet { display:block !important; }
           .barcode-print-sheet, .barcode-print-sheet * { visibility:visible !important; }
           .barcode-print-sheet { position:absolute !important; inset:0 auto auto 0 !important; width:100% !important; margin:0 !important; padding:0 !important; border:0 !important; background:white !important; overflow:visible !important; }
-          .barcode-print-sheet .barcode-grid { display:grid; grid-template-columns:repeat(auto-fill,${LABEL_SIZES[size].width}); gap:0; }
-          .barcode-print-sheet .barcode-label { width:${LABEL_SIZES[size].width} !important; height:${LABEL_SIZES[size].height} !important; min-height:${LABEL_SIZES[size].height} !important; padding:1.5mm !important; border:0.15mm dashed #aaa !important; break-inside:avoid; }
+          .barcode-print-sheet .barcode-grid { display:block; width:${LABEL_SIZES[size].width}; margin:0 auto; }
+          .barcode-print-sheet .barcode-label { box-sizing:border-box !important; display:block; width:${LABEL_SIZES[size].width} !important; height:${LABEL_SIZES[size].height} !important; min-height:${LABEL_SIZES[size].height} !important; padding:0 !important; border:0 !important; break-inside:avoid; break-after:page; page-break-after:always; }
+          .barcode-print-sheet .barcode-svg { shape-rendering:crispEdges; }
+          .barcode-print-sheet .barcode-label:last-child { break-after:auto; page-break-after:auto; }
         }
       `}</style>
     </div>

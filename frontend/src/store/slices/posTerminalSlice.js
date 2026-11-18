@@ -697,7 +697,7 @@ export const startNextSale = () => (dispatch, getState) => {
 const IMEI_SHAPE = /^\d{15}$/;
 
 // The backend's unit code shape (product-units/unit-code.ts).
-const UNIT_CODE_SHAPE = /^SLU\d{8,}$/i;
+const UNIT_CODE_SHAPE = /^(?:5[5-9]\d{6}|[6-9]\d{7}|SLU\d{8,})$/i;
 
 /** arg: { barcode } → resolves with the product */
 export const scanBarcode = createAsyncThunk(
@@ -734,7 +734,9 @@ export const scanUnitIdentifier = createAsyncThunk(
       return await getSellableUnitByIdentifier(identifier, branchId);
     } catch (error) {
       if (error?.response?.status === 404) {
-        if (!UNIT_CODE_SHAPE.test(identifier)) return null;
+        // Numeric product barcodes share the keyboard shape with unit codes;
+        // a unit miss must fall through to the product barcode lookup.
+        if (!UNIT_CODE_SHAPE.test(identifier) || /^\d{8}$/.test(identifier)) return null;
         return rejectWithValue({
           message: "No item matches that unit code at this branch.",
           status: 404,

@@ -47,11 +47,11 @@ const CSS_PX_PER_MM = 96 / 25.4;
 
 /** What the canvas shows: sample text, so it never looks like a real item. */
 const SAMPLES = {
-  PRODUCT: { kind: "PRODUCT", name: "Sample product name", code: "SLP-000123", identifier: null, price: "1250.00" },
+  PRODUCT: { kind: "PRODUCT", name: "Sample product name", code: "12345678", identifier: null, price: "1250.00" },
   UNIT: {
     kind: "UNIT",
     name: "Sample phone 128GB",
-    code: "SLU00000123",
+    code: "87654321",
     identifier: { label: "IMEI", value: "353456789012345" },
     price: "99500.00",
   },

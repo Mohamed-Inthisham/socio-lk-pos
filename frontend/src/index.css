@@ -44,7 +44,7 @@
   }
   /* #barcode-label-print-root: the Barcode Labels sheet, present only while
      that page is open (pages/BarcodeLabels). */
-  body > *:not(#receipt-root):not(#barcode-label-print-root) {
+  body > *:not(#receipt-root):not(#barcode-label-print-root):not(#barcode-test-print-root) {
     display: none !important;
   }
   #receipt-root {

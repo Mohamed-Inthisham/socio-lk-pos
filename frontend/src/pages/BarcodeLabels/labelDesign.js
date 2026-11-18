@@ -53,6 +53,13 @@ const DEFAULT_TEXT = {
   identifier: { sizePt: 6, bold: false },
   price: { sizePt: 8, bold: true },
 };
+const COMPACT_PRODUCT_TEXT = {
+  brand: { ...DEFAULT_TEXT.brand, sizePt: 5 },
+  name: { ...DEFAULT_TEXT.name, sizePt: 5 },
+  code: { ...DEFAULT_TEXT.code, sizePt: 5 },
+  price: { ...DEFAULT_TEXT.price, sizePt: 6.5 },
+};
+const textDefaultsFor = (size, kind) => (size === "30x20" && kind === "PRODUCT" ? COMPACT_PRODUCT_TEXT : DEFAULT_TEXT);
 
 const round = (value, step = POSITION_STEP_MM) => Math.round(value / step) * step;
 const clamp = (value, min, max) => Math.min(max, Math.max(min, value));
@@ -64,15 +71,16 @@ export const textHeightMm = (sizePt) => sizePt * PT_TO_MM * LINE_HEIGHT;
 export const itemHeightMm = (id, item) => (id === "barcode" ? item.heightMm : textHeightMm(item.sizePt));
 
 /**
- * The layout the labels had before the designer: every item full width
- * (inside a 1.5 mm margin), centred, stacked top to bottom, with the
- * barcode taking the room left (5–12 mm).
+ * The default layout stacks items inside the label margins, with the
+ * barcode taking the room left (5–12 mm). The 30 mm label keeps the maximum
+ * safe barcode width to make its encoded bars easier for a scanner to read.
  */
 export const defaultLayout = (size, kind) => {
   const { widthMm, heightMm } = LABEL_MM[size];
+  const textDefaults = textDefaultsFor(size, kind);
   const ids = KIND_ITEMS[kind];
   const textIds = ids.filter((id) => id !== "barcode");
-  const textTotal = textIds.reduce((sum, id) => sum + textHeightMm(DEFAULT_TEXT[id].sizePt), 0);
+  const textTotal = textIds.reduce((sum, id) => sum + textHeightMm(textDefaults[id].sizePt), 0);
   const gaps = GAP_MM * (ids.length - 1);
   // Rounded down to the 0.5 mm step the designer's controls use.
   const barcodeHeight = clamp(Math.floor((heightMm - 2 * MARGIN_MM - textTotal - gaps) * 2) / 2, MIN_BARCODE_MM, 12);
@@ -80,13 +88,17 @@ export const defaultLayout = (size, kind) => {
   let y = Math.max(0, (heightMm - total) / 2);
   const items = {};
   for (const id of ids) {
-    const base = { x: MARGIN_MM, y: round(y, 0.1), widthMm: widthMm - 2 * MARGIN_MM, rotation: 0, show: true };
+    // Use nearly the full print width for bars: at 203 dpi, even a small
+    // increase in module width helps narrow Code 128 bars survive printing.
+    const itemWidth = id === "barcode" ? Math.min(widthMm - 1, 48) : widthMm - 2 * MARGIN_MM;
+    const x = id === "barcode" ? (widthMm - itemWidth) / 2 : MARGIN_MM;
+    const base = { x, y: round(y, 0.1), widthMm: itemWidth, rotation: 0, show: true };
     if (id === "barcode") {
       items[id] = { ...base, heightMm: barcodeHeight };
       y += barcodeHeight + GAP_MM;
     } else {
-      items[id] = { ...base, ...DEFAULT_TEXT[id], italic: false, align: "center" };
-      y += textHeightMm(DEFAULT_TEXT[id].sizePt) + GAP_MM;
+      items[id] = { ...base, ...textDefaults[id], italic: false, align: "center" };
+      y += textHeightMm(textDefaults[id].sizePt) + GAP_MM;
     }
   }
   return items;
@@ -204,21 +216,28 @@ const number = (value, fallback) => (typeof value === "number" && Number.isFinit
  */
 export const normalizeLayout = (stored, size, kind) => {
   const base = defaultLayout(size, kind);
+  const compactProduct = size === "30x20" && kind === "PRODUCT";
   if (!stored || typeof stored !== "object") return base;
   const items = {};
   for (const id of KIND_ITEMS[kind]) {
     const saved = stored[id] && typeof stored[id] === "object" ? stored[id] : {};
     const fallback = base[id];
+    const savedWidth = number(saved.widthMm, fallback.widthMm);
+    const previousDefaultBarcodeWidth = LABEL_MM[size].widthMm - 2 * MARGIN_MM;
     const item = {
       ...fallback,
-      widthMm: clampWidth(number(saved.widthMm, fallback.widthMm), size),
+      widthMm: clampWidth(
+        id === "barcode" && Math.abs(savedWidth - previousDefaultBarcodeWidth) < 0.001 ? fallback.widthMm : savedWidth,
+        size,
+      ),
       rotation: ROTATIONS.includes(saved.rotation) ? saved.rotation : fallback.rotation,
       show: ITEM_INFO[id].hideable ? saved.show !== false : true,
     };
     if (id === "barcode") {
       item.heightMm = clampBarcodeHeight(number(saved.heightMm, fallback.heightMm));
     } else {
-      item.sizePt = clampFont(number(saved.sizePt, fallback.sizePt));
+      const savedSize = number(saved.sizePt, fallback.sizePt);
+      item.sizePt = clampFont(compactProduct && savedSize === DEFAULT_TEXT[id].sizePt ? fallback.sizePt : savedSize);
       item.bold = typeof saved.bold === "boolean" ? saved.bold : fallback.bold;
       item.italic = typeof saved.italic === "boolean" ? saved.italic : fallback.italic;
       item.align = ALIGNMENTS.includes(saved.align) ? saved.align : fallback.align;

@@ -10,10 +10,10 @@ Code: `backend/src/barcode-labels/`.
 
 | Kind | For | Barcode encodes | Readable text | Price |
 |---|---|---|---|---|
-| `PRODUCT` | Active `QUANTITY`-tracked products | The product's `barcode` (such as `SLP-000123`) | Name, SKU | The product's `selling_price` |
-| `UNIT` | One `IN_STOCK` unit of an active `IMEI` or `SERIAL_NUMBER` product | The unit's `unit_code` (such as `SLU00000123`) | The real IMEI or serial number | The unit's `selling_price`, else the product's |
+| `PRODUCT` | Active `QUANTITY`-tracked products | Stored product barcode; generated values are random eight-digit numbers in the 10–54 million range | Name, SKU | The product's `selling_price` |
+| `UNIT` | One `IN_STOCK` unit of an active `IMEI` or `SERIAL_NUMBER` product | The unit's `unit_code`; generated values are random eight-digit numbers in the 55–99 million range | The real IMEI or serial number | The unit's `selling_price`, else the product's |
 
-- **A unit label never encodes the IMEI or serial number.** The till's `GET /product-units/sellable/by-identifier/:identifier` resolves the scanned `unit_code` to that exact unit and sells it by its real identifier. Product labels go through the till's existing `GET /products/by-barcode/:barcode`. Neither lookup has changed.
+- **A unit label never encodes the IMEI or serial number.** The till's `GET /product-units/sellable/by-identifier/:identifier` resolves the scanned `unit_code` to that exact unit and sells it by its real identifier. Product labels go through `GET /products/by-barcode/:barcode` using the full eight-digit barcode.
 - **`identifier` follows the sale's choice.** It is the identifier a sale would record for the unit (`unitSaleIdentifier`): the IMEI for an IMEI product, the serial number for a serial product, and the other one when only that exists. Units recorded before `imei_number` and `serial_number` existed fall back to the legacy `imei` column. `identifier_type` (`IMEI` or `SERIAL_NUMBER`) says which it is, as the till's lookup does: phone labels print the IMEI, other labels the serial number.
 - **Prices** are decimal strings, as elsewhere in the API (`"4500.00"`), and `null` when none is set; the label then prints without a price.
 - **No cost, ever.** No response carries `buying_price` or any other cost field, for any role. No customer, sale or sale line is joined either. Rows are built field by field from columns selected by name, never entities, so the response doesn't depend on the serializer's cost rule (`@ExposeCost`, which only covers entities).
@@ -54,7 +54,7 @@ Any other parameter is a 400. Sorted by `created_at DESC, id DESC`, as `GET /pro
       "name": "USB-C Charger 20W",
       "model": "PD-20",
       "sku": "SKU-000123",
-      "barcode": "SLP-000123",
+      "barcode": "12345678",
       "barcode_type": "CODE_128",
       "selling_price": "4500.00"
     }
@@ -90,7 +90,7 @@ Sorted by `created_at DESC, id DESC`. Only the product and branch are joined, so
     {
       "kind": "UNIT",
       "unit_id": "uuid",
-      "unit_code": "SLU00000123",
+      "unit_code": "87654321",
       "product_id": "uuid",
       "name": "iPhone 13 128GB",
       "tracking_method": "IMEI",
@@ -138,17 +138,17 @@ Checks a whole print queue and returns its label rows in the order sent. Returns
   "data": [
     {
       "kind": "PRODUCT", "product_id": "uuid", "name": "USB-C Charger 20W", "model": null,
-      "sku": "SKU-000123", "barcode": "SLP-000123", "barcode_type": "CODE_128",
+      "sku": "SKU-000123", "barcode": "12345678", "barcode_type": "CODE_128",
       "selling_price": "4500.00", "quantity": 2
     },
     {
-      "kind": "UNIT", "unit_id": "uuid", "unit_code": "SLU00000123", "product_id": "uuid",
+      "kind": "UNIT", "unit_id": "uuid", "unit_code": "87654321", "product_id": "uuid",
       "name": "iPhone 13 128GB", "tracking_method": "IMEI", "identifier_type": "IMEI",
       "identifier": "356938035643809", "selling_price": "185000.00",
       "branch": { "id": "uuid", "name": "Main Shop" }
     },
     {
-      "kind": "UNIT", "unit_id": "uuid", "unit_code": "SLU00000124", "product_id": "uuid",
+      "kind": "UNIT", "unit_id": "uuid", "unit_code": "87654322", "product_id": "uuid",
       "name": "Work Laptop", "tracking_method": "SERIAL_NUMBER", "identifier_type": "SERIAL_NUMBER",
       "identifier": "LAP-SN-0001", "selling_price": null,
       "branch": { "id": "uuid", "name": "Main Shop" }
@@ -207,4 +207,4 @@ Under the **Barcode Labels** tag. The two search responses are `{ data, meta }` 
 
 ## Not in this stage
 
-- **Product barcodes shaped like a unit code** (see `FOLLOWUPS.md`). A product's `barcode` accepts any text, and the till tries a unit-code lookup first, so a product barcode such as `SLU00000042` would not scan as that product.
+- **Product barcodes in the unit-code numeric range.** Generated product and unit barcodes use separate ranges so POS scanning can distinguish them. When manually entering an eight-digit barcode, keep product values below 55,000,000.

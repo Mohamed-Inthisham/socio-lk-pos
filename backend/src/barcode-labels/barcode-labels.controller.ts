@@ -57,8 +57,9 @@ export class BarcodeLabelsController {
       'of the name, SKU or barcode, in any case; % and _ match themselves. ' +
       'Sorted by created_at DESC, id DESC. Pagination: page (default 1), ' +
       'limit (default 50, max 200).\n\n' +
-      'The label barcode encodes the product’s `barcode`, which ' +
-      'GET /products/by-barcode resolves at the till. Each row carries only ' +
+      'The row returns the stored product `barcode`; generated labels encode ' +
+      'the full 8-digit number, which GET /products/by-barcode resolves at ' +
+      'the till. Each row carries only ' +
       'what a label prints: no buying or cost price, and no brand, category ' +
       'or branch. Products are shared by every branch, so there is no ' +
       'branch filter.',
@@ -92,7 +93,7 @@ export class BarcodeLabelsController {
       '_ match themselves. productId narrows to one product. Sorted by ' +
       'created_at DESC, id DESC. Pagination: page (default 1), limit ' +
       '(default 50, max 200).\n\n' +
-      'The label barcode encodes `unit_code` (such as SLU00000123), never ' +
+      'The label barcode encodes the numeric `unit_code`, never ' +
       'the IMEI or serial number: the till resolves it with ' +
       'GET /product-units/sellable/by-identifier. `identifier` is the real ' +
       'IMEI or serial number, for readable text only, and ' +
