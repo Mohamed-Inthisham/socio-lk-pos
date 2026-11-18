@@ -21,6 +21,7 @@ import { StockService } from './stock.service';
 import { CreateStockDto } from './dto/create-stock.dto';
 import { UpdateStockDto } from './dto/update-stock.dto';
 import { StockOverviewQueryDto } from './dto/stock-overview-query.dto';
+import { StockMovementsQueryDto } from './dto/stock-movements-query.dto';
 import { Roles } from '../auth/decorators/roles.decorator';
 import { UserRole } from '../users/enums/user-role.enum';
 import { Auditable } from '../audit-log/decorators/auditable.decorator';
@@ -95,6 +96,40 @@ export class StockController {
       productId,
       branchId: scopeBranch(user, branchId),
       lowStockOnly,
+    });
+  }
+
+  @Get('movements')
+  @Roles(UserRole.ADMIN, UserRole.MANAGER)
+  @ApiOperation({
+    summary: 'List stock movement history',
+    description:
+      'Read-only, paginated movement ledger. Admins can query any branch or ' +
+      'all branches; managers are restricted to their assigned branch. ' +
+      'The response includes only explicit history fields and minimal actor ' +
+      'names; no prices, purchase details, payments or customer data.',
+  })
+  @ApiResponse({
+    status: 200,
+    description: 'Movement rows and pagination metadata.',
+  })
+  @ApiResponse({
+    status: 400,
+    description: 'Invalid filter or startDate is after endDate.',
+  })
+  @ApiResponse({ status: 401, description: 'Not authenticated.' })
+  @ApiResponse({
+    status: 403,
+    description:
+      'Cashier access denied, or { code: WRONG_BRANCH } for a manager requesting another branch.',
+  })
+  async movementHistory(
+    @Query() query: StockMovementsQueryDto,
+    @CurrentUser() user: AuthenticatedUser,
+  ) {
+    return this.stockService.getMovementHistory({
+      ...query,
+      branchId: scopeBranch(user, query.branchId),
     });
   }
 

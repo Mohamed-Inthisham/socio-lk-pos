@@ -7,6 +7,7 @@ import {
 } from '@nestjs/common';
 import { StockService } from './stock.service';
 import { Stock } from './entities/stock.entity';
+import { StockMovement } from './entities/stock-movement.entity';
 import {
   OVERVIEW_BRANCHES_SQL,
   OVERVIEW_PAGE_SQL,
@@ -79,6 +80,10 @@ describe('StockService', () => {
       providers: [
         StockService,
         { provide: getRepositoryToken(Stock), useValue: mockRepo },
+        {
+          provide: getRepositoryToken(StockMovement),
+          useValue: { createQueryBuilder: jest.fn() },
+        },
         { provide: ProductsService, useValue: mockProductsService },
         { provide: BranchesService, useValue: mockBranchesService },
       ],
