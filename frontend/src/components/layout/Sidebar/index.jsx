@@ -157,12 +157,6 @@ const NAV_ITEMS = [
     roles: ["admin", "manager"],
   },
   {
-    to: "/barcode-test",
-    label: "Barcode Scanner Test",
-    icon: Barcode,
-    roles: ["admin", "manager"],
-  },
-  {
     to: "/users",
     label: "Users",
     icon: UserCog,

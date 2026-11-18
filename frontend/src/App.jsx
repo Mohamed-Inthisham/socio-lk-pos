@@ -8,7 +8,6 @@ import ProductDetail from "./pages/ProductDetail";
 import ProductCreate from "./pages/ProductCreate";
 import ProductEdit from "./pages/ProductEdit";
 import BarcodeLabels from "./pages/BarcodeLabels";
-import BarcodeTest from "./pages/BarcodeTest";
 import ManageBrands from "./pages/ManageBrands";
 import ManageCategories from "./pages/ManageCategories";
 import RoleProtectedRoute from "./components/auth/RoleProtectedRoute";
@@ -130,15 +129,6 @@ function App() {
             </RoleProtectedRoute>
           }
         />
-        <Route
-          path="/barcode-test"
-          element={
-            <RoleProtectedRoute allowedRoles={["admin", "manager"]}>
-              <BarcodeTest />
-            </RoleProtectedRoute>
-          }
-        />
-
         {/*
           IMPORTANT: /products/new MUST be defined before /products/:id.
           Otherwise React Router matches "new" as a UUID param and renders
