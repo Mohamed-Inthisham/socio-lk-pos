@@ -1,7 +1,7 @@
 import { MigrationInterface, QueryRunner } from 'typeorm';
 
-export class AddWriteOffStockMovement1793800000000 implements MigrationInterface {
-  name = 'AddWriteOffStockMovement1793800000000';
+export class AddWriteOffStockMovement1794000000000 implements MigrationInterface {
+  name = 'AddWriteOffStockMovement1794000000000';
 
   public async up(queryRunner: QueryRunner): Promise<void> {
     await queryRunner.query(
