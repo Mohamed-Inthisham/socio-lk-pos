@@ -93,8 +93,8 @@ describe("InventoryMovementHistory", () => {
     expect(within(table).getByText("Sale void reversal")).toBeInTheDocument();
     const rowText = table.querySelector("tbody tr")?.textContent;
     expect(rowText).toContain("Reverses original");
-    expect(rowText).toContain("0 → 1");
-    expect(rowText).toContain("SOLD → IN_STOCK");
+    expect(rowText).toContain("0 to 1");
+    expect(rowText).toContain("SOLD to IN_STOCK");
     expect(rowText).toContain("12345678");
     expect(rowText).toContain("SALE_LINE");
     expect(rowText).toContain("Approved by Manager One");

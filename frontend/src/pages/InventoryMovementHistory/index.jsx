@@ -42,11 +42,24 @@ const formatTime = (value) =>
     timeZone: "Asia/Colombo",
   }).format(new Date(value));
 const signed = (value) => (value > 0 ? `+${value}` : String(value));
+const movementColors = {
+  OPENING_BALANCE: "bg-violet-100 text-violet-800 ring-violet-200 dark:bg-violet-500/15 dark:text-violet-300 dark:ring-violet-400/25",
+  PURCHASE: "bg-cyan-100 text-cyan-800 ring-cyan-200 dark:bg-cyan-500/15 dark:text-cyan-300 dark:ring-cyan-400/25",
+  TRADE_IN: "bg-indigo-100 text-indigo-800 ring-indigo-200 dark:bg-indigo-500/15 dark:text-indigo-300 dark:ring-indigo-400/25",
+  SALE: "bg-rose-100 text-rose-800 ring-rose-200 dark:bg-rose-500/15 dark:text-rose-300 dark:ring-rose-400/25",
+  REVERSAL: "bg-amber-100 text-amber-800 ring-amber-200 dark:bg-amber-500/15 dark:text-amber-300 dark:ring-amber-400/25",
+  CUSTOMER_RETURN: "bg-fuchsia-100 text-fuchsia-800 ring-fuchsia-200 dark:bg-fuchsia-500/15 dark:text-fuchsia-300 dark:ring-fuchsia-400/25",
+  INSPECTION_PASSED: "bg-emerald-100 text-emerald-800 ring-emerald-200 dark:bg-emerald-500/15 dark:text-emerald-300 dark:ring-emerald-400/25",
+  ADJUSTMENT_IN: "bg-lime-100 text-lime-800 ring-lime-200 dark:bg-lime-500/15 dark:text-lime-300 dark:ring-lime-400/25",
+  ADJUSTMENT_OUT: "bg-orange-100 text-orange-800 ring-orange-200 dark:bg-orange-500/15 dark:text-orange-300 dark:ring-orange-400/25",
+};
 
 const MovementDescription = ({ row }) => (
   <div className="min-w-44">
-    <div className="font-medium text-slate-900 dark:text-slate-100">
+    <div>
+      <span className={`inline-flex rounded-full px-2.5 py-1 text-xs font-semibold ring-1 ring-inset ${movementColors[row.movement_type] ?? "bg-slate-100 text-slate-700 ring-slate-200 dark:bg-slate-700/50 dark:text-slate-200 dark:ring-slate-600"}`}>
       {TYPE_LABELS[row.movement_type] ?? row.movement_type}
+      </span>
     </div>
     {row.reverses_movement_id && (
       <div className="mt-1 flex items-center gap-1 text-xs font-medium text-amber-700 dark:text-amber-300">
@@ -210,7 +223,7 @@ export default function InventoryMovementHistory() {
         render: (row) => (
           <time
             dateTime={row.created_at}
-            className="whitespace-nowrap text-slate-600 dark:text-slate-300"
+            className="whitespace-nowrap font-medium text-slate-600 dark:text-sky-200"
           >
             {formatTime(row.created_at)}
           </time>
@@ -226,18 +239,18 @@ export default function InventoryMovementHistory() {
         header: "Product / branch",
         render: (row) => (
           <div>
-            <div className="font-medium">{row.product_name}</div>
-            <div className="text-xs text-slate-500 dark:text-slate-400">
+            <div className="font-semibold text-slate-900 dark:text-white">{row.product_name}</div>
+            <div className="text-xs text-slate-500 dark:text-sky-200/70">
               {row.branch_name}
             </div>
             {row.product_unit_code && (
-              <div className="font-mono text-xs text-slate-500 dark:text-slate-400">
+              <div className="font-mono text-xs text-violet-700 dark:text-violet-300">
                 Unit {row.product_unit_code}
               </div>
             )}
             {row.unit_status_to && (
-              <div className="text-xs text-slate-500 dark:text-slate-400">
-                {row.unit_status_from ?? "New"} → {row.unit_status_to}
+              <div className="text-xs text-slate-500 dark:text-sky-200/70">
+                {row.unit_status_from ?? "New"} to {row.unit_status_to}
               </div>
             )}
           </div>
@@ -249,12 +262,14 @@ export default function InventoryMovementHistory() {
         align: "right",
         render: (row) => (
           <div className="whitespace-nowrap text-right tabular-nums">
-            <div className="font-semibold">{signed(row.quantity_delta)}</div>
-            <div className="text-xs text-slate-500 dark:text-slate-400">
-              {row.quantity_before} → {row.quantity_after}
+            <div className={`font-bold ${row.quantity_delta > 0 ? "text-emerald-700 dark:text-emerald-300" : row.quantity_delta < 0 ? "text-rose-700 dark:text-rose-300" : "text-slate-600 dark:text-slate-300"}`}>
+              {signed(row.quantity_delta)}
+            </div>
+            <div className="text-xs text-slate-500 dark:text-sky-200/70">
+              {row.quantity_before} to {row.quantity_after}
             </div>
             {!row.stock_managed && (
-              <div className="text-xs text-slate-500 dark:text-slate-400">
+              <div className="text-xs text-slate-500 dark:text-amber-300">
                 Not stock managed
               </div>
             )}
@@ -301,17 +316,17 @@ export default function InventoryMovementHistory() {
   ];
 
   return (
-    <main className="mx-auto max-w-7xl space-y-5 p-4 sm:p-6">
+    <main className="mx-auto min-h-full max-w-7xl space-y-5 p-4 sm:p-6">
       <header className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
         <div>
           <Link
             to="/inventory"
-            className="mb-2 inline-flex items-center gap-2 text-sm font-medium text-cyan-700 hover:underline dark:text-cyan-300"
+            className="mb-2 inline-flex items-center gap-2 text-sm font-semibold text-cyan-700 hover:underline dark:text-cyan-300"
           >
             <ArrowLeft size={16} /> Inventory overview
           </Link>
-          <h1 className="text-2xl font-semibold">Stock Movement History</h1>
-          <p className="mt-1 text-sm text-slate-500 dark:text-slate-400">
+          <h1 className="text-2xl font-bold tracking-tight text-slate-950 dark:text-white">Stock Movement History</h1>
+          <p className="mt-1 text-sm text-slate-500 dark:text-sky-200/75">
             A chronological record of stock quantity and identified-unit status
             changes.
           </p>
@@ -319,7 +334,7 @@ export default function InventoryMovementHistory() {
       </header>
 
       <section
-        className={`${panel} space-y-4 p-4`}
+        className={`${panel} space-y-4 border-t-2 border-t-cyan-500 p-4 shadow-sm shadow-cyan-950/5 dark:shadow-black/20`}
         aria-label="Movement filters"
       >
         <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
@@ -456,7 +471,7 @@ export default function InventoryMovementHistory() {
       </section>
 
       <section
-        className={`${panel} overflow-hidden`}
+        className={`${panel} overflow-hidden shadow-sm shadow-cyan-950/5 dark:shadow-black/20`}
         aria-label="Stock movement history"
       >
         {result.status === "error" ? (
