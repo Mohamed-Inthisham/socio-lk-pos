@@ -1,6 +1,16 @@
-import { IsInt, Min, IsBoolean } from 'class-validator';
+import { Transform } from 'class-transformer';
+import {
+  IsBoolean,
+  IsEnum,
+  IsInt,
+  IsOptional,
+  IsString,
+  MaxLength,
+  Min,
+} from 'class-validator';
 import { ApiPropertyOptional } from '@nestjs/swagger';
 import { IsOptionalNotNull } from '../../common/validators/is-optional-not-null.decorator';
+import { ManualStockAdjustmentReason } from '../enums/stock-movement-type.enum';
 
 /**
  * Stock updates in R1. Deliberately excludes product_id and branch_id —
@@ -30,6 +40,26 @@ export class UpdateStockDto {
   @IsInt()
   @Min(0)
   expected_quantity?: number;
+
+  @ApiPropertyOptional({
+    enum: ManualStockAdjustmentReason,
+    description: 'Required when quantity changes; omitted for other updates.',
+  })
+  @IsOptionalNotNull()
+  @IsEnum(ManualStockAdjustmentReason)
+  reasonCode?: ManualStockAdjustmentReason;
+
+  @ApiPropertyOptional({
+    maxLength: 500,
+    description: 'Optional note about the manual stock quantity adjustment.',
+  })
+  @Transform(({ value }): unknown =>
+    typeof value === 'string' ? value.trim() : value,
+  )
+  @IsOptional()
+  @IsString()
+  @MaxLength(500)
+  note?: string | null;
 
   @ApiPropertyOptional({
     example: 5,

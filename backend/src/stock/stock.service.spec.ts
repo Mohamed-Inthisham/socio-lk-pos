@@ -7,6 +7,8 @@ import {
 } from '@nestjs/common';
 import { StockService } from './stock.service';
 import { Stock } from './entities/stock.entity';
+import { StockMovement } from './entities/stock-movement.entity';
+import { ManualStockAdjustmentReason } from './enums/stock-movement-type.enum';
 import {
   OVERVIEW_BRANCHES_SQL,
   OVERVIEW_PAGE_SQL,
@@ -79,6 +81,10 @@ describe('StockService', () => {
       providers: [
         StockService,
         { provide: getRepositoryToken(Stock), useValue: mockRepo },
+        {
+          provide: getRepositoryToken(StockMovement),
+          useValue: { createQueryBuilder: jest.fn() },
+        },
         { provide: ProductsService, useValue: mockProductsService },
         { provide: BranchesService, useValue: mockBranchesService },
       ],
@@ -778,7 +784,15 @@ describe('StockService', () => {
       const qb = lockRow(existing);
       refetch({ quantity: 25 });
 
-      const result = await service.update('s1', { quantity: 25 }, admin);
+      const result = await service.update(
+        's1',
+        {
+          quantity: 25,
+          reasonCode: ManualStockAdjustmentReason.STOCK_RECEIVED,
+          note: 'Unrecorded branch delivery',
+        },
+        admin,
+      );
 
       expect(result.quantity).toBe(25);
       // The refetch is by id only, without a branch scope (Phase 2 P2-4).
@@ -800,7 +814,8 @@ describe('StockService', () => {
         25,
         true,
       ]);
-      expect(row[10]).toBe('MANUAL_ADJUSTMENT');
+      expect(row[10]).toBe('STOCK_RECEIVED');
+      expect(row[11]).toBe('Unrecorded branch delivery');
       expect(row[12]).toBe('STOCK_ADJUSTMENT');
       expect(row[13]).toMatch(/^[0-9a-f-]{36}$/);
       expect(row[15]).toBe('admin-1');
@@ -810,7 +825,16 @@ describe('StockService', () => {
       lockRow(existing);
       refetch({ quantity: 7 });
 
-      await service.update('s1', { quantity: 7, expected_quantity: 10 }, admin);
+      await service.update(
+        's1',
+        {
+          quantity: 7,
+          expected_quantity: 10,
+          reasonCode: ManualStockAdjustmentReason.COUNT_CORRECTION,
+          note: 'Physical count was lower',
+        },
+        admin,
+      );
 
       expect(ledgerInserts()[0].slice(3, 7)).toEqual([
         'ADJUSTMENT_OUT',
@@ -818,6 +842,28 @@ describe('StockService', () => {
         10,
         7,
       ]);
+      expect(ledgerInserts()[0][10]).toBe('COUNT_CORRECTION');
+      expect(ledgerInserts()[0][11]).toBe('Physical count was lower');
+    });
+
+    it('rejects a missing or invalid reason before changing stock', async () => {
+      lockRow(existing);
+      await expect(
+        service.update('s1', { quantity: 11 }, admin),
+      ).rejects.toThrow('Choose a valid reason');
+      expect(mockManager.update).not.toHaveBeenCalled();
+      expect(ledgerInserts()).toEqual([]);
+
+      lockRow(existing);
+      await expect(
+        service.update(
+          's1',
+          { quantity: 11, reasonCode: 'UNAPPROVED' as never },
+          admin,
+        ),
+      ).rejects.toThrow('Choose a valid reason');
+      expect(mockManager.update).not.toHaveBeenCalled();
+      expect(ledgerInserts()).toEqual([]);
     });
 
     it('refuses a stale expected_quantity with 409 STOCK_QUANTITY_CHANGED and writes nothing', async () => {
@@ -868,12 +914,27 @@ describe('StockService', () => {
       lockRow({ ...existing, manage_stock: false });
       refetch({ quantity: 4 });
 
-      await service.update('s1', { quantity: 4 }, admin);
+      await service.update(
+        's1',
+        {
+          quantity: 4,
+          reasonCode: ManualStockAdjustmentReason.COUNT_CORRECTION,
+        },
+        admin,
+      );
       expect(ledgerInserts()[0][7]).toBe(false);
 
       lockRow({ ...existing, manage_stock: false });
       refetch({ quantity: 12, manage_stock: true });
-      await service.update('s1', { quantity: 12, manage_stock: true }, admin);
+      await service.update(
+        's1',
+        {
+          quantity: 12,
+          manage_stock: true,
+          reasonCode: ManualStockAdjustmentReason.STOCK_RECEIVED,
+        },
+        admin,
+      );
       expect(ledgerInserts()[1][7]).toBe(true);
     });
 

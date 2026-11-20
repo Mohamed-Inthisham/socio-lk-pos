@@ -38,6 +38,7 @@ describe('StockController: branch-scoped reads', () => {
       findOne: jest.fn().mockResolvedValue({ id: 's1' }),
       findByProduct: jest.fn().mockResolvedValue(rows),
       getOverview: jest.fn().mockResolvedValue({ data: [] }),
+      getMovementHistory: jest.fn().mockResolvedValue({ data: [], meta: {} }),
     };
     return {
       service,
@@ -51,6 +52,16 @@ describe('StockController: branch-scoped reads', () => {
       code: 'WRONG_BRANCH',
     },
     status: 403,
+  });
+
+  describe('PATCH /stock/:id', () => {
+    it('remains restricted to admins', () => {
+      const handler = Object.getOwnPropertyDescriptor(
+        StockController.prototype,
+        'update',
+      )!.value as object;
+      expect(Reflect.getMetadata(ROLES_KEY, handler)).toEqual([UserRole.ADMIN]);
+    });
   });
 
   describe('GET /stock', () => {
@@ -193,6 +204,53 @@ describe('StockController: branch-scoped reads', () => {
         controller.overview({ branchId: 'branch-b' }, manager),
       ).rejects.toEqual(wrongBranch);
       expect(service.getOverview).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('GET /stock/movements', () => {
+    const handler = Object.getOwnPropertyDescriptor(
+      StockController.prototype,
+      'movementHistory',
+    )!.value as object;
+
+    it('is restricted to admins and managers and remains authenticated', () => {
+      expect(Reflect.getMetadata(ROLES_KEY, handler)).toEqual([
+        UserRole.ADMIN,
+        UserRole.MANAGER,
+      ]);
+      // No @Public metadata: the app-wide JwtAuthGuard protects this route.
+      expect(Reflect.getMetadata('isPublic', handler)).toBeUndefined();
+    });
+
+    it('allows admins to query any branch or all branches', async () => {
+      const { service, controller } = setup();
+      await controller.movementHistory({ branchId: 'branch-b' }, admin);
+      await controller.movementHistory({}, admin);
+      expect(service.getMovementHistory).toHaveBeenNthCalledWith(1, {
+        branchId: 'branch-b',
+      });
+      expect(service.getMovementHistory).toHaveBeenNthCalledWith(2, {
+        branchId: undefined,
+      });
+    });
+
+    it('scopes managers to their branch and refuses another branch before querying', async () => {
+      const { service, controller } = setup();
+      await controller.movementHistory({ movementType: 'SALE' }, manager);
+      expect(service.getMovementHistory).toHaveBeenCalledWith({
+        movementType: 'SALE',
+        branchId: 'branch-a',
+      });
+      await expect(
+        controller.movementHistory({ branchId: 'branch-b' }, manager),
+      ).rejects.toEqual(wrongBranch);
+      expect(service.getMovementHistory).toHaveBeenCalledTimes(1);
+    });
+
+    it('does not grant cashiers access', () => {
+      expect(Reflect.getMetadata(ROLES_KEY, handler)).not.toContain(
+        UserRole.CASHIER,
+      );
     });
   });
 

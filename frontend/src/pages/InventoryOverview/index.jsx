@@ -285,11 +285,16 @@ export default function InventoryOverview() {
 
   return (
     <div className="mx-auto max-w-7xl space-y-5 p-4 sm:p-6">
-      <header>
-        <h1 className="text-2xl font-semibold">Inventory Overview</h1>
-        <p className="mt-1 text-sm text-slate-500 dark:text-slate-400">
-          Stock for every product. Quantities come from stock records; identified units are the items recorded with an IMEI or serial number.
-        </p>
+      <header className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+        <div>
+          <h1 className="text-2xl font-semibold">Inventory Overview</h1>
+          <p className="mt-1 text-sm text-slate-500 dark:text-slate-400">
+            Stock for every product. Quantities come from stock records; identified units are the items recorded with an IMEI or serial number.
+          </p>
+        </div>
+        <Link to="/inventory/movements" className="inline-flex h-10 items-center justify-center rounded-lg border border-slate-300 bg-white px-4 text-sm font-semibold text-slate-700 hover:bg-slate-50 dark:border-slate-600 dark:bg-slate-800 dark:text-slate-200 dark:hover:bg-slate-700">
+          Stock movement history
+        </Link>
       </header>
 
       <SummaryCards summary={result.summary} busy={result.status === "loading"} />

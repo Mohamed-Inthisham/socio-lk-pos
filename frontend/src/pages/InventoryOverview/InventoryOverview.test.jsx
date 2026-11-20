@@ -140,6 +140,7 @@ describe("InventoryOverview", () => {
     renderAs();
 
     expect(screen.getByRole("heading", { level: 1, name: "Inventory Overview" })).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "Stock movement history" })).toHaveAttribute("href", "/inventory/movements");
     const row = await rowOf("Galaxy A15");
     expect(row).toHaveTextContent("SKU-000007");
     expect(row).toHaveTextContent("IMEI");

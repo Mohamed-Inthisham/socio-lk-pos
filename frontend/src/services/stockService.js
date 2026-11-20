@@ -58,6 +58,17 @@ export const getStockOverview = async (params = {}) => {
   return response.data;
 };
 
+/** Read-only, paginated movement history for Admins and Managers. */
+export const getStockMovements = async (filters = {}) => {
+  const params = Object.fromEntries(
+    Object.entries(filters).filter(
+      ([, value]) => value !== undefined && value !== null && value !== "",
+    ),
+  );
+  const response = await api.get("/stock/movements", { params });
+  return response.data;
+};
+
 /**
  * Get a single stock row by ID.
  *

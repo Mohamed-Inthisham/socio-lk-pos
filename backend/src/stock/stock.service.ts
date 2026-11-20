@@ -9,9 +9,15 @@ import {
 import { InjectRepository } from '@nestjs/typeorm';
 import { EntityManager, Repository } from 'typeorm';
 import { Stock } from './entities/stock.entity';
+import { StockMovement } from './entities/stock-movement.entity';
 import { CreateStockDto } from './dto/create-stock.dto';
 import { UpdateStockDto } from './dto/update-stock.dto';
 import { StockOverviewQueryDto } from './dto/stock-overview-query.dto';
+import { StockMovementsQueryDto } from './dto/stock-movements-query.dto';
+import {
+  StockMovementHistoryResponseDto,
+  StockMovementHistoryRowDto,
+} from './dto/stock-movement-history.dto';
 import {
   OVERVIEW_BRANCHES_SQL,
   OVERVIEW_PAGE_SQL,
@@ -27,7 +33,7 @@ import { BranchesService } from '../branches/branches.service';
 import { ProductUnitStatus } from '../product-units/enums/product-unit-status.enum';
 import { insertStockMovement, StockMovementInput } from './stock-movements';
 import {
-  MANUAL_ADJUSTMENT_REASON,
+  ManualStockAdjustmentReason,
   StockMovementReferenceType,
   StockMovementType,
 } from './enums/stock-movement-type.enum';
@@ -60,10 +66,161 @@ export class StockService {
   constructor(
     @InjectRepository(Stock)
     private readonly stockRepository: Repository<Stock>,
+    @InjectRepository(StockMovement)
+    private readonly stockMovementRepository: Repository<StockMovement>,
     @Inject(forwardRef(() => ProductsService))
     private readonly productsService: ProductsService,
     private readonly branchesService: BranchesService,
   ) {}
+
+  /** Read-only, branch-aware movement history with an explicit safe DTO. */
+  async getMovementHistory(
+    query: StockMovementsQueryDto,
+  ): Promise<StockMovementHistoryResponseDto> {
+    const page = query.page ?? 1;
+    const limit = query.limit ?? 50;
+    if (query.startDate && query.endDate && query.startDate > query.endDate) {
+      throw new BadRequestException('startDate must be on or before endDate.');
+    }
+
+    const qb = this.stockMovementRepository
+      .createQueryBuilder('movement')
+      // Historical product/user names remain available after soft deletion.
+      // Only explicitly selected, non-sensitive columns leave this query.
+      .withDeleted()
+      .leftJoinAndSelect('movement.product', 'product')
+      .leftJoinAndSelect('movement.branch', 'branch')
+      .leftJoinAndSelect('movement.product_unit', 'product_unit')
+      .leftJoinAndSelect('movement.created_by', 'performed_by')
+      .leftJoinAndSelect('movement.approved_by', 'approved_by')
+      .select([
+        'movement.id',
+        'movement.seq',
+        'movement.movement_type',
+        'movement.product_id',
+        'movement.branch_id',
+        'movement.product_unit_id',
+        'movement.quantity_delta',
+        'movement.quantity_before',
+        'movement.quantity_after',
+        'movement.stock_managed',
+        'movement.unit_status_from',
+        'movement.unit_status_to',
+        'movement.reason_code',
+        'movement.note',
+        'movement.reference_type',
+        'movement.reference_id',
+        'movement.reverses_movement_id',
+        'movement.created_by_id',
+        'movement.approved_by_id',
+        'movement.created_at',
+        'product.id',
+        'product.name',
+        'branch.id',
+        'branch.name',
+        'product_unit.id',
+        'product_unit.unit_code',
+        'performed_by.id',
+        'performed_by.full_name',
+        'approved_by.id',
+        'approved_by.full_name',
+      ]);
+
+    if (query.productId)
+      qb.andWhere('movement.product_id = :productId', {
+        productId: query.productId,
+      });
+    if (query.branchId)
+      qb.andWhere('movement.branch_id = :branchId', {
+        branchId: query.branchId,
+      });
+    if (query.movementType)
+      qb.andWhere('movement.movement_type = :movementType', {
+        movementType: query.movementType,
+      });
+    if (query.referenceType)
+      qb.andWhere('movement.reference_type = :referenceType', {
+        referenceType: query.referenceType,
+      });
+    if (query.referenceId)
+      qb.andWhere('movement.reference_id = :referenceId', {
+        referenceId: query.referenceId,
+      });
+    if (query.performedBy)
+      qb.andWhere('movement.created_by_id = :performedBy', {
+        performedBy: query.performedBy,
+      });
+    if (query.startDate) {
+      qb.andWhere(
+        `movement.created_at >= (CAST(:startDate AS date)::timestamp AT TIME ZONE 'Asia/Colombo')`,
+        { startDate: query.startDate },
+      );
+    }
+    if (query.endDate) {
+      qb.andWhere(
+        `movement.created_at < ((CAST(:endDate AS date) + 1)::timestamp AT TIME ZONE 'Asia/Colombo')`,
+        { endDate: query.endDate },
+      );
+    }
+
+    const [rows, total] = await qb
+      .orderBy('movement.created_at', 'DESC')
+      .addOrderBy('movement.seq', 'DESC')
+      .skip((page - 1) * limit)
+      .take(limit)
+      .getManyAndCount();
+
+    return {
+      data: rows.map((movement) => this.toMovementHistoryRow(movement)),
+      meta: {
+        total,
+        page,
+        limit,
+        totalPages: total === 0 ? 0 : Math.ceil(total / limit),
+        hasNext: page < (total === 0 ? 0 : Math.ceil(total / limit)),
+        hasPrev: page > 1,
+      },
+    };
+  }
+
+  private toMovementHistoryRow(
+    movement: StockMovement,
+  ): StockMovementHistoryRowDto {
+    return {
+      id: movement.id,
+      movement_type: movement.movement_type,
+      product_id: movement.product_id,
+      product_name: movement.product?.name ?? 'Unknown product',
+      branch_id: movement.branch_id,
+      branch_name: movement.branch?.name ?? 'Unknown branch',
+      product_unit_id: movement.product_unit_id,
+      product_unit_code: movement.product_unit?.unit_code ?? null,
+      quantity_delta: movement.quantity_delta,
+      quantity_before: movement.quantity_before,
+      quantity_after: movement.quantity_after,
+      stock_managed: movement.stock_managed,
+      unit_status_from: movement.unit_status_from,
+      unit_status_to: movement.unit_status_to,
+      reason_code: movement.reason_code,
+      note: movement.note,
+      reference_type: movement.reference_type,
+      reference_id: movement.reference_id,
+      reverses_movement_id: movement.reverses_movement_id,
+      performed_by: movement.created_by
+        ? {
+            id: movement.created_by.id,
+            full_name: movement.created_by.full_name,
+          }
+        : null,
+      approved_by: movement.approved_by
+        ? {
+            id: movement.approved_by.id,
+            full_name: movement.approved_by.full_name,
+          }
+        : null,
+      created_at: movement.created_at,
+    };
+  }
 
   /**
    * Create a stock row. Enforces:
@@ -269,8 +426,8 @@ export class StockService {
    *   - expected_quantity, when sent, must equal the row's quantity under
    *     the lock, or 409 STOCK_QUANTITY_CHANGED with the current quantity
    *     and nothing is written: the admin was looking at an older figure.
-   *   - A changed quantity is recorded in the stock ledger as
-   *     ADJUSTMENT_IN / ADJUSTMENT_OUT (reason MANUAL_ADJUSTMENT) by
+   *   - A changed quantity requires an approved reason and is recorded in
+   *     the stock ledger as ADJUSTMENT_IN / ADJUSTMENT_OUT by
    *     `actor`, untracked rows included, with stock_managed as the row
    *     is after this update.
    *   - min_quantity and manage_stock alone record no movement.
@@ -304,6 +461,14 @@ export class StockService {
         });
       }
 
+      const delta =
+        dto.quantity === undefined ? 0 : dto.quantity - stock.quantity;
+      if (delta !== 0 && !this.isManualAdjustmentReason(dto.reasonCode)) {
+        throw new BadRequestException(
+          'Choose a valid reason for the stock quantity adjustment.',
+        );
+      }
+
       const changes: Partial<Stock> = {};
       if (dto.quantity !== undefined) changes.quantity = dto.quantity;
       if (dto.min_quantity !== undefined)
@@ -313,8 +478,6 @@ export class StockService {
       if (Object.keys(changes).length === 0) return;
       await manager.update(Stock, id, changes);
 
-      const delta =
-        dto.quantity === undefined ? 0 : dto.quantity - stock.quantity;
       if (delta === 0) return;
       await insertStockMovement(manager, {
         productId: stock.product_id,
@@ -330,11 +493,20 @@ export class StockService {
           referenceType: StockMovementReferenceType.STOCK_ADJUSTMENT,
           referenceId: randomUUID(),
           createdById: actor.id,
-          reasonCode: MANUAL_ADJUSTMENT_REASON,
+          reasonCode: dto.reasonCode,
+          note: dto.note?.trim() || null,
         },
       });
     });
     return this.findOne(id);
+  }
+
+  private isManualAdjustmentReason(
+    reason: unknown,
+  ): reason is ManualStockAdjustmentReason {
+    return Object.values(ManualStockAdjustmentReason).includes(
+      reason as ManualStockAdjustmentReason,
+    );
   }
 
   /**
