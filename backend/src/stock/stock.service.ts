@@ -10,6 +10,7 @@ import { InjectRepository } from '@nestjs/typeorm';
 import { EntityManager, Repository } from 'typeorm';
 import { Stock } from './entities/stock.entity';
 import { StockMovement } from './entities/stock-movement.entity';
+import { Product } from '../products/entities/product.entity';
 import { CreateStockDto } from './dto/create-stock.dto';
 import { UpdateStockDto } from './dto/update-stock.dto';
 import { StockOverviewQueryDto } from './dto/stock-overview-query.dto';
@@ -38,6 +39,11 @@ import {
   StockMovementType,
 } from './enums/stock-movement-type.enum';
 import { randomUUID } from 'crypto';
+import {
+  StockWriteOffDto,
+  StockWriteOffReason,
+} from './dto/stock-write-off.dto';
+import { TrackingMethod } from '../products/enums/tracking-method.enum';
 
 /**
  * A stock purchase line's movement (Phase 1 T1): one PURCHASE row per
@@ -501,6 +507,75 @@ export class StockService {
     return this.findOne(id);
   }
 
+  /** Permanently remove quantity-tracked stock through the movement ledger. */
+  async writeOff(id: string, dto: StockWriteOffDto, actor: { id: string }) {
+    const note = dto.note?.trim() || null;
+    if (dto.reasonCode === StockWriteOffReason.OTHER && !note) {
+      throw new BadRequestException(
+        'Add a note explaining an Other write-off.',
+      );
+    }
+    await this.stockRepository.manager.transaction(async (manager) => {
+      const stock = await manager
+        .createQueryBuilder(Stock, 'stock')
+        .setLock('pessimistic_write')
+        .where('stock.id = :id', { id })
+        .getOne();
+      if (!stock) throw new NotFoundException('Stock row not found');
+      const product = await manager.findOne(Product, {
+        where: { id: stock.product_id },
+        select: { id: true, tracking_method: true },
+      });
+      if (product?.tracking_method !== TrackingMethod.QUANTITY) {
+        throw new BadRequestException(
+          'Quantity write-off is only available for quantity-tracked products.',
+        );
+      }
+      if (!stock.manage_stock) {
+        throw new BadRequestException(
+          'Write-off is unavailable while stock tracking is disabled.',
+        );
+      }
+      if (dto.expected_quantity !== stock.quantity) {
+        throw new ConflictException({
+          message:
+            'Stock changed while you were reviewing it. Refresh and try again.',
+          code: 'STOCK_QUANTITY_CHANGED',
+          stock_id: id,
+          expected_quantity: dto.expected_quantity,
+          current_quantity: stock.quantity,
+        });
+      }
+      if (stock.quantity < dto.quantity) {
+        throw new ConflictException({
+          message: `Only ${stock.quantity} units are available to write off.`,
+          code: 'INSUFFICIENT_STOCK',
+          available_quantity: stock.quantity,
+        });
+      }
+      const referenceId = randomUUID();
+      await manager.update(Stock, id, {
+        quantity: stock.quantity - dto.quantity,
+      });
+      await insertStockMovement(manager, {
+        productId: stock.product_id,
+        branchId: stock.branch_id,
+        quantityDelta: -dto.quantity,
+        quantityBefore: stock.quantity,
+        stockManaged: true,
+        movement: {
+          type: StockMovementType.WRITE_OFF,
+          referenceType: StockMovementReferenceType.STOCK_ADJUSTMENT,
+          referenceId,
+          createdById: actor.id,
+          reasonCode: dto.reasonCode,
+          note,
+        },
+      });
+    });
+    return this.findOne(id);
+  }
+
   private isManualAdjustmentReason(
     reason: unknown,
   ): reason is ManualStockAdjustmentReason {
@@ -632,6 +707,45 @@ export class StockService {
       productId,
       branchId,
       quantityDelta: 0,
+      quantityBefore: stock.quantity,
+      stockManaged: stock.manage_stock,
+      movement,
+    });
+  }
+
+  /** Apply a write-off transition to an already locked unit and stock row. */
+  async writeOffUnit(
+    manager: EntityManager,
+    productId: string,
+    branchId: string,
+    quantityDelta: number,
+    movement: UnitEventInput,
+  ): Promise<void> {
+    const stock = await manager
+      .createQueryBuilder(Stock, 'stock')
+      .setLock('pessimistic_write')
+      .where('stock.product_id = :productId', { productId })
+      .andWhere('stock.branch_id = :branchId', { branchId })
+      .getOne();
+    if (!stock)
+      throw new NotFoundException('Stock row not found for this unit.');
+    const delta = stock.manage_stock ? quantityDelta : 0;
+    if (stock.quantity + delta < 0) {
+      throw new ConflictException({
+        message: 'No managed stock quantity is available for this unit.',
+        code: 'INSUFFICIENT_STOCK',
+        available_quantity: stock.quantity,
+      });
+    }
+    if (delta !== 0) {
+      await manager.update(Stock, stock.id, {
+        quantity: stock.quantity + delta,
+      });
+    }
+    await insertStockMovement(manager, {
+      productId,
+      branchId,
+      quantityDelta: delta,
       quantityBefore: stock.quantity,
       stockManaged: stock.manage_stock,
       movement,

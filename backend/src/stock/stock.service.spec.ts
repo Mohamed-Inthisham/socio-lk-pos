@@ -23,6 +23,7 @@ import {
   StockMovementReferenceType,
   StockMovementType,
 } from './enums/stock-movement-type.enum';
+import { StockWriteOffReason } from './dto/stock-write-off.dto';
 
 describe('StockService', () => {
   let service: StockService;
@@ -38,6 +39,7 @@ describe('StockService', () => {
   const mockBranchesService = { findOne: jest.fn() };
   const mockManager = {
     createQueryBuilder: jest.fn(),
+    findOne: jest.fn(),
     query: jest.fn(),
     create: jest.fn(),
     save: jest.fn(),
@@ -69,6 +71,7 @@ describe('StockService', () => {
   beforeEach(async () => {
     jest.clearAllMocks();
     mockManager.createQueryBuilder.mockReset();
+    mockManager.findOne.mockReset();
     mockManager.query.mockReset();
     // The ledger INSERT returns the new row's id; anything else, no rows.
     mockManager.query.mockImplementation((sql: string) =>
@@ -945,6 +948,240 @@ describe('StockService', () => {
         service.update('missing', { quantity: 10 }, admin),
       ).rejects.toThrow(NotFoundException);
       expect(mockManager.update).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('writeOff', () => {
+    const stock = {
+      id: 's1',
+      product_id: 'p1',
+      branch_id: 'b1',
+      quantity: 10,
+      manage_stock: true,
+    };
+    const lockRow = (row: unknown) => {
+      const qb = {
+        setLock: jest.fn().mockReturnThis(),
+        where: jest.fn().mockReturnThis(),
+        getOne: jest.fn().mockResolvedValue(row),
+      };
+      mockManager.createQueryBuilder.mockReturnValueOnce(qb);
+      return qb;
+    };
+
+    it('locks, decrements quantity, and records a negative WRITE_OFF movement', async () => {
+      const qb = lockRow(stock);
+      mockManager.findOne.mockResolvedValue({
+        id: 'p1',
+        tracking_method: TrackingMethod.QUANTITY,
+      });
+      mockRepo.findOne.mockResolvedValue({
+        ...stock,
+        quantity: 7,
+        product: activeProduct,
+        branch: activeBranch,
+      });
+
+      await service.writeOff(
+        's1',
+        {
+          quantity: 3,
+          expected_quantity: 10,
+          reasonCode: StockWriteOffReason.DAMAGED,
+          note: '  broken  ',
+        },
+        admin,
+      );
+
+      expect(qb.setLock).toHaveBeenCalledWith('pessimistic_write');
+      expect(mockManager.update).toHaveBeenCalledWith(Stock, 's1', {
+        quantity: 7,
+      });
+      expect(ledgerInserts()[0].slice(0, 8)).toEqual([
+        'p1',
+        'b1',
+        null,
+        'WRITE_OFF',
+        -3,
+        10,
+        7,
+        true,
+      ]);
+      expect(ledgerInserts()[0][10]).toBe('DAMAGED');
+      expect(ledgerInserts()[0][11]).toBe('broken');
+      expect(ledgerInserts()[0][15]).toBe('admin-1');
+    });
+
+    it('rejects stale expected quantities and insufficient stock without writes', async () => {
+      lockRow(stock);
+      mockManager.findOne.mockResolvedValue({
+        id: 'p1',
+        tracking_method: TrackingMethod.QUANTITY,
+      });
+      await expect(
+        service.writeOff(
+          's1',
+          {
+            quantity: 2,
+            expected_quantity: 9,
+            reasonCode: StockWriteOffReason.LOST,
+          },
+          admin,
+        ),
+      ).rejects.toMatchObject({ response: { code: 'STOCK_QUANTITY_CHANGED' } });
+      expect(mockManager.update).not.toHaveBeenCalled();
+      expect(ledgerInserts()).toHaveLength(0);
+
+      lockRow({ ...stock, quantity: 1 });
+      await expect(
+        service.writeOff(
+          's1',
+          {
+            quantity: 2,
+            expected_quantity: 1,
+            reasonCode: StockWriteOffReason.LOST,
+          },
+          admin,
+        ),
+      ).rejects.toMatchObject({ response: { code: 'INSUFFICIENT_STOCK' } });
+      expect(mockManager.update).not.toHaveBeenCalled();
+    });
+
+    it('rejects serialized and non-managed aggregate stock', async () => {
+      lockRow(stock);
+      mockManager.findOne.mockResolvedValue({
+        id: 'p1',
+        tracking_method: TrackingMethod.SERIAL_NUMBER,
+      });
+      await expect(
+        service.writeOff(
+          's1',
+          {
+            quantity: 1,
+            expected_quantity: 10,
+            reasonCode: StockWriteOffReason.LOST,
+          },
+          admin,
+        ),
+      ).rejects.toThrow(BadRequestException);
+
+      lockRow({ ...stock, manage_stock: false });
+      mockManager.findOne.mockResolvedValue({
+        id: 'p1',
+        tracking_method: TrackingMethod.QUANTITY,
+      });
+      await expect(
+        service.writeOff(
+          's1',
+          {
+            quantity: 1,
+            expected_quantity: 10,
+            reasonCode: StockWriteOffReason.LOST,
+          },
+          admin,
+        ),
+      ).rejects.toThrow(BadRequestException);
+      expect(mockManager.update).not.toHaveBeenCalled();
+      expect(ledgerInserts()).toHaveLength(0);
+    });
+
+    it('requires a nonblank note for OTHER', async () => {
+      await expect(
+        service.writeOff(
+          's1',
+          {
+            quantity: 1,
+            expected_quantity: 10,
+            reasonCode: StockWriteOffReason.OTHER,
+            note: '   ',
+          },
+          admin,
+        ),
+      ).rejects.toThrow(BadRequestException);
+      expect(mockManager.createQueryBuilder).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('writeOffUnit', () => {
+    it('decrements managed stock and inserts the unit status movement', async () => {
+      const qb = {
+        setLock: jest.fn().mockReturnThis(),
+        where: jest.fn().mockReturnThis(),
+        andWhere: jest.fn().mockReturnThis(),
+        getOne: jest.fn().mockResolvedValue({
+          id: 's1',
+          quantity: 4,
+          manage_stock: true,
+        }),
+      };
+      mockManager.createQueryBuilder.mockReturnValueOnce(qb);
+
+      await service.writeOffUnit(mockManager as never, 'p1', 'b1', -1, {
+        type: StockMovementType.WRITE_OFF,
+        referenceType: StockMovementReferenceType.STOCK_ADJUSTMENT,
+        referenceId: 'request-1',
+        createdById: 'admin-1',
+        reasonCode: StockWriteOffReason.DAMAGED,
+        unit: {
+          id: 'unit-1',
+          from: ProductUnitStatus.IN_STOCK,
+          to: ProductUnitStatus.WRITTEN_OFF,
+        },
+      });
+
+      expect(qb.setLock).toHaveBeenCalledWith('pessimistic_write');
+      expect(mockManager.update).toHaveBeenCalledWith(Stock, 's1', {
+        quantity: 3,
+      });
+      expect(ledgerInserts()[0].slice(0, 10)).toEqual([
+        'p1',
+        'b1',
+        'unit-1',
+        'WRITE_OFF',
+        -1,
+        4,
+        3,
+        true,
+        'IN_STOCK',
+        'WRITTEN_OFF',
+      ]);
+    });
+
+    it('records inspection and non-managed unit write-offs with zero delta', async () => {
+      mockManager.createQueryBuilder.mockReturnValueOnce({
+        setLock: jest.fn().mockReturnThis(),
+        where: jest.fn().mockReturnThis(),
+        andWhere: jest.fn().mockReturnThis(),
+        getOne: jest.fn().mockResolvedValue({
+          id: 's1',
+          quantity: 4,
+          manage_stock: false,
+        }),
+      });
+
+      await service.writeOffUnit(mockManager as never, 'p1', 'b1', -1, {
+        type: StockMovementType.WRITE_OFF,
+        referenceType: StockMovementReferenceType.STOCK_ADJUSTMENT,
+        referenceId: 'request-2',
+        createdById: 'admin-1',
+        reasonCode: StockWriteOffReason.DAMAGED,
+        unit: {
+          id: 'unit-2',
+          from: ProductUnitStatus.INSPECTION,
+          to: ProductUnitStatus.WRITTEN_OFF,
+        },
+      });
+
+      expect(mockManager.update).not.toHaveBeenCalled();
+      expect(ledgerInserts()[0].slice(3, 10)).toEqual([
+        'WRITE_OFF',
+        0,
+        4,
+        4,
+        false,
+        'INSPECTION',
+        'WRITTEN_OFF',
+      ]);
     });
   });
 

@@ -1,12 +1,20 @@
 import { Test, TestingModule } from '@nestjs/testing';
 import { getDataSourceToken, getRepositoryToken } from '@nestjs/typeorm';
-import { ConflictException, NotFoundException } from '@nestjs/common';
+import {
+  ConflictException,
+  NotFoundException,
+  BadRequestException,
+} from '@nestjs/common';
 import { ProductUnitsService } from './product-units.service';
 import { ProductUnit } from './entities/product-unit.entity';
 import { ProductUnitStatus } from './enums/product-unit-status.enum';
-import { Brackets, QueryFailedError } from 'typeorm';
+import { Brackets, EntityManager, QueryFailedError } from 'typeorm';
 import { StockService } from '../stock/stock.service';
 import { lockInventoryRows } from '../stock/lock-inventory-rows';
+import {
+  IdentifiedUnitWriteOffDto,
+  StockWriteOffReason,
+} from '../stock/dto/stock-write-off.dto';
 import {
   StockMovementReferenceType,
   StockMovementType,
@@ -43,7 +51,10 @@ describe('ProductUnitsService', () => {
   // passInspection (Phase 6.4 P7-7) opens a transaction, adds stock and
   // writes an audit row through the transaction's manager.
   const mockDataSource = { transaction: jest.fn(), query: jest.fn() };
-  const mockStockService = { incrementForReversal: jest.fn() };
+  const mockStockService = {
+    incrementForReversal: jest.fn(),
+    writeOffUnit: jest.fn(),
+  };
   const mockAuditRepo = { save: jest.fn() };
 
   beforeEach(async () => {
@@ -74,6 +85,103 @@ describe('ProductUnitsService', () => {
 
   it('should be defined', () => {
     expect(service).toBeDefined();
+  });
+
+  describe('writeOffUnit', () => {
+    const initialUnit = {
+      id: 'unit-1',
+      unit_code: 'UNIT-1',
+      product_id: 'product-1',
+      branch_id: 'branch-1',
+      status: ProductUnitStatus.IN_STOCK,
+      product: {
+        id: 'product-1',
+        name: 'Phone',
+        sku: 'SKU-1',
+        tracking_method: 'IMEI',
+      },
+      branch: { id: 'branch-1', name: 'Main' },
+    };
+
+    const setupWriteOff = (status: ProductUnitStatus) => {
+      const manager = {
+        findOne: jest.fn().mockResolvedValue({ ...initialUnit, status }),
+        update: jest.fn().mockResolvedValue(undefined),
+      };
+      mockRepo.findOne.mockResolvedValue(initialUnit);
+      mockDataSource.transaction.mockImplementation(
+        (callback: (manager: EntityManager) => unknown) =>
+          callback(manager as unknown as EntityManager),
+      );
+      return manager;
+    };
+
+    const dto: IdentifiedUnitWriteOffDto = {
+      reasonCode: StockWriteOffReason.DAMAGED,
+      note: '  cracked screen  ',
+    };
+    const actor = { id: 'admin-1', role: UserRole.ADMIN } as never;
+
+    it.each([
+      [ProductUnitStatus.IN_STOCK, -1],
+      [ProductUnitStatus.INSPECTION, 0],
+    ])('writes off %s and records quantity delta %s', async (status, delta) => {
+      const manager = setupWriteOff(status);
+
+      const result = await service.writeOffUnit('unit-1', dto, actor);
+
+      expect(lockInventoryRows).toHaveBeenCalledWith(manager, {
+        stock: [{ productId: 'product-1', branchId: 'branch-1' }],
+        unitIds: ['unit-1'],
+      });
+      expect(manager.update).toHaveBeenCalledWith(ProductUnit, 'unit-1', {
+        status: ProductUnitStatus.WRITTEN_OFF,
+      });
+      expect(mockStockService.writeOffUnit).toHaveBeenCalledWith(
+        manager,
+        'product-1',
+        'branch-1',
+        delta,
+        expect.objectContaining({
+          type: StockMovementType.WRITE_OFF,
+          reasonCode: StockWriteOffReason.DAMAGED,
+          note: 'cracked screen',
+          unit: {
+            id: 'unit-1',
+            from: status,
+            to: ProductUnitStatus.WRITTEN_OFF,
+          },
+        }),
+      );
+      expect(result.status).toBe(ProductUnitStatus.WRITTEN_OFF);
+      expect(JSON.stringify(result)).not.toContain('buying_price');
+    });
+
+    it.each([
+      ProductUnitStatus.SOLD,
+      ProductUnitStatus.RETURNED,
+      ProductUnitStatus.WRITTEN_OFF,
+    ])('rejects a unit already in %s', async (status) => {
+      const manager = setupWriteOff(status);
+
+      await expect(
+        service.writeOffUnit('unit-1', dto, actor),
+      ).rejects.toBeInstanceOf(ConflictException);
+
+      expect(manager.update).not.toHaveBeenCalled();
+      expect(mockStockService.writeOffUnit).not.toHaveBeenCalled();
+    });
+
+    it('requires an explanatory note for OTHER', async () => {
+      await expect(
+        service.writeOffUnit(
+          'unit-1',
+          { reasonCode: StockWriteOffReason.OTHER },
+          actor,
+        ),
+      ).rejects.toBeInstanceOf(BadRequestException);
+      expect(mockDataSource.transaction).not.toHaveBeenCalled();
+    });
   });
 
   // ---- findAll ----
