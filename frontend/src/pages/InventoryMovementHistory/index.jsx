@@ -24,6 +24,10 @@ const TYPE_LABELS = {
   ADJUSTMENT_IN: "Adjustment in",
   ADJUSTMENT_OUT: "Adjustment out",
 };
+const REASON_LABELS = {
+  STOCK_RECEIVED: "Stock received",
+  COUNT_CORRECTION: "Stock count correction",
+};
 const TYPE_OPTIONS = [
   { value: "OPENING_BALANCE", label: "Opening balance" },
   { value: "PURCHASE", label: "Purchase received" },
@@ -69,7 +73,7 @@ const MovementDescription = ({ row }) => (
     )}
     {row.reason_code && (
       <div className="mt-1 text-xs text-slate-500 dark:text-slate-400">
-        {row.reason_code}
+        {REASON_LABELS[row.reason_code] ?? row.reason_code}
       </div>
     )}
     {row.note && (

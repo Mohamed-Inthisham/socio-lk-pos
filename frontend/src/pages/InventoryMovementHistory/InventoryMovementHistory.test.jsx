@@ -100,6 +100,32 @@ describe("InventoryMovementHistory", () => {
     expect(rowText).toContain("Approved by Manager One");
   });
 
+  it.each([
+    ["STOCK_RECEIVED", "Stock received"],
+    ["COUNT_CORRECTION", "Stock count correction"],
+  ])("shows a readable %s reason and its optional note", async (reasonCode, label) => {
+    getStockMovements.mockResolvedValueOnce(
+      response([{ ...reversal, reason_code: reasonCode, note: "Verified on shelf" }]),
+    );
+    renderAs();
+    const table = await screen.findByRole("table", {
+      name: "Stock movement history",
+    });
+    expect(within(table).getByText(label)).toBeInTheDocument();
+    expect(within(table).getByText("Verified on shelf")).toBeInTheDocument();
+  });
+
+  it("keeps legacy adjustment reason codes visible as a safe fallback", async () => {
+    getStockMovements.mockResolvedValueOnce(
+      response([{ ...reversal, movement_type: "ADJUSTMENT_IN", reason_code: "MANUAL_ADJUSTMENT" }]),
+    );
+    renderAs();
+    const table = await screen.findByRole("table", {
+      name: "Stock movement history",
+    });
+    expect(within(table).getByText("MANUAL_ADJUSTMENT")).toBeInTheDocument();
+  });
+
   it("supports product, branch, type and date filters and resets to page one", async () => {
     const user = userEvent.setup();
     renderAs();

@@ -53,12 +53,14 @@ describe("AdjustStockDialog", () => {
     const { user, dialog, onSuccess } = setup();
 
     await setField(user, dialog, /New quantity/, "7");
+    await user.selectOptions(within(dialog).getByLabelText(/Adjustment reason/), "COUNT_CORRECTION");
     await save(user, dialog);
 
     await waitFor(() => expect(onSuccess).toHaveBeenCalled());
     expect(stockService.updateStock).toHaveBeenCalledWith("stock-1", {
       quantity: 7,
       expected_quantity: 10,
+      reasonCode: "COUNT_CORRECTION",
       min_quantity: 3,
     });
   });
@@ -79,6 +81,7 @@ describe("AdjustStockDialog", () => {
     expect(current(dialog)).toHaveTextContent("10");
 
     await setField(user, dialog, /New quantity/, "7");
+    await user.selectOptions(within(dialog).getByLabelText(/Adjustment reason/), "COUNT_CORRECTION");
     await save(user, dialog);
 
     expect(await within(dialog).findByText(/changed to 8 while you were editing/)).toBeInTheDocument();
@@ -93,6 +96,7 @@ describe("AdjustStockDialog", () => {
     expect(stockService.updateStock).toHaveBeenLastCalledWith("stock-1", {
       quantity: 7,
       expected_quantity: 8,
+      reasonCode: "COUNT_CORRECTION",
       min_quantity: 3,
     });
   });
@@ -104,10 +108,34 @@ describe("AdjustStockDialog", () => {
     const { user, dialog, onSuccess } = setup();
 
     await setField(user, dialog, /New quantity/, "7");
+    await user.selectOptions(within(dialog).getByLabelText(/Adjustment reason/), "STOCK_RECEIVED");
     await save(user, dialog);
 
     expect(await within(dialog).findByText("Forbidden resource")).toBeInTheDocument();
     expect(current(dialog)).toHaveTextContent("10");
     expect(onSuccess).not.toHaveBeenCalled();
+  });
+
+  it("requires a reason only for a changed quantity and lists the approved reasons", async () => {
+    stockService.updateStock.mockResolvedValue({});
+    const { user, dialog } = setup();
+
+    await setField(user, dialog, /New quantity/, "7");
+    const reason = await within(dialog).findByLabelText(/Adjustment reason/);
+    expect(within(reason).getByRole("option", { name: "Stock received" })).toBeInTheDocument();
+    expect(within(reason).getByRole("option", { name: "Stock count correction" })).toBeInTheDocument();
+    expect(within(dialog).getByLabelText(/Note \(optional\)/)).toBeInTheDocument();
+
+    await save(user, dialog);
+    expect(await within(dialog).findByText("Choose a reason for this quantity change")).toBeInTheDocument();
+    expect(stockService.updateStock).not.toHaveBeenCalled();
+
+    await setField(user, dialog, /Minimum quantity/, "5");
+    // Reset the quantity to the value shown when the dialog opened. The
+    // reason is now hidden and no longer required for this threshold update.
+    await setField(user, dialog, /New quantity/, "10");
+    expect(within(dialog).queryByLabelText(/Adjustment reason/)).not.toBeInTheDocument();
+    await save(user, dialog);
+    await waitFor(() => expect(stockService.updateStock).toHaveBeenCalledWith("stock-1", { min_quantity: 5 }));
   });
 });

@@ -26,11 +26,8 @@ import { updateStock } from "../../../services/stockService";
  * changing only the minimum can't put back an old quantity.
  *
  * REASON FIELD:
- * Deliberately omitted for R1 — the backend has no audit table to persist
- * the reason. Showing a field that gets silently discarded is dishonest
- * UX. Tracked as a followup: when the backend adds a stock_adjustments
- * audit table, we add the reason field here and a history view on the
- * product detail page.
+ * Quantity changes and their reason/note are stored in the append-only
+ * stock movement ledger and shown in Stock Movement History.
  *
  * PROPS:
  * - open: boolean
@@ -42,6 +39,8 @@ import { updateStock } from "../../../services/stockService";
  */
 
 const AdjustStockDialog = ({ open, onClose, onSuccess, stockRow }) => {
+  const [reasonCode, setReasonCode] = useState("");
+  const [note, setNote] = useState("");
   const [quantity, setQuantity] = useState("");
   const [minQuantity, setMinQuantity] = useState("");
   // The stock as the backend last reported it: the row's quantity when the
@@ -59,12 +58,11 @@ const AdjustStockDialog = ({ open, onClose, onSuccess, stockRow }) => {
     if (open && stockRow) {
       // eslint-disable-next-line react-hooks/set-state-in-effect
       setQuantity(String(stockRow.quantity ?? 0));
-      // eslint-disable-next-line react-hooks/set-state-in-effect
       setMinQuantity(String(stockRow.min_quantity ?? 0));
       setCurrentQty(stockRow.quantity ?? 0);
-      // eslint-disable-next-line react-hooks/set-state-in-effect
+      setReasonCode("");
+      setNote("");
       setErrors({});
-      // eslint-disable-next-line react-hooks/set-state-in-effect
       setApiError(null);
     }
   }, [open, stockRow]);
@@ -80,6 +78,15 @@ const AdjustStockDialog = ({ open, onClose, onSuccess, stockRow }) => {
       next.quantity = "Quantity must be a whole number";
     } else if (qty < 0) {
       next.quantity = "Quantity can't be negative";
+    }
+
+    if (
+      quantity !== "" &&
+      Number.isInteger(qty) &&
+      qty !== currentQty &&
+      !reasonCode
+    ) {
+      next.reasonCode = "Choose a reason for this quantity change";
     }
 
     if (minQuantity === "" || Number.isNaN(minQty)) {
@@ -104,11 +111,14 @@ const AdjustStockDialog = ({ open, onClose, onSuccess, stockRow }) => {
     setApiError(null);
 
     const qty = Number(quantity);
+    const trimmedNote = note.trim();
     try {
       await updateStock(stockRow.id, {
         ...(qty !== currentQty && {
           quantity: qty,
           expected_quantity: currentQty,
+          reasonCode,
+          ...(trimmedNote && { note: trimmedNote }),
         }),
         min_quantity: Number(minQuantity),
       });
@@ -137,6 +147,8 @@ const AdjustStockDialog = ({ open, onClose, onSuccess, stockRow }) => {
 
   const newQty = Number(quantity);
   const delta = Number.isFinite(newQty) ? newQty - currentQty : 0;
+  const quantityChanged =
+    quantity !== "" && Number.isInteger(newQty) && newQty !== currentQty;
 
   return (
     <Dialog
@@ -224,6 +236,41 @@ const AdjustStockDialog = ({ open, onClose, onSuccess, stockRow }) => {
               : undefined
           }
         />
+
+        {quantityChanged && (
+          <>
+            <InputField
+              type="select"
+              name="reasonCode"
+              label="Adjustment reason"
+              value={reasonCode}
+              onChange={(event) => {
+                setReasonCode(event.target.value);
+                if (errors.reasonCode) {
+                  setErrors((previous) => ({ ...previous, reasonCode: undefined }));
+                }
+              }}
+              placeholder="Select a reason"
+              options={[
+                { value: "STOCK_RECEIVED", label: "Stock received" },
+                { value: "COUNT_CORRECTION", label: "Stock count correction" },
+              ]}
+              required
+              error={errors.reasonCode}
+            />
+            <InputField
+              type="textarea"
+              name="adjustment-note"
+              label="Note (optional)"
+              placeholder="Add context for this adjustment"
+              value={note}
+              onChange={(event) => setNote(event.target.value.slice(0, 500))}
+              maxLength={500}
+              rows={3}
+              hint={`${note.length}/500 characters`}
+            />
+          </>
+        )}
       </div>
 
       {apiError && (

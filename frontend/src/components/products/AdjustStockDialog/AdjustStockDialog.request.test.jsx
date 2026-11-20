@@ -42,6 +42,9 @@ describe("AdjustStockDialog: the request sent", () => {
     const { user, dialog, onSuccess } = openDialog();
 
     await setField(user, dialog, /New quantity/, "7");
+    expect(within(dialog).getByLabelText(/New quantity/)).toHaveValue(7);
+    await user.selectOptions(await within(dialog).findByLabelText(/Adjustment reason/), "STOCK_RECEIVED");
+    await setField(user, dialog, /Note \(optional\)/, "  Unrecorded branch delivery  ");
     await user.click(within(dialog).getByRole("button", { name: "Save changes" }));
 
     await waitFor(() => expect(onSuccess).toHaveBeenCalled());
@@ -49,6 +52,8 @@ describe("AdjustStockDialog: the request sent", () => {
     expect(api.patch).toHaveBeenCalledWith("/stock/stock-1", {
       quantity: 7,
       expected_quantity: 10,
+      reasonCode: "STOCK_RECEIVED",
+      note: "Unrecorded branch delivery",
       min_quantity: 3,
     });
   });

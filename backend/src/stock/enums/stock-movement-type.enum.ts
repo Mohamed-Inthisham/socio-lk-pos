@@ -52,5 +52,11 @@ export const APPROVED_MOVEMENT_TYPES: readonly StockMovementType[] = [
   StockMovementType.CUSTOMER_RETURN,
 ];
 
-/** The reason a manual adjustment gets until reasons can be chosen. */
+/** Kept for existing historical movement rows; new adjustments use the enum below. */
 export const MANUAL_ADJUSTMENT_REASON = 'MANUAL_ADJUSTMENT';
+
+/** Approved reasons for new manual stock quantity adjustments. */
+export enum ManualStockAdjustmentReason {
+  STOCK_RECEIVED = 'STOCK_RECEIVED',
+  COUNT_CORRECTION = 'COUNT_CORRECTION',
+}

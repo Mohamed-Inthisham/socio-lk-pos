@@ -33,7 +33,7 @@ import { BranchesService } from '../branches/branches.service';
 import { ProductUnitStatus } from '../product-units/enums/product-unit-status.enum';
 import { insertStockMovement, StockMovementInput } from './stock-movements';
 import {
-  MANUAL_ADJUSTMENT_REASON,
+  ManualStockAdjustmentReason,
   StockMovementReferenceType,
   StockMovementType,
 } from './enums/stock-movement-type.enum';
@@ -426,8 +426,8 @@ export class StockService {
    *   - expected_quantity, when sent, must equal the row's quantity under
    *     the lock, or 409 STOCK_QUANTITY_CHANGED with the current quantity
    *     and nothing is written: the admin was looking at an older figure.
-   *   - A changed quantity is recorded in the stock ledger as
-   *     ADJUSTMENT_IN / ADJUSTMENT_OUT (reason MANUAL_ADJUSTMENT) by
+   *   - A changed quantity requires an approved reason and is recorded in
+   *     the stock ledger as ADJUSTMENT_IN / ADJUSTMENT_OUT by
    *     `actor`, untracked rows included, with stock_managed as the row
    *     is after this update.
    *   - min_quantity and manage_stock alone record no movement.
@@ -461,6 +461,14 @@ export class StockService {
         });
       }
 
+      const delta =
+        dto.quantity === undefined ? 0 : dto.quantity - stock.quantity;
+      if (delta !== 0 && !this.isManualAdjustmentReason(dto.reasonCode)) {
+        throw new BadRequestException(
+          'Choose a valid reason for the stock quantity adjustment.',
+        );
+      }
+
       const changes: Partial<Stock> = {};
       if (dto.quantity !== undefined) changes.quantity = dto.quantity;
       if (dto.min_quantity !== undefined)
@@ -470,8 +478,6 @@ export class StockService {
       if (Object.keys(changes).length === 0) return;
       await manager.update(Stock, id, changes);
 
-      const delta =
-        dto.quantity === undefined ? 0 : dto.quantity - stock.quantity;
       if (delta === 0) return;
       await insertStockMovement(manager, {
         productId: stock.product_id,
@@ -487,11 +493,20 @@ export class StockService {
           referenceType: StockMovementReferenceType.STOCK_ADJUSTMENT,
           referenceId: randomUUID(),
           createdById: actor.id,
-          reasonCode: MANUAL_ADJUSTMENT_REASON,
+          reasonCode: dto.reasonCode,
+          note: dto.note?.trim() || null,
         },
       });
     });
     return this.findOne(id);
+  }
+
+  private isManualAdjustmentReason(
+    reason: unknown,
+  ): reason is ManualStockAdjustmentReason {
+    return Object.values(ManualStockAdjustmentReason).includes(
+      reason as ManualStockAdjustmentReason,
+    );
   }
 
   /**

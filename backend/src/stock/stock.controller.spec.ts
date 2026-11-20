@@ -54,6 +54,16 @@ describe('StockController: branch-scoped reads', () => {
     status: 403,
   });
 
+  describe('PATCH /stock/:id', () => {
+    it('remains restricted to admins', () => {
+      const handler = Object.getOwnPropertyDescriptor(
+        StockController.prototype,
+        'update',
+      )!.value as object;
+      expect(Reflect.getMetadata(ROLES_KEY, handler)).toEqual([UserRole.ADMIN]);
+    });
+  });
+
   describe('GET /stock', () => {
     it('lets an admin list every branch, or the one asked for', async () => {
       const { service, controller } = setup();
