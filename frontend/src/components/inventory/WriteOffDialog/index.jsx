@@ -4,6 +4,7 @@ import Button from "../../common/Button";
 import InputField from "../../common/InputField";
 import { writeOffStock } from "../../../services/stockService";
 import { writeOffProductUnit } from "../../../services/productUnitsService";
+import { newClientRequestId } from "../../../utils/requestId";
 
 const REASONS = [
   { value: "DAMAGED", label: "Damaged" },
@@ -21,6 +22,7 @@ export default function WriteOffDialog({
   stockRow,
   unit,
   product,
+  onStaleQuantity,
 }) {
   const isUnit = Boolean(unit);
   const [quantity, setQuantity] = useState("1");
@@ -29,6 +31,7 @@ export default function WriteOffDialog({
   const [confirmed, setConfirmed] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const submittingRef = useRef(false);
+  const requestRef = useRef({ signature: "", id: "" });
   const [error, setError] = useState("");
 
   useEffect(() => {
@@ -42,7 +45,8 @@ export default function WriteOffDialog({
     setError("");
     setSubmitting(false);
     submittingRef.current = false;
-  }, [open, stockRow, unit]);
+    requestRef.current = { signature: "", id: "" };
+  }, [open, stockRow?.id, unit?.id]);
 
   const handleSubmit = async () => {
     if (submittingRef.current) return;
@@ -69,19 +73,39 @@ export default function WriteOffDialog({
           reasonCode,
           ...(note.trim() && { note: note.trim() }),
         });
-      else
-        await writeOffStock(stockRow.id, {
+      else {
+        const payload = {
           quantity: qty,
           expected_quantity: Number(stockRow.quantity),
           reasonCode,
           ...(note.trim() && { note: note.trim() }),
+        };
+        const signature = JSON.stringify([stockRow.id, payload]);
+        if (requestRef.current.signature !== signature) {
+          requestRef.current = { signature, id: newClientRequestId() };
+        }
+        await writeOffStock(stockRow.id, {
+          ...payload,
+          client_request_id: requestRef.current.id,
         });
+      }
       onSuccess();
     } catch (err) {
-      setError(
-        err.response?.data?.message ||
-          "Could not write off this stock. Refresh and try again.",
-      );
+      if (err.response?.status === 409 && err.response?.data?.code === "STOCK_QUANTITY_CHANGED" && onStaleQuantity) {
+        try {
+          const refreshed = await onStaleQuantity(stockRow.id);
+          if (Number.isFinite(Number(refreshed?.quantity))) {
+            requestRef.current = { signature: "", id: "" };
+            setError(`Stock changed. Available quantity refreshed to ${refreshed.quantity}; review it before trying again.`);
+          } else {
+            setError("Stock changed, but its latest quantity could not be loaded. Refresh and try again.");
+          }
+        } catch {
+          setError("Stock changed, but its latest quantity could not be loaded. Refresh and try again.");
+        }
+      } else {
+        setError(err.response?.data?.message || "Could not write off this stock. Refresh and try again.");
+      }
       submittingRef.current = false;
       setSubmitting(false);
     }

@@ -1,5 +1,6 @@
 import { Test, TestingModule } from '@nestjs/testing';
 import { getRepositoryToken } from '@nestjs/typeorm';
+import { QueryFailedError } from 'typeorm';
 import {
   NotFoundException,
   ConflictException,
@@ -48,6 +49,7 @@ describe('StockService', () => {
   // create and update run in a transaction (Phase 1 T1).
   Object.assign(mockRepo, {
     manager: {
+      findOne: (...args: unknown[]) => mockManager.findOne(...args),
       transaction: jest.fn((cb: (m: typeof mockManager) => unknown) =>
         cb(mockManager),
       ),
@@ -971,6 +973,7 @@ describe('StockService', () => {
 
     it('locks, decrements quantity, and records a negative WRITE_OFF movement', async () => {
       const qb = lockRow(stock);
+      mockManager.findOne.mockResolvedValueOnce(null);
       mockManager.findOne.mockResolvedValue({
         id: 'p1',
         tracking_method: TrackingMethod.QUANTITY,
@@ -985,6 +988,7 @@ describe('StockService', () => {
       await service.writeOff(
         's1',
         {
+          client_request_id: '11111111-1111-4111-8111-111111111111',
           quantity: 3,
           expected_quantity: 10,
           reasonCode: StockWriteOffReason.DAMAGED,
@@ -1010,10 +1014,14 @@ describe('StockService', () => {
       expect(ledgerInserts()[0][10]).toBe('DAMAGED');
       expect(ledgerInserts()[0][11]).toBe('broken');
       expect(ledgerInserts()[0][15]).toBe('admin-1');
+      expect(ledgerInserts()[0][13]).toBe(
+        '11111111-1111-4111-8111-111111111111',
+      );
     });
 
     it('rejects stale expected quantities and insufficient stock without writes', async () => {
       lockRow(stock);
+      mockManager.findOne.mockResolvedValueOnce(null);
       mockManager.findOne.mockResolvedValue({
         id: 'p1',
         tracking_method: TrackingMethod.QUANTITY,
@@ -1022,6 +1030,7 @@ describe('StockService', () => {
         service.writeOff(
           's1',
           {
+            client_request_id: '22222222-2222-4222-8222-222222222222',
             quantity: 2,
             expected_quantity: 9,
             reasonCode: StockWriteOffReason.LOST,
@@ -1033,10 +1042,12 @@ describe('StockService', () => {
       expect(ledgerInserts()).toHaveLength(0);
 
       lockRow({ ...stock, quantity: 1 });
+      mockManager.findOne.mockResolvedValueOnce(null);
       await expect(
         service.writeOff(
           's1',
           {
+            client_request_id: '33333333-3333-4333-8333-333333333333',
             quantity: 2,
             expected_quantity: 1,
             reasonCode: StockWriteOffReason.LOST,
@@ -1049,6 +1060,7 @@ describe('StockService', () => {
 
     it('rejects serialized and non-managed aggregate stock', async () => {
       lockRow(stock);
+      mockManager.findOne.mockResolvedValueOnce(null);
       mockManager.findOne.mockResolvedValue({
         id: 'p1',
         tracking_method: TrackingMethod.SERIAL_NUMBER,
@@ -1057,6 +1069,7 @@ describe('StockService', () => {
         service.writeOff(
           's1',
           {
+            client_request_id: '44444444-4444-4444-8444-444444444444',
             quantity: 1,
             expected_quantity: 10,
             reasonCode: StockWriteOffReason.LOST,
@@ -1066,6 +1079,7 @@ describe('StockService', () => {
       ).rejects.toThrow(BadRequestException);
 
       lockRow({ ...stock, manage_stock: false });
+      mockManager.findOne.mockResolvedValueOnce(null);
       mockManager.findOne.mockResolvedValue({
         id: 'p1',
         tracking_method: TrackingMethod.QUANTITY,
@@ -1074,6 +1088,7 @@ describe('StockService', () => {
         service.writeOff(
           's1',
           {
+            client_request_id: '55555555-5555-4555-8555-555555555555',
             quantity: 1,
             expected_quantity: 10,
             reasonCode: StockWriteOffReason.LOST,
@@ -1090,6 +1105,7 @@ describe('StockService', () => {
         service.writeOff(
           's1',
           {
+            client_request_id: '66666666-6666-4666-8666-666666666666',
             quantity: 1,
             expected_quantity: 10,
             reasonCode: StockWriteOffReason.OTHER,
@@ -1099,6 +1115,91 @@ describe('StockService', () => {
         ),
       ).rejects.toThrow(BadRequestException);
       expect(mockManager.createQueryBuilder).not.toHaveBeenCalled();
+    });
+
+    it('replays the recorded write-off for the same request ID without another deduction', async () => {
+      lockRow(stock);
+      mockManager.findOne.mockResolvedValueOnce({
+        product_id: 'p1',
+        branch_id: 'b1',
+        created_by_id: admin.id,
+        quantity_delta: -2,
+        quantity_before: 10,
+        reason_code: 'LOST',
+        note: null,
+      });
+      mockRepo.findOne.mockResolvedValue({ ...stock, quantity: 8 });
+      await service.writeOff(
+        's1',
+        {
+          client_request_id: '77777777-7777-4777-8777-777777777777',
+          quantity: 2,
+          expected_quantity: 10,
+          reasonCode: StockWriteOffReason.LOST,
+        },
+        admin,
+      );
+      expect(mockManager.update).not.toHaveBeenCalled();
+      expect(ledgerInserts()).toHaveLength(0);
+    });
+
+    it('rejects reuse of a request ID with a different payload', async () => {
+      lockRow(stock);
+      mockManager.findOne.mockResolvedValueOnce({
+        product_id: 'p1',
+        branch_id: 'b1',
+        created_by_id: admin.id,
+        quantity_delta: -2,
+        quantity_before: 10,
+        reason_code: 'LOST',
+        note: null,
+      });
+      await expect(
+        service.writeOff(
+          's1',
+          {
+            client_request_id: '88888888-8888-4888-8888-888888888888',
+            quantity: 1,
+            expected_quantity: 10,
+            reasonCode: StockWriteOffReason.LOST,
+          },
+          admin,
+        ),
+      ).rejects.toMatchObject({
+        response: { code: 'CLIENT_REQUEST_ID_CONFLICT' },
+      });
+      expect(mockManager.update).not.toHaveBeenCalled();
+    });
+
+    it('recovers a concurrent duplicate rejected by the ledger unique index', async () => {
+      mockRepo.manager.transaction.mockRejectedValueOnce(
+        new QueryFailedError('INSERT', [], {
+          code: '23505',
+          constraint: 'uq_stock_movements_event_quantity',
+        }),
+      );
+      mockManager.findOne.mockResolvedValueOnce({
+        product_id: 'p1',
+        branch_id: 'b1',
+        created_by_id: admin.id,
+        quantity_delta: -1,
+        quantity_before: 10,
+        reason_code: 'DAMAGED',
+        note: null,
+      });
+      mockRepo.findOne.mockResolvedValue({ ...stock, quantity: 9 });
+      await service.writeOff(
+        's1',
+        {
+          client_request_id: '99999999-9999-4999-8999-999999999999',
+          quantity: 1,
+          expected_quantity: 10,
+          reasonCode: StockWriteOffReason.DAMAGED,
+        },
+        admin,
+      );
+      expect(mockManager.update).not.toHaveBeenCalled();
+      expect(ledgerInserts()).toHaveLength(0);
     });
   });
 

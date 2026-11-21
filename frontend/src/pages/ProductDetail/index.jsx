@@ -236,6 +236,23 @@ const ProductDetail = () => {
       .finally(() => setLoading(false));
   };
 
+  const refreshWriteOffStock = async (stockId) => {
+    const requests = [getStockByProduct(id)];
+    if (isAdmin || isManager) requests.push(listAllProductUnits({ productId: id }));
+    const [stockData, unitData] = await Promise.all(requests);
+    setStock(stockData);
+    if (unitData) setProductUnits(unitData);
+    const refreshedRow = stockData.find((row) => row.id === stockId) ?? null;
+    if (refreshedRow) {
+      setWriteOffTarget((current) =>
+        current?.stockRow?.id === stockId
+          ? { ...current, stockRow: refreshedRow }
+          : current,
+      );
+    }
+    return refreshedRow;
+  };
+
   useEffect(() => {
     // eslint-disable-next-line react-hooks/set-state-in-effect
     load();
@@ -611,6 +628,7 @@ const ProductDetail = () => {
         stockRow={writeOffTarget?.stockRow}
         unit={writeOffTarget?.unit}
         product={product}
+        onStaleQuantity={refreshWriteOffStock}
       />
     </div>,
   );

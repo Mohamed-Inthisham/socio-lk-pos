@@ -5,6 +5,7 @@ import {
   IsInt,
   IsOptional,
   IsString,
+  IsUUID,
   MaxLength,
   Min,
 } from 'class-validator';
@@ -19,6 +20,10 @@ export enum StockWriteOffReason {
 }
 
 export class StockWriteOffDto {
+  @ApiProperty({ format: 'uuid' })
+  @IsUUID()
+  client_request_id!: string;
+
   @ApiProperty({ minimum: 1 })
   @Type(() => Number)
   @IsInt()

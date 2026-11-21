@@ -7,7 +7,7 @@ import {
   forwardRef,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { EntityManager, Repository } from 'typeorm';
+import { EntityManager, IsNull, QueryFailedError, Repository } from 'typeorm';
 import { Stock } from './entities/stock.entity';
 import { StockMovement } from './entities/stock-movement.entity';
 import { Product } from '../products/entities/product.entity';
@@ -44,6 +44,13 @@ import {
   StockWriteOffReason,
 } from './dto/stock-write-off.dto';
 import { TrackingMethod } from '../products/enums/tracking-method.enum';
+
+const WRITE_OFF_REQUEST_INDEX = 'uq_stock_movements_event_quantity';
+
+const isWriteOffRequestDuplicate = (error: unknown): boolean =>
+  error instanceof QueryFailedError &&
+  (error.driverError as { constraint?: string } | undefined)?.constraint ===
+    WRITE_OFF_REQUEST_INDEX;
 
 /**
  * A stock purchase line's movement (Phase 1 T1): one PURCHASE row per
@@ -515,64 +522,107 @@ export class StockService {
         'Add a note explaining an Other write-off.',
       );
     }
-    await this.stockRepository.manager.transaction(async (manager) => {
-      const stock = await manager
-        .createQueryBuilder(Stock, 'stock')
-        .setLock('pessimistic_write')
-        .where('stock.id = :id', { id })
-        .getOne();
-      if (!stock) throw new NotFoundException('Stock row not found');
-      const product = await manager.findOne(Product, {
-        where: { id: stock.product_id },
-        select: { id: true, tracking_method: true },
-      });
-      if (product?.tracking_method !== TrackingMethod.QUANTITY) {
-        throw new BadRequestException(
-          'Quantity write-off is only available for quantity-tracked products.',
-        );
-      }
-      if (!stock.manage_stock) {
-        throw new BadRequestException(
-          'Write-off is unavailable while stock tracking is disabled.',
-        );
-      }
-      if (dto.expected_quantity !== stock.quantity) {
-        throw new ConflictException({
-          message:
-            'Stock changed while you were reviewing it. Refresh and try again.',
-          code: 'STOCK_QUANTITY_CHANGED',
-          stock_id: id,
-          expected_quantity: dto.expected_quantity,
-          current_quantity: stock.quantity,
-        });
-      }
-      if (stock.quantity < dto.quantity) {
-        throw new ConflictException({
-          message: `Only ${stock.quantity} units are available to write off.`,
-          code: 'INSUFFICIENT_STOCK',
-          available_quantity: stock.quantity,
-        });
-      }
-      const referenceId = randomUUID();
-      await manager.update(Stock, id, {
-        quantity: stock.quantity - dto.quantity,
-      });
-      await insertStockMovement(manager, {
-        productId: stock.product_id,
-        branchId: stock.branch_id,
-        quantityDelta: -dto.quantity,
-        quantityBefore: stock.quantity,
-        stockManaged: true,
-        movement: {
-          type: StockMovementType.WRITE_OFF,
-          referenceType: StockMovementReferenceType.STOCK_ADJUSTMENT,
-          referenceId,
-          createdById: actor.id,
-          reasonCode: dto.reasonCode,
-          note,
+    const findRequest = (manager: EntityManager) =>
+      manager.findOne(StockMovement, {
+        where: {
+          movement_type: StockMovementType.WRITE_OFF,
+          reference_type: StockMovementReferenceType.STOCK_ADJUSTMENT,
+          reference_id: dto.client_request_id,
+          product_unit_id: IsNull(),
         },
       });
-    });
+    const resolveReplay = async (
+      movement: StockMovement | null,
+      target?: Pick<Stock, 'product_id' | 'branch_id'>,
+    ) => {
+      if (!movement) return null;
+      const samePayload =
+        movement.product_id === target?.product_id &&
+        movement.branch_id === target?.branch_id &&
+        movement.created_by_id === actor.id &&
+        movement.quantity_delta === -dto.quantity &&
+        movement.quantity_before === dto.expected_quantity &&
+        movement.reason_code === dto.reasonCode &&
+        (movement.note ?? null) === note;
+      if (!samePayload) {
+        throw new ConflictException({
+          message:
+            'This client request ID was already used for another write-off.',
+          code: 'CLIENT_REQUEST_ID_CONFLICT',
+        });
+      }
+      return this.findOne(id);
+    };
+    try {
+      await this.stockRepository.manager.transaction(async (manager) => {
+        const stock = await manager
+          .createQueryBuilder(Stock, 'stock')
+          .setLock('pessimistic_write')
+          .where('stock.id = :id', { id })
+          .getOne();
+        if (!stock) throw new NotFoundException('Stock row not found');
+        const recorded = await resolveReplay(await findRequest(manager), stock);
+        if (recorded) return;
+        const product = await manager.findOne(Product, {
+          where: { id: stock.product_id },
+          select: { id: true, tracking_method: true },
+        });
+        if (product?.tracking_method !== TrackingMethod.QUANTITY) {
+          throw new BadRequestException(
+            'Quantity write-off is only available for quantity-tracked products.',
+          );
+        }
+        if (!stock.manage_stock) {
+          throw new BadRequestException(
+            'Write-off is unavailable while stock tracking is disabled.',
+          );
+        }
+        if (dto.expected_quantity !== stock.quantity) {
+          throw new ConflictException({
+            message:
+              'Stock changed while you were reviewing it. Refresh and try again.',
+            code: 'STOCK_QUANTITY_CHANGED',
+            stock_id: id,
+            expected_quantity: dto.expected_quantity,
+            current_quantity: stock.quantity,
+          });
+        }
+        if (stock.quantity < dto.quantity) {
+          throw new ConflictException({
+            message: `Only ${stock.quantity} units are available to write off.`,
+            code: 'INSUFFICIENT_STOCK',
+            available_quantity: stock.quantity,
+          });
+        }
+        await manager.update(Stock, id, {
+          quantity: stock.quantity - dto.quantity,
+        });
+        await insertStockMovement(manager, {
+          productId: stock.product_id,
+          branchId: stock.branch_id,
+          quantityDelta: -dto.quantity,
+          quantityBefore: stock.quantity,
+          stockManaged: true,
+          movement: {
+            type: StockMovementType.WRITE_OFF,
+            referenceType: StockMovementReferenceType.STOCK_ADJUSTMENT,
+            referenceId: dto.client_request_id,
+            createdById: actor.id,
+            reasonCode: dto.reasonCode,
+            note,
+          },
+        });
+      });
+    } catch (error) {
+      if (!isWriteOffRequestDuplicate(error)) throw error;
+      const target = await this.stockRepository.findOne({ where: { id } });
+      const replay = await resolveReplay(
+        await findRequest(this.stockRepository.manager),
+        target ?? undefined,
+      );
+      if (replay) return replay;
+      throw error;
+    }
     return this.findOne(id);
   }
 
