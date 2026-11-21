@@ -29,6 +29,7 @@ import { AuditAction } from '../audit-log/enums/audit-action.enum';
 import { CurrentUser } from '../auth/decorators/current-user.decorator';
 import type { AuthenticatedUser } from '../auth/strategies/jwt.strategy';
 import { scopeBranch } from '../common/utils/branch-scope';
+import { StockWriteOffDto } from './dto/stock-write-off.dto';
 
 @ApiTags('Stock')
 @ApiCookieAuth('access_token')
@@ -288,5 +289,29 @@ export class StockController {
     @CurrentUser() user: AuthenticatedUser,
   ) {
     return this.stockService.update(id, dto, user);
+  }
+
+  @Post(':id/write-off')
+  @Roles(UserRole.ADMIN)
+  @ApiOperation({ summary: 'Permanently write off quantity-tracked stock' })
+  @ApiResponse({
+    status: 200,
+    description: 'Stock updated and write-off recorded.',
+  })
+  @ApiResponse({
+    status: 400,
+    description: 'Invalid write-off or unsupported stock tracking.',
+  })
+  @ApiResponse({ status: 403, description: 'Not an admin.' })
+  @ApiResponse({
+    status: 409,
+    description: 'Stock changed or quantity unavailable.',
+  })
+  async writeOff(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body() dto: StockWriteOffDto,
+    @CurrentUser() user: AuthenticatedUser,
+  ) {
+    return this.stockService.writeOff(id, dto, user);
   }
 }

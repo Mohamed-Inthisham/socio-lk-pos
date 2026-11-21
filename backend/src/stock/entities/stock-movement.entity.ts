@@ -39,7 +39,7 @@ import {
 @Unique('UQ_stock_movements_seq', ['seq'])
 @Check(
   'CHK_stock_movements_type',
-  `"movement_type" IN ('OPENING_BALANCE', 'PURCHASE', 'TRADE_IN', 'SALE', 'REVERSAL', 'CUSTOMER_RETURN', 'INSPECTION_PASSED', 'ADJUSTMENT_IN', 'ADJUSTMENT_OUT')`,
+  `"movement_type" IN ('OPENING_BALANCE', 'PURCHASE', 'TRADE_IN', 'SALE', 'REVERSAL', 'CUSTOMER_RETURN', 'INSPECTION_PASSED', 'ADJUSTMENT_IN', 'ADJUSTMENT_OUT', 'WRITE_OFF')`,
 )
 @Check(
   'CHK_stock_movements_reference_type',

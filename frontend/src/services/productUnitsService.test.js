@@ -1,6 +1,6 @@
 import { vi } from "vitest";
 import api from "./api";
-import { getProductUnitDetails, listProductUnits, passInspection, searchProductUnits } from "./productUnitsService";
+import { getProductUnitDetails, listProductUnits, passInspection, searchProductUnits, writeOffProductUnit } from "./productUnitsService";
 import { notInInspectionError, productUnitEntity } from "../test/returnEntities";
 
 vi.mock("./api", () => ({
@@ -57,5 +57,12 @@ describe("productUnitsService", () => {
     api.post.mockRejectedValue(error);
 
     await expect(passInspection("unit-a15")).rejects.toBe(error);
+  });
+
+  it("writes off one identified product unit with its reason", async () => {
+    const response = { unit: { id: "unit-a15", status: "WRITTEN_OFF" } };
+    api.post.mockResolvedValue({ status: 200, data: response });
+    await expect(writeOffProductUnit("unit-a15", { reasonCode: "DAMAGED" })).resolves.toEqual(response);
+    expect(api.post).toHaveBeenCalledWith("/product-units/unit-a15/write-off", { reasonCode: "DAMAGED" });
   });
 });

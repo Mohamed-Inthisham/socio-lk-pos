@@ -23,6 +23,7 @@ import { warrantyLabel } from "../../constants/warranty";
 import { unitIdentifiers } from "../../utils/unitIdentifiers";
 import DeactivateProductDialog from "../../components/products/DeactivateProductDialog";
 import AdjustStockDialog from "../../components/products/AdjustStockDialog";
+import WriteOffDialog from "../../components/inventory/WriteOffDialog";
 
 /**
  * ProductDetail Page
@@ -205,6 +206,7 @@ const ProductDetail = () => {
   // as the "open" signal (null = closed, row object = open on that row).
   const [showDeactivateDialog, setShowDeactivateDialog] = useState(false);
   const [adjustStockRow, setAdjustStockRow] = useState(null);
+  const [writeOffTarget, setWriteOffTarget] = useState(null);
 
   const load = () => {
     setLoading(true);
@@ -232,6 +234,23 @@ const ProductDetail = () => {
         setError({ status, message });
       })
       .finally(() => setLoading(false));
+  };
+
+  const refreshWriteOffStock = async (stockId) => {
+    const requests = [getStockByProduct(id)];
+    if (isAdmin || isManager) requests.push(listAllProductUnits({ productId: id }));
+    const [stockData, unitData] = await Promise.all(requests);
+    setStock(stockData);
+    if (unitData) setProductUnits(unitData);
+    const refreshedRow = stockData.find((row) => row.id === stockId) ?? null;
+    if (refreshedRow) {
+      setWriteOffTarget((current) =>
+        current?.stockRow?.id === stockId
+          ? { ...current, stockRow: refreshedRow }
+          : current,
+      );
+    }
+    return refreshedRow;
   };
 
   useEffect(() => {
@@ -474,6 +493,9 @@ const ProductDetail = () => {
                       label="Adjust"
                     />
                   )}
+                  {isAdmin && product.tracking_method === "QUANTITY" && row.manage_stock && Number(row.quantity) > 0 && (
+                    <Button variant="danger" size="sm" onClick={() => setWriteOffTarget({ stockRow: row })} label="Write off" />
+                  )}
                 </div>
               </div>
             ))}
@@ -511,6 +533,7 @@ const ProductDetail = () => {
                     <th className="px-3 py-2">Branch</th>
                     <th className="px-3 py-2">Status</th>
                     <th className="px-3 py-2">Sale</th>
+                    {isAdmin && <th className="px-3 py-2">Action</th>}
                   </tr>
                 </thead>
                 <tbody>
@@ -537,6 +560,11 @@ const ProductDetail = () => {
                             </button>
                           ) : "—"}
                         </td>
+                        {isAdmin && <td className="px-3 py-2">
+                          {(unit.status === "IN_STOCK" || unit.status === "INSPECTION") && (
+                            <Button variant="danger" size="sm" onClick={() => setWriteOffTarget({ unit })} label="Write off" />
+                          )}
+                        </td>}
                       </tr>
                     );
                   })}
@@ -588,6 +616,19 @@ const ProductDetail = () => {
         onClose={() => setAdjustStockRow(null)}
         onSuccess={handleAdjustStockSuccess}
         stockRow={adjustStockRow}
+      />
+
+      <WriteOffDialog
+        open={writeOffTarget !== null}
+        onClose={() => setWriteOffTarget(null)}
+        onSuccess={() => {
+          setWriteOffTarget(null);
+          load();
+        }}
+        stockRow={writeOffTarget?.stockRow}
+        unit={writeOffTarget?.unit}
+        product={product}
+        onStaleQuantity={refreshWriteOffStock}
       />
     </div>,
   );

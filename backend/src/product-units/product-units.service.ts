@@ -1,5 +1,6 @@
 import {
   ConflictException,
+  BadRequestException,
   ForbiddenException,
   Injectable,
   NotFoundException,
@@ -35,6 +36,11 @@ import {
   AuditActor,
   writeAuditEntry,
 } from '../audit-log/utils/write-audit-entry';
+import { randomUUID } from 'crypto';
+import {
+  IdentifiedUnitWriteOffDto,
+  StockWriteOffReason,
+} from '../stock/dto/stock-write-off.dto';
 
 /**
  * Relations eagerly hydrated on findOne / findAll. Includes the parent
@@ -150,7 +156,10 @@ export interface ProductUnitDetails {
 }
 
 /** 409 NOT_IN_INSPECTION unless the unit is waiting for a check (P7-7). */
-const assertInInspection = (unit: ProductUnit, identifierLabel = 'IMEI'): void => {
+const assertInInspection = (
+  unit: ProductUnit,
+  identifierLabel = 'IMEI',
+): void => {
   if (unit.status !== ProductUnitStatus.INSPECTION) {
     throw new ConflictException({
       message:
@@ -750,6 +759,79 @@ export class ProductUnitsService {
     });
 
     return this.findOne(id);
+  }
+
+  /** Permanently transition one eligible unit and record its stock event atomically. */
+  async writeOffUnit(
+    id: string,
+    dto: IdentifiedUnitWriteOffDto,
+    user: AuditActor & { role: UserRole },
+  ) {
+    const note = dto.note?.trim() || null;
+    if (dto.reasonCode === StockWriteOffReason.OTHER && !note) {
+      throw new BadRequestException(
+        'Add a note explaining an Other write-off.',
+      );
+    }
+    const initial = await this.productUnitsRepository.findOne({
+      where: { id },
+      relations: ['product', 'branch'],
+    });
+    if (!initial) throw new NotFoundException('Product unit not found');
+
+    await this.dataSource.transaction(async (manager) => {
+      await lockInventoryRows(manager, {
+        stock: [{ productId: initial.product_id, branchId: initial.branch_id }],
+        unitIds: [initial.id],
+      });
+      const unit = await manager.findOne(ProductUnit, { where: { id } });
+      if (!unit) throw new NotFoundException('Product unit not found');
+      if (
+        unit.status !== ProductUnitStatus.IN_STOCK &&
+        unit.status !== ProductUnitStatus.INSPECTION
+      ) {
+        throw new ConflictException({
+          message: 'Only in-stock or inspection units can be written off.',
+          code: 'UNIT_NOT_ELIGIBLE_FOR_WRITE_OFF',
+          status: unit.status,
+        });
+      }
+      const from = unit.status;
+      await manager.update(ProductUnit, id, {
+        status: ProductUnitStatus.WRITTEN_OFF,
+      });
+      const referenceId = randomUUID();
+      // Inspection returns already left managed stock when sold, so writing
+      // one off records the status change with a zero quantity delta.
+      const quantityDelta = from === ProductUnitStatus.IN_STOCK ? -1 : 0;
+      await this.stockService.writeOffUnit(
+        manager,
+        unit.product_id,
+        unit.branch_id,
+        quantityDelta,
+        {
+          type: StockMovementType.WRITE_OFF,
+          referenceType: StockMovementReferenceType.STOCK_ADJUSTMENT,
+          referenceId,
+          createdById: user.id,
+          reasonCode: dto.reasonCode,
+          note,
+          unit: { id, from, to: ProductUnitStatus.WRITTEN_OFF },
+        },
+      );
+    });
+    return {
+      id,
+      unit_code: initial.unit_code,
+      status: ProductUnitStatus.WRITTEN_OFF,
+      product: {
+        id: initial.product_id,
+        name: initial.product?.name,
+        sku: initial.product?.sku,
+        tracking_method: initial.product?.tracking_method,
+      },
+      branch: { id: initial.branch_id, name: initial.branch?.name },
+    };
   }
 
   /**

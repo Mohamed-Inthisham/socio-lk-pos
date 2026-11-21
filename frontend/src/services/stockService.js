@@ -127,3 +127,8 @@ export const updateStock = async (id, payload) => {
   const response = await api.patch(`/stock/${id}`, payload);
   return response.data;
 };
+
+export const writeOffStock = async (id, payload) => {
+  const response = await api.post(`/stock/${id}/write-off`, payload);
+  return response.data;
+};

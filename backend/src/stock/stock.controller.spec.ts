@@ -64,6 +64,14 @@ describe('StockController: branch-scoped reads', () => {
     });
   });
 
+  it('restricts POST /stock/:id/write-off to admins', () => {
+    const handler = Object.getOwnPropertyDescriptor(
+      StockController.prototype,
+      'writeOff',
+    )!.value as object;
+    expect(Reflect.getMetadata(ROLES_KEY, handler)).toEqual([UserRole.ADMIN]);
+  });
+
   describe('GET /stock', () => {
     it('lets an admin list every branch, or the one asked for', async () => {
       const { service, controller } = setup();

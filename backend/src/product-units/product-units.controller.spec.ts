@@ -66,6 +66,10 @@ describe('ProductUnitsController: branch-scoped reads', () => {
       )!.value as object,
     );
 
+  it('restricts the write-off endpoint to admins', () => {
+    expect(rolesOf('writeOff')).toEqual([UserRole.ADMIN]);
+  });
+
   describe('GET /product-units', () => {
     it('still allows admins and managers only (cashiers are refused by role)', () => {
       expect(rolesOf('findAll')).toEqual([UserRole.ADMIN, UserRole.MANAGER]);

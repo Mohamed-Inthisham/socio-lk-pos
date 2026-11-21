@@ -23,10 +23,17 @@ const TYPE_LABELS = {
   INSPECTION_PASSED: "Inspection passed",
   ADJUSTMENT_IN: "Adjustment in",
   ADJUSTMENT_OUT: "Adjustment out",
+  WRITE_OFF: "Write-off",
 };
 const REASON_LABELS = {
   STOCK_RECEIVED: "Stock received",
   COUNT_CORRECTION: "Stock count correction",
+  DAMAGED: "Damaged",
+  LOST: "Lost",
+  STOLEN: "Stolen",
+  EXPIRED: "Expired",
+  OBSOLETE: "Obsolete",
+  OTHER: "Other",
 };
 const TYPE_OPTIONS = [
   { value: "OPENING_BALANCE", label: "Opening balance" },
@@ -38,6 +45,7 @@ const TYPE_OPTIONS = [
   { value: "INSPECTION_PASSED", label: "Inspection passed" },
   { value: "ADJUSTMENT_IN", label: "Adjustment in" },
   { value: "ADJUSTMENT_OUT", label: "Adjustment out" },
+  { value: "WRITE_OFF", label: "Write-off" },
 ];
 const formatTime = (value) =>
   new Intl.DateTimeFormat("en-LK", {
@@ -56,6 +64,7 @@ const movementColors = {
   INSPECTION_PASSED: "bg-emerald-100 text-emerald-800 ring-emerald-200 dark:bg-emerald-500/15 dark:text-emerald-300 dark:ring-emerald-400/25",
   ADJUSTMENT_IN: "bg-lime-100 text-lime-800 ring-lime-200 dark:bg-lime-500/15 dark:text-lime-300 dark:ring-lime-400/25",
   ADJUSTMENT_OUT: "bg-orange-100 text-orange-800 ring-orange-200 dark:bg-orange-500/15 dark:text-orange-300 dark:ring-orange-400/25",
+  WRITE_OFF: "bg-red-100 text-red-800 ring-red-200 dark:bg-red-500/15 dark:text-red-300 dark:ring-red-400/25",
 };
 
 const MovementDescription = ({ row }) => (

@@ -13,6 +13,7 @@
  *   moved to INSPECTION (quantity 0).
  * - INSPECTION_PASSED: a returned phone checked and back on sale.
  * - ADJUSTMENT_IN / ADJUSTMENT_OUT: a manual change with a reason.
+ * - WRITE_OFF: quantity removal or an identified unit permanently removed.
  *
  * Stored as varchar(30) with CHK_stock_movements_type; keep the
  * migration's list in step.
@@ -27,6 +28,7 @@ export enum StockMovementType {
   INSPECTION_PASSED = 'INSPECTION_PASSED',
   ADJUSTMENT_IN = 'ADJUSTMENT_IN',
   ADJUSTMENT_OUT = 'ADJUSTMENT_OUT',
+  WRITE_OFF = 'WRITE_OFF',
 }
 
 /**

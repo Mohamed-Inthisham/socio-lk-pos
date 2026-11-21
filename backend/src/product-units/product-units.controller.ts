@@ -1,5 +1,6 @@
 import {
   Controller,
+  Body,
   Get,
   HttpCode,
   HttpStatus,
@@ -24,6 +25,7 @@ import { UserRole } from '../users/enums/user-role.enum';
 import { CurrentUser } from '../auth/decorators/current-user.decorator';
 import type { AuthenticatedUser } from '../auth/strategies/jwt.strategy';
 import { scopeBranch } from '../common/utils/branch-scope';
+import { IdentifiedUnitWriteOffDto } from '../stock/dto/stock-write-off.dto';
 
 @ApiTags('Product Units')
 @ApiCookieAuth('access_token')
@@ -279,5 +281,28 @@ export class ProductUnitsController {
     @Ip() ip: string,
   ) {
     return this.productUnitsService.passInspection(id, user, ip);
+  }
+
+  @Post(':id/write-off')
+  @HttpCode(HttpStatus.OK)
+  @Roles(UserRole.ADMIN)
+  @ApiOperation({ summary: 'Permanently write off one identified unit' })
+  @ApiParam({ name: 'id', description: 'ProductUnit UUID', format: 'uuid' })
+  @ApiResponse({
+    status: 200,
+    description: 'Unit status and stock ledger updated.',
+  })
+  @ApiResponse({ status: 403, description: 'Not an admin.' })
+  @ApiResponse({ status: 404, description: 'Product unit not found.' })
+  @ApiResponse({
+    status: 409,
+    description: 'Unit status is not eligible for write-off.',
+  })
+  async writeOff(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body() dto: IdentifiedUnitWriteOffDto,
+    @CurrentUser() user: AuthenticatedUser,
+  ) {
+    return this.productUnitsService.writeOffUnit(id, dto, user);
   }
 }

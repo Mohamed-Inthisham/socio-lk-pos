@@ -68,3 +68,8 @@ export const passInspection = async (unitId) => {
   const response = await api.post(`/product-units/${unitId}/inspection-pass`);
   return response.data;
 };
+
+export const writeOffProductUnit = async (unitId, payload) => {
+  const response = await api.post(`/product-units/${unitId}/write-off`, payload);
+  return response.data;
+};

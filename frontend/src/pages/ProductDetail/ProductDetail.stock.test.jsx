@@ -1,5 +1,6 @@
 import { vi } from "vitest";
-import { screen } from "@testing-library/react";
+import { screen, waitFor, within } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { Route, Routes } from "react-router-dom";
 import ProductDetail from ".";
 import { authState, branchesState, renderWithProviders } from "../../test/renderWithProviders";
@@ -88,5 +89,69 @@ describe("ProductDetail: stock section heading", () => {
     expect(await screen.findByRole("heading", { name: "Stock at Your Branch" })).toBeInTheDocument();
     expect(screen.queryByRole("heading", { name: "Stock across branches" })).not.toBeInTheDocument();
     expect(stockService.getStockByProduct).toHaveBeenCalledWith("p1");
+  });
+
+  it("updates the open write-off dialog from the refreshed stock row and preserves the form", async () => {
+    const user = userEvent.setup();
+    const initialRow = stockRow(mainShop, 8);
+    const refreshedRow = stockRow(mainShop, 5);
+    productsService.getProduct.mockResolvedValue(product);
+    stockService.getStockByProduct
+      .mockResolvedValueOnce([initialRow])
+      .mockResolvedValueOnce([refreshedRow])
+      .mockResolvedValue([refreshedRow]);
+    productUnitsService.listAllProductUnits.mockResolvedValue([]);
+    stockPurchasesService.getProductPurchaseIdentifiers.mockResolvedValue([]);
+    stockService.writeOffStock
+      .mockRejectedValueOnce({
+        response: {
+          status: 409,
+          data: { code: "STOCK_QUANTITY_CHANGED", message: "Stock changed." },
+        },
+      })
+      .mockResolvedValueOnce(refreshedRow);
+    renderAs(adminUser);
+
+    const openButton = await screen.findByRole("button", { name: "Write off" });
+    await user.click(openButton);
+    const dialog = screen.getByRole("dialog", { name: "Write off stock" });
+    expect(within(dialog).getByText(/8 available/)).toBeInTheDocument();
+
+    const quantity = within(dialog).getByLabelText(/quantity to write off/i);
+    await user.clear(quantity);
+    await user.type(quantity, "3");
+    const reason = within(dialog).getByLabelText(/reason/i);
+    await user.selectOptions(reason, "DAMAGED");
+    const note = within(dialog).getByLabelText(/note/i);
+    await user.type(note, "box damage");
+    const confirmation = within(dialog).getByRole("checkbox");
+    await user.click(confirmation);
+    await user.click(
+      within(dialog).getByRole("button", { name: "Confirm write-off" }),
+    );
+
+    expect(await within(dialog).findByRole("alert")).toHaveTextContent(
+      "refreshed to 5",
+    );
+    expect(within(dialog).getByText(/5 available/)).toBeInTheDocument();
+    expect(quantity).toHaveAttribute("max", "5");
+    expect(quantity).toHaveValue(3);
+    expect(reason).toHaveValue("DAMAGED");
+    expect(note).toHaveValue("box damage");
+    expect(confirmation).toBeChecked();
+
+    await user.click(
+      within(dialog).getByRole("button", { name: "Confirm write-off" }),
+    );
+    await waitFor(() =>
+      expect(stockService.writeOffStock).toHaveBeenCalledTimes(2),
+    );
+    expect(stockService.writeOffStock.mock.calls[1][0]).toBe(initialRow.id);
+    expect(stockService.writeOffStock.mock.calls[1][1]).toMatchObject({
+      quantity: 3,
+      expected_quantity: 5,
+      reasonCode: "DAMAGED",
+      note: "box damage",
+    });
   });
 });
