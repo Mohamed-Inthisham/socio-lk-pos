@@ -13,6 +13,7 @@ import { Supplier } from '../../suppliers/entities/supplier.entity';
 import { User } from '../../users/entities/user.entity';
 import { StockPurchaseItem } from './stock-purchase-item.entity';
 import { StockPurchasePayment } from './stock-purchase-payment.entity';
+import { SupplierReturn } from '../../supplier-returns/entities/supplier-return.entity';
 
 /**
  * client_request_id is the stock purchase page's id for one submission
@@ -74,6 +75,9 @@ export class StockPurchase {
 
   @OneToMany(() => StockPurchasePayment, (payment) => payment.purchase)
   payments!: StockPurchasePayment[];
+
+  @OneToMany(() => SupplierReturn, (supplierReturn) => supplierReturn.purchase)
+  supplier_returns!: SupplierReturn[];
 
   @CreateDateColumn({ type: 'timestamptz', name: 'created_at' })
   created_at!: Date;

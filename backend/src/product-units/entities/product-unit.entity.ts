@@ -21,7 +21,7 @@ import { ExposeCost } from '../../common/utils/cost-visibility';
 // Named as in the migrations, so generated migrations see no drift.
 @Check(
   'CHK_product_units_status',
-  `"status" IN ('IN_STOCK', 'SOLD', 'RETURNED', 'WRITTEN_OFF', 'INSPECTION')`,
+  `"status" IN ('IN_STOCK', 'SOLD', 'RETURNED', 'WRITTEN_OFF', 'INSPECTION', 'SUPPLIER_RETURNED')`,
 )
 @Check('CHK_product_units_buying_price_nonneg', `"buying_price" >= 0`)
 @Check(

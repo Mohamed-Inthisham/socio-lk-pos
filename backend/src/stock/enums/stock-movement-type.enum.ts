@@ -14,6 +14,7 @@
  * - INSPECTION_PASSED: a returned phone checked and back on sale.
  * - ADJUSTMENT_IN / ADJUSTMENT_OUT: a manual change with a reason.
  * - WRITE_OFF: quantity removal or an identified unit permanently removed.
+ * - SUPPLIER_RETURN: quantity or identified stock returned to its supplier.
  *
  * Stored as varchar(30) with CHK_stock_movements_type; keep the
  * migration's list in step.
@@ -29,6 +30,7 @@ export enum StockMovementType {
   ADJUSTMENT_IN = 'ADJUSTMENT_IN',
   ADJUSTMENT_OUT = 'ADJUSTMENT_OUT',
   WRITE_OFF = 'WRITE_OFF',
+  SUPPLIER_RETURN = 'SUPPLIER_RETURN',
 }
 
 /**
@@ -46,6 +48,7 @@ export enum StockMovementReferenceType {
   PAYMENT = 'PAYMENT',
   SALE_LINE = 'SALE_LINE',
   SALE_RETURN_LINE = 'SALE_RETURN_LINE',
+  SUPPLIER_RETURN = 'SUPPLIER_RETURN',
 }
 
 /** Movements that need an approver (approved_by_id), and only these. */
