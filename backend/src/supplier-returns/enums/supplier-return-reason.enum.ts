@@ -1,0 +1,8 @@
+export enum SupplierReturnReason {
+  DAMAGED = 'DAMAGED',
+  DEFECTIVE = 'DEFECTIVE',
+  WRONG_ITEM = 'WRONG_ITEM',
+  EXCESS_STOCK = 'EXCESS_STOCK',
+  WARRANTY = 'WARRANTY',
+  OTHER = 'OTHER',
+}

@@ -39,11 +39,11 @@ import {
 @Unique('UQ_stock_movements_seq', ['seq'])
 @Check(
   'CHK_stock_movements_type',
-  `"movement_type" IN ('OPENING_BALANCE', 'PURCHASE', 'TRADE_IN', 'SALE', 'REVERSAL', 'CUSTOMER_RETURN', 'INSPECTION_PASSED', 'ADJUSTMENT_IN', 'ADJUSTMENT_OUT', 'WRITE_OFF')`,
+  `"movement_type" IN ('OPENING_BALANCE', 'PURCHASE', 'TRADE_IN', 'SALE', 'REVERSAL', 'CUSTOMER_RETURN', 'INSPECTION_PASSED', 'ADJUSTMENT_IN', 'ADJUSTMENT_OUT', 'WRITE_OFF', 'SUPPLIER_RETURN')`,
 )
 @Check(
   'CHK_stock_movements_reference_type',
-  `"reference_type" IN ('STOCK', 'STOCK_ADJUSTMENT', 'STOCK_PURCHASE_ITEM', 'PHONE_PURCHASE', 'PAYMENT', 'SALE_LINE', 'SALE_RETURN_LINE')`,
+  `"reference_type" IN ('STOCK', 'STOCK_ADJUSTMENT', 'STOCK_PURCHASE_ITEM', 'PHONE_PURCHASE', 'PAYMENT', 'SALE_LINE', 'SALE_RETURN_LINE', 'SUPPLIER_RETURN')`,
 )
 @Check(
   'CHK_stock_movements_chain',
@@ -51,7 +51,7 @@ import {
 )
 @Check(
   'CHK_stock_movements_unit_status',
-  `("unit_status_from" IS NULL OR "unit_status_from" IN ('IN_STOCK', 'SOLD', 'RETURNED', 'WRITTEN_OFF', 'INSPECTION')) AND ("unit_status_to" IS NULL OR "unit_status_to" IN ('IN_STOCK', 'SOLD', 'RETURNED', 'WRITTEN_OFF', 'INSPECTION'))`,
+  `("unit_status_from" IS NULL OR "unit_status_from" IN ('IN_STOCK', 'SOLD', 'RETURNED', 'WRITTEN_OFF', 'INSPECTION', 'SUPPLIER_RETURNED')) AND ("unit_status_to" IS NULL OR "unit_status_to" IN ('IN_STOCK', 'SOLD', 'RETURNED', 'WRITTEN_OFF', 'INSPECTION', 'SUPPLIER_RETURNED'))`,
 )
 @Check(
   'CHK_stock_movements_unit',

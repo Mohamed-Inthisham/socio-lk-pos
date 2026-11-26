@@ -30,6 +30,7 @@ import { ApprovalsModule } from './approvals/approvals.module';
 import { CashDaysModule } from './cash-days/cash-days.module';
 import { StockPurchasesModule } from './stock-purchases/stock-purchases.module';
 import { BarcodeLabelsModule } from './barcode-labels/barcode-labels.module';
+import { SupplierReturnsModule } from './supplier-returns/supplier-returns.module';
 
 @Module({
   imports: [
@@ -71,6 +72,7 @@ import { BarcodeLabelsModule } from './barcode-labels/barcode-labels.module';
     CashDaysModule,
     StockPurchasesModule,
     BarcodeLabelsModule,
+    SupplierReturnsModule,
   ],
   controllers: [AppController],
   providers: [
